@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useReducer } from "react";
+import { useCallback, useEffect, useMemo, useReducer } from "react";
 import { FileText } from "lucide-react";
 import { useIntl } from "react-intl";
 import api from "../../api/client";
@@ -189,6 +189,7 @@ export default function ReleaseNotesPanel() {
     () => state.releases.find((release) => release.state === "published")?.releaseId,
     [state.releases],
   );
+  const handleRetry = useCallback(() => dispatch({ type: "retry" }), []);
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
@@ -220,7 +221,7 @@ export default function ReleaseNotesPanel() {
               <Button
                 variant="outline"
                 size="sm"
-                onClick={() => dispatch({ type: "retry" })}
+                onClick={handleRetry}
               >
                 {formatMessage({ id: "settings.releaseNotes.retry" })}
               </Button>

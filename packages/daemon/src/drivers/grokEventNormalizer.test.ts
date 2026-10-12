@@ -145,6 +145,48 @@ test("grok normalizer does not let a late terminal notification complete the nex
   assert.equal(normalizer.canSteerBusy, false);
 });
 
+test("grok normalizer keeps a tool completion that outlives its turn from becoming a tool event", () => {
+  const normalizer = new GrokEventNormalizer();
+  normalizer.adoptSession("session-1");
+  const generation = normalizer.beginPrompt();
+  assert.equal(normalizer.normalizeNotification(notification("session-1", {
+    sessionUpdate: "tool_call",
+    toolCallId: "tool-bg",
+    _meta: { "x.ai/tool": { name: "shell" } },
+  }))[0]?.kind, "tool_call");
+  assert.deepEqual(normalizer.finishPrompt(generation, { stopReason: "end_turn", promptId: "prompt-1" }), [
+    { kind: "turn_end", sessionId: "session-1" },
+  ]);
+
+  const late = normalizer.normalizeNotification(notification("session-1", {
+    sessionUpdate: "tool_call_update",
+    toolCallId: "tool-bg",
+    status: "completed",
+  }));
+  assert.equal(late.length, 1);
+  assert.equal(late[0]?.kind, "internal_progress", "late completion is progress, not a tool event that marks the agent busy");
+
+  // A self-started successor turn announces its call before completing it.
+  assert.equal(normalizer.normalizeNotification(notification("session-1", {
+    sessionUpdate: "tool_call",
+    toolCallId: "tool-successor",
+    _meta: { "x.ai/tool": { name: "shell" } },
+  }))[0]?.kind, "tool_call");
+  assert.deepEqual(normalizer.normalizeNotification(notification("session-1", {
+    sessionUpdate: "tool_call_update",
+    toolCallId: "tool-successor",
+    status: "completed",
+  })), [{ kind: "tool_output", name: "shell" }]);
+
+  // Inside a daemon turn an unannounced completion still surfaces.
+  normalizer.beginPrompt();
+  assert.equal(normalizer.normalizeNotification(notification("session-1", {
+    sessionUpdate: "tool_call_update",
+    toolCallId: "tool-unannounced",
+    status: "failed",
+  }))[0]?.kind, "tool_output");
+});
+
 test("grok normalizer completes an autonomous successor turn with its own prompt id", () => {
   const normalizer = new GrokEventNormalizer();
   normalizer.adoptSession("session-1");

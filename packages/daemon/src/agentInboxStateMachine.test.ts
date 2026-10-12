@@ -3,6 +3,7 @@ import fc from "fast-check";
 
 import { buildApmFreshnessDecisionProducerFactId } from "./apmStateMachine";
 import {
+  normalizeInboxVisibleMessage,
   planAgentInboxSideEffect,
   type AgentInboxFreshnessDecision,
   type AgentInboxStateMachineEffect,
@@ -47,6 +48,17 @@ function latestMessages(
   const sorted = [...messages].sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0));
   return sorted.slice(Math.max(0, sorted.length - limit));
 }
+
+test("inbox message normalization carries the sender time zone from either key casing", () => {
+  assert.equal(normalizeInboxVisibleMessage(message(1, { sender_timezone: "Asia/Shanghai" })).sender_timezone, "Asia/Shanghai");
+  assert.equal(normalizeInboxVisibleMessage(message(2, { senderTimezone: "Europe/Berlin" })).sender_timezone, "Europe/Berlin");
+  assert.equal(
+    normalizeInboxVisibleMessage(message(3, { sender_timezone: "Asia/Tokyo", senderTimezone: "Europe/Berlin" })).sender_timezone,
+    "Asia/Tokyo",
+    "snake_case wins like the other sender fields",
+  );
+  assert.equal(normalizeInboxVisibleMessage(message(4)).sender_timezone, null);
+});
 
 test("agent inbox state machine locally holds exact-target pending messages", () => {
   const pendingMessages = [40, 41, 42, 43, 44].map((seq) => message(seq));

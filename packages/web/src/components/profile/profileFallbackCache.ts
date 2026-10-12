@@ -38,6 +38,7 @@ export function primeHumanProfileFromChannelMember(serverId: string, human: Chan
     serverId: human.serverId,
     serverName: human.serverName,
     serverSlug: human.serverSlug,
+    ...(human.servers ? { servers: human.servers } : {}),
     email: null,
     gravatarHash: "",
     name: human.name,

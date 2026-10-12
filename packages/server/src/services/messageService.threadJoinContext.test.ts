@@ -20,6 +20,7 @@ import {
   threadFollows,
   users,
 } from "../db/schema";
+import { withChannelDelivery } from "../test/orchestratorStub";
 
 
 // Delivery-decision teeth for thread_join_context. Persistence, follow rows,
@@ -99,11 +100,11 @@ async function seed(slug: string) {
 }
 
 function orchestratorSink(sink: Array<{ agentId: string; payload: any }>) {
-  return {
+  return withChannelDelivery({
     deliverMessage: async (agentId: string, payload: any) => {
       sink.push({ agentId, payload });
     },
-  } as any;
+  }) as any;
 }
 
 function ioFake(): any {
@@ -242,4 +243,80 @@ test("C: direct mention reactivates an explicitly unfollowed agent and emits the
     .limit(1);
   assert.equal(follow?.unfollowedAt, null, "direct mention must clear the explicit unfollow tombstone");
   assert.equal(follow?.reason, "manual", "mention reactivation must preserve existing follow provenance");
+});
+
+// Task #266: a human web sender's IANA zone rides on the agent payloads (live
+// delivery and the thread join context) and is never recorded for an agent.
+test("sender_timezone reaches agents on live delivery and in thread_join_context", async ({ db: _database }) => {
+  stubIoAndPushDeps();
+  const { db, owner, agent, parentMessage, threadChannel } = await seed("tjc-tz");
+  await db.update(messages).set({ senderTimezone: "Asia/Shanghai" }).where(eq(messages.id, parentMessage.id));
+  await db.update(messages).set({ senderTimezone: "America/New_York" }).where(eq(messages.channelId, threadChannel.id));
+
+  const delivered: Array<{ agentId: string; payload: any }> = [];
+  await broadcastAndDeliver(io, orchestratorSink(delivered), {
+    channelId: threadChannel.id,
+    senderType: "user",
+    senderId: owner.id,
+    senderName: "tjc-tzOwner",
+    content: `@${agent.name} what time is it for me?`,
+    mentions: [{ type: "agent", id: agent.id, name: agent.name }] as any,
+    randomId: "tjc-tz-random-1",
+    senderTimezone: "Europe/Berlin",
+  });
+  await settle();
+
+  const got = delivered.find((delivery) => delivery.agentId === agent.id);
+  assert.ok(got, "agent must receive the mention");
+  assert.equal(got.payload.sender_timezone, "Europe/Berlin");
+  assert.equal(got.payload.thread_join_context.parent_message.sender_timezone, "Asia/Shanghai");
+  assert.ok(got.payload.thread_join_context.recent_messages.length > 0);
+  for (const recent of got.payload.thread_join_context.recent_messages) {
+    assert.equal(recent.sender_timezone, "America/New_York");
+  }
+  const [stored] = await db.select({ senderTimezone: messages.senderTimezone })
+    .from(messages)
+    .where(eq(messages.randomId, "tjc-tz-random-1"));
+  assert.equal(stored?.senderTimezone, "Europe/Berlin", "randomId sends persist the zone");
+});
+
+test("sender_timezone is persisted on direct sends and forced to null for agent senders", async ({ db: _database }) => {
+  stubIoAndPushDeps();
+  const { db, owner, agent, parentMessage } = await seed("tjc-tz-agent");
+  const [listener] = await db.insert(agents).values({
+    serverId: (await db.select({ serverId: channels.serverId }).from(channels).where(eq(channels.id, parentMessage.channelId)))[0]!.serverId,
+    name: "tjc-tz-agent-listener",
+    status: "active",
+  }).returning();
+  await db.insert(channelAgents).values({ channelId: parentMessage.channelId, agentId: listener.id });
+
+  const humanDelivered: Array<{ agentId: string; payload: any }> = [];
+  const human = await broadcastAndDeliver(io, orchestratorSink(humanDelivered), {
+    channelId: parentMessage.channelId,
+    senderType: "user",
+    senderId: owner.id,
+    senderName: "tjc-tz-agentOwner",
+    content: "no randomId on this send",
+    senderTimezone: "Asia/Kolkata",
+  });
+  await settle();
+  const [humanRow] = await db.select({ senderTimezone: messages.senderTimezone }).from(messages).where(eq(messages.id, human.id));
+  assert.equal(humanRow?.senderTimezone, "Asia/Kolkata");
+  assert.equal(humanDelivered.find((delivery) => delivery.agentId === listener.id)?.payload.sender_timezone, "Asia/Kolkata");
+
+  const agentDelivered: Array<{ agentId: string; payload: any }> = [];
+  const sent = await broadcastAndDeliver(io, orchestratorSink(agentDelivered), {
+    channelId: parentMessage.channelId,
+    senderType: "agent",
+    senderId: agent.id,
+    senderName: agent.name,
+    content: "an agent never carries a browser zone",
+    senderTimezone: "Asia/Tokyo",
+  });
+  await settle();
+  const [agentRow] = await db.select({ senderTimezone: messages.senderTimezone }).from(messages).where(eq(messages.id, sent.id));
+  assert.equal(agentRow?.senderTimezone, null);
+  const toListener = agentDelivered.find((delivery) => delivery.agentId === listener.id);
+  assert.ok(toListener, "the other agent must receive the agent's message");
+  assert.equal(toListener.payload.sender_timezone, null);
 });

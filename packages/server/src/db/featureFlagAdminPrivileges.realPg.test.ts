@@ -46,6 +46,19 @@ test("real PostgreSQL proves durable reconciliation, exact grants, and binding i
 
   await target.query("CREATE TABLE announcements (id uuid PRIMARY KEY, status text NOT NULL)");
   await target.query("CREATE TABLE announcement_audit_events (id uuid PRIMARY KEY, announcement_id uuid NOT NULL)");
+  await target.query(`CREATE TABLE announcement_image_assets (
+    id uuid PRIMARY KEY,
+    storage_key text NOT NULL UNIQUE,
+    content_type text NOT NULL,
+    width integer NOT NULL,
+    height integer NOT NULL,
+    size_bytes integer NOT NULL,
+    created_by_user_id uuid,
+    created_by_agent_id uuid,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    unreferenced_since timestamptz,
+    deleting_at timestamptz
+  )`);
   await target.query("CREATE TABLE users (id uuid PRIMARY KEY, email text NOT NULL)");
   await target.query("CREATE TABLE servers (id uuid PRIMARY KEY, slug text NOT NULL, deleted_at timestamptz, name text NOT NULL, plan text NOT NULL DEFAULT 'free')");
   await target.query("CREATE TABLE subscriptions (id uuid PRIMARY KEY, server_id uuid NOT NULL, plan text NOT NULL, status text NOT NULL, stripe_customer_id text NOT NULL)");
@@ -104,6 +117,13 @@ test("real PostgreSQL proves durable reconciliation, exact grants, and binding i
     ),
     "utf8",
   );
+  const announcementImagePrivilegeMigration = readFileSync(
+    path.resolve(
+      path.dirname(fileURLToPath(import.meta.url)),
+      "../../drizzle/0333_feature_flag_admin_announcement_image_privileges.sql",
+    ),
+    "utf8",
+  );
 
   // 0240 may be journaled where the production-only role is absent, but it
   // installs a reconciler instead of silently becoming a no-op. Required mode
@@ -114,6 +134,7 @@ test("real PostgreSQL proves durable reconciliation, exact grants, and binding i
   await target.query(previewPrivilegeMigration);
   await target.query(labPrivilegeMigration);
   await target.query(traceIdentityPrivilegeMigration);
+  await target.query(announcementImagePrivilegeMigration);
   await assert.rejects(
     reconcileAndVerifyFeatureFlagAdminPrivileges((text, values) => target.query(text, values)),
     (error: unknown) => (error as { code?: string }).code === "42704",
@@ -133,6 +154,7 @@ test("real PostgreSQL proves durable reconciliation, exact grants, and binding i
   await target.query(`GRANT USAGE ON SCHEMA public TO ${FEATURE_FLAG_ADMIN_OPERATOR_ROLE}`);
   await target.query(`GRANT SELECT, INSERT, UPDATE ON TABLE public.announcements TO ${FEATURE_FLAG_ADMIN_OPERATOR_ROLE}`);
   await target.query(`GRANT SELECT, INSERT ON TABLE public.announcement_audit_events TO ${FEATURE_FLAG_ADMIN_OPERATOR_ROLE}`);
+  await target.query(`GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.announcement_image_assets TO ${FEATURE_FLAG_ADMIN_OPERATOR_ROLE}`);
   await target.query(`GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.feature_flags, public.feature_flag_rules TO ${FEATURE_FLAG_ADMIN_OPERATOR_ROLE}`);
   await target.query(`GRANT SELECT, INSERT, UPDATE ON TABLE public.feature_flag_audiences TO ${FEATURE_FLAG_ADMIN_OPERATOR_ROLE}`);
   await target.query(`GRANT SELECT, INSERT, DELETE ON TABLE public.feature_flag_audience_members TO ${FEATURE_FLAG_ADMIN_OPERATOR_ROLE}`);
@@ -167,6 +189,10 @@ test("real PostgreSQL proves durable reconciliation, exact grants, and binding i
   await operator.query("UPDATE announcements SET status = 'published'");
   await operator.query("INSERT INTO announcement_audit_events (id, announcement_id) VALUES ('00000000-0000-0000-0000-000000000002', '00000000-0000-0000-0000-000000000001')");
   await operator.query("SELECT id FROM announcement_audit_events");
+  await operator.query("INSERT INTO announcement_image_assets (id, storage_key, content_type, width, height, size_bytes) VALUES ('00000000-0000-4000-8000-000000000008', 'announcements/images/00000000-0000-4000-8000-000000000008', 'image/png', 3, 1, 64)");
+  await operator.query("SELECT id, storage_key FROM announcement_image_assets");
+  await operator.query("UPDATE announcement_image_assets SET unreferenced_since = NOW() WHERE id = '00000000-0000-4000-8000-000000000008'");
+  await operator.query("DELETE FROM announcement_image_assets WHERE id = '00000000-0000-4000-8000-000000000008'");
   await operator.query("INSERT INTO feature_flags (key) VALUES ('temporary')");
   await operator.query("INSERT INTO feature_flag_rules (id, flag_key, stage) VALUES ('00000000-0000-4000-8000-000000000005', 'temporary', 'server')");
   await operator.query("UPDATE feature_flag_rules SET stage = 'user' WHERE flag_key = 'temporary'");
@@ -195,6 +221,10 @@ test("real PostgreSQL proves durable reconciliation, exact grants, and binding i
   );
   await assert.rejects(
     operator.query("UPDATE announcement_audit_events SET announcement_id = announcement_id"),
+    (error: unknown) => (error as { code?: string }).code === "42501",
+  );
+  await assert.rejects(
+    operator.query("TRUNCATE announcement_image_assets"),
     (error: unknown) => (error as { code?: string }).code === "42501",
   );
   await assert.rejects(
@@ -318,6 +348,13 @@ test("real PostgreSQL proves durable reconciliation, exact grants, and binding i
   await assert.rejects(
     verifyFeatureFlagAdminPrivileges((text, values) => target.query(text, values)),
     /missing:public\.announcements:UPDATE/,
+  );
+  await reconcileAndVerifyFeatureFlagAdminPrivileges((text, values) => target.query(text, values));
+
+  await target.query(`REVOKE DELETE ON TABLE public.announcement_image_assets FROM ${FEATURE_FLAG_ADMIN_OPERATOR_ROLE}`);
+  await assert.rejects(
+    verifyFeatureFlagAdminPrivileges((text, values) => target.query(text, values)),
+    /missing:public\.announcement_image_assets:DELETE/,
   );
   await reconcileAndVerifyFeatureFlagAdminPrivileges((text, values) => target.query(text, values));
 

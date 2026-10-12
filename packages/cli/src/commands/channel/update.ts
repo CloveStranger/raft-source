@@ -1,5 +1,5 @@
 // `raft channel update --target <#channel> [--name <name>] [--description <text>] [--public|--private]`
-// -> PATCH /internal/agent/:id/channels/:channelId
+// -> PATCH /internal/agent-api/channels/:channelId
 
 import type { Command } from "commander";
 
@@ -36,7 +36,7 @@ export function formatUpdateChannelResult(channel: UpdatedChannel): string {
 export const channelUpdateCommand = defineCommand(
   {
     name: "update",
-    description: "Edit a public, private, or joint channel when this agent has server admin authority (a joint channel's name and description change for every connected server; its visibility cannot change)",
+    description: "Edit a public, private, or joint channel when this agent has server admin or channel admin authority (a joint channel's name and description change for every connected server; its visibility cannot change)",
     options: [
       {
         flags: "--target <target>",
@@ -106,11 +106,7 @@ export const channelUpdateCommand = defineCommand(
       });
     }
 
-    const updateRes = await client.request<UpdatedChannel>(
-      "PATCH",
-      `/internal/agent/${encodeURIComponent(agentContext.agentId)}/channels/${encodeURIComponent(channel.id)}`,
-      body,
-    );
+    const updateRes = await createAgentApiSurfaceClient(client).channels.update({ channelId: channel.id as never }, body);
     if (!updateRes.ok || !updateRes.data) {
       throw new CliError({
         code: updateRes.status >= 500 ? "SERVER_5XX" : "UPDATE_FAILED",

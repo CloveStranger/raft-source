@@ -1,4 +1,4 @@
-import { useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useLayoutEffect, useRef, useState } from "react";
 import { useIntl } from "react-intl";
 import { PanelHeading, PanelSection, Separator } from "raft-ui";
 
@@ -100,6 +100,12 @@ export default function TaskModalHead({ task }: { task: Task }) {
     };
   }, [description, descriptionKey]);
 
+  const toggleDescriptionExpanded = useCallback(() => {
+    setDescriptionExpansion((cur) => ({
+      key: descriptionKey,
+      expanded: cur.key === descriptionKey ? !cur.expanded : true,
+    }));
+  }, [descriptionKey]);
 
   return (
     <>
@@ -133,11 +139,7 @@ export default function TaskModalHead({ task }: { task: Task }) {
                 expandedLabel={formatMessage({ id: "message.content.collapse" })}
                 aria-controls={`task-modal-description-${task.id}`}
                 aria-expanded={descriptionExpanded}
-                onClick={() =>
-                  setDescriptionExpansion((cur) => ({
-                    key: descriptionKey,
-                    expanded: cur.key === descriptionKey ? !cur.expanded : true,
-                  }))}
+                onClick={toggleDescriptionExpanded}
                 className="mt-1"
                 data-testid="task-modal-description-toggle"
               />

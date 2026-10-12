@@ -1,8 +1,9 @@
 // `raft channel create --name <name> [--private] [--description <text>]`
-// → POST /internal/agent/:id/channels
+// → POST /internal/agent-api/channels
 
 import type { Command } from "commander";
 
+import { createAgentApiSurfaceClient } from "../../agentApiPath";
 import { defineCommand, registerCliCommand } from "../../core/command";
 import type { CommandRuntimeOptions } from "../../core/context";
 import { CliError } from "../../core/errors";
@@ -60,15 +61,11 @@ export const channelCreateCommand = defineCommand(
 
     const agentContext = ctx.loadAgentContext();
     const client = ctx.createApiClient(agentContext);
-    const res = await client.request<CreatedChannel>(
-      "POST",
-      `/internal/agent/${encodeURIComponent(agentContext.agentId)}/channels`,
-      {
-        name,
-        description: opts.description,
-        visibility: opts.private ? "private" : "public",
-      },
-    );
+    const res = await createAgentApiSurfaceClient(client).channels.create({
+      name,
+      ...(opts.description !== undefined ? { description: opts.description } : {}),
+      visibility: opts.private ? "private" : "public",
+    });
     if (!res.ok || !res.data) {
       throw new CliError({
         code: res.status >= 500 ? "SERVER_5XX" : "CREATE_FAILED",

@@ -1,11 +1,13 @@
 import { Button, Popover, PopoverTrigger, PopoverContent } from "raft-ui";
 import Tooltip from "../ui/Tooltip";
 import { useOptionalAppTheme } from "../../hooks/useAppTheme";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import type { ComponentType } from "react";
 import type { PickerProps } from "emoji-picker-react";
 import { SmilePlus, X } from "lucide-react";
 import { useIntl } from "react-intl";
+
+const PICKER_PREVIEW_CONFIG: PickerProps["previewConfig"] = { showPreview: false };
 
 export default function SidebarSectionEmojiPicker({
   value,
@@ -18,6 +20,10 @@ export default function SidebarSectionEmojiPicker({
   const [open, setOpen] = useState(false);
   const [EmojiPicker, setEmojiPicker] = useState<ComponentType<PickerProps> | null>(null);
   const appTheme = useOptionalAppTheme();
+  const handleEmojiClick = useCallback<NonNullable<PickerProps["onEmojiClick"]>>((emojiData) => {
+    onChange(emojiData.emoji);
+    setOpen(false);
+  }, [onChange]);
 
   useEffect(() => {
     if (!open || EmojiPicker) return;
@@ -81,11 +87,8 @@ export default function SidebarSectionEmojiPicker({
               height={360}
               theme={(appTheme?.resolvedMode === "dark" ? "dark" : "light") as PickerProps["theme"]}
               lazyLoadEmojis
-              previewConfig={{ showPreview: false }}
-              onEmojiClick={(emojiData) => {
-                onChange(emojiData.emoji);
-                setOpen(false);
-              }}
+              previewConfig={PICKER_PREVIEW_CONFIG}
+              onEmojiClick={handleEmojiClick}
             />
           ) : (
             <div role="status" className="flex h-24 w-[min(340px,calc(100vw-48px))] items-center justify-center text-sm text-foreground-muted">

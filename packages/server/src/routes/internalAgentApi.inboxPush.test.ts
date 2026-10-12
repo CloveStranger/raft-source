@@ -24,15 +24,18 @@ import { readFileSync } from "node:fs";
 import { createHmac, randomUUID } from "node:crypto";
 
 import { BasicTracer, MemoryTraceSink, type AgentMessage } from "@botiverse/raft-shared";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 
 import { getDb } from "../db/index";
 import { traceAgentIdHash, traceServerIdHash } from "../tracing/traceIdentity";
-import { agentInboxPushRegistrations, servers, thirdPartyAgentEvents, users } from "../db/schema";
+import { agentInboxPushRegistrations, agents, assistantDoorbells, featureFlags, servers, thirdPartyAgentEvents, users } from "../db/schema";
+import { ASSISTANT_DOORBELL_COALESCE_MS, drainAssistantDoorbells } from "../services/assistantService";
+import { createFeatureFlag, IDENTITY_BORROWING_FEATURE_FLAG_KEY } from "../services/featureFlagService";
+import { listAgentAppEvents } from "../services/agentAppEventsService";
 import { createOAuthClient, requestAgentAccess } from "../services/oauthService";
-import { createServer } from "../services/serverService";
+import { addMember, createServer } from "../services/serverService";
 import { createAgent } from "../services/agentService";
-import { addAgent, addHuman, createChannel, getAgentLegacyReadCursor, type AgentInboxChainSelection } from "../services/channelService";
+import { addAgent, addHuman, createChannel, findOrCreateUserDM, getAgentLegacyReadCursor, getOrCreateThread, type AgentInboxChainSelection } from "../services/channelService";
 import {
   createMessage,
   __setExternalAgentInboxChainSelectorForTests,
@@ -932,3 +935,161 @@ for (const [retryAfter, expectedMs] of [["30", 30_000], ["3600", 5 * 60_000]] as
     assert.ok(waitMs >= expectedMs - 1_000 && waitMs <= expectedMs + 5_000, `next attempt in ${waitMs} ms`);
   });
 }
+
+// RFC 074 §2 assistant doorbell: a `system.assistant` event in the same table
+// as app events, so it rides the same push, sweep and /events paths.
+async function seedAssistant(app: { baseUrl: string }) {
+  const f = await seedAgent();
+  await getDb().update(agents).set({ assistantOwnerUserId: f.ownerId }).where(eq(agents.id, f.agentId));
+  const [existing] = await getDb().select().from(featureFlags).where(eq(featureFlags.key, IDENTITY_BORROWING_FEATURE_FLAG_KEY));
+  if (existing) {
+    await getDb().update(featureFlags).set({ defaultEnabled: true }).where(eq(featureFlags.key, IDENTITY_BORROWING_FEATURE_FLAG_KEY));
+  } else {
+    await createFeatureFlag({ key: IDENTITY_BORROWING_FEATURE_FLAG_KEY, randomizationUnit: "server", enabled: true, defaultEnabled: true });
+  }
+  await register(app, f);
+  return f;
+}
+
+async function ownerFact(f: Fixture, channelId: string, kind: "channel" | "dm" | "thread", extra: { unreadEligible?: boolean } = {}) {
+  const message = await createMessage(channelId, "agent", f.agentId, `activity ${randomUUID().slice(0, 6)}`);
+  await recordInboxNotificationFacts([{
+    receiverType: "user",
+    receiverId: f.ownerId,
+    serverId: f.serverId,
+    kind,
+    sourceChannelId: channelId,
+    messageId: message.id,
+    messageSeq: message.seq,
+    activityAt: message.createdAt,
+    personalMention: false,
+    unreadEligible: extra.unreadEligible ?? true,
+  }]);
+}
+
+async function pendingDoorbell(agentId: string) {
+  const [row] = await getDb().select().from(assistantDoorbells).where(eq(assistantDoorbells.agentId, agentId));
+  return row ?? null;
+}
+
+async function doorbellEvents(agentId: string) {
+  return getDb().select().from(thirdPartyAgentEvents)
+    .where(and(eq(thirdPartyAgentEvents.agentId, agentId), eq(thirdPartyAgentEvents.systemApp, "system.assistant")));
+}
+
+test("assistant doorbell: an owner inbox change pushes one agent-event notice; bursts merge for 30s", async ({ app }) => {
+  const f = await seedAssistant(app);
+  const orchestrator = freshProcess(app);
+  const rec = recorder([{ status: 200 }]);
+
+  await ownerFact(f, f.channelId, "channel");
+  await ownerFact(f, f.channelId, "channel");
+  assert.ok(await pendingDoorbell(f.agentId), "the owner's fact rang the doorbell in its transaction");
+
+  await withWorker(orchestrator, rec.post, async (worker) => {
+    assert.equal(await drainAssistantDoorbells({ deliverer: orchestrator }), 1);
+    await waitFor(() => rec.posted.length === 1);
+    await worker.idle();
+  });
+  const [event] = await doorbellEvents(f.agentId);
+  assert.ok(event);
+  assert.equal(event.clientId, null);
+  assert.equal(event.kind, "event");
+  assert.equal(event.payload.type, "owner_inbox_updated");
+  assert.equal(event.payload.owner_user_id, f.ownerId);
+  assert.equal(event.status, "delivering");
+  assert.deepEqual(rec.posted[0]!.notice.targets.map((target) => [target.target, target.latestSenderName, target.latestSenderType]), [
+    [`agent-event:${event.id.slice(0, 8)}`, "system.assistant", "third_party_app"],
+  ]);
+  assert.equal(await pendingDoorbell(f.agentId), null);
+
+  // More activity within 30 s waits for the window, then goes out as one.
+  await ownerFact(f, f.channelId, "channel");
+  await ownerFact(f, f.channelId, "channel");
+  assert.equal(await drainAssistantDoorbells({ deliverer: orchestrator }), 0);
+  assert.ok(await pendingDoorbell(f.agentId), "still pending inside the window");
+  const later = new Date(event.createdAt.getTime() + ASSISTANT_DOORBELL_COALESCE_MS + 1_000);
+  assert.equal(await drainAssistantDoorbells({ deliverer: orchestrator, now: later }), 1);
+  assert.equal((await doorbellEvents(f.agentId)).length, 2);
+});
+
+test("assistant doorbell: DMs, threads under DMs and the owner's own sends never ring", async ({ app }) => {
+  const f = await seedAssistant(app);
+  const db = getDb();
+  const suffix = randomUUID().slice(0, 8);
+  const [peer] = await db.insert(users).values({
+    email: `doorbell-peer-${suffix}@slock.test`,
+    name: `doorbell-peer-${suffix}`,
+    displayName: "Peer",
+    passwordHash: await fixturePasswordHash("password123"),
+    emailVerified: true,
+  }).returning();
+  await addMember(f.serverId, peer!.id);
+  const dm = await findOrCreateUserDM(f.serverId, f.ownerId, peer!.id);
+  assert.ok(dm);
+  const dmParent = await createMessage(dm.id, "user", peer!.id, "dm parent");
+  const dmThread = await getOrCreateThread(dmParent.id, peer!.id, "user");
+
+  await ownerFact(f, dm.id, "dm");
+  await ownerFact(f, dmThread.id, "thread");
+  await ownerFact(f, f.channelId, "channel", { unreadEligible: false });
+  assert.equal(await pendingDoorbell(f.agentId), null);
+
+  // A thread under a channel does ring.
+  const parent = await createMessage(f.channelId, "user", f.ownerId, "channel parent");
+  const thread = await getOrCreateThread(parent.id, f.ownerId, "user");
+  await ownerFact(f, thread.id, "thread");
+  assert.ok(await pendingDoorbell(f.agentId));
+});
+
+test("assistant doorbell: a failed delivery stays queued; the sweep announces it and /events delivers it", async ({ app }) => {
+  const f = await seedAssistant(app);
+  const orchestrator = freshProcess(app);
+  await ownerFact(f, f.channelId, "channel");
+  const failing = { deliverMessage: async () => { throw new Error("replica gone"); } };
+  assert.equal(await drainAssistantDoorbells({ deliverer: failing as never }), 1);
+  const [event] = await doorbellEvents(f.agentId);
+  assert.equal(event?.status, "queued", "released back to queued");
+
+  const rec = recorder([{ status: 200 }]);
+  const swept = await sweepAgentInboxNotices({ agentOrchestrator: orchestrator, post: rec.post, agentIds: [f.agentId] });
+  assert.equal(swept.sent, 1);
+  assert.deepEqual(rec.posted[0]!.notice.targets.map((target) => target.target), [`agent-event:${event!.id.slice(0, 8)}`]);
+
+  const pulled = await api(app.baseUrl, f.apiKey, "GET", "/events?since=latest");
+  assert.equal(pulled.status, 200, pulled.raw);
+  assert.ok(pulled.raw.includes(event!.id), "the doorbell is delivered by the next pull");
+  assert.ok(pulled.raw.includes("owner_inbox_updated"));
+});
+
+test("assistant doorbell: OAuth clients never see or touch system rows; one source per row", async ({ app }) => {
+  const f = await seedAssistant(app);
+  const orchestrator = freshProcess(app);
+  const { client, accessToken } = await appWithAgentToken(app, f);
+  await ownerFact(f, f.channelId, "channel");
+  await drainAssistantDoorbells({ deliverer: orchestrator });
+  const [system] = await doorbellEvents(f.agentId);
+  assert.ok(system);
+
+  // The only client write path, with an externalEventId: its dedupe is keyed
+  // to its own client_id, so it creates its own row and never returns ours.
+  const write = await fetch(`${app.baseUrl}/api/oauth/agent-events`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ kind: "notification", summary: "client event", externalEventId: "x-1" }),
+  });
+  assert.equal(write.status, 202, await write.clone().text());
+  const written = await write.json() as { id: string };
+  assert.notEqual(written.id, system.id);
+
+  // Filtering by a client never returns system rows; the system filter returns only them.
+  const byClient = await listAgentAppEvents({ agentId: f.agentId, clientId: client.id });
+  assert.deepEqual(byClient.events.map((event) => event.id), [written.id]);
+  const bySystem = await listAgentAppEvents({ agentId: f.agentId, clientId: "system.assistant" });
+  assert.deepEqual(bySystem.events.map((event) => [event.id, event.app.name]), [[system.id, "system.assistant"]]);
+
+  // Exactly one of client_id / system_app.
+  const base = { serverId: f.serverId, agentId: f.agentId, kind: "event" as const, summary: "x", payload: {}, payloadHash: "h", resource: "r", expiresAt: new Date(Date.now() + 60_000) };
+  await assert.rejects(getDb().insert(thirdPartyAgentEvents).values({ ...base, clientId: null, systemApp: null }));
+  await assert.rejects(getDb().insert(thirdPartyAgentEvents).values({ ...base, clientId: client.id, systemApp: "system.assistant" }));
+});

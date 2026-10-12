@@ -687,7 +687,6 @@ test("OAuth mapping exposes sealed authority only and fails closed on scope or i
     providerTeamId: "T_TEAM",
     providerEnterpriseId: null,
     providerUserId: "U_HUMAN",
-    installerIsWorkspaceAdmin: true as const,
     botUserId: "U_BOT",
     providerBotId: "B_BOT",
     workspaceName: "Isolated Test",
@@ -709,7 +708,42 @@ test("OAuth mapping exposes sealed authority only and fails closed on scope or i
   assert.deepEqual(normalizeSlackOAuthExchangeResult({
     request,
     result: { ...authorized, installedScopes: ["chat:write"] },
-  }), { kind: "deterministic_failure", reason: "scope_mismatch" });
+  }), {
+    kind: "deterministic_failure",
+    reason: "scope_mismatch",
+    providerError: "missing:channels:history",
+  });
+  // Extra scopes beyond the required set are allowed: the app may have
+  // scopes added in the console before a code deploy tightens the contract.
+  // The extras are visible on the install record for audit.
+  assert.equal(normalizeSlackOAuthExchangeResult({
+    request,
+    result: {
+      ...authorized,
+      installedScopes: [
+        "channels:history", "channels:read", "chat:write",
+        "chat:write.customize", "files:read", "files:write",
+        "groups:history", "groups:read", "reactions:read",
+        "reactions:write", "users:read", "usergroups:read",
+        "usergroups:write",
+      ],
+    },
+  }).kind, "authorized");
+  // The provider's own error string must survive normalization so operators
+  // can see why Slack refused (e.g. "bad_client_secret") instead of a bare
+  // slack_oauth_rejected.
+  assert.deepEqual(normalizeSlackOAuthExchangeResult({
+    request,
+    result: { kind: "rejected", error: "bad_client_secret" },
+  }), {
+    kind: "deterministic_failure",
+    reason: "provider_rejected",
+    providerError: "bad_client_secret",
+  });
+  assert.deepEqual(normalizeSlackOAuthExchangeResult({
+    request,
+    result: { kind: "rejected", error: "handle_unavailable" },
+  }), { kind: "preflight_rejected" });
   assert.deepEqual(normalizeSlackOAuthExchangeResult({
     request,
     result: { ...authorized, providerUserId: "U_BOT" },
@@ -862,7 +896,6 @@ test("live OAuth HTTP transport consumes handles once and exposes only sealed cr
     providerTeamId: "T_TEAM",
     providerEnterpriseId: null,
     providerUserId: "U_HUMAN",
-    installerIsWorkspaceAdmin: true,
     botUserId: "U_BOT",
     providerBotId: "B_BOT",
     workspaceName: "Workspace",
@@ -879,7 +912,7 @@ test("live OAuth HTTP transport consumes handles once and exposes only sealed cr
   assert.equal(serialized.includes("authorization-code-value"), false);
 });
 
-test("live OAuth refuses a non-admin workspace installer before credential persistence", async () => {
+test("live OAuth accepts a workspace member who is not a Slack admin", async () => {
   let seals = 0;
   const transport = createSlackOAuthHttpTransport({
     endpoint: "https://slack.test/api/oauth.v2.access",
@@ -895,7 +928,7 @@ test("live OAuth refuses a non-admin workspace installer before credential persi
     credentialSealer: {
       async seal() {
         seals += 1;
-        return { encryptedMaterial: "never", envelopeKeyId: "never", aadVersion: 1 };
+        return { encryptedMaterial: "sealed", envelopeKeyId: "key", aadVersion: 1 };
       },
     },
     async fetch(url) {
@@ -932,11 +965,11 @@ test("live OAuth refuses a non-admin workspace installer before credential persi
     },
   });
 
-  assert.deepEqual(await transport.exchange(oauthRequest()), {
-    kind: "rejected",
-    error: "installer_not_workspace_admin",
-  });
-  assert.equal(seals, 0, "a non-admin installer must never reach credential sealing");
+  // Who may install the app is Slack's own policy; Raft no longer requires
+  // the installer to be a Slack workspace admin.
+  const outcome = await transport.exchange(oauthRequest());
+  assert.equal(outcome.kind, "authorized");
+  assert.equal(seals, 1);
 });
 
 test("live OAuth HTTP transport rejects missing or accepted-only scope headers before sealing", async () => {

@@ -19,13 +19,13 @@
   },
   "devDependencies": {
     "@types/node": "^25.5.0",
-    "@typespec/compiler": "1.14.0",
-    "@typespec/http": "1.14.0",
-    "@typespec/json-schema": "1.14.0",
-    "@typespec/openapi3": "1.14.0",
-    "@vitest/coverage-v8": "^5.0.2",
-    "ajv": "8.17.1",
+    "@typespec/compiler": "1.16.0",
+    "@typespec/http": "1.16.0",
+    "@typespec/json-schema": "1.16.0",
+    "@typespec/openapi3": "1.16.0",
+    "@vitest/coverage-v8": "^5.0.3",
+    "ajv": "8.20.0",
     "typescript": "6.0.3",
-    "vitest": "^5.0.2"
+    "vitest": "^5.0.3"
   }
 }

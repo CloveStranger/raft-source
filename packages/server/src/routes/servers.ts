@@ -23,6 +23,7 @@ import {
 } from "../services/computerCredentialService";
 import { getLatestComputerReleaseNotes, getLatestComputerVersion } from "../services/computerVersionService";
 import {
+  createBatchBroadcastPolicyEvaluator,
   evaluateBroadcastPolicy,
   normalizeComputerPlatform,
   projectComputerBroadcastPolicyDecision,
@@ -49,10 +50,10 @@ import {
 import { hasServerCompletedSetupForProjection } from "../services/serverSetupCompletionService";
 import { handleMachineLocalRouting, sendMachineAffinityUnavailable } from "../machineLocalReplay";
 import {
-  isRemoteUpgradeSupported, asMachineId, COMPOSER_RESOURCE_REFERENCES_FEATURE_FLAG_KEY, COMPUTER_CAPABILITY_SUPERVISOR_MUTATIONS, currentDate, INVALID_EMAIL_MESSAGE, PUBLIC_SERVER_FEATURE_FLAG_KEY, RUNTIME_ACCOUNT_USAGE_PROVIDERS, SERVER_GUEST_FEATURE_FLAG_KEY, SERVER_SYSTEM_NOTIFICATIONS_CONTRACT_VERSION, validateEmailAddress, validateNewServerSlug, type RuntimeAccountUsageProvider, type ServerCapability, type ServerModelLabelCatalog, type ServerPlan, type ServerRole } from "@botiverse/raft-shared";
+  isRemoteUpgradeSupported, asMachineId, COMPOSER_RESOURCE_REFERENCES_FEATURE_FLAG_KEY, COMPUTER_CAPABILITY_SUPERVISOR_MUTATIONS, currentDate, INVALID_EMAIL_MESSAGE, PUBLIC_SERVER_FEATURE_FLAG_KEY, RUNTIME_ACCOUNT_USAGE_PROVIDERS, SERVER_GUEST_FEATURE_FLAG_KEY, SERVER_SYSTEM_NOTIFICATIONS_CONTRACT_VERSION, systemAttentionReceiptInputSchema, validateEmailAddress, validateNewServerSlug, type RuntimeAccountUsageProvider, type ServerCapability, type ServerModelLabelCatalog, type ServerPlan, type ServerRole } from "@botiverse/raft-shared";
 import { releasedRuntimeFormDefinition } from "@botiverse/raft-runtime-form";
 import { canInspectAgentPrivateSurfaces } from "./agents";
-import { actorRoleHasServerCapability, getActorServerRoleInServer } from "../lib/actorPermissions";
+import { actorHasServerCapabilityInServer, actorRoleHasServerCapability, getActorServerRoleInServer } from "../lib/actorPermissions";
 import { FencedAuthorizationDeniedError, ServerMembershipRevokedError, withActorMembershipFence } from "../lib/actorMembershipFence";
 import { createScopeAttestation } from "../lib/scopeAttestation";
 import { getDb } from "../db/index";
@@ -72,21 +73,30 @@ import {
 } from "../services/avatarService";
 import {
   projectNewAgentRuntimeOptions,
+  runtimeOptionProjectionFromHeaders,
   resolveRuntimeAdmissionPolicy,
 } from "../services/runtimeAdmissionService";
 import { serverLabsRouter } from "./serverLabs";
 import { runtimeFormV1Entry } from "../services/runtimeFormDefinitionService";
-import { runtimeFormV2Entry } from "../services/runtimeFormV2Registry";
+import { buildRuntimeFormV2ForServer, runtimeFormV2Entry } from "../services/runtimeFormV2Registry";
+import {
+  localizeRuntimeFormV2,
+  localizeRuntimeFormV2OptionSource,
+  runtimeFormCopyLocale,
+  setRuntimeFormCopyHeaders,
+} from "../services/runtimeFormV2Copy";
 import { BuiltInModelCatalogError } from "../services/builtinModelCatalogCompatibility";
 import { evaluateFeatureFlag, REMOTE_COMPUTER_UPGRADE_V2_FEATURE_FLAG_KEY } from "../services/featureFlagService";
 import {
   createComputerUpgradeRequest,
+  failUndeliveredComputerUpgradeRequest,
   listLatestComputerUpgradeRequests,
   projectComputerUpgradeRequest,
 } from "../services/computerUpgradeRequestService";
 import { RouteFailureError } from "../tracing/routeFailure";
 import { computeActivityUnreadCounts } from "../services/activityUnreadSummaryService";
 import { runtimeAccountUsageCacheService } from "../services/runtimeAccountUsageCacheService";
+import { usageLimitAttentionService } from "../services/usageLimitAttentionService";
 import { machineRuntimeModelCatalogService } from "../services/machineRuntimeModelCatalogService";
 import { MachineCatalogStaleError } from "../services/machineCatalogAuthority";
 import * as mentionDeliveryOccurrenceService from "../services/mentionDeliveryOccurrenceService";
@@ -106,6 +116,8 @@ guardUuidPathParams(serverRouter, {
   machineId: "Machine",
   agentId: "Agent",
   reportId: "Report",
+  memberId: "Member",
+  incidentId: "System attention incident",
 });
 const serverAvatarUpload = createAvatarUpload();
 
@@ -128,9 +140,12 @@ type ComputerBroadcastPolicyEvaluator = (
   input: Parameters<typeof evaluateBroadcastPolicy>[0],
 ) => ComputerBroadcastPolicyDecision | Promise<ComputerBroadcastPolicyDecision>;
 
-function computerBroadcastPolicyEvaluator(app: { get(name: string): unknown }): ComputerBroadcastPolicyEvaluator {
+function computerBroadcastPolicyEvaluator(
+  app: { get(name: string): unknown },
+  fallback: ComputerBroadcastPolicyEvaluator = evaluateBroadcastPolicy,
+): ComputerBroadcastPolicyEvaluator {
   return (app.get("computerBroadcastPolicyEvaluator") as ComputerBroadcastPolicyEvaluator | undefined)
-    ?? evaluateBroadcastPolicy;
+    ?? fallback;
 }
 
 async function readComputerSourceFact(
@@ -1992,7 +2007,9 @@ serverRouter.get("/:id/sidebar-order", async (req, res) => {
       res.status(404).json({ error: "Server not found" });
       return;
     }
-    const sidebarOrder = await tracePhase(
+    // The stored order and the ids it may reference are independent reads;
+    // they run side by side.
+    const [sidebarOrder, allowedIds] = await Promise.all([tracePhase(
       () => serverService.getSanitizedMemberSidebarOrder(req.params.id, req.userId!, {
         traceQuery: createTraceDbQueryTracer("sidebar_order.loaded"),
       }),
@@ -2014,14 +2031,13 @@ serverRouter.get("/:id/sidebar-order", async (req, res) => {
           agent_panel_tab_order_count: order?.agentPanelTabOrder.length ?? 0,
         },
       }),
-    );
+    ), getAllowedSidebarIds(req.params.id, req.userId!, {
+      traceQuery: createTraceDbQueryTracer("sidebar_order.pinned_context_loaded"),
+    })]);
     if (!sidebarOrder) {
       res.status(404).json({ error: "Member not found" });
       return;
     }
-    const allowedIds = await getAllowedSidebarIds(req.params.id, req.userId!, {
-      traceQuery: createTraceDbQueryTracer("sidebar_order.pinned_context_loaded"),
-    });
     const responseOrder = hydrateSidebarPinnedResponse(sidebarOrder, allowedIds);
     addTraceEvent("response.ready", {
       channel_order_count: responseOrder.channelOrder.length,
@@ -2605,6 +2621,63 @@ serverRouter.get("/:id/system-notifications", async (req, res) => {
   }
 });
 
+// Durable account-level attention. Unlike the legacy machine feed above,
+// seen/dismiss receipts are receiver-scoped on the server and therefore sync
+// across devices. The service returns an empty replace-snapshot when the gate
+// is off or the current member is not an owner/admin.
+serverRouter.get("/:id/system-notifications-v2", async (req, res) => {
+  try {
+    res.set("Cache-Control", "private, no-store");
+    res.json(await usageLimitAttentionService.listForReceiver(req.params.id, req.userId!));
+  } catch {
+    res.status(500).json({ error: "Failed to list system attention" });
+  }
+});
+
+serverRouter.post("/:id/system-notifications-v2/:incidentId/seen", async (req, res) => {
+  const parsed = systemAttentionReceiptInputSchema.safeParse({ incidentId: req.params.incidentId });
+  if (!parsed.success) {
+    res.status(400).json({ error: "Invalid system attention incident" });
+    return;
+  }
+  try {
+    const updated = await usageLimitAttentionService.markSeen(
+      req.params.id,
+      req.userId!,
+      parsed.data.incidentId,
+    );
+    if (!updated) {
+      res.status(404).json({ error: "System attention incident not found" });
+      return;
+    }
+    res.json({ ok: true });
+  } catch {
+    res.status(500).json({ error: "Failed to mark system attention seen" });
+  }
+});
+
+serverRouter.post("/:id/system-notifications-v2/:incidentId/dismiss", async (req, res) => {
+  const parsed = systemAttentionReceiptInputSchema.safeParse({ incidentId: req.params.incidentId });
+  if (!parsed.success) {
+    res.status(400).json({ error: "Invalid system attention incident" });
+    return;
+  }
+  try {
+    const updated = await usageLimitAttentionService.dismiss(
+      req.params.id,
+      req.userId!,
+      parsed.data.incidentId,
+    );
+    if (!updated) {
+      res.status(404).json({ error: "System attention incident not found" });
+      return;
+    }
+    res.json({ ok: true });
+  } catch {
+    res.status(500).json({ error: "Failed to dismiss system attention" });
+  }
+});
+
 // List machines for server
 serverRouter.get("/:id/machines", async (req, res) => {
   try {
@@ -2678,7 +2751,8 @@ serverRouter.get("/:id/machines", async (req, res) => {
         },
       }),
     );
-    const evaluatePolicy = computerBroadcastPolicyEvaluator(req.app);
+    // One gate read for the whole list, not one per Computer.
+    const evaluatePolicy = computerBroadcastPolicyEvaluator(req.app, createBatchBroadcastPolicyEvaluator());
     let policyNow: Date | null = null;
     const latestUpgradeRequests = await listLatestComputerUpgradeRequests(
       enriched.filter((machine) => machine.isComputer).map((machine) => machine.id),
@@ -3170,6 +3244,7 @@ serverRouter.post("/:id/machines/:machineId/computer/:action", async (req, res) 
       if (created) {
         const { sent } = await agentOrchestrator.sendComputerUpgrade(machine.id, row.targetVersion, row.id);
         if (!sent) {
+          await failUndeliveredComputerUpgradeRequest(row.id, new Date(agentOrchestrator.getCurrentTimeMs()));
           res.status(409).json({ error: "Computer is not online", code: "computer_offline" });
           return;
         }
@@ -3536,7 +3611,7 @@ serverRouter.get("/:id/machines/:machineId/workspaces", async (req, res) => {
     );
     if (routing === "handled") return;
     if (routing !== "confirmed_local") {
-      sendMachineAffinityUnavailable(res, req.params.machineId);
+      sendMachineAffinityUnavailable(res, req.params.machineId, routing);
       return;
     }
 
@@ -3601,7 +3676,7 @@ serverRouter.get("/:id/machines/:machineId/runtime-options", async (req, res) =>
     res.json({
       context: "new_agent",
       machineId: machine.id,
-      options: projectNewAgentRuntimeOptions(machine.runtimes ?? [], policy),
+      options: projectNewAgentRuntimeOptions(machine.runtimes ?? [], policy, runtimeOptionProjectionFromHeaders(req.headers)),
     });
   } catch {
     res.status(500).json({ error: "Failed to load runtime options" });
@@ -3743,15 +3818,24 @@ const handleRuntimeFormDefinition = (protocol: 1 | 2): RequestHandler<{ id: stri
     // A released version is answered from its frozen sample, never from current
     // code, so a server change cannot break clients that already shipped it
     // (packages/runtime-form/README.md).
-    const definition = v2
-      ? v2.buildForm()
-      : releasedRuntimeFormDefinition(v1!.ref.schemaVersion) ?? v1!.buildDefinition();
     const projectionIssues = (v2 ?? v1!).validateProjection();
     if (projectionIssues.length > 0) {
       res.status(500).json({ error: "Runtime form projection drift", issues: projectionIssues });
       return;
     }
-    res.json(definition);
+    if (v2) {
+      // v2 copy follows the request language; v1 stays the frozen English sample.
+      // The per-server build adds the saved-connection capability, the
+      // x-connectionOwned markers and the revision token when this server has
+      // provider connections enabled; localization preserves them (it only
+      // rewrites copy strings).
+      const locale = runtimeFormCopyLocale(req.get("accept-language"));
+      setRuntimeFormCopyHeaders(res, locale);
+      const definition = await buildRuntimeFormV2ForServer(req.params.runtimeId, req.params.id) ?? v2.buildForm();
+      res.json(localizeRuntimeFormV2(definition, locale));
+      return;
+    }
+    res.json(releasedRuntimeFormDefinition(v1!.ref.schemaVersion) ?? v1!.buildDefinition());
   } catch {
     res.status(500).json({ error: "Failed to load runtime form definition" });
   }
@@ -3794,10 +3878,23 @@ const handleRuntimeFormOptionSource = (protocol: 1 | 2): RequestHandler<{ id: st
       return;
     }
     const agentOrchestrator = req.app.get("agentOrchestrator") as AgentOrchestrator;
+    // Saved-connection options (v2, capability `provider.saved_connection`):
+    // only a revisioned request from a caller who may list this server's
+    // connections ever sees them; an unrevisioned request keeps the plain
+    // direct-option protocol. Authorization is re-checked here on every
+    // request — the revision guards form consistency only.
+    const formRevision = protocol === 2 && typeof req.query.formRevision === "string" && req.query.formRevision
+      ? req.query.formRevision
+      : undefined;
+    const connectionsVisible = formRevision !== undefined
+      && await actorHasServerCapabilityInServer(req.params.id, "user", req.userId!, "manageExternalAuth");
     const resolution = await entry.resolveOptionSource({
       sourceId: req.params.sourceId,
       machineId: req.params.machineId,
       machine,
+      serverId: req.params.id,
+      formRevision,
+      connectionsVisible,
       // A client's retry of a non-live source (`option_source.status`), v2 only.
       refresh: protocol === 2 && req.query.refresh === "1",
       agentOrchestrator,
@@ -3824,6 +3921,12 @@ const handleRuntimeFormOptionSource = (protocol: 1 | 2): RequestHandler<{ id: st
     const projectionIssues = (v1 ?? entry).validateProjection();
     if (projectionIssues.length > 0) {
       res.status(500).json({ error: "Runtime form projection drift", issues: projectionIssues });
+      return;
+    }
+    if (protocol === 2) {
+      const locale = runtimeFormCopyLocale(req.get("accept-language"));
+      setRuntimeFormCopyHeaders(res, locale);
+      res.json(localizeRuntimeFormV2OptionSource(source, locale));
       return;
     }
     res.json(source);
@@ -4149,7 +4252,7 @@ serverRouter.get("/:id/machines/:machineId/agents/:agentId/diagnostic/session-tr
     );
     if (routing === "handled") return;
     if (routing !== "confirmed_local") {
-      sendMachineAffinityUnavailable(res, req.params.machineId);
+      sendMachineAffinityUnavailable(res, req.params.machineId, routing);
       return;
     }
 
@@ -4206,7 +4309,7 @@ serverRouter.post("/:id/machines/:machineId/agents/:agentId/feedback/:reportId/t
     );
     if (routing === "handled") return;
     if (routing !== "confirmed_local") {
-      sendMachineAffinityUnavailable(res, req.params.machineId);
+      sendMachineAffinityUnavailable(res, req.params.machineId, routing);
       return;
     }
 
@@ -4322,7 +4425,7 @@ serverRouter.delete("/:id/machines/:machineId/workspaces/:directoryName", async 
     );
     if (routing === "handled") return;
     if (routing !== "confirmed_local") {
-      sendMachineAffinityUnavailable(res, req.params.machineId);
+      sendMachineAffinityUnavailable(res, req.params.machineId, routing);
       return;
     }
 

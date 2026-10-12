@@ -17,7 +17,7 @@ import type {
   AgentOrchestrator,
   MachineConnectionPrincipalKind,
 } from "../services/agentOrchestrator";
-import { sendAuthenticatedMachineContext } from "../services/machineContext";
+import { newMachineConnectionEpochId, sendAuthenticatedMachineContext } from "../services/machineContext";
 import { errorClassOf, recordTraceEvent, runWithTraceSpan } from "../tracing/semanticTrace";
 import type { MachineToServerMessage } from "@botiverse/raft-shared";
 import {
@@ -267,11 +267,13 @@ export function setupMachineWebSocket(
     principalKind: MachineConnectionPrincipalKind = "unknown",
   ) => {
     let contextSent = true;
+    const connectionEpochId = newMachineConnectionEpochId(machine.id);
     void runMachineWsStep("server.machine_ws.connection_setup", { machine_id: machine.id }, async () => {
       try {
         sendAuthenticatedMachineContext(ws, {
           machineId: machine.id,
           serverId: machine.serverId,
+          connectionEpochId,
         });
       } catch (err) {
         console.error(`[Machine ${machine.id}] Failed to send authenticated context:`, err);
@@ -285,7 +287,7 @@ export function setupMachineWebSocket(
         return "error";
       }
       try {
-        await orchestrator.registerMachine(machine.id, machine.serverId, ws, traceContext, principalKind);
+        await orchestrator.registerMachine(machine.id, machine.serverId, ws, traceContext, principalKind, connectionEpochId);
         return "ok";
       } catch (err) {
         console.error(`[Machine ${machine.id}] Registration failed:`, err);
@@ -322,7 +324,9 @@ export function setupMachineWebSocket(
       cause: "socket_close" | "socket_error",
       details: Parameters<AgentOrchestrator["handleMachineDisconnect"]>[2],
     ) => {
-      void runMachineWsStep("server.machine_ws.disconnect", { machine_id: machine.id, cause }, async () => {
+      const attrs: Record<string, string | number> = { machine_id: machine.id, cause };
+      if (details?.closeCode !== undefined) attrs.close_code = details.closeCode;
+      void runMachineWsStep("server.machine_ws.disconnect", attrs, async () => {
         try {
           await orchestrator.handleMachineDisconnect(machine.id, ws, details);
           return "ok";

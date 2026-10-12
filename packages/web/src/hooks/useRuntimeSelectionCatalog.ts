@@ -11,6 +11,10 @@ type RuntimeSelectionCatalogState = {
 
 const EMPTY_OPTIONS: RuntimeSelectionOption[] = [];
 
+// The server sends each row's `runtimeFormV2` marker only to clients that ask:
+// released mobile apps decode runtime options strictly and break on unknown keys.
+const RUNTIME_FORM_V2_MARKER_HEADERS = { "X-Raft-Runtime-Form-V2": "1" } as const;
+
 function catalogOptions(payload: RuntimeSelectionCatalog): RuntimeSelectionOption[] {
   return Array.isArray(payload?.options) ? payload.options : EMPTY_OPTIONS;
 }
@@ -38,7 +42,7 @@ function useRuntimeSelectionCatalog(
     if (!path) return;
     let cancelled = false;
     setState({ requestKey, options: EMPTY_OPTIONS, loading: true });
-    void api.get<RuntimeSelectionCatalog>(path)
+    void api.get<RuntimeSelectionCatalog>(path, { headers: RUNTIME_FORM_V2_MARKER_HEADERS })
       .then(({ data }) => {
         if (!cancelled) setState({ requestKey, options: catalogOptions(data), loading: false });
       })
@@ -87,4 +91,21 @@ export function useExistingAgentRuntimeOptions(
     enabled ? `/agents/${agentId}/runtime-options` : null,
     signature,
   );
+}
+
+/**
+ * One-shot read of an existing agent's runtime options, for flows that need it
+ * for several agents at once (bulk Change model, task #1287). Same request and
+ * the same fail-closed rule as `useExistingAgentRuntimeOptions`: any error
+ * yields no options, never the raw Computer capability list.
+ */
+export async function fetchExistingAgentRuntimeOptions(agentId: string): Promise<RuntimeSelectionOption[]> {
+  try {
+    const { data } = await api.get<RuntimeSelectionCatalog>(`/agents/${agentId}/runtime-options`, {
+      headers: RUNTIME_FORM_V2_MARKER_HEADERS,
+    });
+    return catalogOptions(data);
+  } catch {
+    return EMPTY_OPTIONS;
+  }
 }

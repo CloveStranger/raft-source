@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { eq } from "drizzle-orm";
 
 import { getDb } from "../db/index";
-import { agents, reminders, servers, users } from "../db/schema";
+import { agents, machines, reminders, servers, users } from "../db/schema";
 import {
   createReminder,
   getReminderById,
@@ -167,4 +167,102 @@ test("armed state without an exact armed revision is not healthy", async ({ db }
   assert.equal(persisted?.armState, "not_armed");
   assert.equal(persisted?.armedVersion, null);
   assert.equal(persisted?.status, "scheduled");
+});
+
+async function seedAgentOnMachine(
+  server: { id: string },
+  user: { id: string },
+  suffix: string,
+  lastHeartbeat: Date | null,
+) {
+  const db = getDb();
+  const [machine] = await db.insert(machines).values({
+    serverId: server.id,
+    userId: user.id,
+    name: `machine-${suffix}`,
+    apiKeyHash: `hash-${suffix}`,
+    lastHeartbeat,
+  }).returning();
+  const [agent] = await db.insert(agents).values({
+    serverId: server.id,
+    machineId: machine.id,
+    name: `agent-${suffix}`,
+    status: "active",
+    model: "sonnet",
+    runtime: "claude",
+    executionMode: "byoc",
+  }).returning();
+  return agent;
+}
+
+test("task #441: a reminder on an offline machine is not re-pushed or stamped, and cannot starve an online one", async ({ db }) => {
+  const { server, user } = await seedServerAndAgent();
+  // 90 s and older is offline; the outbound projection uses the same cutoff.
+  const offlineAgent = await seedAgentOnMachine(server, user, "offline", new Date(FIXED_NOW.getTime() - 90_001));
+  const onlineAgent = await seedAgentOnMachine(server, user, "online", new Date(FIXED_NOW.getTime() - 30_000));
+  const create = (ownerAgentId: string, title: string, fireAt: string) => createReminder({
+    serverId: server.id,
+    ownerAgentId,
+    msgId: null,
+    title,
+    fireAt: new Date(fireAt),
+    payload: null,
+    createdBy: { type: "human", id: user.id },
+  }, { clock: FIXED_CLOCK });
+  // The offline row is the more urgent one: under fireAt order it would lead.
+  const offline = await create(offlineAgent.id, "offline machine", "2026-04-20T12:00:01.000Z");
+  const online = await create(onlineAgent.id, "online machine", "2026-04-20T12:00:10.000Z");
+
+  const pushed: string[] = [];
+  const watchdog = startReminderArmWatchdog({
+    clock: createFakeClock(FIXED_NOW),
+    horizonMs: 15_000,
+    batchSize: 1,
+    orchestrator: {
+      pushReminderUpsert: async (_agentId, row) => {
+        pushed.push(row.id);
+        return true;
+      },
+    },
+  });
+  await watchdog.tick();
+  await watchdog.tick();
+  watchdog.stop();
+
+  assert.deepEqual(pushed, [online.id, online.id]);
+  const offlineRow = await getReminderById(offline.id);
+  assert.equal(offlineRow?.armUpdatedAt, null, "an offline row is never stamped");
+  assert.equal(offlineRow?.status, "scheduled");
+});
+
+test("task #441: a machine that comes back online rejoins the arm watchdog", async ({ db }) => {
+  const { server, user } = await seedServerAndAgent();
+  const agent = await seedAgentOnMachine(server, user, "returning", null);
+  const reminder = await createReminder({
+    serverId: server.id,
+    ownerAgentId: agent.id,
+    msgId: null,
+    title: "returning machine",
+    fireAt: new Date("2026-04-20T12:00:10.000Z"),
+    payload: null,
+    createdBy: { type: "human", id: user.id },
+  }, { clock: FIXED_CLOCK });
+  const pushed: string[] = [];
+  const watchdog = startReminderArmWatchdog({
+    clock: createFakeClock(FIXED_NOW),
+    horizonMs: 15_000,
+    orchestrator: {
+      pushReminderUpsert: async (_agentId, row) => {
+        pushed.push(row.id);
+        return true;
+      },
+    },
+  });
+  await watchdog.tick();
+  assert.deepEqual(pushed, [], "never-heartbeated machine is offline");
+
+  await getDb().update(machines).set({ lastHeartbeat: FIXED_NOW }).where(eq(machines.id, agent.machineId!));
+  await watchdog.tick();
+  watchdog.stop();
+  assert.deepEqual(pushed, [reminder.id]);
 });

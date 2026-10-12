@@ -235,13 +235,12 @@ test("history renders through the rui Timeline with status-mapped variants", asy
   assert.ok(timeline.classList.contains("r-timeline--sm"), "history uses the rui sm (panel) density tier");
   const items = timeline.querySelectorAll("[data-slot='timeline-item']");
   assert.equal(items.length, 4, "one rui TimelineItem per visible history event");
-  // Status → rui variant: todo→warning, in_progress→information, in_review→accent, done→success.
-  assert.ok(items[0].classList.contains("r-timeline-item--warning"), "created(todo) maps to warning");
-  assert.ok(items[1].classList.contains("r-timeline-item--information"), "in_progress maps to information");
-  // The In Review tone must stay its own color, never collapse to default/grey (that is
-  // exactly the regression rui added the `accent` variant for).
-  assert.ok(items[2].classList.contains("r-timeline-item--accent"), "in_review maps to accent (not default)");
-  assert.ok(!items[2].classList.contains("r-timeline-item--default"), "in_review must not fall back to default");
-  assert.ok(items[3].classList.contains("r-timeline-item--success"), "done maps to success");
+  // Status → the item's own taskStatus (raft-ui paints the marker from that
+  // status's token). The old per-status `variant` mapping is gone — the dot now
+  // uses the SAME token as every other task-status surface.
+  assert.equal(items[0].getAttribute("data-task-status"), "todo", "created(todo) carries todo");
+  assert.equal(items[1].getAttribute("data-task-status"), "in-progress", "in_progress carries in-progress");
+  assert.equal(items[2].getAttribute("data-task-status"), "in-review", "in_review carries in-review (its own token, never default)");
+  assert.equal(items[3].getAttribute("data-task-status"), "done", "done carries done");
   assert.ok(timeline.querySelector("[data-slot='timeline-item-marker']"), "rui axis marker is used");
 });

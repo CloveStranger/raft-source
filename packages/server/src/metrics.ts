@@ -1,6 +1,7 @@
 import { Registry, Counter, Gauge, Histogram, collectDefaultMetrics } from "prom-client";
 import express from "express";
 import type { TraceDeploymentIdentity } from "./tracing/traceDeploymentIdentity";
+import { readBuildIdentityStatus, type BuildIdentityStatus } from "./version";
 
 // Dedicated registry (avoids polluting the global default)
 export const register = new Registry();
@@ -19,13 +20,35 @@ export function configureMetricsDeploymentIdentity(identity: TraceDeploymentIden
 // Collect default Node.js metrics (event loop lag, heap, GC, active handles)
 collectDefaultMetrics({ register, prefix: "slock_" });
 
-/** Presence marker for the private application metrics endpoint. */
+/**
+ * `git_sha` label value: the release commit from RAFT_RELEASE_SHA, or
+ * "unknown" when the build identity is missing or invalid (dev, self-hosted).
+ * One value per process, so one series per task.
+ */
+export function releaseShaLabel(status: BuildIdentityStatus): string {
+  return status.ok ? status.identity.sha : "unknown";
+}
+
+/**
+ * Presence marker for the private application metrics endpoint. `git_sha`
+ * lets alert rules count the release commits serving at once
+ * (#proj-sre:6e643496: more than two for 15 minutes opens a ticket).
+ */
 export const appMetricsInfo = new Gauge({
   name: "slock_app_metrics_info",
   help: "Constant 1 when the slock-server private application metrics endpoint is exporting metrics",
+  labelNames: ["git_sha"] as const,
   registers: [register],
 });
-appMetricsInfo.set(1);
+appMetricsInfo.set({ git_sha: releaseShaLabel(readBuildIdentityStatus()) }, 1);
+
+// Labels never include caller-supplied service names or Agent/token identifiers.
+export const agentJwtIssuanceCounter = new Counter({
+  name: "slock_agent_jwt_issuance_total",
+  help: "Agent audience JWT issuance outcomes by registered App and finite reason",
+  labelNames: ["client_id", "outcome", "reason"] as const,
+  registers: [register],
+});
 
 // ---------------------------------------------------------------------------
 // Socket.io metrics
@@ -99,6 +122,20 @@ export const httpRequestsTotal = new Counter({
 });
 
 /**
+ * Responses that failed because RisingWave was unavailable: rw_overloaded,
+ * rw_unconfigured, rw_read_failed (task #162). They stay 5xx in
+ * slock_http_requests_total, so SLO v1 SLI 1 still counts them as unavailable;
+ * this counter lets server-bug 5xx alerts subtract them and gives the
+ * RisingWave-availability category its own alert. No user or server labels.
+ */
+export const risingWaveUnavailableResponsesTotal = new Counter({
+  name: "slock_risingwave_unavailable_responses_total",
+  help: "HTTP responses that failed because RisingWave was unavailable",
+  labelNames: ["route_pattern", "code", "retryable"] as const,
+  registers: [register],
+});
+
+/**
  * End-to-end request duration for the main Express app.
  * Uses the same low-cardinality labels as request totals.
  * The 2 s bucket is the SLO v1 latency threshold (task #431): "share of /api
@@ -121,19 +158,29 @@ export const httpRequestDuration = new Histogram({
  * record created after a failed first send ("false") is an offline delivery.
  * Records live in replica memory: one that vanishes in a drain has no outcome,
  * so read SLI 4 as acked-within-60s / tracked, never acked / settled.
+ * delivery_kind: "mention" for a tracked @mention (the daemon acks it only once
+ * the agent has been told, which can wait for the current turn to end),
+ * "plain" otherwise (acked on receipt). Split so the two ack semantics can be
+ * read apart (task #432).
  */
 export const agentDeliveryTrackedTotal = new Counter({
   name: "slock_agent_delivery_tracked_total",
   help: "Agent deliveries that started waiting for a daemon ack",
-  labelNames: ["online_at_first_attempt"] as const,
+  labelNames: ["online_at_first_attempt", "delivery_kind", "daemon_version"] as const,
   registers: [register],
 });
 
-/** First send to daemon ack, measured from the record's first attempt. */
+/**
+ * First send to arrival at the daemon, measured from the record's first
+ * attempt. Arrival is the daemon ack, or for a tracked mention the earlier
+ * `daemon_pending` transition (the daemon has it and waits for the agent to be
+ * told; its ack can wait for the end of the current turn). Observed once per
+ * record (task #432).
+ */
 export const agentDeliveryAckSeconds = new Histogram({
   name: "slock_agent_delivery_ack_seconds",
   help: "Time from first agent:deliver attempt to the daemon ack",
-  labelNames: ["online_at_first_attempt"] as const,
+  labelNames: ["online_at_first_attempt", "delivery_kind", "daemon_version"] as const,
   buckets: [0.1, 0.5, 1, 2, 5, 10, 30, 60, 120, 300],
   registers: [register],
 });
@@ -143,14 +190,70 @@ export const agentDeliveryAckSeconds = new Histogram({
  * dropped (retry gate), routed (handed to the owning replica, which tracks it
  * again), terminal (mention terminal error or identity drift), agent_stopped,
  * converted_to_wake (daemon rejected delivery, server started the agent),
- * replica_shutdown.
+ * replica_shutdown, parked_expired (machine stayed offline past the parked
+ * max age, 30 min), held_expired (a mention that reached the daemon was not
+ * settled within 30 min; its arrival already counted).
+ * conn_age (gave_up and dropped only, "n/a" otherwise): age of this replica's
+ * connection to the machine when the record failed: "<1h", "1-6h", ">6h",
+ * "none" if the machine is not connected here, or "unknown" for a connection
+ * without a recorded connect time (hand-built test connections only).
  */
 export const agentDeliveryOutcomesTotal = new Counter({
   name: "slock_agent_delivery_outcomes_total",
   help: "Outcomes of agent deliveries waiting for a daemon ack",
-  labelNames: ["outcome", "online_at_first_attempt"] as const,
+  labelNames: ["outcome", "online_at_first_attempt", "delivery_kind", "conn_age", "daemon_version"] as const,
   registers: [register],
 });
+
+type AgentDeliveryPendingCounts = Array<{ parked: boolean; daemonVersion: string; count: number }>;
+let agentDeliveryPendingProvider: (() => AgentDeliveryPendingCounts) | null = null;
+
+/** The orchestrator registers its pending-ack map here. */
+export function provideAgentDeliveryPending(provider: () => AgentDeliveryPendingCounts): void {
+  agentDeliveryPendingProvider = provider;
+}
+
+/** Detach on shutdown, only if this provider is still the registered one. */
+export function releaseAgentDeliveryPending(provider: () => AgentDeliveryPendingCounts): void {
+  if (agentDeliveryPendingProvider === provider) agentDeliveryPendingProvider = null;
+}
+
+/**
+ * Delivery records currently waiting for a daemon ack on this replica, read at
+ * scrape time. parked="true" counts records whose machine went offline; they
+ * wait for that machine to re-register here and have no timer of their own.
+ * Healthy in-flight is a handful; growth with uptime means records without an
+ * outcome (their replica_shutdown count is never scraped).
+ */
+export const agentDeliveryPending = new Gauge({
+  name: "slock_agent_delivery_pending",
+  help: "Agent deliveries currently waiting for a daemon ack on this replica",
+  labelNames: ["parked", "daemon_version"] as const,
+  registers: [register],
+  collect() {
+    // Reset first: a version with no pending records left must not keep its
+    // last value; and with no orchestrator attached (released at shutdown)
+    // nothing is exported.
+    this.reset();
+    const counts = agentDeliveryPendingProvider?.();
+    if (!counts) return;
+    for (const entry of counts) {
+      this.set({ parked: String(entry.parked), daemon_version: entry.daemonVersion }, entry.count);
+    }
+  },
+});
+
+/**
+ * `daemon_version` label value: the version the daemon reported, "unknown"
+ * when none is known yet, "other" when it is not a plain semver-like string
+ * (keeps cardinality to real versions). zhiqiang-zhou (#monitoring-alerts:
+ * 1ad4e118): daemon-related metrics carry the real version so SLO rules can
+ * exclude old daemons and readbacks can group by version.
+ */
+export function daemonVersionLabel(version: string | null | undefined): string {
+  if (!version) return "unknown";
+  return /^\d{1,4}\.\d{1,4}\.\d{1,6}(?:[-+][0-9A-Za-z.-]{1,32})?$/.test(version) ? version : "other";
+}
 
 /**
  * Machine websocket connections refused by this replica. A refusal never
@@ -158,12 +261,114 @@ export const agentDeliveryOutcomesTotal = new Counter({
  * reason="draining": a connection that arrived after the drain started
  * (task #268). Post-deploy readouts report it beside SLO v1 SLI 3.
  */
+/**
+ * task #365 (RFC 071 terminal-failure breaker, dormant until it is enabled):
+ * transitions of the spawn-error pause. `kind`: `spawn_error_counted` (a
+ * proven never-created start paused automatic wakes), `retry_dispatched` /
+ * `retry_refused` / `retry_error` (the retry sweep re-served a refused wake).
+ * How many agents are paused right now is not measured (coverage gap).
+ */
+export const agentWakePauseTransitionsTotal = new Counter({
+  name: "slock_agent_wake_pause_transitions_total",
+  help: "Spawn-error wake pause transitions by kind",
+  labelNames: ["kind"] as const,
+  registers: [register],
+});
+
+/**
+ * Task #440: cross-replica command routing and the owner lease that backs it.
+ * Every label is a closed set (message_type is the protocol's message union).
+ */
+export const machineCommandRouteTotal = new Counter({
+  name: "slock_machine_command_route_total",
+  help: "Cross-replica machine command routing attempts by outcome, reason and message type",
+  labelNames: ["outcome", "reason", "message_type"] as const,
+  registers: [register],
+});
+
+export const machineOwnerRefreshTotal = new Counter({
+  name: "slock_machine_owner_refresh_total",
+  help: "Machine owner lease refreshes by the replica holding the socket, by trigger and result",
+  labelNames: ["trigger", "result"] as const,
+  registers: [register],
+});
+
+/**
+ * Task #374: a live machine socket on this replica whose owner-lease refresh is
+ * refused while another replica keeps renewing the lease, i.e. the same machine
+ * key is connected twice. Counted once per connection. Observation only: no
+ * connection is closed because of it yet.
+ */
+export const machineDuplicateConnectionsTotal = new Counter({
+  name: "slock_machine_duplicate_connections_total",
+  help: "Machine sockets that keep losing the owner lease to another replica that keeps renewing it, by daemon version",
+  labelNames: ["daemon_version"] as const,
+  registers: [register],
+});
+
+/**
+ * Task #374 enforcement (behind SLOCK_MACHINE_DUPLICATE_CONNECTION_ENFORCEMENT):
+ * `closed_older` when the refused older socket is closed, `refused_held` when a
+ * new connection is refused because the winner still holds the key. A refused
+ * connection has not sent `ready`, so `daemon_version` on `refused_held` is the
+ * version of the connection that was closed as the duplicate (nearly always
+ * the one reconnecting).
+ */
+export const machineDuplicateConnectionActionsTotal = new Counter({
+  name: "slock_machine_duplicate_connection_actions_total",
+  help: "Duplicate machine connection enforcement: older sockets closed and reconnects refused while the winner holds the key",
+  labelNames: ["action", "daemon_version"] as const,
+  registers: [register],
+});
+
 export const machineConnectionsRefusedTotal = new Counter({
   name: "slock_machine_connections_refused_total",
   help: "Machine websocket connections refused by this replica",
-  labelNames: ["reason"] as const,
+  labelNames: ["reason", "daemon_version"] as const,
   registers: [register],
 });
+
+/**
+ * Machine websocket connections that ended on this replica, once per
+ * connection: the stale or duplicate disconnect that follows for the same
+ * socket (e.g. heartbeat_timeout, then socket_close) is not counted. Answers
+ * "why does this machine reconnect so often" from AMP; until now the close
+ * code was only in a log line that is not kept in full (#440,
+ * #proj-o11y:d32a682c). daemon_version is "unknown" when the connection
+ * closed before the daemon's `ready` was processed.
+ */
+export const machineDisconnectsTotal = new Counter({
+  name: "slock_machine_disconnects_total",
+  help: "Machine websocket connections that ended on this replica, by cause, close code, shutdown reason, daemon version and connection age",
+  labelNames: ["cause", "close_code", "shutdown_reason", "daemon_version", "conn_age"] as const,
+  registers: [register],
+});
+
+/** Websocket close code as a closed label set: the standard 1000–1015, our own 4000–4099, "none" when the socket sent no close, anything else "other". */
+export function machineCloseCodeLabel(code: number | undefined): string {
+  if (code === undefined) return "none";
+  if (Number.isInteger(code) && ((code >= 1000 && code <= 1015) || (code >= 4000 && code <= 4099))) return String(code);
+  return "other";
+}
+
+/**
+ * How long a machine connection lived when it ended. Fine under 10 minutes,
+ * where reconnect loops are: a proxy's fixed idle or maximum-connection
+ * timeout shows as one bucket standing out (NotZZ saw 30 s, 90 s, 140 s).
+ */
+export function machineConnectionLifetimeLabel(
+  lifetimeMs: number | undefined,
+): "unknown" | "<30s" | "30-60s" | "1-2m" | "2-5m" | "5-10m" | "10-60m" | "1-6h" | ">6h" {
+  if (lifetimeMs === undefined || !Number.isFinite(lifetimeMs)) return "unknown";
+  if (lifetimeMs < 30_000) return "<30s";
+  if (lifetimeMs < 60_000) return "30-60s";
+  if (lifetimeMs < 120_000) return "1-2m";
+  if (lifetimeMs < 300_000) return "2-5m";
+  if (lifetimeMs < 600_000) return "5-10m";
+  if (lifetimeMs < 3_600_000) return "10-60m";
+  if (lifetimeMs < 6 * 3_600_000) return "1-6h";
+  return ">6h";
+}
 
 /**
  * Raw Slack Events API requests are registered before express.json() so their
@@ -202,10 +407,39 @@ export const dbPoolWaitingRequests = new Gauge({
   registers: [register],
 });
 
+// Time a new connection waited for a connect permit before its handshake
+// started (db/connectGate.ts). Most observations are 0; a non-zero tail means
+// the per-pool cap on concurrent handshakes delayed requests.
+export const dbPoolConnectPermitWait = new Histogram({
+  name: "slock_db_pool_connect_permit_wait_seconds",
+  help: "Time a new PostgreSQL connection waited for a connect permit",
+  labelNames: ["pool"] as const,
+  buckets: [0.001, 0.01, 0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10],
+  registers: [register],
+});
+
 export const pgPoolReadOnlyClientRecycledTotal = new Counter({
   name: "slock_pg_pool_read_only_client_recycled_total",
   help: "Postgres pool clients destroyed after SQLSTATE 25006/read-only transaction errors",
   labelNames: ["pool"] as const,
+  registers: [register],
+});
+
+// Labels stay bounded on purpose: `statement` is the leading SQL keyword class
+// (select/insert/update/delete/transaction/unknown), never SQL text or a hash.
+// Per-query detail lives in the server.db.connection trace span.
+export const dbQueryDuration = new Histogram({
+  name: "slock_db_query_duration_seconds",
+  help: "PostgreSQL statement round trip by pool and statement kind",
+  labelNames: ["pool", "statement"] as const,
+  buckets: [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 15, 30],
+  registers: [register],
+});
+
+export const dbQueryErrorsTotal = new Counter({
+  name: "slock_db_query_errors_total",
+  help: "PostgreSQL statement failures by pool and bounded SQLSTATE (57014 = statement timeout or cancel)",
+  labelNames: ["pool", "sqlstate"] as const,
   registers: [register],
 });
 
@@ -344,6 +578,16 @@ export const s3PutDuration = new Histogram({
   help: "Latency of S3-compatible storage PutObject calls",
   labelNames: ["bucket", "endpoint_host", "outcome"] as const,
   buckets: [0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30],
+  registers: [register],
+});
+
+// Seconds since each machine of the configured server last heartbeated
+// (services/machineLivenessMetrics.ts). Scoped to one server, so about 40
+// series per task.
+export const machineHeartbeatAgeSeconds = new Gauge({
+  name: "slock_machine_heartbeat_age_seconds",
+  help: "Seconds since the machine last heartbeated, for machines of MACHINE_LIVENESS_METRICS_SERVER_ID",
+  labelNames: ["machine_id"] as const,
   registers: [register],
 });
 

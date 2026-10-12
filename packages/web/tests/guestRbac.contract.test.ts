@@ -26,8 +26,14 @@ test("channel settings gate and preserve the Guest policy invariant", () => {
 });
 
 test("Guest roster surfaces stay summary-only", () => {
-  const humanDetail = readSource("src/components/member/HumanDetailPanel.tsx");
-  const members = readSource("src/components/agent/ChannelMembers.tsx");
+  const humanDetail = [
+    readSource("src/components/member/HumanDetailPanel.tsx"),
+    readSource("src/components/member/CreatedAgentRow.tsx"),
+  ].join("\n");
+  const members = [
+    readSource("src/components/agent/ChannelMembers.tsx"),
+    readSource("src/components/agent/MemberRoleActions.tsx"),
+  ].join("\n");
   const memberRows = readSource("src/components/channel/ChannelMemberList.tsx");
 
   assert.match(humanDetail, /currentRole !== "guest" && human\.role !== "guest"/);
@@ -58,7 +64,7 @@ test("Guest navigation hides directories while preserving bounded Agent profiles
   );
 
   assert.match(leftRail, /\{!isGuest && <RailTabButton icon=\{<Users/);
-  assert.match(leftRail, /item !== "members" && item !== "humans" && item !== "computers"/);
+  assert.match(leftRail, /\{!isGuest && <RailTabButton\s+icon=\{<Monitor/);
   assert.match(mainLayout, /serverRole === "guest" \? \[\] : \[/);
   assert.ok(humanRoute.startsWith("function HumanRoute()"));
   assert.doesNotMatch(humanRoute, /server\?\.role === "guest"/);
@@ -114,21 +120,23 @@ test("Guest task surfaces render read-only state with no edit or drag affordance
   assert.match(tasksPanel, /useDraggable\(\{ id: task\.id, disabled \}\)/);
   assert.match(tasksPanel, /useDroppable\(\{ id: status, disabled: !canModifyTasks \}\)/);
   assert.match(tasksPanel, /\{isChannelMode && canModifyTasks && \(/);
-  assert.match(tasksPanel, /onDragTask=\{canModifyTasks \? onDragTask : undefined\}/);
 });
 
 test("unavailable linked messages collapse to one chip instead of an empty preview", () => {
   const messageItem = readSource("src/components/message/MessageItem.tsx");
   const preview = readSource("src/components/message/QuotedMessagePermalinkPreview.tsx");
+  // MessageItem's permalink chip lives in its own file since task #709.
+  const permalinkChip = readSource("src/components/message/PermalinkReferenceChip.tsx");
   const chatPanel = readSource("src/components/message/ChatPanel.tsx");
   const threadPanel = readSource("src/components/message/ThreadPanel.tsx");
 
   assert.match(messageItem, /message\.messageItem\.unavailableLinkedMessage/);
   assert.match(messageItem, /quotedPermalink && !quotedPermalinkUnavailable/);
   assert.match(messageItem, /onUnavailable=\{handleQuotedPermalinkUnavailable\}/);
-  assert.match(messageItem, /as=\{quotedMessageUnavailable \? "span" : "a"\}/);
-  assert.match(messageItem, /onClick=\{quotedMessageUnavailable \? undefined/);
-  assert.match(messageItem, /title=\{quotedMessageUnavailable \? undefined/);
+  assert.match(messageItem, /quotedMessageUnavailable=\{quotedMessageUnavailable\}/);
+  assert.match(permalinkChip, /as=\{quotedMessageUnavailable \? "span" : "a"\}/);
+  assert.match(permalinkChip, /onClick=\{quotedMessageUnavailable \? undefined/);
+  assert.match(permalinkChip, /title=\{quotedMessageUnavailable \? undefined/);
   assert.match(preview, /if \(state\.status === "unavailable"\) \{\s*return null;/);
   assert.match(chatPanel, /const canReactInChannel = !isGuest\s*&& !readOnly\s*&& !channel\?\.archivedAt\s*&& \(channel\?\.type === "dm" \|\| channel\?\.type === "thread" \|\| channel\?\.joined === true\)/);
   assert.match(threadPanel, /const canReactToThread = !isGuest\s*&& parentJoined === true\s*&& !parentChannel\?\.archivedAt\s*&& !parentJointFeatureLocked/);

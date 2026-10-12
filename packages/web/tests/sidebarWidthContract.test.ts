@@ -73,11 +73,6 @@ test("desktop chat sidebar uses shrink-0 so the resize handle changes visible wi
   );
   // Breakpoint selection and both resize/recovery paths are covered through
   // the production sizing seam in masterDetailPanelResize.behavior.test.tsx.
-  assert.match(
-    source,
-    /workspaceEnabled\s*\?\s*\{[\s\S]*?minWidth:\s*MIN_WORKSPACE_GRID_SIDEBAR_WIDTH,[\s\S]*?maxWidth:\s*`min\(\$\{MAX_WORKSPACE_GRID_SIDEBAR_WIDTH\}px, 40vw\)`,?[\s\S]*?\}\s*:\s*\{\}/,
-    "Workspace mode should add its own responsive min/max width without changing classic sizing",
-  );
   assert.doesNotMatch(source, /className="bg-brutal-cream relative min-w-0 flex-1"/);
   assert.doesNotMatch(source, /className="bg-brutal-cream relative min-w-0 shrink-0"/);
 });
@@ -115,7 +110,7 @@ test("thread side panel browser resize path stays CSS-only", () => {
   const source = readFileSync(resolve(repoRoot, "src/components/layout/MainLayout.tsx"), "utf8");
   const threadPanelSource = readFileSync(resolve(repoRoot, "src/components/message/ThreadPanel.tsx"), "utf8");
   const styles = readFileSync(resolve(repoRoot, "src/index.css"), "utf8");
-  const sideThreadColumn = source.match(/function SideThreadColumn\(\) \{[\s\S]*?\n\}/)?.[0] ?? "";
+  const sideThreadColumn = source.match(/function SideThreadColumn\([^\n]*\) \{[\s\S]*?\n\}/)?.[0] ?? "";
 
   assert.ok(sideThreadColumn, "SideThreadColumn source should be discoverable");
   assert.doesNotMatch(
@@ -206,7 +201,7 @@ test("sidebar section headers share row, toggle, and icon-button geometry", () =
   );
   assert.match(
     source,
-    /const SIDEBAR_SECTION_TOGGLE_CLASS = "flex h-6 min-w-0 flex-1 items-center gap-1 text-xs font-bold uppercase text-foreground-strong tracking-widest transition-colors hover:text-foreground-muted theme-brutal:text-black theme-brutal:hover:text-black\/70"/,
+    /const SIDEBAR_SECTION_TOGGLE_CLASS = "flex h-6 min-w-0 flex-1 items-center gap-1 \[&>svg\]:shrink-0 text-xs font-bold uppercase text-foreground-strong tracking-widest transition-colors hover:text-foreground-muted theme-brutal:text-black theme-brutal:hover:text-black\/70"/,
   );
   assert.match(
     source,

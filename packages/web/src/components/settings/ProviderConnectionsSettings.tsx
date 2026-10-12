@@ -14,9 +14,9 @@ import {
   Spinner,
   Textarea,
 } from "raft-ui";
-import { useCallback, useEffect, useState } from "react";
-import type { FormEvent } from "react";
-import { CheckCircle2, ChevronDown, KeyRound, Link2Off, Pencil, Plus, Power, RefreshCw, Send, Trash2, XCircle } from "lucide-react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import type { ChangeEvent, FormEvent } from "react";
+import { CheckCircle2, ChevronDown, KeyRound, Pencil, Plus, Power, RefreshCw, Send, Trash2, XCircle } from "lucide-react";
 import { useIntl } from "react-intl";
 import {
   PI_BUILTIN_PROVIDER_DEFAULT_MODELS,
@@ -37,15 +37,13 @@ import { useProviderConnections } from "../../hooks/useProviderConnections";
 import { useMachineStore } from "../../store/machineStore";
 import { useProfileStore } from "../../store/profileStore";
 import { useServerPermissions } from "../../hooks/useServerPermissions";
-import { formatRuntimeLabelWithStatus } from "../../utils/runtimeAvailabilityLabel";
-import AvatarListRow from "../ui/AvatarListRow";
-import AvatarSlot from "../ui/AvatarSlot";
-import StatusDot from "../ui/StatusDot";
 import Tooltip from "../ui/Tooltip";
 import DialogCard from "../ui/DialogCard";
 import FormField from "../ui/FormField";
 import SectionHeader from "../ui/SectionHeader";
 import EditProviderConnectionModal from "./EditProviderConnectionModal";
+import { ManagedConnectionRow } from "./ManagedConnectionRow";
+import { AssignedAgentRow } from "./AssignedAgentRow";
 
 function labelForProviderId(
   providerId: ProviderConnectionProviderId,
@@ -91,9 +89,7 @@ export default function ProviderConnectionsSettings() {
   const [busyId, setBusyId] = useState<string | null>(null);
   const [actionError, setActionError] = useState("");
 
-  if (!featureEnabled) return null;
-
-  const run = async (id: string, action: () => Promise<unknown>) => {
+  const run = useCallback(async (id: string, action: () => Promise<unknown>) => {
     setBusyId(id);
     setActionError("");
     try {
@@ -105,14 +101,35 @@ export default function ProviderConnectionsSettings() {
     } finally {
       setBusyId(null);
     }
-  };
+  }, [formatMessage, refresh]);
+
+  const openAgent = useCallback((agentId: string) => openProfile("agent", agentId), [openProfile]);
+  const openCreate = useCallback(() => setCreating(true), []);
+  const closeCreate = useCallback(() => setCreating(false), []);
+  const handleCreated = useCallback(async () => {
+    setCreating(false);
+    await refresh();
+  }, [refresh]);
+  const closeEdit = useCallback(() => setEditing(null), []);
+  const handleEdited = useCallback(async () => {
+    setEditing(null);
+    await refresh();
+  }, [refresh]);
+  const closeVerify = useCallback(() => setVerifying(null), []);
+  const closeTest = useCallback(() => setTesting(null), []);
+  const handleTested = useCallback(async () => {
+    setTesting(null);
+    await refresh();
+  }, [refresh]);
+
+  if (!featureEnabled) return null;
 
   return (
     <div className="mx-auto max-w-3xl space-y-4" data-testid="provider-connections-settings">
       <div className="flex items-center justify-between gap-3">
         <SectionHeader label={formatMessage({ id: "settings.providers.sectionTitle" })} icon={<KeyRound size={16} />} />
         {capabilities.manageExternalAuth && (
-          <Button type="button" size="sm" disabled={providerOptions.length === 0} onClick={() => setCreating(true)}>
+          <Button type="button" size="sm" disabled={providerOptions.length === 0} onClick={openCreate}>
             <Plus size={16} />
             {formatMessage({ id: "settings.providers.add" })}
           </Button>
@@ -135,24 +152,18 @@ export default function ProviderConnectionsSettings() {
       ) : (
         <div className="divide-y-2 divide-line-muted theme-brutal:divide-black border-2 border-line-muted theme-brutal:border-black bg-layer-panel theme-brutal:bg-white shadow-raft-sm theme-brutal:shadow-brutal-sm">
           {connections.map((connection) => (
-            <ConnectionRow
+            <ManagedConnectionRow
               key={connection.id}
               connection={connection}
               providerOptions={providerOptions}
               canManage={capabilities.manageExternalAuth}
               legacyTestVisible={legacyTestVisible}
               busy={busyId === connection.id}
-              onTest={() => setTesting(connection)}
-              onEdit={() => setEditing(connection)}
-              onToggle={() => void run(connection.id, () => api.patch(`/provider-connections/${connection.id}`, { enabled: !connection.enabled }))}
-              onOpenAgent={(agentId) => openProfile("agent", agentId)}
-              onVerify={() => setVerifying(connection)}
-              onDetachAgent={(agentId) => run(connection.id, () => api.delete(`/provider-connections/${connection.id}/agents/${agentId}`))}
-              onDelete={() => {
-                if (window.confirm(formatMessage({ id: "settings.providers.deleteConfirm" }, { name: connection.name }))) {
-                  void run(connection.id, () => api.delete(`/provider-connections/${connection.id}`));
-                }
-              }}
+              run={run}
+              onTestConnection={setTesting}
+              onEditConnection={setEditing}
+              onVerifyConnection={setVerifying}
+              onOpenAgent={openAgent}
             />
           ))}
         </div>
@@ -161,11 +172,8 @@ export default function ProviderConnectionsSettings() {
       {creating && (
         <CreateProviderConnectionModal
           providerOptions={providerOptions}
-          onClose={() => setCreating(false)}
-          onCreated={async () => {
-            setCreating(false);
-            await refresh();
-          }}
+          onClose={closeCreate}
+          onCreated={handleCreated}
         />
       )}
       {editing && (
@@ -173,35 +181,29 @@ export default function ProviderConnectionsSettings() {
           key={editing.id}
           connection={editing}
           providerOptions={providerOptions}
-          onClose={() => setEditing(null)}
-          onCompleted={async () => {
-            setEditing(null);
-            await refresh();
-          }}
+          onClose={closeEdit}
+          onCompleted={handleEdited}
         />
       )}
       {verifying && (
         <VerifyProviderConnectionModal
           connection={verifying}
-          onClose={() => setVerifying(null)}
+          onClose={closeVerify}
         />
       )}
       {testing && (
         <ProviderConnectionTestModal
           key={testing.id}
           connection={testing}
-          onClose={() => setTesting(null)}
-          onCompleted={async () => {
-            setTesting(null);
-            await refresh();
-          }}
+          onClose={closeTest}
+          onCompleted={handleTested}
         />
       )}
     </div>
   );
 }
 
-function ConnectionRow({
+export function ConnectionRow({
   connection,
   providerOptions,
   canManage,
@@ -270,10 +272,10 @@ function ConnectionRow({
     if (assignedAgents === null && !loadingAssignedAgents) void loadAssignedAgents();
   };
 
-  const detachAgent = async (agentId: string) => {
+  const detachAgent = useCallback(async (agentId: string) => {
     await onDetachAgent?.(agentId);
     await loadAssignedAgents();
-  };
+  }, [loadAssignedAgents, onDetachAgent]);
 
   const handleEdit = onEdit;
 
@@ -362,7 +364,7 @@ function ConnectionRow({
           error={assignedAgentsError}
           canManage={canManage}
           busy={busy}
-          onRetry={() => void loadAssignedAgents()}
+          onRetry={loadAssignedAgents}
           onOpenAgent={onOpenAgent}
           onDetachAgent={detachAgent}
         />
@@ -432,77 +434,16 @@ function AssignedAgentsPanel({
         </p>
       ) : (
         <div className="mt-2 space-y-2">
-          {listed.map((agent) => {
-            const label = agent.displayName || agent.name;
-            const statusText = formatMessage({ id: `settings.providers.agentStatus.${agent.status}` });
-            const subtitle = [
-              formatMessage({ id: "settings.providers.assignedAgentHandle" }, { name: agent.name }),
-              formatRuntimeLabelWithStatus(agent.runtime, formatMessage),
-              agent.computerName ?? formatMessage({ id: "settings.providers.assignedAgentNoComputer" }),
-            ].join(" · ");
-            return (
-              <div key={agent.id} data-testid={`provider-connection-assigned-agent-${agent.id}`}>
-                {agent.deleted ? (
-                  // Static row: the detach control lives in the primitive's
-                  // action slot, a sibling of the (absent) row button, so a
-                  // deleted Agent never nests one interactive target in another.
-                  <AvatarListRow
-                    avatar={<AvatarSlot context="surface-list" type="agent" agentAvatarUrl={null} className="grayscale opacity-60" />}
-                    name={<span className="text-foreground-hint line-through">{label}</span>}
-                    subtitle={subtitle}
-                    rightContent={(
-                      <span className="shrink-0 rounded-sm border border-line-muted px-1 text-[10px] font-black uppercase text-foreground-hint theme-brutal:rounded-none theme-brutal:border-2 theme-brutal:border-black/30">
-                        {formatMessage({ id: "settings.providers.assignedAgentDeleted" })}
-                      </span>
-                    )}
-                    actionContent={canManage ? (
-                      <Tooltip content={formatMessage({ id: "settings.providers.assignedAgentDeletedHint" })}>
-                      <Button
-                        type="button"
-                        size="sm"
-                        data-slot="button"
-                        disabled={busy}
-                        aria-label={formatMessage({ id: "settings.providers.assignedAgentDetach" })}
-                        onClick={() => {
-                          const confirmed = window.confirm(
-                            formatMessage({ id: "settings.providers.detachConfirm" }, { name: label }),
-                          );
-                          if (confirmed) void onDetachAgent(agent.id);
-                        }}
-                      >
-                        <Link2Off size={15} />
-                        {formatMessage({ id: "settings.providers.assignedAgentDetach" })}
-                      </Button>
-                      </Tooltip>
-                    ) : undefined}
-                    className="bg-gray-100"
-                  />
-                ) : (
-                  <AvatarListRow
-                    avatar={<AvatarSlot context="surface-list" type="agent" agentAvatarUrl={null} />}
-                    name={label}
-                    subtitle={subtitle}
-                    rightContent={(
-                      <>
-                        <StatusDot activity={agent.status === "active" ? "online" : "offline"} title={statusText} />
-                        <span
-                          className="hidden max-w-[min(32rem,42vw)] truncate align-middle text-xs font-mono text-foreground-hint sm:inline-block"
-                        >
-                          {statusText}
-                        </span>
-                      </>
-                    )}
-                    onClick={() => onOpenAgent?.(agent.id)}
-                    buttonProps={{
-                      "aria-label": formatMessage({ id: "settings.providers.assignedAgentOpen" }, { name: label }),
-                      title: formatMessage({ id: "settings.providers.assignedAgentOpen" }, { name: label }),
-                    }}
-                    className="bg-fill-muted/50 hover:bg-fill-muted theme-brutal:bg-gray-100 theme-brutal:hover:bg-white"
-                  />
-                )}
-              </div>
-            );
-          })}
+          {listed.map((agent) => (
+            <AssignedAgentRow
+              key={agent.id}
+              agent={agent}
+              canManage={canManage}
+              busy={busy}
+              onOpenAgent={onOpenAgent}
+              onDetachAgent={onDetachAgent}
+            />
+          ))}
         </div>
       )}
     </div>
@@ -580,10 +521,24 @@ function ProviderConnectionTestModal({
 
   const isCustom = customModelMode || (model.trim().length > 0 && !models.includes(model));
   const selectValue = isCustom ? CUSTOM_MODEL_SELECT_VALUE : model;
-  const modelSelectOptions = [
+  const modelSelectOptions = useMemo(() => [
     ...models.map((candidate) => ({ value: candidate, label: candidate })),
     { value: CUSTOM_MODEL_SELECT_VALUE, label: formatMessage({ id: "agent.runtimeConfig.custom" }) },
-  ];
+  ], [formatMessage, models]);
+
+  const handleModelSelect = useCallback((nextValue: string | null) => {
+    if (nextValue === CUSTOM_MODEL_SELECT_VALUE) {
+      setCustomModelMode(true);
+      if (models.includes(model)) setModel("");
+      return;
+    }
+    if (nextValue != null) {
+      setCustomModelMode(false);
+      setModel(nextValue);
+    }
+  }, [model, models]);
+  const handleModelInput = useCallback((event: ChangeEvent<HTMLInputElement>) => setModel(event.target.value), []);
+  const handleMessageInput = useCallback((event: ChangeEvent<HTMLTextAreaElement>) => setMessage(event.target.value), []);
 
   return (
     <DialogCard
@@ -599,17 +554,7 @@ function ProviderConnectionTestModal({
           {models.length > 0 ? (
             <Select
               value={selectValue}
-              onValueChange={(nextValue) => {
-                if (nextValue === CUSTOM_MODEL_SELECT_VALUE) {
-                  setCustomModelMode(true);
-                  if (models.includes(model)) setModel("");
-                  return;
-                }
-                if (nextValue != null) {
-                  setCustomModelMode(false);
-                  setModel(nextValue);
-                }
-              }}
+              onValueChange={handleModelSelect}
               items={modelSelectOptions}
             >
               <SelectTrigger
@@ -637,7 +582,7 @@ function ProviderConnectionTestModal({
               id={modelInputId}
               className={`w-full ${models.length > 0 ? "mt-2" : ""}`}
               value={model}
-              onChange={(event) => setModel(event.target.value)}
+              onChange={handleModelInput}
               placeholder={formatMessage({ id: "agent.runtimeConfig.customModelId" })}
               maxLength={200}
               required
@@ -649,7 +594,7 @@ function ProviderConnectionTestModal({
           <p className={`text-xs ${modelError ? "text-red-700" : "text-foreground-muted theme-brutal:text-black/55"}`}>
             {modelError || formatMessage({ id: "settings.providers.testModelHint" })}
           </p>
-          <Button type="button" size="sm" disabled={loadingModels || submitting} onClick={() => void loadModels()}>
+          <Button type="button" size="sm" disabled={loadingModels || submitting} onClick={loadModels}>
             <RefreshCw size={15} className={loadingModels ? "animate-spin" : ""} />
             {formatMessage({ id: "settings.providers.refreshModels" })}
           </Button>
@@ -662,7 +607,7 @@ function ProviderConnectionTestModal({
             id={messageInputId}
             className="min-h-28 w-full resize-y"
             value={message}
-            onChange={(event) => setMessage(event.target.value)}
+            onChange={handleMessageInput}
             maxLength={2000}
             required
           />
@@ -699,6 +644,23 @@ function CreateProviderConnectionModal({
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
   const gateway = isGatewayProviderId(providerId, providerOptions);
+  const providerSelectItems = useMemo(
+    () => providerOptions.map((provider) => ({
+      value: provider.id,
+      label: provider.label,
+    })),
+    [providerOptions],
+  );
+  const handleNameChange = useCallback((event: ChangeEvent<HTMLInputElement>) => setName(event.target.value), []);
+  const handleProviderChange = useCallback((value: string | null) => {
+    if (value != null) setProviderId(value as ProviderConnectionProviderId);
+  }, []);
+  const handleEndpointUrlChange = useCallback(
+    (event: ChangeEvent<HTMLInputElement>) => setEndpointUrl(event.target.value),
+    [],
+  );
+  const handleApiKeyChange = useCallback((event: ChangeEvent<HTMLInputElement>) => setApiKey(event.target.value), []);
+  const handleSupportsImageInputChange = useCallback((checked: boolean) => setSupportsImageInput(checked), []);
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
@@ -723,18 +685,13 @@ function CreateProviderConnectionModal({
     <DialogCard onClose={onClose} title={formatMessage({ id: "settings.providers.createTitle" })} testId="provider-connection-create-dialog">
       <form onSubmit={submit} className="space-y-4" data-testid="provider-connection-create-form">
         <FormField label={formatMessage({ id: "settings.providers.name" })}>
-          <Input className="w-full" value={name} onChange={(event) => setName(event.target.value)} maxLength={120} required />
+          <Input className="w-full" value={name} onChange={handleNameChange} maxLength={120} required />
         </FormField>
         <FormField label={formatMessage({ id: "settings.providers.provider" })}>
           <Select
             value={providerId}
-            onValueChange={(value) => {
-              if (value != null) setProviderId(value as ProviderConnectionProviderId);
-            }}
-            items={providerOptions.map((provider) => ({
-              value: provider.id,
-              label: provider.label,
-            }))}
+            onValueChange={handleProviderChange}
+            items={providerSelectItems}
           >
             <SelectTrigger className="w-full">
               <SelectValue />
@@ -754,15 +711,15 @@ function CreateProviderConnectionModal({
         </FormField>
         {gateway && (
           <FormField label={formatMessage({ id: "settings.providers.endpoint" })}>
-            <Input className="w-full" type="url" value={endpointUrl} onChange={(event) => setEndpointUrl(event.target.value)} render={<input placeholder="https://gateway.example.com/v1" />} required />
+            <Input className="w-full" type="url" value={endpointUrl} onChange={handleEndpointUrlChange} render={<input placeholder="https://gateway.example.com/v1" />} required />
           </FormField>
         )}
         <FormField label={formatMessage({ id: "settings.providers.apiKey" })} hint={formatMessage({ id: "settings.providers.apiKeyHint" })}>
-          <Input className="w-full" type="password" autoComplete="new-password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} required />
+          <Input className="w-full" type="password" autoComplete="new-password" value={apiKey} onChange={handleApiKeyChange} required />
         </FormField>
         {gateway && (
           <label className="flex items-center gap-2 text-sm font-medium">
-            <Checkbox checked={supportsImageInput} onCheckedChange={(event) => setSupportsImageInput(event)} />
+            <Checkbox checked={supportsImageInput} onCheckedChange={handleSupportsImageInputChange} />
             {formatMessage({ id: "settings.providers.imageInput" })}
           </label>
         )}
@@ -813,14 +770,17 @@ function VerifyProviderConnectionModal({
 }) {
   const { formatMessage } = useIntl();
   const machines = useMachineStore((state) => state.machines);
-  const candidates = machines.filter((machine) => machine.status === "online" && machine.runtimes.includes("builtin"));
+  const candidates = useMemo(
+    () => machines.filter((machine) => machine.status === "online" && machine.runtimes.includes("builtin")),
+    [machines],
+  );
   const [computerId, setComputerId] = useState(candidates[0]?.id ?? "");
   const [model, setModel] = useState(() => defaultTestModel(connection.providerId));
   const [phase, setPhase] = useState<"idle" | "running" | "done">("idle");
   const [result, setResult] = useState<ProviderProbeCreatedView | null>(null);
   const [failure, setFailure] = useState("");
   const computerName = machines.find((machine) => machine.id === computerId)?.name ?? computerId;
-  const presetModels = presetTestModels(connection.providerId);
+  const presetModels = useMemo(() => presetTestModels(connection.providerId), [connection.providerId]);
   const [customModelMode, setCustomModelMode] = useState(() => {
     const initial = defaultTestModel(connection.providerId);
     return presetModels.length === 0 || (initial.trim().length > 0 && !presetModels.includes(initial));
@@ -828,12 +788,34 @@ function VerifyProviderConnectionModal({
   const isCustom = customModelMode || (model.trim().length > 0 && !presetModels.includes(model));
   const verifyModelInputId = `provider-connection-${connection.id}-verify-model`;
   const verifyModelSelectId = `provider-connection-${connection.id}-verify-model-select`;
-  const verifyModelOptions = [
+  const verifyModelOptions = useMemo(() => [
     ...presetModels.map((candidate) => ({ value: candidate, label: candidate })),
     { value: CUSTOM_MODEL_SELECT_VALUE, label: formatMessage({ id: "agent.runtimeConfig.custom" }) },
-  ];
+  ], [formatMessage, presetModels]);
+  const computerSelectItems = useMemo(
+    () => candidates.map((machine) => ({
+      value: machine.id,
+      label: machine.name,
+    })),
+    [candidates],
+  );
 
-  const start = async () => {
+  const handleComputerChange = useCallback((value: string | null) => {
+    if (value != null) setComputerId(value);
+  }, []);
+  const handleModelSelect = useCallback((nextValue: string | null) => {
+    if (nextValue === CUSTOM_MODEL_SELECT_VALUE) {
+      setCustomModelMode(true);
+      if (presetModels.includes(model)) setModel("");
+      return;
+    }
+    if (nextValue != null) {
+      setCustomModelMode(false);
+      setModel(nextValue);
+    }
+  }, [model, presetModels]);
+
+  const start = useCallback(async () => {
     setPhase("running");
     setFailure("");
     setResult(null);
@@ -856,7 +838,7 @@ function VerifyProviderConnectionModal({
       setFailure(formatMessage({ id: "settings.providers.verifyError" }));
       setPhase("done");
     }
-  };
+  }, [computerId, connection.id, connection.providerId, formatMessage, model]);
 
   const outcome = result?.probe.outcome ?? null;
   const category = result?.probe.category ?? null;
@@ -871,13 +853,8 @@ function VerifyProviderConnectionModal({
           <Select
             value={computerId}
             disabled={phase === "running" || candidates.length === 0}
-            onValueChange={(value) => {
-              if (value != null) setComputerId(value);
-            }}
-            items={candidates.map((machine) => ({
-              value: machine.id,
-              label: machine.name,
-            }))}
+            onValueChange={handleComputerChange}
+            items={computerSelectItems}
           >
             <SelectTrigger
               className="w-full"
@@ -910,17 +887,7 @@ function VerifyProviderConnectionModal({
             <Select
               value={isCustom ? CUSTOM_MODEL_SELECT_VALUE : model}
               disabled={phase === "running"}
-              onValueChange={(nextValue) => {
-                if (nextValue === CUSTOM_MODEL_SELECT_VALUE) {
-                  setCustomModelMode(true);
-                  if (presetModels.includes(model)) setModel("");
-                  return;
-                }
-                if (nextValue != null) {
-                  setCustomModelMode(false);
-                  setModel(nextValue);
-                }
-              }}
+              onValueChange={handleModelSelect}
               items={verifyModelOptions}
             >
               <SelectTrigger
@@ -1001,7 +968,7 @@ function VerifyProviderConnectionModal({
           <Button
             type="button"
             disabled={phase === "running" || candidates.length === 0}
-            onClick={() => void start()}
+            onClick={start}
           >
             {phase === "done"
               ? formatMessage({ id: "settings.providers.verifyAgain" })

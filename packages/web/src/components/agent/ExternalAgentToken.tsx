@@ -1,10 +1,11 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useIntl } from "react-intl";
 import { Button } from "raft-ui";
 import api from "../../api/client";
 import { copyTextToClipboard } from "../../utils/selectMarkdown";
+import { CredentialRow } from "./CredentialRow";
 
-type Credential = {
+export type Credential = {
   id: string;
   maskedToken?: string;
   name: string | null;
@@ -15,7 +16,7 @@ type Credential = {
 
 /** Mount keyed by agent id. Secrets stay in this panel, never in the agent store. */
 export function ExternalAgentToken({ agentId }: { agentId: string }) {
-  const { formatMessage, formatDate } = useIntl();
+  const { formatMessage } = useIntl();
   const [token, setToken] = useState("");
   const [tokenId, setTokenId] = useState("");
   const [inventory, setInventory] = useState<{ credentials: Credential[]; loading: boolean; listError: boolean }>({ credentials: [], loading: true, listError: false });
@@ -39,7 +40,7 @@ export function ExternalAgentToken({ agentId }: { agentId: string }) {
     return () => { active = false; };
   }, [agentId, listRevision]);
 
-  async function revoke(credentialId: string) {
+  const revoke = useCallback(async (credentialId: string) => {
     if (requesting.current) return;
     requesting.current = true;
     setRevokingId(credentialId);
@@ -56,9 +57,9 @@ export function ExternalAgentToken({ agentId }: { agentId: string }) {
       requesting.current = false;
       setRevokingId(null);
     }
-  }
+  }, [agentId, tokenId]);
 
-  async function generate() {
+  const generate = useCallback(async () => {
     if (requesting.current) return;
     requesting.current = true;
     setPending(true);
@@ -79,7 +80,26 @@ export function ExternalAgentToken({ agentId }: { agentId: string }) {
       requesting.current = false;
       setPending(false);
     }
-  }
+  }, [agentId]);
+
+  const handleCopy = useCallback(async () => {
+    try {
+      await copyTextToClipboard(token);
+      setCopied(true);
+    } catch {
+      setCopied(false);
+    }
+  }, [token]);
+  const handleGenerateClick = useCallback(() => void generate(), [generate]);
+  const handleRefreshClick = useCallback(() => {
+    setConfirmId(null);
+    setRevokeError(false);
+    setInventory((previous) => ({ ...previous, loading: true, listError: false }));
+    setListRevision((value) => value + 1);
+  }, []);
+  const handleConfirmRevoke = useCallback((credentialId: string) => void revoke(credentialId), [revoke]);
+  const handleCancelRevoke = useCallback(() => setConfirmId(null), []);
+  const handleStartRevoke = useCallback((credentialId: string) => { setConfirmId(credentialId); setRevokeError(false); }, []);
 
   return (
     <div className="min-w-0 space-y-2" data-testid="external-agent-token">
@@ -94,12 +114,12 @@ export function ExternalAgentToken({ agentId }: { agentId: string }) {
           </label>
           <p className="text-xs text-foreground-muted">{formatMessage({ id: "agent.detail.externalTokenOnce" })}</p>
           <Button type="button" size="sm" variant="outline" className="whitespace-normal"
-            onClick={async () => { try { await copyTextToClipboard(token); setCopied(true); } catch { setCopied(false); } }}>
+            onClick={handleCopy}>
             {formatMessage({ id: copied ? "agent.detail.copied" : "agent.detail.externalTokenCopy" })}
           </Button>
         </>
       ) : (
-        <Button type="button" size="sm" variant="outline" disabled={pending || revokingId !== null} onClick={() => void generate()}
+        <Button type="button" size="sm" variant="outline" disabled={pending || revokingId !== null} onClick={handleGenerateClick}
           className="whitespace-normal">
           {formatMessage({ id: pending ? "agent.detail.externalTokenGenerating" : "agent.detail.externalTokenGenerate" })}
         </Button>
@@ -109,7 +129,7 @@ export function ExternalAgentToken({ agentId }: { agentId: string }) {
         <div className="flex flex-wrap items-center justify-between gap-2">
           <p className="text-xs font-bold">{formatMessage({ id: "agent.detail.externalTokenList" })}</p>
           <Button type="button" size="sm" variant="outline" disabled={loading || pending || revokingId !== null}
-            onClick={() => { setConfirmId(null); setRevokeError(false); setInventory((previous) => ({ ...previous, loading: true, listError: false })); setListRevision((value) => value + 1); }}
+            onClick={handleRefreshClick}
             className="whitespace-normal">
             {formatMessage({ id: "agent.detail.externalTokenRefresh" })}
           </Button>
@@ -118,31 +138,16 @@ export function ExternalAgentToken({ agentId }: { agentId: string }) {
         {listError && <p role="alert" className="text-xs text-brutal-orange">{formatMessage({ id: "agent.detail.externalTokenListError" })}</p>}
         {!loading && !listError && credentials.length === 0 && <p className="text-xs">{formatMessage({ id: "agent.detail.externalTokenEmpty" })}</p>}
         {!loading && !listError && credentials.map((credential) => (
-          <div key={credential.id} className="min-w-0 space-y-1 rounded-md border border-line-muted p-2 text-xs theme-brutal:rounded-none theme-brutal:border-black/20">
-            <p className="break-words font-bold">{credential.name || formatMessage({ id: "agent.detail.externalTokenLabel" })} <span className="break-all font-mono font-normal">{credential.maskedToken || credential.id.slice(0, 8)}</span></p>
-            <p>{formatMessage({ id: "agent.detail.externalTokenCreated" }, { date: formatDate(credential.createdAt, { dateStyle: "medium", timeStyle: "short" }) })}</p>
-            <p>{formatMessage({ id: credential.revokedAt ? "agent.detail.externalTokenRevoked" : "agent.detail.externalTokenActive" })}</p>
-            {!credential.revokedAt && (confirmId === credential.id ? (
-              <>
-                <p>{formatMessage({ id: "agent.detail.externalTokenRevokeWarning" })}</p>
-                <div className="flex flex-wrap gap-2">
-                  <Button type="button" size="sm" variant="outline" disabled={pending || revokingId !== null} onClick={() => void revoke(credential.id)}
-                    className="whitespace-normal">
-                    {formatMessage({ id: "agent.detail.externalTokenConfirmRevoke" })}
-                  </Button>
-                  <Button type="button" size="sm" variant="outline" disabled={revokingId !== null} onClick={() => setConfirmId(null)}
-                    className="whitespace-normal">
-                    {formatMessage({ id: "agent.detail.externalTokenCancel" })}
-                  </Button>
-                </div>
-              </>
-            ) : (
-              <Button type="button" size="sm" variant="outline" disabled={pending || revokingId !== null} onClick={() => { setConfirmId(credential.id); setRevokeError(false); }}
-                className="whitespace-normal">
-                {formatMessage({ id: "agent.detail.externalTokenRevoke" })}
-              </Button>
-            ))}
-          </div>
+          <CredentialRow
+            key={credential.id}
+            credential={credential}
+            confirming={confirmId === credential.id}
+            pending={pending}
+            revokingId={revokingId}
+            onConfirmRevoke={handleConfirmRevoke}
+            onCancelRevoke={handleCancelRevoke}
+            onStartRevoke={handleStartRevoke}
+          />
         ))}
         {revokeError && <p role="alert" className="text-xs text-brutal-orange">{formatMessage({ id: "agent.detail.externalTokenRevokeError" })}</p>}
       </div>

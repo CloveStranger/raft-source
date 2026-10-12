@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { lazySchema } from "./lazySchema";
 
 import { AGENT_INBOX_FLAGS, type AgentInboxFlag } from "./agentInbox";
 import { ATTENTION_HINT_SCHEMA } from "./attentionDependencyOracle";
@@ -13,15 +14,15 @@ export const DAEMON_API_BASE_PATH = "/internal/agent-api";
 export const daemonApiMethods = ["GET", "POST"] as const;
 export type DaemonApiMethod = (typeof daemonApiMethods)[number];
 
-const optionalStringSchema = z.string().trim().optional();
-const optionalNonNegativeIntSchema = z.number().int().nonnegative().optional();
-const optionalQueryIntSchema = z.union([z.number().int().nonnegative(), z.string().trim().min(1)]).optional();
-const nullableNumberSchema = z.number().finite().nullable();
+const optionalStringSchema = lazySchema("optionalStringSchema", () => z.string().trim().optional());
+const optionalNonNegativeIntSchema = lazySchema("optionalNonNegativeIntSchema", () => z.number().int().nonnegative().optional());
+const optionalQueryIntSchema = lazySchema("optionalQueryIntSchema", () => z.union([z.number().int().nonnegative(), z.string().trim().min(1)]).optional());
+const nullableNumberSchema = lazySchema("nullableNumberSchema", () => z.number().finite().nullable());
 const passthroughObject = <T extends z.ZodRawShape>(shape: T) => z.object(shape).passthrough();
 
 // Derived, never restated: a second hand-written copy of this list is what caused the
 // 2026-09-06 inbox-check outage.
-export const daemonApiKnownInboxFlagSchema = z.enum(AGENT_INBOX_FLAGS);
+export const daemonApiKnownInboxFlagSchema = lazySchema("daemonApiKnownInboxFlagSchema", () => z.enum(AGENT_INBOX_FLAGS));
 
 /**
  * Daemon and CLI are deployed independently -- the outage ran CLI 0.0.22 against daemon
@@ -37,11 +38,11 @@ export const daemonApiKnownInboxFlagSchema = z.enum(AGENT_INBOX_FLAGS);
  * admitting a future string -- `string` alone would silently drop every call site's
  * knowledge of what the real flags are.
  */
-const daemonApiInboxFlagSchema: z.ZodType<AgentInboxFlag | (string & {})> = z.union([
+const daemonApiInboxFlagSchema: z.ZodType<AgentInboxFlag | (string & {})> = lazySchema("daemonApiInboxFlagSchema", () => z.union([
   daemonApiKnownInboxFlagSchema,
   z.string(),
-]);
-const daemonApiAttentionHintSchema = passthroughObject({
+]));
+const daemonApiAttentionHintSchema = lazySchema("daemonApiAttentionHintSchema", () => passthroughObject({
   schema: z.literal(ATTENTION_HINT_SCHEMA),
   trigger: z.enum(["M2", "M3"]),
   scope: z.string().trim().min(1),
@@ -54,9 +55,9 @@ const daemonApiAttentionHintSchema = passthroughObject({
     k: optionalNonNegativeIntSchema,
     window_ms: z.number().int().positive(),
   }),
-});
+}));
 
-export const daemonApiInboxTargetRowSchema = passthroughObject({
+export const daemonApiInboxTargetRowSchema = lazySchema("daemonApiInboxTargetRowSchema", () => passthroughObject({
   target: z.string().trim().min(1),
   channelId: optionalStringSchema,
   channelType: optionalStringSchema,
@@ -69,23 +70,23 @@ export const daemonApiInboxTargetRowSchema = passthroughObject({
   latestSenderType: z.enum(["human", "agent", "system", "third_party_app"]).optional(),
   flags: z.array(daemonApiInboxFlagSchema),
   attentionHint: daemonApiAttentionHintSchema.optional(),
-});
+}));
 
-const daemonApiInboxPrimaryActionSchema = passthroughObject({
+const daemonApiInboxPrimaryActionSchema = lazySchema("daemonApiInboxPrimaryActionSchema", () => passthroughObject({
   kind: z.enum(["open_target", "run_command", "none"]),
   target: optionalStringSchema,
   commandId: optionalStringSchema,
-});
+}));
 
-const daemonApiInboxSourceRefSchema = z
+const daemonApiInboxSourceRefSchema = lazySchema("daemonApiInboxSourceRefSchema", () => z
   .object({
     kind: z.string().trim().min(1),
     id: z.string().trim().min(1),
     revision: z.string().trim().min(1).optional(),
   })
-  .strict();
+  .strict());
 
-const daemonApiInboxAppItemSchema = passthroughObject({
+const daemonApiInboxAppItemSchema = lazySchema("daemonApiInboxAppItemSchema", () => passthroughObject({
   source: z.literal("app"),
   itemId: z.string().trim().min(1),
   appId: z.string().trim().min(1),
@@ -104,29 +105,29 @@ const daemonApiInboxAppItemSchema = passthroughObject({
     until: z.string().trim().min(1),
     sealedAtMs: z.number().int().nonnegative(),
   }).optional(),
-});
-const daemonApiInboxAcknowledgedAppSourceSchema = passthroughObject({
+}));
+const daemonApiInboxAcknowledgedAppSourceSchema = lazySchema("daemonApiInboxAcknowledgedAppSourceSchema", () => passthroughObject({
   appId: z.string().trim().min(1),
   notificationClass: z.string().trim().min(1),
   sourceRef: daemonApiInboxSourceRefSchema,
   itemId: z.string().trim().min(1),
   acknowledgedAtMs: z.number().int().nonnegative(),
   ownerAgentId: optionalStringSchema,
-});
-const daemonApiInboxSourceSealSchema = passthroughObject({
+}));
+const daemonApiInboxSourceSealSchema = lazySchema("daemonApiInboxSourceSealSchema", () => passthroughObject({
   appId: z.string().trim().min(1),
   notificationClass: z.string().trim().min(1),
   sourceRef: daemonApiInboxSourceRefSchema,
   owner: z.string().trim().min(1),
   until: z.string().trim().min(1),
   sealedAtMs: z.number().int().nonnegative(),
-});
-const daemonApiInboxMessageTargetItemSchema = passthroughObject({
+}));
+const daemonApiInboxMessageTargetItemSchema = lazySchema("daemonApiInboxMessageTargetItemSchema", () => passthroughObject({
   source: z.literal("message_target"),
   row: daemonApiInboxTargetRowSchema,
-});
+}));
 
-export const daemonApiInboxCheckResponseSchema = passthroughObject({
+export const daemonApiInboxCheckResponseSchema = lazySchema("daemonApiInboxCheckResponseSchema", () => passthroughObject({
   rows: z.array(daemonApiInboxTargetRowSchema).optional(),
   items: z.array(z.union([daemonApiInboxMessageTargetItemSchema, daemonApiInboxAppItemSchema])).optional(),
   pending_targets: optionalNonNegativeIntSchema,
@@ -134,35 +135,35 @@ export const daemonApiInboxCheckResponseSchema = passthroughObject({
   pending_app_items: optionalNonNegativeIntSchema,
   acknowledged_app_sources: z.array(daemonApiInboxAcknowledgedAppSourceSchema).optional(),
   seals: z.array(daemonApiInboxSourceSealSchema).optional(),
-});
+}));
 
-export const daemonApiInboxAckBodySchema = z.object({
+export const daemonApiInboxAckBodySchema = lazySchema("daemonApiInboxAckBodySchema", () => z.object({
   itemId: z.string().trim().min(1),
-}).strict();
+}).strict());
 
-export const daemonApiInboxAckResponseSchema = passthroughObject({
+export const daemonApiInboxAckResponseSchema = lazySchema("daemonApiInboxAckResponseSchema", () => passthroughObject({
   ok: z.literal(true),
   itemId: z.string().trim().min(1),
   remaining_app_items: z.number().int().nonnegative(),
-});
+}));
 
 // Task #178 — application-layer ack for third-party app events served from the
 // daemon Local Inbox. A `/events` request carrying `X-Raft-Events-Ack: lease`
 // only leases the third-party events it returns; the CLI acks the batch here
 // after it has written the bodies to stdout and flushed. Only then does the
 // daemon consume them locally and report them delivered (task #175 reporter).
-export const daemonApiThirdPartyEventsAckBodySchema = z.object({
+export const daemonApiThirdPartyEventsAckBodySchema = lazySchema("daemonApiThirdPartyEventsAckBodySchema", () => z.object({
   batchId: z.string().trim().min(1),
   eventIds: z.array(z.string().trim().min(1)).min(1).max(200),
-}).strict();
+}).strict());
 
-export const daemonApiThirdPartyEventsAckResponseSchema = passthroughObject({
+export const daemonApiThirdPartyEventsAckResponseSchema = lazySchema("daemonApiThirdPartyEventsAckResponseSchema", () => passthroughObject({
   ok: z.literal(true),
   batchId: z.string(),
   acked: z.array(z.string()),
-});
+}));
 
-export const daemonApiInboxSealBodySchema = z.object({
+export const daemonApiInboxSealBodySchema = lazySchema("daemonApiInboxSealBodySchema", () => z.object({
   sources: z.array(passthroughObject({
     appId: z.string().trim().min(1),
     notificationClass: z.string().trim().min(1),
@@ -170,33 +171,33 @@ export const daemonApiInboxSealBodySchema = z.object({
   })).min(1),
   owner: z.string().trim().min(1).max(120),
   until: z.string().trim().min(1).max(500),
-}).strict();
+}).strict());
 
-export const daemonApiInboxUnsealBodySchema = z.object({
+export const daemonApiInboxUnsealBodySchema = lazySchema("daemonApiInboxUnsealBodySchema", () => z.object({
   sources: z.array(passthroughObject({
     appId: z.string().trim().min(1),
     notificationClass: z.string().trim().min(1),
     sourceRef: daemonApiInboxSourceRefSchema,
   })).min(1),
-}).strict();
+}).strict());
 
-export const daemonApiInboxSealResponseSchema = passthroughObject({
+export const daemonApiInboxSealResponseSchema = lazySchema("daemonApiInboxSealResponseSchema", () => passthroughObject({
   ok: z.literal(true),
   affected: z.number().int().positive(),
-});
+}));
 
-export const daemonApiRuntimeVersionResponseSchema = passthroughObject({
+export const daemonApiRuntimeVersionResponseSchema = lazySchema("daemonApiRuntimeVersionResponseSchema", () => passthroughObject({
   daemonVersion: z.string().trim().min(1),
   computerVersion: z.string().trim().min(1).nullable(),
   observation: z.literal("live_daemon_process"),
-});
+}));
 
-export const daemonApiWakeHintsQuerySchema = passthroughObject({
+export const daemonApiWakeHintsQuerySchema = lazySchema("daemonApiWakeHintsQuerySchema", () => passthroughObject({
   since: z.union([z.literal("latest"), z.number().int().nonnegative(), z.string().trim().min(1)]).optional(),
   limit: optionalQueryIntSchema,
-});
+}));
 
-export const daemonApiWakeHintSchema = passthroughObject({
+export const daemonApiWakeHintSchema = lazySchema("daemonApiWakeHintSchema", () => passthroughObject({
   hintId: optionalStringSchema,
   hint_id: optionalStringSchema,
   eventId: optionalStringSchema,
@@ -213,37 +214,37 @@ export const daemonApiWakeHintSchema = passthroughObject({
   attention_hint: daemonApiAttentionHintSchema.optional(),
   createdAt: optionalStringSchema,
   created_at: optionalStringSchema,
-});
+}));
 
-export const daemonApiWakeHintsFetchResponseSchema = passthroughObject({
+export const daemonApiWakeHintsFetchResponseSchema = lazySchema("daemonApiWakeHintsFetchResponseSchema", () => passthroughObject({
   hints: z.array(daemonApiWakeHintSchema).optional(),
   wake_hints: z.array(daemonApiWakeHintSchema).optional(),
   last_seen_hint_seq: nullableNumberSchema.optional(),
   last_hint_seq: nullableNumberSchema.optional(),
   has_more: z.boolean().optional(),
-});
+}));
 
-const daemonApiActivityEventSchema = passthroughObject({
+const daemonApiActivityEventSchema = lazySchema("daemonApiActivityEventSchema", () => passthroughObject({
   schema: optionalStringSchema,
   // raft-agent-status.v1 status (or a legacy hook-outcome value) and its detail.
   status: z.enum([...RAFT_AGENT_STATUS_VALUES, ...EXTERNAL_AGENT_ACTIVITY_LEGACY_STATUS_VALUES]).optional(),
   detail: z.string().max(RAFT_AGENT_STATUS_DETAIL_LIMIT).optional(),
-});
+}));
 
-export const daemonApiActivityForwardBodySchema = passthroughObject({
+export const daemonApiActivityForwardBodySchema = lazySchema("daemonApiActivityForwardBodySchema", () => passthroughObject({
   schema: z.literal("raft-agent-activity-ingest.v1"),
   coreSessionId: optionalStringSchema,
   adapterInstance: optionalStringSchema,
   events: z.array(daemonApiActivityEventSchema),
   dropped: optionalNonNegativeIntSchema,
-});
+}));
 
-export const daemonApiActivityForwardResponseSchema = passthroughObject({
+export const daemonApiActivityForwardResponseSchema = lazySchema("daemonApiActivityForwardResponseSchema", () => passthroughObject({
   ok: z.literal(true).optional(),
   acceptedCount: z.number().int().nonnegative().optional(),
   rejectedCount: z.number().int().nonnegative().optional(),
   droppedCount: z.number().int().nonnegative().optional(),
-});
+}));
 
 type DaemonApiContractResponse = {
   body: z.ZodType;

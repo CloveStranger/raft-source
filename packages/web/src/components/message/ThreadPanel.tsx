@@ -1,12 +1,11 @@
 import { composerHostClassName } from "./composerHost";
 import CloseButton from "../ui/CloseButton";
 import Tooltip from "../ui/Tooltip";
-import { useEffect, useRef, useMemo, useCallback, useState } from "react";
+import { useEffectEvent,  useEffect, useRef, useMemo, useCallback, useState } from "react";
 import type { Dispatch, SetStateAction, ReactNode } from "react";
-import { createPortal } from "react-dom";
 import { useIntl } from "react-intl";
 import { X, ArrowDown, LogIn, Search, ChevronUp, ChevronDown } from "lucide-react";
-import { Button, toast, ThreadIcon, ThreadPanelBody, ThreadPanelContent, ThreadPanelFooter, ThreadPanelRoot } from "raft-ui";
+import { Button, PanelTitle, toast, ThreadIcon, ThreadPanelBody, ThreadPanelContent, ThreadPanelFooter, ThreadPanelRoot } from "raft-ui";
 import { useThreadStore } from "../../store/threadStore";
 import type { ThreadSummary } from "../../store/threadStore";
 import { useAgentStore } from "../../store/agentStore";
@@ -14,10 +13,12 @@ import { useChannelStore } from "../../store/channelStore";
 import type { Channel } from "../../store/channelStore";
 import {
   captureReceiverPrivateIngressContext,
+  coerceWireMessageSeqs,
   compareMessagesForDisplay,
   isMatchingOptimisticMessage,
   isReceiverPrivateIngressContextCurrent,
   mergeIncomingMessage,
+  queueThreadLiveReplyReadSync,
   useMessageStore,
 } from "../../store/messageStore";
 import { useServerStore } from "../../store/serverStore";
@@ -38,6 +39,7 @@ import Banner from "../ui/Banner";
 import SelectModeToolbar from "./SelectModeToolbar";
 import SelectShareLightbox from "./SelectShareLightbox";
 import ForwardComposerDialog from "./ForwardComposerDialog";
+import type { ForwardDelivery } from "./ForwardComposerDialog";
 import { useSelectionStore } from "../../store/selectionStore";
 import { gatherSelectedMessagesWithMeta, useSelectionShareHandlers } from "./useSelectionShareHandlers";
 import {
@@ -51,13 +53,8 @@ import MessageTimeline from "./MessageTimeline";
 import type { MessageTimelineHandle, MessageTimelineSource } from "./MessageTimeline";
 import type { Message } from "../../store/messageStore";
 import {
-  applyMessagesReactionsForV2Ingress,
   isCanonicalMessageReaction,
 } from "../../store/normalizedMessageReactions";
-import {
-  SYNC_CORE_MESSAGES_FLAG_KEY,
-  useServerFeatureFlag,
-} from "../../store/serverFeatureFlags";
 import type { Task } from "../../store/taskStore";
 import { useLocation, useNavigate } from "react-router-dom";
 import { buildMessagePermalink, useAppNavigate, useMobileBack } from "../../hooks/useAppNavigate";
@@ -65,9 +62,9 @@ import { openThreadParentMessageRoute } from "../layout/rightPanelUrlSync";
 import { useTranslationBatch } from "../../hooks/useTranslationBatch";
 import { useChannelMembers } from "../../hooks/useChannelMembers";
 import { buildMessageContextRequest, buildThreadParentContextRequest } from "./messageContextRequest";
-import SystemMessageGroupDisclosure from "./SystemMessageGroupDisclosure";
+import ThreadPanelSystemMessageGroupDisclosure from "./ThreadPanelSystemMessageGroupDisclosure";
 import { buildSystemMessageRenderStates } from "./systemMessageGrouping";
-import { useStableMessageGrouping } from "./messageGrouping";
+import { followedByFor, followsSystemFor, useStableMessageGrouping } from "./messageGrouping";
 import { useTimeFormatter } from "../../hooks/useTimeFormatter";
 import { resolveMessageSenderMember } from "../../utils/messageSenderMember";
 import { mergeParentTaskMetadata } from "../../utils/taskMetadata";
@@ -85,10 +82,27 @@ import { isJointChannelReadOnly } from "../../utils/jointChannelLimit";
 const EMPTY_MESSAGES: Message[] = [];
 const SELECTION_TOAST_OPTIONS = { icon: false, dismissible: false } as const;
 const THREAD_SEARCH_HYDRATION_DEBOUNCE_MS = 250;
-const THREAD_PANEL_PARENT_CLASS_NAME = "border-b border-line-muted bg-layer-panel px-3 py-3 theme-brutal:border-b-2 theme-brutal:border-black theme-brutal:bg-white";
+/** Batches the read write for a burst of live replies landing in view. */
+export const THREAD_LIVE_REPLY_READ_DEBOUNCE_MS = 500;
+// The read-only panel is framed with the same rui parts and the same surface,
+// chrome-layer and content-layer classes as AuthenticatedThreadPanel below
+// (panelClassName, threadChromeLayerClassName, threadContentLayerClassName).
+const READ_ONLY_THREAD_PANEL_CLASS_NAME = "isolate flex h-full min-h-0 w-full flex-col bg-layer-panel dark:bg-layer-card theme-brutal:bg-white";
+const READ_ONLY_THREAD_BODY_CLASS_NAME = "relative z-0 min-h-0 flex-1 overflow-hidden";
+const THREAD_PANEL_PARENT_CLASS_NAME = "border-b border-line-muted bg-layer-panel px-3 py-3 [--mi-hdr-pr:2.5rem] theme-brutal:border-b-2 theme-brutal:border-black theme-brutal:bg-white";
 /** Discriminator for HistoryTopState catalog keys — keep out of JSX string attrs. */
 const THREAD_HISTORY_NOUN = "replies" as const;
 export const THREAD_LATEST_WINDOW_LIMIT = 50;
+const THREAD_CHROME_LAYER_CLASS_NAME = "relative z-20 shrink-0";
+// Header tint (cindyz 2026-10-10, #737): in elegant the thread column's header
+// sits on the same canvas-muted surface as the chat panel's header — same
+// token, dark mode handled by the token. The plain z-stack class stays for the
+// other thread chrome layers (search bar / composer keep their own
+// backgrounds). Brutal is untouched (its header rule comes from the recipe).
+const THREAD_HEADER_CONTAINER_CLASS_NAME = `${THREAD_CHROME_LAYER_CLASS_NAME} in-data-[theme=elegant]:bg-layer-canvas-muted`;
+const READ_ONLY_THREAD_HEADER_CONTAINER_PROPS = { className: THREAD_HEADER_CONTAINER_CLASS_NAME };
+const THREAD_MOBILE_BACK_PROPS = { "data-testid": "thread-mobile-back" } as const;
+const THREAD_CHROME_CONTAINER_PROPS = { className: THREAD_HEADER_CONTAINER_CLASS_NAME } as const;
 
 export interface ReadOnlyThreadData {
   threadChannelId: string;
@@ -104,6 +118,10 @@ export interface ReadOnlyThreadData {
 }
 
 export interface ThreadPanelProps {
+  /** Optional host-owned channel-column layout action. */
+  canToggleChannel?: () => boolean;
+  channelCollapsed?: boolean;
+  onToggleChannel?: () => void;
   presentation?: "side" | "modal" | "mobile-modal";
   onClose?: () => void;
   threadIdentity?: {
@@ -118,13 +136,10 @@ export interface ThreadPanelProps {
   showComposer?: boolean;
   overlayComposer?: boolean;
   mobilePage?: boolean;
-  workspaceComposer?: boolean;
   composerAutoFocus?: boolean;
   hideHeader?: boolean;
   hideParentMessage?: boolean;
   parentSlot?: ReactNode;
-  headerActionsHost?: Element | null;
-  scrollToTopRequest?: number;
   /** Narrow public snapshot. Supplying it mounts no authenticated thread
    * store, socket, task, member, or message data source. */
   readOnlyData?: ReadOnlyThreadData;
@@ -155,7 +170,7 @@ function ReadOnlyThreadPanel({
     ? "flex"
     : "hidden lg:flex";
   const renderMessage = useCallback((message: Message) => (
-    <div className="px-3" style={{ overflow: "clip visible" }}>
+    <div className="px-3 [--mi-hdr-pr:2.5rem]" style={{ overflow: "clip visible" }}>
       <MessageItem
         message={message}
         mentionMap={EMPTY_PUBLIC_MENTION_MAP}
@@ -186,23 +201,27 @@ function ReadOnlyThreadPanel({
   );
 
   return (
-    <div className="isolate flex h-full min-h-0 w-full flex-col bg-layer-canvas" data-testid="read-only-thread-panel">
+    <ThreadPanelRoot className={READ_ONLY_THREAD_PANEL_CLASS_NAME} data-testid="read-only-thread-panel">
       {!hideHeader && (
         <PanelHeader
+          containerProps={READ_ONLY_THREAD_HEADER_CONTAINER_PROPS}
           titleSlot={(
-            <div className="flex h-panel-header w-full min-w-0 items-center truncate text-left text-base font-bold text-foreground-strong">
+            <PanelTitle className="flex h-10 w-full min-w-0 items-center truncate text-left">
               {formatMessage({ id: "message.threadPanel.thread" })}
-              <span className="font-normal text-foreground-hint">
+              {/* The gap before the dash is `ml-1`, not a leading space: the span
+                  is a flex item (blockified), and a leading space inside it
+                  collapses. Do not re-add it as text. */}
+              <span className="ml-1 font-normal in-data-[theme=elegant]:text-[15px] text-foreground-placeholder theme-brutal:text-black/50">
                 {formatMessage(
                   { id: "message.threadPanel.channelContext" },
                   { name: readOnlyData.channels.find((channel) => channel.id === readOnlyData.parentChannelId)?.name },
                 )}
               </span>
-            </div>
+            </PanelTitle>
           )}
           mobileBreakpoint={presentation === "side" ? "lg" : "md"}
           onMobileBack={onClose}
-          mobileBackProps={{ "data-testid": "thread-mobile-back" }}
+          mobileBackProps={THREAD_MOBILE_BACK_PROPS}
           actions={presentation !== "mobile-modal" ? (
             <Tooltip content={formatMessage({ id: "message.threadPanel.closeThread" })}>
               <Button
@@ -220,7 +239,8 @@ function ReadOnlyThreadPanel({
           ) : undefined}
         />
       )}
-      <div className="relative min-h-0 flex-1 overflow-hidden">
+      <ThreadPanelContent>
+      <ThreadPanelBody className={READ_ONLY_THREAD_BODY_CLASS_NAME}>
         {readOnlyData.error ? (
           <div className="flex h-full flex-col overflow-auto">
             {parent}
@@ -246,8 +266,9 @@ function ReadOnlyThreadPanel({
             persistKey={`public-thread:${readOnlyData.threadChannelId}`}
           />
         )}
-      </div>
-    </div>
+      </ThreadPanelBody>
+      </ThreadPanelContent>
+    </ThreadPanelRoot>
   );
 }
 
@@ -374,7 +395,7 @@ export function ingestThreadLiveReply(
   state: { messages: Message[]; seenReplyIds: Set<string> },
   reply: Message,
   opts: { hasNewer: boolean; isNearBottom: boolean },
-): { messages: Message[]; countedNew: boolean } {
+): { messages: Message[]; countedNew: boolean; landedInView: boolean } {
   // "Seen" separates ALREADY-HANDLED from NEEDS-ALERT (the two must not be
   // conflated). A reply is seen if we ingested it on an earlier frame OR it is
   // already in the loaded window (initial fetch / a prior event). A seen reply is
@@ -390,16 +411,42 @@ export function ingestThreadLiveReply(
   if (opts.hasNewer && reply.seq && currentMaxSeq > 0 && reply.seq > currentMaxSeq + 1) {
     // Beyond a bounded newer window: never insert; surface as "new" only the
     // first time this reply is seen.
-    return { messages: state.messages, countedNew: !alreadySeen };
+    return { messages: state.messages, countedNew: !alreadySeen, landedInView: false };
   }
 
   const messages = mergeThreadMessages(state.messages, [reply]);
-  if (alreadySeen) return { messages, countedNew: false };
+  if (alreadySeen) return { messages, countedNew: false, landedInView: false };
   // First time handling this reply: alert only if the reader wouldn't already see
   // it land (i.e. they're scrolled up or a newer window is loaded). Either way it
   // is now marked seen (above), so a later frame can't re-count it.
   const countedNew = !opts.isNearBottom || opts.hasNewer;
-  return { messages, countedNew };
+  return { messages, countedNew, landedInView: !countedNew };
+}
+
+/**
+ * Debounces read writes for replies landing in view: a burst becomes one write
+ * of the highest seq. `flush` writes any pending seq now (panel teardown: the
+ * reader already saw it).
+ */
+export function createThreadLiveReadBatcher(
+  persist: (seq: number) => void,
+  delayMs = THREAD_LIVE_REPLY_READ_DEBOUNCE_MS,
+): { add: (seq: number) => void; flush: () => void } {
+  let pendingSeq = 0;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const flush = () => {
+    if (timer !== null) clearTimeout(timer);
+    timer = null;
+    if (pendingSeq > 0) persist(pendingSeq);
+    pendingSeq = 0;
+  };
+  return {
+    add: (seq) => {
+      pendingSeq = Math.max(pendingSeq, seq);
+      timer ??= setTimeout(flush, delayMs);
+    },
+    flush,
+  };
 }
 
 /**
@@ -422,12 +469,15 @@ export function subscribeThreadLiveReplies(params: {
   getScroll: () => { hasNewer: boolean; isNearBottom: boolean };
   setMessages: (updater: (prev: Message[]) => Message[]) => void;
   bumpNewCount: () => void;
+  /** A first-seen reply landed where the reader sees it (bottom of the latest window). */
+  onReplyLandedInView?: (seq: number) => void;
 }): () => void {
   const seenReplyIds = new Set<string>();
   const ingest = (reply: Message) => {
     params.setMessages((prev) => {
-      const { messages, countedNew } = ingestThreadLiveReply({ messages: prev, seenReplyIds }, reply, params.getScroll());
+      const { messages, countedNew, landedInView } = ingestThreadLiveReply({ messages: prev, seenReplyIds }, reply, params.getScroll());
       if (countedNew) params.bumpNewCount();
+      if (landedInView && reply.seq) params.onReplyLandedInView?.(reply.seq);
       return messages;
     });
   };
@@ -598,28 +648,31 @@ export function scrollThreadTimelineToTop(
 // object lives in a column container; the same ThreadPanel renders identically
 // in every host, with small surface-intrinsic differences (X close
 // visibility, back-chevron breakpoint) flowing through props.
-// Explicit thread identity makes the original stateful surface reusable across independently mounted workspace panes.
+// Explicit thread identity makes the original stateful surface reusable across independently mounted hosts.
 // oxlint-disable react-doctor/no-adjust-state-on-prop-change, react-doctor/no-derived-state, react-doctor/no-event-handler
 function AuthenticatedThreadPanel({
+  canToggleChannel,
+  channelCollapsed = false,
+  onToggleChannel,
   presentation = "side",
   onClose,
   threadIdentity,
   onFocusedMessageConsumed,
   onOpenParentChannel,
   onOpenProfile,
-  // Stryker disable all: workspace host defaults are exercised by the real-panel browser smoke.
+  // Stryker disable all: host defaults are exercised by browser smoke.
   showComposer = true,
   overlayComposer = false,
   mobilePage = false,
-  workspaceComposer = false,
   composerAutoFocus = true,
   hideHeader = false,
   hideParentMessage = false,
   parentSlot,
   // Stryker restore all
-  headerActionsHost,
-  scrollToTopRequest = 0,
 }: {
+  canToggleChannel?: () => boolean;
+  channelCollapsed?: boolean;
+  onToggleChannel?: () => void;
   // Surface-intrinsic axis (NOT column layout — the host owns layout):
   //   side          — X close visible at lg+ only (mobile uses back chevron),
   //                   back chevron up to lg-
@@ -647,7 +700,6 @@ function AuthenticatedThreadPanel({
   overlayComposer?: boolean;
   /** Dedicated new-tab page mode: mobile uses a full-bleed surface with a bottom-pinned composer. */
   mobilePage?: boolean;
-  workspaceComposer?: boolean;
   composerAutoFocus?: boolean;
   hideHeader?: boolean;
   /** Drop the anchoring message from the timeline, leaving replies only.
@@ -660,8 +712,6 @@ function AuthenticatedThreadPanel({
   hideParentMessage?: boolean;
   /** Optional content rendered before the parent/replies in the timeline. */
   parentSlot?: ReactNode;
-  headerActionsHost?: Element | null;
-  scrollToTopRequest?: number;
 }) {
   const { formatMessage } = useIntl();
   // Keep locale-bound formatMessage out of effect/handler deps (render + memos use
@@ -754,6 +804,7 @@ function AuthenticatedThreadPanel({
     selectAll([...forwardableParent, ...forwardableReplies].map((message) => message.id));
   }, [messages, selectAll]);
   // Stryker restore all
+  const panelRef = useRef<HTMLDivElement>(null);
   const {
     picCapturing,
     picPreview,
@@ -768,6 +819,7 @@ function AuthenticatedThreadPanel({
   } = useSelectionShareHandlers({
     threadReplyMessages: messages,
     threadParentMessageRef,
+    captureScopeRef: panelRef,
     onUnresolvedSelection: showUnresolvedSelectionToast,
   });
   // Closing the thread or the panel unmounting should always exit a thread
@@ -834,34 +886,14 @@ function AuthenticatedThreadPanel({
   const joinChannel = useChannelStore((s) => s.joinChannel);
   const members = useServerStore((s) => s.members);
   const mentionScopeChannelId = parentChannelId || threadChannelId || "";
-  const { channelAgents: mentionChannelAgents, channelHumans: mentionChannelHumans } = useChannelMembers(mentionScopeChannelId);
+  const { channelAgents: mentionChannelAgents, channelHumans: mentionChannelHumans, channelExternalMembers: mentionChannelExternalMembers } = useChannelMembers(mentionScopeChannelId);
   const routeNavigate = useNavigate();
   const location = useLocation();
   const currentServer = useServerStore((s) => s.current);
-  const normalizedMessageV2Enabled = useServerFeatureFlag(
-    SYNC_CORE_MESSAGES_FLAG_KEY,
-    { prefetch: false },
-  ).enabled;
-  const normalizeThreadIngress = useCallback((
+
+  const coerceThreadIngress = useCallback((
     incoming: readonly Message[],
-    source: "channel-room" | "receiver-private",
-    parentScopeKind?: "thread",
-  ): Message[] => {
-    if (!normalizedMessageV2Enabled || !currentServer?.id || !currentUser?.id) return [...incoming];
-    return applyMessagesReactionsForV2Ingress(incoming, {
-      serverId: currentServer.id,
-      principalId: currentUser.id,
-      source,
-      viewerUserId: currentUser?.id ?? null,
-      parentScopeKey: parentScopeKind && incoming[0]
-        ? {
-            serverId: currentServer.id,
-            scopeKind: parentScopeKind,
-            scopeId: incoming[0].channelId,
-          }
-        : undefined,
-    });
-  }, [currentServer?.id, currentUser?.id, normalizedMessageV2Enabled]);
+  ): Message[] => [...coerceWireMessageSeqs(incoming)], []);
   const serverSlug = currentServer?.slug;
   const nav = useAppNavigate();
 
@@ -936,7 +968,7 @@ function AuthenticatedThreadPanel({
   // channel) with browser Back; on a cold permalink, useMobileBack falls back
   // to the semantic parent channel. Activity's route navigation now owns the
   // only history PUSH, so this can no longer land on a duplicate same-URL
-  // entry. Modal/workspace hosts still own teardown directly.
+  // entry. Modal hosts still own teardown directly.
   // Close the store-owned panel before consuming its history entry. The
   // right-panel subscriber synchronously replaces the current destination
   // with its cleaned URL and reserves that search before mobile Back POPs.
@@ -985,9 +1017,7 @@ function AuthenticatedThreadPanel({
   const [expandedSystemMessageGroups, setExpandedSystemMessageGroups] = useState<Set<string>>(() => new Set());
   const timelineRef = useRef<MessageTimelineHandle>(null);
   const scrolledFocusedMessageIdRef = useRef<string | null>(null);
-  const handledScrollToTopRequestRef = useRef(0);
   const jumpToThreadStartInFlightRef = useRef(false);
-  const panelRef = useRef<HTMLDivElement>(null);
   const threadSearchInputRef = useRef<HTMLInputElement>(null);
   const threadSearchScopeActiveRef = useRef(false);
   const isNearBottomRef = useRef(true);
@@ -1138,6 +1168,11 @@ function AuthenticatedThreadPanel({
     }
     return map;
   }, [members, mentionChannelHumans]);
+  const externalById = useMemo(() => {
+    const map = new Map<string, (typeof mentionChannelExternalMembers)[0]>();
+    for (const ext of mentionChannelExternalMembers) map.set(ext.id, ext);
+    return map;
+  }, [mentionChannelExternalMembers]);
   const fallbackParentMessage = useMemo<Message | null>(() => {
     if (!parentMessageId || !parentChannelId) return null;
 
@@ -1253,7 +1288,7 @@ function AuthenticatedThreadPanel({
     ) return null;
     const msgs = onlyThreadMessages(
       nextThreadChannelId,
-      normalizeThreadIngress(data.messages ?? data, "receiver-private", "thread"),
+      coerceThreadIngress(data.messages ?? data),
     );
     setMessages(sortThreadMessages(msgs));
     setHasMore(msgs.length >= limit);
@@ -1266,7 +1301,7 @@ function AuthenticatedThreadPanel({
     setLoadingOlder(false);
     setLoadingNewer(false);
     return msgs;
-  }, [isCurrentThread, normalizeThreadIngress]);
+  }, [isCurrentThread, coerceThreadIngress]);
   // Stryker restore all
 
   // Load thread messages
@@ -1275,7 +1310,7 @@ function AuthenticatedThreadPanel({
   // Async-loader: thread messages on threadChannelId change. Standard
   // async-loader FP family — reset + fetch + arrival commit.
   // oxlint-disable-next-line react-doctor/no-cascading-set-state
-  useEffect(() => {
+  const subscribeAndLoadThread = useCallback(() => {
     if (!threadChannelId) return;
     let cancelled = false;
 
@@ -1289,10 +1324,8 @@ function AuthenticatedThreadPanel({
     // Use cached messages if available instead of clearing to empty (avoids blank flash)
     const cached = onlyThreadMessages(
       threadChannelId,
-      normalizeThreadIngress(
+      coerceThreadIngress(
         useMessageStore.getState().channelMessages[threadChannelId] ?? [],
-        "channel-room",
-        "thread",
       ),
     );
     if (initialFocusId) {
@@ -1325,7 +1358,7 @@ function AuthenticatedThreadPanel({
       try {
         const updates = onlyThreadMessages(
           threadChannelId,
-          normalizeThreadIngress([msg], "channel-room", "thread"),
+          coerceThreadIngress([msg]),
         );
         setMessages((prev) => mergeThreadMessageUpdates(prev, updates));
       } catch (error) {
@@ -1345,7 +1378,7 @@ function AuthenticatedThreadPanel({
       if (!raw || typeof raw !== "object") return null;
       let normalized: Message;
       try {
-        normalized = normalizeThreadIngress([raw as Message], "channel-room", "thread")[0] ?? (raw as Message);
+        normalized = coerceThreadIngress([raw as Message])[0] ?? (raw as Message);
       } catch (error) {
         console.error("[MessageV2] rejected malformed thread live reply", error);
         return null;
@@ -1353,6 +1386,9 @@ function AuthenticatedThreadPanel({
       // Only replies belonging to THIS thread channel are applied.
       return normalized.channelId === threadChannelId ? normalized : null;
     };
+    // A reply that lands in view is read; persist it (debounced) so Activity,
+    // which reads the server cursor, agrees with the cleared channel badge.
+    const liveRead = createThreadLiveReadBatcher((seq) => queueThreadLiveReplyReadSync(threadChannelId, seq));
     const disposeLiveReplies = subscribeThreadLiveReplies({
       socket,
       threadChannelId,
@@ -1361,6 +1397,7 @@ function AuthenticatedThreadPanel({
       getScroll: () => ({ hasNewer: hasNewerRef.current, isNearBottom: isNearBottomRef.current }),
       setMessages,
       bumpNewCount: () => setNewMessageCount((c) => c + 1),
+      onReplyLandedInView: liveRead.add,
     });
 
     // Clear unread count for this thread in the followed threads list
@@ -1397,7 +1434,7 @@ function AuthenticatedThreadPanel({
         if (cancelled || !isReceiverPrivateIngressContextCurrent(ingressContext)) return;
         const msgs = onlyThreadMessages(
           threadChannelId,
-          normalizeThreadIngress(data.messages ?? data, "receiver-private", "thread"),
+          coerceThreadIngress(data.messages ?? data),
         );
         if (initialFocusId && !msgs.some((msg) => msg.id === initialFocusId)) {
           fallbackToLatestThreadMessages();
@@ -1427,22 +1464,24 @@ function AuthenticatedThreadPanel({
     return () => {
       cancelled = true;
       disposeLiveReplies();
+      liveRead.flush();
       socket.off("message:updated", updateHandler);
       socket.off("connect", handleReconnect);
       socket.emit("leave:channel", threadChannelId);
     };
-    // The focused id is intentionally captured at thread-open time; clearing it
-    // after scroll must not restart the loader. A V2 flag transition may rerun
-    // once to replace legacy reaction rows with the normalized projection.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [normalizedMessageV2Enabled, threadChannelId]);
+  }, [threadChannelId, parentMessageId, coerceThreadIngress, focusedMessageId, loadLatestThreadMessages]);
+  // Effect deps stay narrow on purpose: the focused id is captured at thread-open
+  // time and clearing it later must not restart the loader. useEffectEvent gives the effect
+  // the latest closure without widening the dep list.
+  const subscribeAndLoadThreadEvent = useEffectEvent(subscribeAndLoadThread);
+  useEffect(() => subscribeAndLoadThreadEvent(), [threadChannelId]);
 
   useEffect(() => {
     if (!threadChannelId || threadBucket.length === 0) return;
     setMessages((prev) => {
       const filteredThreadBucket = onlyThreadMessages(
         threadChannelId,
-        normalizeThreadIngress(threadBucket, "channel-room", "thread"),
+        coerceThreadIngress(threadBucket),
       );
       return mergeThreadBucketWithinWindow(
         prev,
@@ -1450,7 +1489,7 @@ function AuthenticatedThreadPanel({
         hasNewerRef.current,
       );
     });
-  }, [normalizeThreadIngress, threadBucket, threadChannelId]);
+  }, [coerceThreadIngress, threadBucket, threadChannelId]);
 
   // Load parent message and its linked task. Async-loader + reset-on-deps FP.
   // Stryker disable all: async loader/store hook wiring around the parent
@@ -1481,7 +1520,7 @@ function AuthenticatedThreadPanel({
       api.get(parentContextRequest.url, parentContextRequest.config)
         .then(({ data }) => {
           if (cancelled || !isReceiverPrivateIngressContextCurrent(ingressContext)) return;
-          const msgs = normalizeThreadIngress(data.messages ?? [], "receiver-private");
+          const msgs = coerceThreadIngress(data.messages ?? []);
           const parent = msgs.find((m) => m.id === parentMessageId) ?? null;
           const cachedParent = findCachedThreadParentMessage(useMessageStore.getState().channelMessages, parentChannelId, parentMessageId);
           setParentMessage(pickFreshThreadParentMessage(parent, cachedParent));
@@ -1503,7 +1542,7 @@ function AuthenticatedThreadPanel({
     return () => {
       cancelled = true;
     };
-  }, [loadTasks, normalizeThreadIngress, parentChannelId, parentMessageId]);
+  }, [loadTasks, coerceThreadIngress, parentChannelId, parentMessageId]);
 
   // Keep parentTask in sync with taskStore mutations (mark-as-done from the
   // thread header's own context menu, socket task:updated, tasks page, etc.).
@@ -1581,7 +1620,7 @@ function AuthenticatedThreadPanel({
       ) return;
       const older = onlyThreadMessages(
         requestThreadChannelId,
-        normalizeThreadIngress(data.messages ?? data, "receiver-private", "thread"),
+        coerceThreadIngress(data.messages ?? data),
       );
       setMessages((prev) => {
         const existingIds = new Set(prev.map((m) => m.id));
@@ -1595,7 +1634,7 @@ function AuthenticatedThreadPanel({
     } finally {
       setLoadingOlder(false);
     }
-  }, [hasMore, isCurrentThread, loadingOlder, messages, normalizeThreadIngress, threadChannelId]);
+  }, [hasMore, isCurrentThread, loadingOlder, messages, coerceThreadIngress, threadChannelId]);
 
   const jumpToThreadStart = useCallback(async () => {
     if (!threadChannelId || messages.length === 0) {
@@ -1628,7 +1667,7 @@ function AuthenticatedThreadPanel({
         ) return;
         const older = onlyThreadMessages(
           requestThreadChannelId,
-          normalizeThreadIngress(data.messages ?? data, "receiver-private", "thread"),
+          coerceThreadIngress(data.messages ?? data),
         );
         next = mergeThreadMessages(next, older);
         nextHasMore = older.length >= limit;
@@ -1649,7 +1688,7 @@ function AuthenticatedThreadPanel({
       if (isCurrentThread(requestThreadChannelId)) setLoadingOlder(false);
       jumpToThreadStartInFlightRef.current = false;
     }
-  }, [hasMore, historyLimited, isCurrentThread, messages, normalizeThreadIngress, threadChannelId]);
+  }, [hasMore, historyLimited, isCurrentThread, messages, coerceThreadIngress, threadChannelId]);
 
   const loadNewerMessages = useCallback(async () => {
     if (!threadChannelId || loadingNewer || !hasNewer || loading || messages.length === 0) return;
@@ -1673,7 +1712,7 @@ function AuthenticatedThreadPanel({
       ) return;
       const newer = onlyThreadMessages(
         requestThreadChannelId,
-        normalizeThreadIngress(data.messages ?? data, "receiver-private", "thread"),
+        coerceThreadIngress(data.messages ?? data),
       );
       setMessages((prev) => {
         const existingIds = new Set(prev.map((m) => m.id));
@@ -1686,7 +1725,7 @@ function AuthenticatedThreadPanel({
     } finally {
       setLoadingNewer(false);
     }
-  }, [hasNewer, isCurrentThread, loading, loadingNewer, messages, normalizeThreadIngress, threadChannelId]);
+  }, [hasNewer, isCurrentThread, loading, loadingNewer, messages, coerceThreadIngress, threadChannelId]);
 
   const handleAtBottomStateChange = useCallback((atBottom: boolean) => {
     isNearBottomRef.current = atBottom;
@@ -1698,15 +1737,6 @@ function AuthenticatedThreadPanel({
     timelineRef.current?.scrollToBottom();
     setNewMessageCount(0);
   }, []);
-
-  useEffect(() => {
-    if (scrollToTopRequest <= handledScrollToTopRequestRef.current) return;
-    if (!timelineRef.current) return;
-    handledScrollToTopRequestRef.current = scrollToTopRequest;
-    void jumpToThreadStart();
-  }, [jumpToThreadStart, loading, messages.length, scrollToTopRequest]);
-
-
 
   const handleBackToBottom = useCallback(async () => {
     if (!threadChannelId) return;
@@ -1753,7 +1783,7 @@ function AuthenticatedThreadPanel({
       ) return next;
       const older = onlyThreadMessages(
         threadChannelId,
-        normalizeThreadIngress(data.messages ?? data, "receiver-private", "thread"),
+        coerceThreadIngress(data.messages ?? data),
       );
       next = mergeThreadMessages(next, older);
       nextHasMore = older.length >= limit;
@@ -1772,7 +1802,7 @@ function AuthenticatedThreadPanel({
       ) return next;
       const newer = onlyThreadMessages(
         threadChannelId,
-        normalizeThreadIngress(data.messages ?? data, "receiver-private", "thread"),
+        coerceThreadIngress(data.messages ?? data),
       );
       next = mergeThreadMessages(next, newer);
       nextHasNewer = newer.length >= limit;
@@ -1786,7 +1816,7 @@ function AuthenticatedThreadPanel({
       corpusMessages: next,
     }));
     return next;
-  }, [hasMore, hasNewer, isCurrentThread, messages, normalizeThreadIngress, threadChannelId]);
+  }, [hasMore, hasNewer, isCurrentThread, messages, coerceThreadIngress, threadChannelId]);
 
   const ensureThreadSearchHydrated = useCallback(async () => {
     if (
@@ -1916,7 +1946,7 @@ function AuthenticatedThreadPanel({
 
     const contextMessages = onlyThreadMessages(
       threadChannelId,
-      normalizeThreadIngress(data.messages ?? data, "receiver-private", "thread"),
+      coerceThreadIngress(data.messages ?? data),
     );
     setMessages((current) => mergeThreadMessages(current, contextMessages));
     setHasMore(!!data.hasOlder);
@@ -1928,7 +1958,7 @@ function AuthenticatedThreadPanel({
   }, [
     displayedParentMessageWithThreadId?.id,
     isCurrentThread,
-    normalizeThreadIngress,
+    coerceThreadIngress,
     threadChannelId,
   ]);
 
@@ -2078,11 +2108,12 @@ function AuthenticatedThreadPanel({
     if (systemMessageState?.kind === "summary") {
       const expanded = expandedSystemMessageGroups.has(systemMessageState.groupId);
       return (
-        <div className="px-3" style={{ overflow: "clip visible" }}>
-          <SystemMessageGroupDisclosure
+        <div className="px-3 [--mi-hdr-pr:2.5rem]" style={{ overflow: "clip visible" }}>
+          <ThreadPanelSystemMessageGroupDisclosure
+            groupId={systemMessageState.groupId}
             summary={systemMessageState.content}
             expanded={expanded}
-            onToggle={() => toggleSystemMessageGroup(systemMessageState.groupId)}
+            onToggleGroup={toggleSystemMessageGroup}
           >
             {systemMessageState.messageIndexes.map((messageIndex) => {
               const originalMessage = messages[messageIndex];
@@ -2097,6 +2128,7 @@ function AuthenticatedThreadPanel({
                   parentMessageId={parentMessageId || undefined}
                   previewSenderAgent={getPreviewSenderAgent(originalMessage)}
                   previewSenderMember={getPreviewSenderMember(originalMessage)}
+                  channelParticipantExternalsById={externalById}
                   mentionComposerChannelId={threadMentionComposerChannelId}
                   reactionParentScopeKey={threadReactionParentScopeKey}
                   canReact={canReactToThread}
@@ -2107,7 +2139,7 @@ function AuthenticatedThreadPanel({
                 />
               );
             })}
-          </SystemMessageGroupDisclosure>
+          </ThreadPanelSystemMessageGroupDisclosure>
         </div>
       );
     }
@@ -2116,7 +2148,7 @@ function AuthenticatedThreadPanel({
       // `overflow: clip visible` (not `overflow-hidden`) so the hover toolbar can
       // ride on top of the message border without being clipped — matches
       // ChatPanel. Horizontal clipping is preserved.
-      <div className="px-3" style={{ overflow: "clip visible" }}>
+      <div className="px-3 [--mi-hdr-pr:2.5rem]" style={{ overflow: "clip visible" }}>
         <MessageItem
           key={msg.id}
           message={msg}
@@ -2126,18 +2158,21 @@ function AuthenticatedThreadPanel({
           parentMessageId={parentMessageId || undefined}
           previewSenderAgent={getPreviewSenderAgent(msg)}
           previewSenderMember={getPreviewSenderMember(msg)}
+          channelParticipantExternalsById={externalById}
           mentionComposerChannelId={threadMentionComposerChannelId}
           reactionParentScopeKey={threadReactionParentScopeKey}
           canReact={canReactToThread}
           hideThreadActions
           onOpenProfile={onOpenProfile}
           groupState={messageGrouping.get(msg.id)}
+          followedBy={followedByFor(messages, index, messageGrouping)}
+          followsSystem={followsSystemFor(messages, index)}
           threadSearchHighlightQuery={getThreadSearchHighlightQuery(msg.id)}
           threadSearchActive={msg.id === activeThreadSearchMessageId}
         />
       </div>
     );
-  }, [activeThreadSearchMessageId, canReactToThread, channels, expandedSystemMessageGroups, getPreviewSenderAgent, getPreviewSenderMember, mentionMap, messageGrouping, messages, onOpenProfile, parentChannelId, parentMessageId, systemMessageRenderStates, threadMentionComposerChannelId, threadReactionParentScopeKey, threadSearchQuery, toggleSystemMessageGroup]);
+  }, [activeThreadSearchMessageId, canReactToThread, channels, expandedSystemMessageGroups, externalById, getPreviewSenderAgent, getPreviewSenderMember, mentionMap, messageGrouping, messages, onOpenProfile, parentChannelId, parentMessageId, systemMessageRenderStates, threadMentionComposerChannelId, threadReactionParentScopeKey, threadSearchQuery, toggleSystemMessageGroup]);
   // Stryker restore all
 
   // Stryker disable all: focused sender-name mention behavior is covered through MessageItem/MessageInput; this memo only duplicates thread parent pass-through and dependency invalidation.
@@ -2161,6 +2196,7 @@ function AuthenticatedThreadPanel({
             linkedTask={displayedParentTask ?? undefined}
             previewSenderAgent={getPreviewSenderAgent(displayedParentMessageWithThreadId)}
             previewSenderMember={getPreviewSenderMember(displayedParentMessageWithThreadId)}
+            channelParticipantExternalsById={externalById}
             mentionComposerChannelId={threadMentionComposerChannelId}
             reactionParentScopeKey={parentReactionParentScopeKey}
             canReact={canReactToThread}
@@ -2187,7 +2223,7 @@ function AuthenticatedThreadPanel({
         </div>
       </div>
     </div>
-  ), [activeThreadSearchMessageId, canReactToThread, channels, displayedParentMessageWithThreadId, displayedParentTask, formatMessage, getPreviewSenderAgent, getPreviewSenderMember, hasMore, historyLimited, loadingOlder, mentionMap, messages.length, onOpenProfile, displayedParentThreadSummary, parentReactionParentScopeKey, parentSlot, threadMentionComposerChannelId, threadSearchQuery]);
+  ), [activeThreadSearchMessageId, canReactToThread, channels, displayedParentMessageWithThreadId, displayedParentTask, externalById, formatMessage, getPreviewSenderAgent, getPreviewSenderMember, hasMore, historyLimited, loadingOlder, mentionMap, messages.length, onOpenProfile, displayedParentThreadSummary, parentReactionParentScopeKey, parentSlot, threadMentionComposerChannelId, threadSearchQuery]);
   // Stryker restore all
 
   const threadFooter = useMemo(() => (
@@ -2204,6 +2240,58 @@ function AuthenticatedThreadPanel({
     </div>
   ), [formatMessage, loadingNewer]);
 
+  // Memoized JSX handlers (react-perf): declared above the early returns so
+  // hook order stays stable regardless of loading/error branches below.
+  const handleRetryOpenThread = useCallback(() => { void retryOpenThread(); }, [retryOpenThread]);
+  const handleClosePicPreview = useCallback(() => setPicPreview(null), [setPicPreview]);
+  const handlePicPreviewSaved = useCallback(() => {
+    setPicPreview(null);
+    useSelectionStore.getState().exit();
+  }, [setPicPreview]);
+  const handleOpenParentChannelAction = useCallback(() => {
+    if (!parentMessageId || !parentChannelId) return;
+    if (onOpenParentChannel) {
+      onOpenParentChannel(parentChannelId, parentMessageId);
+      return;
+    }
+    const routeKind = parentRouteKind === "dm" ? "dm" : "channel";
+    // Reserve the canonical ?msg= URL before navigating, then clear the store
+    // synchronously. BrowserRouter commits route state in a transition; the
+    // ownership marker prevents an already-queued origin effect from racing
+    // stale thread params back into the store before that commit lands.
+    // Desktop preserves its existing PUSH semantics, while mobile replaces the
+    // current thread detail entry and records the synchronous mobile-back step.
+    openThreadParentMessageRoute({
+      isDesktop,
+      parentRouteKind: routeKind,
+      parentChannelId,
+      parentMessageId,
+      serverSlug,
+      navigate: routeNavigate,
+    });
+  }, [parentMessageId, parentChannelId, onOpenParentChannel, parentRouteKind, isDesktop, serverSlug, routeNavigate]);
+  // Wrap so the menu's click event never leaks in as the seed query.
+  const handleOpenThreadSearch = useCallback(() => openThreadSearch(), [openThreadSearch]);
+  const markThreadSearchScopeActive = useCallback(() => {
+    threadSearchScopeActiveRef.current = true;
+  }, []);
+  const handlePrevThreadSearchMatch = useCallback(() => goToThreadSearchMatch(-1), [goToThreadSearchMatch]);
+  const handleNextThreadSearchMatch = useCallback(() => goToThreadSearchMatch(1), [goToThreadSearchMatch]);
+  const handleCloseForwardComposer = useCallback(() => setForwardComposer(null), []);
+  const handleForwardComposerSent = useCallback((deliveries: ForwardDelivery[]) => {
+    for (const delivery of deliveries) useMessageStore.getState().addMessage(delivery.message);
+    useSelectionStore.getState().exit();
+  }, []);
+
+  const threadContentLayerClassName = mobilePage
+    ? "relative z-0 min-h-0 flex-1 overflow-hidden"
+    : "relative z-0 min-h-0 flex-1 overflow-hidden";
+  // Restored from 4afe5677e (lost in the #7347 revert merge, e8765efaf): the
+  // chrome layer the header/composer sit in, above the z-0 content layer.
+  const threadChromeLayerClassName = "relative z-20 shrink-0";
+
+  const threadContainerProps = useMemo(() => ({ className: THREAD_HEADER_CONTAINER_CLASS_NAME }), []);
+
   if (!parentMessageId) return null;
   const showBottomButton = hasNewer || !atBottom || newMessageCount > 0;
   const handleBottomButton = hasNewer ? handleBackToBottom : scrollToBottom;
@@ -2216,10 +2304,6 @@ function AuthenticatedThreadPanel({
   const panelClassName = mobilePage
     ? "isolate flex h-full min-h-0 w-full flex-col bg-layer-panel dark:bg-layer-card theme-brutal:bg-white"
     : "isolate flex h-full min-h-0 w-full flex-col bg-layer-panel dark:bg-layer-card theme-brutal:bg-white";
-  const threadChromeLayerClassName = "relative z-20 shrink-0";
-  const threadContentLayerClassName = mobilePage
-    ? "relative z-0 min-h-0 flex-1 overflow-hidden"
-    : "relative z-0 min-h-0 flex-1 overflow-hidden";
   // X close button visibility, per stdrc 2026-05-21 #proj-task:287f18ce
   // msg=804c045d: "它作为弹窗就需要叉；如果它是直接覆盖整个页面，就是返回."
   //   modal        — X (centered card with backdrop, X is the dialog close)
@@ -2243,12 +2327,12 @@ function AuthenticatedThreadPanel({
     // Stryker restore all
     if (resolveFailed || openThreadLoading) return (
       <div className={panelClassName}>
-        {/* Stryker disable all: workspace header ownership is browser-smoke verified. */}
+        {/* Stryker disable all: header ownership is browser-smoke verified. */}
         {showHeader && <PanelHeader
           title={formatMessage({ id: "message.threadPanel.thread" })}
           onMobileBack={mobileBackHandler}
-          mobileBackProps={{ "data-testid": "thread-mobile-back" }}
-          containerProps={{ className: threadChromeLayerClassName }}
+          mobileBackProps={THREAD_MOBILE_BACK_PROPS}
+          containerProps={THREAD_CHROME_CONTAINER_PROPS}
           mobileBreakpoint="lg"
           actions={
             <Tooltip content={formatMessage({ id: "message.threadPanel.closeThread" })}>
@@ -2275,7 +2359,7 @@ function AuthenticatedThreadPanel({
               <Button
                 size="sm"
                 variant="outline"
-                onClick={() => { void retryOpenThread(); }}
+                onClick={handleRetryOpenThread}
                 data-testid="thread-retry"
               >
                 {formatMessage({ id: "message.threadPanel.retry" })}
@@ -2295,12 +2379,9 @@ function AuthenticatedThreadPanel({
     <SelectShareLightbox
       dataUrl={picPreview}
       filename={`raft-thread-${new Date().toISOString().slice(0, 10)}.png`}
-      onClose={() => setPicPreview(null)}
+      onClose={handleClosePicPreview}
       onShareToX={onSharePreviewToX}
-      onSaved={() => {
-        setPicPreview(null);
-        useSelectionStore.getState().exit();
-      }}
+      onSaved={handlePicPreviewSaved}
     />
   ) : null;
   // Stryker restore all
@@ -2319,29 +2400,7 @@ function AuthenticatedThreadPanel({
     return ch?.type !== "dm";
   })();
   // Stryker restore all
-  // Stryker disable all: workspace header action forwarding is contract-pinned and browser-smoke verified.
-  const handleOpenParentChannelAction = () => {
-    if (!parentMessageId || !parentChannelId) return;
-    if (onOpenParentChannel) {
-      onOpenParentChannel(parentChannelId, parentMessageId);
-      return;
-    }
-    const routeKind = parentRouteKind === "dm" ? "dm" : "channel";
-    // Reserve the canonical ?msg= URL before navigating, then clear the store
-    // synchronously. BrowserRouter commits route state in a transition; the
-    // ownership marker prevents an already-queued origin effect from racing
-    // stale thread params back into the store before that commit lands.
-    // Desktop preserves its existing PUSH semantics, while mobile replaces the
-    // current thread detail entry and records the synchronous mobile-back step.
-    openThreadParentMessageRoute({
-      isDesktop,
-      parentRouteKind: routeKind,
-      parentChannelId,
-      parentMessageId,
-      serverSlug,
-      navigate: routeNavigate,
-    });
-  };
+  // Stryker disable all: header action wiring is browser-smoke verified.
   // Thread commands live in the menu; structural Back and Close stay in the header.
   const openParentChannelLabel = onOpenParentChannel
     ? formatMessage({ id: "message.threadPanel.openChannel" })
@@ -2353,51 +2412,47 @@ function AuthenticatedThreadPanel({
       parentMessageId={parentMessageId}
       viewInChannelLabel={openParentChannelLabel}
       onViewInChannel={handleOpenParentChannelAction}
-      onSearch={() => openThreadSearch()}
+      onSearch={handleOpenThreadSearch}
+      channelCollapsed={channelCollapsed}
+      hideChannelLabel={formatMessage({ id: parentChannel?.type === "dm" ? "message.threadPanel.overflow.hideConversation" : "message.threadPanel.overflow.hideChannel" })}
+      restoreChannelLabel={formatMessage({ id: parentChannel?.type === "dm" ? "message.threadPanel.overflow.showConversation" : "message.threadPanel.overflow.showChannel" })}
+      canToggleChannel={canToggleChannel}
+      onToggleChannel={presentation === "side" && parentChannel ? onToggleChannel : undefined}
     />
   );
   const showCloseButton = presentation !== "mobile-modal";
-  const composerContainerClassName = `${composerHostClassName(overlayComposer && !mobilePage)} ${threadChromeLayerClassName}`;
-  const composerTestId = workspaceComposer
-    ? "workspace-panel-composer"
-    : mobilePage
-      ? "thread-window-composer"
-      : undefined;
-  const portaledHeaderActions = hideHeader && headerActionsHost
-    ? createPortal(
-        <div className="workspace-grid-tabset-actions" data-testid="workspace-tabset-context-actions">
-          {threadChannelId && <ThreadAgentFollowers threadChannelId={threadChannelId} variant="header" />}
-          {threadContextActions}
-        </div>,
-        headerActionsHost,
-      )
-    : null;
+  const composerContainerClassName = `${composerHostClassName(overlayComposer && !mobilePage)} ${THREAD_CHROME_LAYER_CLASS_NAME}`;
+  const composerTestId = mobilePage ? "thread-window-composer" : undefined;
   // Stryker restore all
 
   return (
     <ThreadPanelRoot
       ref={panelRef}
       className={panelClassName}
-      onPointerDownCapture={() => { threadSearchScopeActiveRef.current = true; }}
-      onFocusCapture={() => { threadSearchScopeActiveRef.current = true; }}
+      onPointerDownCapture={markThreadSearchScopeActive}
+      onFocusCapture={markThreadSearchScopeActive}
     >
-      {/* Stryker disable all: workspace header ownership and portal are browser-smoke verified. */}
+      {/* Stryker disable all: header ownership is browser-smoke verified. */}
       {showHeader && <PanelHeader
         onMobileBack={mobileBackHandler}
-        mobileBackProps={{ "data-testid": "thread-mobile-back" }}
-        containerProps={{ className: threadChromeLayerClassName }}
+        mobileBackProps={THREAD_MOBILE_BACK_PROPS}
+        containerProps={threadContainerProps}
         // In modal presentation the back chevron is the close affordance, so
         // it should hide once the Rail kicks in (md+, centered card). In side
         // presentation the chevron stays through to lg- (mobile full-screen).
         mobileBreakpoint={presentation === "side" ? "lg" : "md"}
         titleSlot={
           <Tooltip content={formatMessage({ id: "message.threadPanel.scrollToFirst" })}>
-          <button
-            type="button"
-            onClick={() => { void jumpToThreadStart(); }}
-            className="flex h-10 w-full min-w-0 items-center truncate text-left text-base font-bold text-foreground-strong theme-brutal:text-black"
-            aria-label={formatMessage({ id: "message.threadPanel.scrollThreadToFirst" })}
-            data-testid="thread-scroll-to-top"
+          <PanelTitle
+            render={(
+              <button
+                type="button"
+                onClick={() => { void jumpToThreadStart(); }}
+                aria-label={formatMessage({ id: "message.threadPanel.scrollThreadToFirst" })}
+                data-testid="thread-scroll-to-top"
+              />
+            )}
+            className="flex h-10 w-full min-w-0 items-center truncate text-left"
           >
             {formatMessage({ id: "message.threadPanel.thread" })}
             {parentChannelId && (() => {
@@ -2406,9 +2461,11 @@ function AuthenticatedThreadPanel({
               if (!ch) return null;
               const label = ch.type === "dm" ? `@${ch.peerDisplayName || ch.peerName || ch.name}` : `#${ch.name}`;
               // Stryker restore all
-              return <span className="font-normal text-foreground-muted theme-brutal:text-black/50"> — {label}</span>;
+              // The gap before the dash is `ml-1` on the span below; a leading
+              // space inside a flex-item span collapses (blockified).
+              return <span className="ml-1 font-normal in-data-[theme=elegant]:text-[15px] text-foreground-placeholder theme-brutal:text-black/50">— {label}</span>;
             })()}
-          </button>
+          </PanelTitle>
           </Tooltip>
         }
         actions={
@@ -2437,7 +2494,6 @@ function AuthenticatedThreadPanel({
           </>
         }
       />}
-      {portaledHeaderActions}
       <ThreadPanelContent>
       {/* Stryker restore all */}
       {threadSearchOpen && (
@@ -2489,7 +2545,7 @@ function AuthenticatedThreadPanel({
               type="button"
               size="icon-sm"
               variant="ghost"
-              onClick={() => goToThreadSearchMatch(-1)}
+              onClick={handlePrevThreadSearchMatch}
               disabled={threadSearchMatches.length === 0}
               aria-label={formatMessage({ id: "message.threadPanel.previousMatch" })}
             >
@@ -2501,7 +2557,7 @@ function AuthenticatedThreadPanel({
               type="button"
               size="icon-sm"
               variant="ghost"
-              onClick={() => goToThreadSearchMatch(1)}
+              onClick={handleNextThreadSearchMatch}
               disabled={threadSearchMatches.length === 0}
               aria-label={formatMessage({ id: "message.threadPanel.nextMatch" })}
             >
@@ -2623,7 +2679,7 @@ function AuthenticatedThreadPanel({
       </ThreadPanelBody>
 
       {/* In thread-mode select, the toolbar replaces the input. */}
-      {/* Stryker disable all: workspace composer ownership and chrome are browser-smoke verified. */}
+      {/* Stryker disable all: composer ownership and chrome are browser-smoke verified. */}
       {showComposer ? (
       <ThreadPanelFooter
         className={composerContainerClassName}
@@ -2708,11 +2764,8 @@ function AuthenticatedThreadPanel({
           sourceParentChannelId={parentChannelId}
           skippedCount={forwardComposer.skippedCount}
           nestedForwardCount={forwardComposer.nestedForwardCount}
-          onClose={() => setForwardComposer(null)}
-          onSent={(deliveries) => {
-            for (const delivery of deliveries) useMessageStore.getState().addMessage(delivery.message);
-            useSelectionStore.getState().exit();
-          }}
+          onClose={handleCloseForwardComposer}
+          onSent={handleForwardComposerSent}
         />
       )}
       {/* Stryker restore all */}

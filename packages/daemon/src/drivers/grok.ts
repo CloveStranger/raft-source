@@ -1,5 +1,6 @@
 import { RuntimeExecutableNotFoundError } from "../spawnFailureErrors";
 import { execFileSync, spawn } from "node:child_process";
+import { spawnRuntimeChild } from "./runtimeChild";
 import os from "node:os";
 import type { ChildProcess } from "node:child_process";
 import {
@@ -14,6 +15,7 @@ import {
   type RuntimeModelSet,
   type RuntimeModelSourceOutcome,
   type AxSurfaceText,
+  isRuntimeModelDetectionLookupReason,
 } from "@botiverse/raft-shared";
 import { buildCliTransportSystemPrompt, prepareCliTransport } from "./cliTransport";
 import { resolveGrokHomeFromEnv } from "./grokHome";
@@ -24,6 +26,8 @@ import {
   type GrokJsonRpcMessage,
 } from "./grokEventNormalizer";
 import {
+  classifyProbeExecFailure,
+  lookupCommandOnPath,
   resolveCommandOnPath,
   withWindowsUserEnvironment,
   type ProbeDeps,
@@ -34,6 +38,7 @@ import type {
   RuntimeBusyDeliveryReadiness,
   RuntimeDriver,
   RuntimeProbeResult,
+  RuntimeProbeUnavailableReason,
   SpawnContext,
   SpawnResult,
 } from "./types";
@@ -163,18 +168,39 @@ export function resolveGrokCommand(deps: ProbeDeps = {}): string | null {
   return resolveCommandOnPath("grok", deps);
 }
 
+/**
+ * task #1242: the lookup's own verdict decides the message. Only a locator
+ * "not found" is a confirmed absence; a lookup that timed out, was denied or
+ * failed says nothing about whether Grok Build is installed, so the message
+ * states only what happened and never suggests installing.
+ */
+function grokNotResolvedMessage(missReason: RuntimeProbeUnavailableReason | undefined): string {
+  switch (missReason) {
+    case "probe_timeout":
+      return "The PATH lookup for `grok` did not finish within its budget. This is not evidence that Grok Build is missing; retry.";
+    case "permission_denied":
+      return "The PATH lookup for `grok` was denied permission to run. This is not evidence that Grok Build is missing.";
+    case "probe_failed":
+      return "The PATH lookup for `grok` did not produce a usable result. This is not evidence that Grok Build is missing; retry.";
+    default:
+      return "Cannot resolve the Grok Build CLI on PATH. Install Grok Build and run `grok login` first.";
+  }
+}
+
 export function resolveGrokSpawn(args: string[], deps: ProbeDeps = {}): GrokLaunch {
-  const command = resolveGrokCommand(deps);
+  // One lookup; its verdict travels on the error so the caller never has to
+  // look again (a second observation could not explain this failure).
+  const { command, missReason } = lookupCommandOnPath("grok", deps);
   if (!command) {
-    throw new RuntimeExecutableNotFoundError({ runtimeId: "grok", message: "Cannot resolve the Grok Build CLI on PATH. Install Grok Build and run `grok login` first." });
+    throw new RuntimeExecutableNotFoundError({ runtimeId: "grok", message: grokNotResolvedMessage(missReason), reason: missReason });
   }
   return grokDirectLaunch(command, args, deps);
 }
 
 export function probeGrok(deps: ProbeDeps = {}): RuntimeProbeResult {
-  const command = resolveGrokCommand(deps);
+  const { command, missReason } = lookupCommandOnPath("grok", deps);
   if (!command) {
-    return { available: false, diagnostic: "No Grok Build CLI was found on PATH." };
+    return { available: false, unavailableReason: missReason, diagnostic: "No Grok Build CLI was found on PATH." };
   }
   const execFileSyncFn = deps.execFileSyncFn ?? execFileSync;
   try {
@@ -188,10 +214,12 @@ export function probeGrok(deps: ProbeDeps = {}): RuntimeProbeResult {
     });
   } catch (error) {
     if (error instanceof RuntimeExecutableNotFoundError) {
-      return { available: false, diagnostic: error.message };
+      // `grok` was found on PATH but its direct launch could not be resolved.
+      return { available: false, unavailableReason: "probe_failed", diagnostic: error.message };
     }
     return {
       available: false,
+      unavailableReason: classifyProbeExecFailure(error),
       diagnostic: `Grok Build agent stdio probe failed: ${describeProbeFailure(error)}.`,
     };
   }
@@ -445,7 +473,9 @@ export class GrokDriver implements RuntimeDriver {
       : { method: "session/new" as const, params: this.freshSessionParams };
 
     const launch = resolveGrokSpawn([...GROK_AGENT_ARGS], { env: spawnEnv });
-    const proc = spawn(launch.command, launch.args, {
+    // task #365: after the last await, right before the child exists.
+    ctx.assertLaunchCurrent?.();
+    const proc = spawnRuntimeChild(launch.command, launch.args, {
       cwd: ctx.workingDirectory,
       stdio: ["pipe", "pipe", "pipe"],
       env: launch.env ?? spawnEnv,
@@ -746,6 +776,8 @@ interface GrokModelDetectionOptions {
   env?: NodeJS.ProcessEnv;
   cwd?: string;
   timeoutMs?: number;
+  /** Lookup/exec stand-ins for tests (the PATH lookup that decides `runtime_not_found`). */
+  deps?: ProbeDeps;
 }
 
 export async function detectGrokModelsFromAcp(
@@ -754,12 +786,16 @@ export async function detectGrokModelsFromAcp(
   const env = withWindowsUserEnvironment(options.env ?? process.env, { env: options.env ?? process.env });
   let launch: GrokLaunch;
   try {
-    launch = resolveGrokSpawn([...GROK_AGENT_ARGS], { env });
+    launch = resolveGrokSpawn([...GROK_AGENT_ARGS], { ...options.deps, env });
   } catch (error) {
-    return {
-      kind: "error", retryable: true,
-      code: error instanceof RuntimeExecutableNotFoundError ? "runtime_not_found" : "detect_failed",
-    };
+    if (error instanceof RuntimeExecutableNotFoundError) {
+      // task #1242: the verdict of the lookup that just failed, nothing newer.
+      return {
+        kind: "error", retryable: true, code: "runtime_not_found",
+        ...(isRuntimeModelDetectionLookupReason(error.reason) ? { reason: error.reason } : {}),
+      };
+    }
+    return { kind: "error", retryable: true, code: "detect_failed" };
   }
 
   return await new Promise<RuntimeModelSourceOutcome>((resolve) => {

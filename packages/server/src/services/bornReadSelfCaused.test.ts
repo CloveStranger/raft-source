@@ -26,6 +26,7 @@ import {
   type ProductionSystemMessageProducer,
   type RequiresCausalActorProducer,
 } from "./systemMessageBornReadRegistry";
+import { withChannelDelivery } from "../test/orchestratorStub";
 
 
 afterEach(async () => {
@@ -49,7 +50,7 @@ function createIoStub() {
   } as any;
 }
 
-const agentOrchestratorStub = { deliverMessage: async () => undefined } as any;
+const agentOrchestratorStub = withChannelDelivery({ deliverMessage: async () => undefined }) as any;
 
 /**
  * Seed a public channel with two human members (owner + member) and one agent
@@ -319,6 +320,7 @@ test("addChannelMemberForAgent born-reads the acting agent's own membership noti
 // ---------------------------------------------------------------------------
 const CHANNEL_BORN_READ_PRODUCERS: readonly RequiresCausalActorProducer[] = [
   "agent.join_channel",
+  "agent.server_role_changed",
   "channel.agent_membership",
   "channel.human_membership",
   "channel.rename",

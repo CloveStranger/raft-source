@@ -79,7 +79,10 @@ async function readTailBytes(filePath: string, maxBytes: number): Promise<{ text
 
 const PEM_END = /-----END [A-Z ]*PRIVATE KEY-----/;
 const PEM_BEGIN = /-----BEGIN [A-Z ]*PRIVATE KEY-----/;
-const LINE_TIMESTAMP = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2}))\b/;
+// Accepts ISO's "T" and the space separator the daemon logger writes
+// (formatUtcTimestamp: "2026-09-15 11:50:00Z"). A zone is required: a bare
+// local date-time names no instant, so it is treated as undated.
+const LINE_TIMESTAMP = /^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2}))\b/;
 
 /**
  * Redact the WHOLE text before it is split into lines, so multi-line rules
@@ -112,8 +115,8 @@ export interface BoundedLogTail {
 }
 
 /**
- * Window semantics: a line with a leading ISO timestamp is in the tail only
- * when that instant lies within [from, to]. A line without a timestamp is a
+ * Window semantics: a line with a leading timestamp (see LINE_TIMESTAMP) is
+ * in the tail only when that instant lies within [from, to]. A line without a timestamp is a
  * continuation (stack trace, JSON dump) and inherits the previous dated
  * line's decision; one with nothing to inherit from is dropped and counted.
  * The whole text is redacted FIRST (see redactLogTailText), then filtered,
@@ -139,7 +142,7 @@ export function boundAndRedactLogTail(
     }
     const stamp = LINE_TIMESTAMP.exec(line);
     if (stamp) {
-      const ms = Date.parse(stamp[1]!);
+      const ms = Date.parse(`${stamp[1]}T${stamp[2]}`);
       inherited = Number.isFinite(ms) && ms >= fromMs && ms <= toMs;
     } else if (inherited === null) {
       undatedLines += 1;

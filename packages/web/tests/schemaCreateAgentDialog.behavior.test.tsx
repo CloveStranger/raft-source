@@ -501,10 +501,7 @@ test("Kimi create uses the served model-scoped effort metadata without cross-mod
 
   const modelSelect = await screen.findByTestId("schema-runtime-model-select");
   assert.ok(screen.getByTestId("schema-runtime-reasoning-select"));
-  fireEvent.click(modelSelect);
-  const k2Option = await screen.findByRole("option", { name: "Kimi K2" });
-  fireEvent.pointerDown(k2Option);
-  fireEvent.click(k2Option);
+  await pickOption(modelSelect, "Kimi K2");
   await waitFor(() => assert.equal(screen.queryByTestId("schema-runtime-reasoning-select"), null));
 
   fireEvent.click(modelSelect);
@@ -686,12 +683,26 @@ test("a saved provider leads the Provider selector, keeps its schema, and submit
   assert.equal(JSON.stringify(submitted).includes("apiKey"), false);
 });
 
-test("v2 flag on: builtin create still renders the saved-provider selector", async () => {
+test("v2 flag on: builtin create uses the v2 form, whose picker natively offers saved providers", async () => {
+  // Phase 2 (task #46): the #8814-era stopgap that pinned builtin create to v1
+  // is gone — the v2 form itself carries the saved/direct picker
+  // (capability provider.saved_connection). This is the flipped guard: create
+  // must now use v2 and must NOT fall back to the v1 definition endpoints.
   seedStores(["builtin"]);
+  const CONNECTION = "22222222-2222-4222-8222-222222222222";
+  const postBodies: unknown[] = [];
+  const served = toRuntimeFormV2(definitionFixture() as unknown as AgentCreateFormDefinition) as unknown as {
+    dataSchema: { properties: Record<string, Record<string, unknown>> };
+  } & Record<string, unknown>;
+  served.requiredClientCapabilities = ["provider.saved_connection"];
+  served.revision = "rev-create";
+  for (const key of ["apiKey", "baseUrl", "supportsImageInput"]) {
+    served.dataSchema.properties[key]!["x-connectionOwned"] = true;
+  }
   api.get = (async (url: string) => {
     if (url === "/provider-connections") {
       return { data: { connections: [{
-        id: "22222222-2222-4222-8222-222222222222",
+        id: CONNECTION,
         name: "Team DeepSeek",
         providerId: "deepseek",
         authMethod: "api_key",
@@ -716,24 +727,48 @@ test("v2 flag on: builtin create still renders the saved-provider selector", asy
         runtimeFormV2: { protocolVersion: 2 },
       }] } } as never;
     }
-    if (url.includes("/runtime-form-definitions/builtin/option-sources/provider?schemaVersion=builtin-pi.create.v2")) {
-      return { data: definitionFixture().optionSources.provider } as never;
+    if (url === "/servers/server-1/machines/machine-1/runtime-forms/v2/builtin") {
+      return { data: served } as never;
     }
-    if (url.includes("/runtime-form-definitions/builtin/option-sources/model?schemaVersion=builtin-pi.create.v2")) {
-      return { data: definitionFixture().optionSources.model } as never;
+    if (url.includes("/runtime-forms/v2/builtin/option-sources/provider")) {
+      assert.ok(url.includes("formRevision=rev-create"), `the source request must echo the revision: ${url}`);
+      return {
+        data: {
+          sourceId: "provider", kind: "select", pointer: "/providerId",
+          options: [
+            {
+              value: `connection:${CONNECTION}`, label: "DeepSeek · Team DeepSeek", providerKind: "preset",
+              connectionId: CONNECTION, underlyingProviderId: "deepseek", group: "saved",
+            },
+            { value: "deepseek", label: "DeepSeek", providerKind: "preset", group: "direct" },
+            { value: "openai-compatible", label: "OpenAI compatible", providerKind: "gateway", group: "direct" },
+          ],
+          defaultValue: "deepseek",
+        },
+      } as never;
     }
-    if (url.includes("/runtime-form-definitions/builtin?schemaVersion=builtin-pi.create.v2")) {
-      return { data: definitionResponse() } as never;
+    if (url.includes("/runtime-forms/v2/builtin/option-sources/model")) {
+      assert.ok(url.includes("formRevision=rev-create"), `the source request must echo the revision: ${url}`);
+      return {
+        data: {
+          sourceId: "model", kind: "dependent_select", pointer: "/model", dependsOn: "/providerId",
+          optionsByValue: {
+            [`connection:${CONNECTION}`]: [{ value: "deepseek-v4-pro", label: "V4 Pro" }],
+            deepseek: [{ value: "deepseek-v4-pro", label: "V4 Pro" }],
+            "openai-compatible": [],
+          },
+          defaultValueByValue: { [`connection:${CONNECTION}`]: "deepseek-v4-pro", deepseek: "deepseek-v4-pro" },
+          customValueAllowedByValue: { [`connection:${CONNECTION}`]: false, deepseek: false, "openai-compatible": true },
+        },
+      } as never;
     }
-    if (url.includes("/runtime-forms/v2/")) {
-      // If create ever goes v2 for builtin this endpoint gets hit and the v2
-      // form would replace the Provider block — the bug this test guards.
-      throw new Error(`builtin create must not fetch the v2 form: ${url}`);
+    if (url.includes("/runtime-form-definitions/")) {
+      throw new Error(`builtin create must not fall back to the v1 definition endpoints: ${url}`);
     }
     if (url.includes("/runtime-models/")) return { data: { models: [] } } as never;
     throw new Error(`unexpected GET ${url}`);
   }) as typeof api.get;
-  api.post = (async (url: string) => {
+  api.post = (async (url: string, body?: unknown) => {
     if (url === "/feature-flags/evaluate") {
       return {
         data: { evaluations: [
@@ -742,18 +777,40 @@ test("v2 flag on: builtin create still renders the saved-provider selector", asy
         ] },
       } as never;
     }
-    throw new Error(`unexpected POST ${url}`);
+    assert.equal(url, "/agents");
+    postBodies.push(body);
+    return { data: makeAgent("builtin", null) } as never;
   }) as typeof api.post;
 
   await prefetchServerFeatureFlags("server-1");
   renderDialog();
-  const providerSelect = await screen.findByTestId("schema-runtime-provider-select");
-  fireEvent.click(providerSelect);
-  assert.ok(
-    await screen.findByText("Saved providers"),
-    "with runtime_form_v2_web on, builtin create must stay on the schema form that carries the saved-provider group",
-  );
-  assert.ok(screen.getByText("Server DeepSeek · Team DeepSeek"));
+
+  const provider = await screen.findByTestId("runtime-form-v2-providerId");
+  assert.ok(screen.queryByTestId("schema-runtime-provider-select") === null, "the v1 picker is not rendered");
+  // Open the picker first: the saved group must lead, then take the connection.
+  fireEvent.focus(provider);
+  fireEvent.keyDown(provider, { key: "ArrowDown" });
+  assert.ok(await screen.findByText("Saved providers"), "saved connections lead as their own group");
+  screen.getByText("Direct setup");
+  const savedOption = await screen.findByRole("option", { name: "DeepSeek · Team DeepSeek" });
+  fireEvent.pointerDown(savedOption);
+  fireEvent.click(savedOption);
+  const apiKey = screen.getByTestId("runtime-form-v2-apiKey");
+  assert.equal(apiKey.hasAttribute("disabled"), true, "the connection owns the credential field");
+  assert.match(apiKey.getAttribute("placeholder") ?? "", /Provided by/);
+  assert.equal(screen.getByTestId("runtime-form-v2-edit-provider-connection-providerId") !== null, true, "the authorized pencil is present");
+
+  fireEvent.change(screen.getByPlaceholderText("e.g. Alice"), { target: { value: "V2Conn" } });
+  fireEvent.click(screen.getByRole("button", { name: "Create Agent" }));
+  await waitFor(() => assert.equal(postBodies.length, 1));
+  const submitted = postBodies[0] as Record<string, unknown> & { formValues: Record<string, unknown> };
+  assert.deepEqual(submitted.formDefinitionRef, { protocolVersion: 2, runtimeId: "builtin" });
+  assert.equal(submitted.runtimeConfig, undefined);
+  assert.equal(submitted.formValues.providerId, `connection:${CONNECTION}`);
+  assert.equal(submitted.formValues.model, "deepseek-v4-pro");
+  assert.equal("apiKey" in submitted.formValues, false, "owned fields never enter formValues");
+  assert.equal("baseUrl" in submitted.formValues, false);
+  assert.equal("supportsImageInput" in submitted.formValues, false);
 });
 
 test("gateway image-input checkbox resets on provider switch and submits only when checked", async () => {
@@ -1433,10 +1490,7 @@ test("with runtime_form_v2_web on, create renders the v2 form by field kind, tol
   assert.ok(screen.queryByText("Colour") === null, "an optional field of an unknown kind is skipped, not fatal");
   assert.ok(screen.queryByTestId("schema-runtime-model-select") === null, "the v1 renderer is not used");
 
-  fireEvent.click(modelSelect);
-  const k2Option = await screen.findByRole("option", { name: "Kimi K2" });
-  fireEvent.pointerDown(k2Option);
-  fireEvent.click(k2Option);
+  await pickOption(modelSelect, "Kimi K2");
   await waitFor(() => assert.ok(screen.queryByTestId("runtime-form-v2-reasoningEffort") === null));
 
   fireEvent.change(screen.getByPlaceholderText("e.g. Alice"), { target: { value: "V2Alice" } });
@@ -1620,10 +1674,7 @@ test("with runtime_form_v2_web on, OpenCode creates through its v2 form: model s
   assert.equal(advanced.getAttribute("aria-expanded"), "true");
   screen.getByText("These will be injected into the runtime command environment.");
   // The option source's defaultValue preselects; pick another bundled model.
-  fireEvent.click(model);
-  const option = await screen.findByRole("option", { name: "DeepSeek V4 Pro · DeepSeek" });
-  fireEvent.pointerDown(option);
-  fireEvent.click(option);
+  await pickOption(model, "DeepSeek V4 Pro · DeepSeek");
   fireEvent.change(screen.getByPlaceholderText("e.g. Alice"), { target: { value: "V2OpenCode" } });
   fireEvent.click(screen.getByRole("button", { name: "Create Agent" }));
   await waitFor(() => assert.equal(postBodies.length, 1));
@@ -1681,10 +1732,24 @@ async function renderCodexV2Create(sourceResponses: Array<() => unknown>, form: 
 }
 
 const pickOption = async (trigger: HTMLElement, name: RegExp | string) => {
-  fireEvent.click(trigger);
+  // A searchable field (combobox) opens from its input; a select from its trigger.
+  if (trigger instanceof HTMLInputElement) {
+    fireEvent.focus(trigger);
+    fireEvent.keyDown(trigger, { key: "ArrowDown" });
+  } else {
+    fireEvent.click(trigger);
+  }
   const option = await screen.findByRole("option", { name });
   fireEvent.pointerDown(option);
   fireEvent.click(option);
+};
+
+/** A searchable field that allows custom values: type it, then take the "Use …" row. */
+const typeCustomValue = async (field: HTMLElement, value: string) => {
+  fireEvent.change(field, { target: { value } });
+  const use = await screen.findByTestId(`${field.getAttribute("data-testid")}-use-custom`);
+  fireEvent.pointerDown(use);
+  fireEvent.click(use);
 };
 
 test("codex v2 create: combobox model, labelled reasoning choices, fast mode; a typed custom model is submitted as typed", async () => {
@@ -1707,10 +1772,8 @@ test("codex v2 create: combobox model, labelled reasoning choices, fast mode; a 
   // Fast mode is a switch.
   fireEvent.click(screen.getByTestId("runtime-form-v2-fastMode"));
 
-  // Custom: pick "Custom", then type.
-  await pickOption(model, "Custom");
-  const typed = await screen.findByTestId("runtime-form-v2-model-custom");
-  fireEvent.change(typed, { target: { value: "my-org/typed-model" } });
+  // Custom: type the model id, then use it as typed.
+  await typeCustomValue(model, "my-org/typed-model");
 
   fireEvent.change(screen.getByPlaceholderText("e.g. Alice"), { target: { value: "V2Codex" } });
   const create = screen.getByRole("button", { name: "Create Agent" }) as HTMLButtonElement;
@@ -1929,13 +1992,11 @@ test("pi v2 create: Configured shows the Computer's model list; DeepSeek swaps i
   assert.ok(screen.queryByTestId("runtime-form-v2-reasoningEffort") === null);
   screen.getByTestId("runtime-form-v2-providerReasoningEffort");
   assert.ok(screen.queryByTestId("runtime-form-v2-providerModel-status") === null, "a static list has no status line");
-  // The provider's own list, no Custom (legacy locks the picker to it).
-  fireEvent.click(providerModel);
-  await screen.findByRole("option", { name: "DeepSeek V4.1 Flash" });
-  assert.ok(screen.queryByRole("option", { name: "Custom" }) === null);
-  const flash = screen.getByRole("option", { name: "DeepSeek V4.1 Flash" });
-  fireEvent.pointerDown(flash);
-  fireEvent.click(flash);
+  // The provider's own list, no custom value (legacy locks the picker to it).
+  fireEvent.change(providerModel, { target: { value: "not-a-listed-model" } });
+  assert.ok(screen.queryByTestId("runtime-form-v2-providerModel-use-custom") === null);
+  fireEvent.change(providerModel, { target: { value: "" } });
+  await pickOption(providerModel, "DeepSeek V4.1 Flash");
 
   fireEvent.change(apiKey, { target: { value: "sk-typed" } });
   fireEvent.change(screen.getByPlaceholderText("e.g. Alice"), { target: { value: "V2Pi" } });
@@ -1962,9 +2023,7 @@ test("pi v2 create: Configured shows the Computer's model list; DeepSeek swaps i
 test("pi v2 create: a typed Configured model is submitted as typed and hides the reasoning effort", async () => {
   const { postBodies } = await renderPiV2Create();
   const model = await screen.findByTestId("runtime-form-v2-model");
-  await pickOption(model, "Custom");
-  const typed = await screen.findByTestId("runtime-form-v2-model-custom");
-  fireEvent.change(typed, { target: { value: "anthropic/claude-typed" } });
+  await typeCustomValue(model, "anthropic/claude-typed");
   await waitFor(() => assert.ok(screen.queryByTestId("runtime-form-v2-reasoningEffort") === null));
   fireEvent.change(screen.getByPlaceholderText("e.g. Alice"), { target: { value: "V2PiTyped" } });
   const create = screen.getByRole("button", { name: "Create Agent" }) as HTMLButtonElement;

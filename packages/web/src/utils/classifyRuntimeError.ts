@@ -31,3 +31,39 @@ export const RUNTIME_ERROR_LABEL_ID: Record<RuntimeErrorKind, MessageId> = {
   authFailed: "agent.runtimeError.authFailed",
   toolArgsInvalid: "agent.runtimeError.toolArgsInvalid",
 };
+
+// task #735 — a runtime lookup failure (`runtime_not_found`) now discriminates
+// WHY the lookup missed, on both the detect side (`unavailableReason`:
+// not_installed/probe_timeout/probe_failed/permission_denied) and the launch
+// side (`WindowsLaunchFailureReason`: not_on_path/lookup_timed_out/
+// lookup_permission_denied/lookup_failed). Only a confirmed miss may keep the
+// install-guidance copy; timeouts, permission denials and unresolved failures
+// each get their own arm, and an absent reason (old daemon) is unresolved too
+// — uncertainty never collapses into "install it".
+export type RuntimeLookupDisplay = "confirmed_missing" | "timeout" | "permission_denied" | "unconfirmed";
+
+export function runtimeLookupDisplayForReason(reason: string | null | undefined): RuntimeLookupDisplay {
+  switch (reason) {
+    // Detect: probe found no executable. Launch: the locator answered
+    // CommandNotFoundException (exit 3) — a genuine miss, not a failed check.
+    case "not_installed":
+    case "not_on_path":
+      return "confirmed_missing";
+    case "probe_timeout":
+    case "lookup_timed_out":
+      return "timeout";
+    case "permission_denied":
+    case "lookup_permission_denied":
+      return "permission_denied";
+    // probe_failed / lookup_failed / absent (old daemon) / unknown value.
+    default:
+      return "unconfirmed";
+  }
+}
+
+/** Catalog ids for the non-install arms; each site keeps its own confirmed-missing copy. */
+export const RUNTIME_LOOKUP_DISPLAY_MESSAGE_ID: Record<Exclude<RuntimeLookupDisplay, "confirmed_missing">, MessageId> = {
+  timeout: "agent.runtimeModels.runtimeLookupTimeout",
+  permission_denied: "agent.runtimeModels.runtimeLookupPermissionDenied",
+  unconfirmed: "agent.runtimeModels.runtimeLookupUnresolved",
+};

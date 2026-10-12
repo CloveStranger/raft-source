@@ -227,7 +227,7 @@ test("machine detail blocked delete is a single-action shared confirmation", asy
 
   renderWithIntl(
     <MemoryRouter initialEntries={["/s/acme/settings/computers/machine-1"]}>
-      <MachineDetailPanel machine={useMachineStore.getState().machines[0]!} workspaceEmbedded />
+      <MachineDetailPanel machine={useMachineStore.getState().machines[0]!} hideHeader />
     </MemoryRouter>,
   );
 

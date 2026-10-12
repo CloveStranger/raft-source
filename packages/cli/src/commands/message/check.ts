@@ -16,6 +16,7 @@ import { createDaemonApiSurfaceClient } from "../../daemonApiPath";
 import { drainInbox } from "./_inbox";
 import { formatAppItemsUnavailable, formatInboxHint, formatMessages, formatTarget } from "./_format";
 import { recordConsumedExactSeqs } from "./_consumedSeqState";
+import { elideSeenSenders } from "./_senderElision";
 
 export const messageCheckCommand = defineCommand(
   {
@@ -51,13 +52,15 @@ export const messageCheckCommand = defineCommand(
       : result.drainComplete
         ? "\nNo more new inbox messages.\n"
         : "\n";
-    writeText(ctx.io, adoptCliReplyText(`${formatMessages(result.messages)}${drainStatus}${appInboxStatus}`));
+    const senders = elideSeenSenders(result.messages, agentContext.agentId);
+    writeText(ctx.io, adoptCliReplyText(`${formatMessages(senders.messages)}${drainStatus}${appInboxStatus}`));
     if (result.inboxHint) writeText(ctx.io, formatInboxHint(result.inboxHint), NL);
     // Task #178: ack leased third-party events only after their bodies reached
     // stdout. If the write or flush fails (EPIPE, closed pipe) nothing is
     // acked; the daemon lease expires and the events are served again on the
     // next check. An old daemon without the route answers non-2xx: ignored.
     const leases = result.thirdPartyLeases ?? [];
+    await senders.settle(ctx.io);
     if (leases.length > 0 && await flushText(ctx.io)) {
       const daemonApi = createDaemonApiSurfaceClient(client);
       for (const lease of leases) {

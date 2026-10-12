@@ -94,6 +94,30 @@ test("one model-label projection owns pending, live, and terminal fallback copy"
   }), { kind: "resolved", label: "Claude Opus" }, "declared static catalogs never regress to a loading label");
 });
 
+test("task #735: the runtime_not_found lookup reason survives parsing; absent or unknown drops to unresolved", () => {
+  for (const reason of ["not_installed", "probe_timeout", "probe_failed", "permission_denied"] as const) {
+    assert.deepEqual(
+      parseRuntimeModelSourcePayload({ kind: "error", retryable: true, code: "runtime_not_found", reason }),
+      { kind: "error", retryable: true, code: "runtime_not_found", reason },
+      reason,
+    );
+  }
+  // Old daemon: code present, no reason field.
+  assert.deepEqual(
+    parseRuntimeModelSourcePayload({ kind: "error", retryable: true, code: "runtime_not_found" }),
+    { kind: "error", retryable: true, code: "runtime_not_found" },
+  );
+  // An unknown or malformed reason never reaches the display layer.
+  assert.deepEqual(
+    parseRuntimeModelSourcePayload({ kind: "error", retryable: true, code: "runtime_not_found", reason: "definitely_installed" }),
+    { kind: "error", retryable: true, code: "runtime_not_found" },
+  );
+  assert.deepEqual(
+    parseRuntimeModelSourcePayload({ kind: "error", retryable: true, code: "runtime_not_found", reason: 42 }),
+    { kind: "error", retryable: true, code: "runtime_not_found" },
+  );
+});
+
 test("typed and legacy payloads preserve live, empty, and error truth", () => {
   const live = { kind: "live", value: { models: [{ id: "k2.7", label: "K2.7" }], default: "k2.7" } } as const;
   assert.deepEqual(parseRuntimeModelSourcePayload(live), live);

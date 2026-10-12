@@ -93,13 +93,11 @@ test("keeps a Claude model selected before async runtime admission", async ({ pa
     await page.getByRole("button", { name: "Create" }).click();
     await expect(page.getByRole("heading", { name: "Create Agent" })).toBeVisible();
 
-    const trigger = page
-      .getByRole("combobox")
-      .filter({ hasText: /Claude Opus|Claude Sonnet|Claude Haiku|Claude Fable/ })
-      .first();
-    await trigger.click();
+    const modelBox = page.getByTestId("runtime-model-combobox");
+    await expect(modelBox).toHaveValue(/Claude Opus|Claude Sonnet|Claude Haiku|Claude Fable/);
+    await modelBox.click();
     await page.getByRole("option", { name: "Claude Fable", exact: true }).click();
-    await expect(trigger).toHaveText("Claude Fable");
+    await expect(modelBox).toHaveValue("Claude Fable");
 
     const agentName = `ClaudeRaceW${testInfo.workerIndex}R${testInfo.retry}P${testInfo.repeatEachIndex}`;
     await page.locator("#create-agent-name").fill(agentName);
@@ -113,7 +111,7 @@ test("keeps a Claude model selected before async runtime admission", async ({ pa
     releaseRuntimeOptions?.();
     await admissionResponse;
 
-    await expect(trigger).toHaveText("Claude Fable");
+    await expect(modelBox).toHaveValue("Claude Fable");
     const createButton = page.getByRole("button", { name: "Create Agent" });
     await expect(createButton).toBeEnabled();
     const [agentRequest, response] = await Promise.all([

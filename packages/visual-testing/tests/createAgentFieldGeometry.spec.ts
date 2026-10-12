@@ -36,7 +36,10 @@ async function fieldGaps(page: import("@playwright/test").Page) {
     const fields = [...document.querySelectorAll('[data-slot="field"]')];
     const gaps: number[] = [];
     for (let i = 1; i < fields.length; i++) {
-      const prevControl = fields[i - 1].querySelector("input,textarea,button[data-slot]");
+      // A searchable model field has a padded outer control around its input.
+      // Spacing follows that visible border, not the inner text line.
+      const prevControl = fields[i - 1].querySelector('[data-slot="combobox-control"]')
+        ?? fields[i - 1].querySelector("input,textarea,button[data-slot]");
       const nextLabel = fields[i].querySelector('[data-slot="field-label"]');
       if (!prevControl || !nextLabel) continue;
       const a = prevControl.getBoundingClientRect();
@@ -86,10 +89,13 @@ test("selects and inputs share one field contract, not button metrics", async ({
     [...document.querySelectorAll('[data-slot="field"]')].map((f) => {
       const c = f.querySelector("input,textarea,button[data-slot]") as HTMLElement | null;
       if (!c) return null;
+      const frame = c.closest('[data-slot="combobox-control"]') ?? c;
       const s = getComputedStyle(c);
-      return { tag: c.tagName.toLowerCase(), h: Math.round(c.getBoundingClientRect().height), fs: s.fontSize, fw: s.fontWeight };
+      return { tag: c.tagName.toLowerCase(), h: Math.round(frame.getBoundingClientRect().height), fs: s.fontSize, fw: s.fontWeight };
     }).filter(Boolean),
   );
+  // Measure the combobox border for height, but its actual input for text.
+  // Reading both from the wrapper could mask incorrectly styled inner text.
   // The textarea is intentionally taller; every single-line control matches.
   const singleLine = metrics.filter((m) => m!.tag !== "textarea");
   // Guard the loop itself: iterating an empty array passes every expect inside

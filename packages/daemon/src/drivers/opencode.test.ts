@@ -165,15 +165,30 @@ test("resolveOpenCodeSpawn rejects a missing non-Windows binary", () => {
   );
 });
 
-test("probe marks a missing non-Windows binary unavailable", () => {
+test("probe marks a missing non-Windows binary unavailable as not_installed", () => {
   const result = new OpenCodeDriver().probe({
     platform: "darwin",
+    homeDir: "/nonexistent-home",
+    existsSyncFn: () => false,
     execFileSyncFn: (() => {
-      throw new Error("not found");
+      throw Object.assign(new Error("not found"), { status: 1 });
     }) as any,
   });
 
-  assert.deepEqual(result, { available: false });
+  assert.deepEqual(result, { available: false, unavailableReason: "not_installed" });
+});
+
+test("probe marks an installed but unsupported OpenCode as unsupported_version, not not_installed", () => {
+  const result = new OpenCodeDriver().probe({
+    platform: "darwin",
+    execFileSyncFn: ((command: string) => {
+      if (command === "which") return Buffer.from("/opt/opencode/bin/opencode\n");
+      return Buffer.from("1.14.20\n");
+    }) as any,
+  });
+
+  assert.equal(result.available, false);
+  assert.equal(result.unavailableReason, "unsupported_version");
 });
 
 test("resolveOpenCodeSpawn bypasses Windows npm cmd shim and launches package exe", () => {
@@ -663,7 +678,7 @@ test("buildOpenCodeLaunchOptions keeps native standing prompt separate from dyna
   await withTempDirAsync(async (root) => {
     const ctx = makeSpawnContext(root);
     ctx.standingPrompt = "static raft CLI guide";
-    ctx.prompt = "[Raft inbox notice:\nInbox update: 1 unread message total\n]";
+    ctx.prompt = "[Raft inbox notice:\nInbox update: 1 message pending your read across all conversations\n]";
     const launch = await buildOpenCodeLaunchOptions(ctx, root);
 
     assert.deepEqual(launch.args.slice(-2), ["--", ctx.prompt]);
@@ -681,6 +696,7 @@ test("buildOpenCodeLaunchOptions includes --agent for versions before 1.15.0", a
     assert.ok(launch.args.includes("--agent"));
     assert.ok(launch.args.includes("slock"));
     assert.equal(JSON.parse(String(launch.env.OPENCODE_CONFIG_CONTENT)).agent.slock.prompt, "standing");
+    assert.equal(JSON.parse(String(launch.env.OPENCODE_CONFIG_CONTENT)).default_agent, undefined, "older versions select the agent with --agent");
   });
 });
 
@@ -690,7 +706,10 @@ test("buildOpenCodeLaunchOptions omits --agent for versions 1.15.0 and later", a
     const launch = await buildOpenCodeLaunchOptions(ctx, root, "1.15.0");
 
     assert.equal(launch.args.includes("--agent"), false);
-    assert.equal(JSON.parse(String(launch.env.OPENCODE_CONFIG_CONTENT)).agent.slock.prompt, "standing");
+    const config = JSON.parse(String(launch.env.OPENCODE_CONFIG_CONTENT));
+    assert.equal(config.agent.slock.prompt, "standing");
+    // Without --agent, opencode run picks default_agent; otherwise its own `build` agent and prompt.
+    assert.equal(config.default_agent, "slock");
   });
 });
 

@@ -1,0 +1,1 @@
+DROP TABLE "agent_config_migrations" CASCADE;

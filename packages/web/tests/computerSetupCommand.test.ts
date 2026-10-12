@@ -40,6 +40,7 @@ function isolatedWindowsCommands(slug: string, deploymentEnv: string, serverUrlA
   return {
     install: `${environment} ${windowsComputerInstallCommand(deploymentEnv)}`,
     setup: `${environment} ${binary} setup /${slug}${serverUrlArg}`,
+    installAndSetup: null,
     status: `${environment} ${binary} status`,
     doctor: `${environment} ${binary} doctor`,
     restartService: `${environment} ${binary} restart`,
@@ -205,7 +206,7 @@ test("Windows Computer staging and slockdev commands are self-contained PowerShe
     const expected = isolatedWindowsCommands("acme", env, serverUrlArg);
     assert.ok(commands);
     assert.deepEqual(commands, expected);
-    for (const command of Object.values(commands)) {
+    for (const command of Object.values(commands).filter((value): value is string => value !== null)) {
       assert.match(command, /\$env:RAFT_HOME = "\$env:USERPROFILE\\\.raft-computer-acme"/);
       assert.match(command, /\$env:RAFT_COMPUTER_INSTALL_DIR = "\$env:RAFT_HOME\\bin"/);
       assert.doesNotMatch(command, /RAFT_HOME="\$HOME| sh -c |npx\.cmd|raft-daemon/);
@@ -321,6 +322,25 @@ test("Windows Computer install command is a PowerShell one-liner against the env
     windowsComputerInstallCommand("staging", "1.0.14"),
     `$env:RAFT_COMPUTER_RELEASE_BASE = "${COMPUTER_CDN_BASE_STAGING}"; $env:RAFT_COMPUTER_INSTALL_CHANNEL = "alpha"; $env:RAFT_COMPUTER_VERSION = "1.0.14"; irm "$env:RAFT_COMPUTER_RELEASE_BASE/install.ps1" | iex`,
   );
+});
+
+test("mac/Linux production offers one paste that installs then runs setup; Windows and isolated envs keep two steps", () => {
+  const prod = getComputerCommands("acme", "production", DEFAULT_COMPUTER_SERVER_URL);
+  assert.equal(prod?.installAndSetup, `curl -fsSL ${COMPUTER_CDN_BASE_PROD}/install.sh | sh -s -- --setup /acme`);
+  // Setup arguments ride after --setup, exactly as the separate setup step has them.
+  const custom = getComputerCommands("acme", "production", "https://raft.example.com", { machineId: "m-1" });
+  assert.equal(
+    custom?.installAndSetup,
+    `curl -fsSL ${COMPUTER_CDN_BASE_PROD}/install.sh | sh -s -- --setup /acme --server-url https://raft.example.com --machine m-1`,
+  );
+  // A version pin stays on the installer process, before -s.
+  const pinned = getComputerCommands("acme", "production", DEFAULT_COMPUTER_SERVER_URL, { version: "1.0.45" });
+  assert.equal(pinned?.installAndSetup, `curl -fsSL ${COMPUTER_CDN_BASE_PROD}/install.sh | RAFT_COMPUTER_VERSION=1.0.45 sh -s -- --setup /acme`);
+  // Windows pastes `irm … | iex`, which cannot take arguments: two steps.
+  assert.equal(getComputerCommands("acme", "production", DEFAULT_COMPUTER_SERVER_URL, { platform: "windows" })?.installAndSetup, null);
+  for (const env of ["staging", "slockdev"]) {
+    assert.equal(getComputerCommands("acme", env, "https://x.example.com")?.installAndSetup, null);
+  }
 });
 
 test("Computer setup command uses the installed Raft binary without path details", () => {

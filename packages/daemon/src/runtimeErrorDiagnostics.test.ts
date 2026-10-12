@@ -303,7 +303,7 @@ test("formatRuntimeLoginRequiredMessage gives action-oriented runtime copy", () 
   );
   assert.equal(
     formatRuntimeLoginRequiredMessage("pi"),
-    "Pi is not logged in on this machine. Please log in to Pi locally, then retry starting this agent.",
+    "Pi's model provider rejected the API key, or no key is set for it on this machine. Check the API key for this agent's provider, then retry starting this agent.",
   );
   assert.equal(
     formatRuntimeLoginRequiredMessage("builtin"),
@@ -318,8 +318,16 @@ test("formatRuntimeStartTimeoutMessage gives bounded-startup guidance", () => {
   );
 });
 
+const GROK_INPUT_TOO_LARGE_TEXT =
+  "Grok Build reported input that is too large for the selected model. Restart keeps the existing session. "
+  + "To start a new session, someone who can manage this agent can open Restart / Reset and choose Reset Session & Restart "
+  + "(shown as Reset Model for members). This stops current work and clears the runtime conversation context, "
+  + "while keeping Raft messages and workspace files, including MEMORY.md. "
+  + "If the error persists in a new session, reduce the prompt or configured startup context.";
+
 test("Grok's input-too-large message names the control that starts a new session", () => {
   const message = formatRuntimeInputTooLargeMessage("grok");
+  assert.equal(message, GROK_INPUT_TOO_LARGE_TEXT, "the Grok text is unchanged");
   // No compaction exists for Grok and Restart reloads the same session, so the
   // text must point at the real control by its web labels, not "compact it".
   assert.doesNotMatch(message, /compact/i);
@@ -330,8 +338,17 @@ test("Grok's input-too-large message names the control that starts a new session
   assert.match(message, /If the error persists in a new session, reduce the prompt or configured startup context\.$/);
 });
 
+test("Pi and Built-in name Reset Session & Restart too: Raft has no compact control and Restart resumes the session", () => {
+  for (const [runtime, label] of [["pi", "Pi"], ["builtin", "Built-in Pi"]] as const) {
+    const message = formatRuntimeInputTooLargeMessage(runtime);
+    assert.doesNotMatch(message, /compact/i, runtime);
+    assert.ok(message.startsWith(`${label} reported input that is too large for the selected model. Restart keeps the existing session. `), message);
+    assert.match(message, /open Restart \/ Reset and choose Reset Session & Restart \(shown as Reset Model for members\)/, runtime);
+  }
+});
+
 test("other runtimes keep the generic input-too-large text", () => {
-  for (const runtime of ["claude", "codex", "pi", "kimi", "gemini", "opencode"]) {
+  for (const runtime of ["claude", "codex", "kimi", "gemini", "opencode"]) {
     const message = formatRuntimeInputTooLargeMessage(runtime);
     assert.match(message, /For a resumed session, compact it or start a new session before retrying\.$/, runtime);
     assert.doesNotMatch(message, /Reset Session & Restart/, runtime);

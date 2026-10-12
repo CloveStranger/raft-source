@@ -49,19 +49,21 @@ type Delivery = { agentId: string; payload: Record<string, unknown>; options: Re
 
 function installRecordingOrchestrator(app: { set: (key: string, value: unknown) => void }): Delivery[] {
   const deliveries: Delivery[] = [];
-  const stub = new Proxy({}, {
-    get(_target, prop) {
-      if (prop === "deliverMessage") {
-        return async (agentId: string, payload: Record<string, unknown>, options?: Record<string, unknown>) => {
-          deliveries.push({ agentId, payload, options });
-          return { status: "queued", reason: "test" };
-        };
-      }
-      if (prop === "receiveMessages" || prop === "peekPendingMessages") return async () => [];
-      if (prop === "shutdown" || prop === "setIO" || prop === "evictCache") return () => {};
-      return async () => {};
-    },
-  });
+  // Exactly the orchestrator surface these flows use (no catch-all: a method
+  // the code starts calling must be added here, not silently answered).
+  const deliverMessage = async (agentId: string, payload: Record<string, unknown>, options?: Record<string, unknown>) => {
+    deliveries.push({ agentId, payload, options });
+    return { status: "queued", reason: "test" };
+  };
+  const stub = {
+    deliverMessage,
+    deliverMessagesOnChannel: (
+      _channelId: string,
+      batch: ReadonlyArray<{ agentId: string; message: Record<string, unknown>; options?: Record<string, unknown> }>,
+    ) => batch.map(({ agentId, message, options }) => deliverMessage(agentId, message, options)),
+    loadDeliveryGates: async () => null,
+    recordAgentRaftAction: async () => {},
+  };
   app.set("agentOrchestrator", stub);
   return deliveries;
 }

@@ -101,7 +101,8 @@ test("remove-member command sends DELETE body with normalized handle", async () 
           data: {
             ok: true,
             wasMember: true,
-            member: { type: "human", name: "alice" },
+            channelId: "channel-1",
+            member: { type: "human", id: "user-1", name: "alice" },
             attention: {
               stillArrives: ["If #engineering is public, followed threads still notify @alice until they unfollow them."],
               threadBoundary: "Removing a channel member does not unfollow existing thread follows.",
@@ -125,7 +126,7 @@ test("remove-member command sends DELETE body with normalized handle", async () 
     },
     {
       method: "DELETE",
-      path: "/internal/agent/agent-1/channels/channel-1/members",
+      path: "/internal/agent-api/channels/channel-1/members",
       body: { user: "alice" },
     },
   ]);

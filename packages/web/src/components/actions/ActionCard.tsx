@@ -12,7 +12,7 @@
 // existing modal dialog in prefilled mode if any required fields are
 // still missing.
 
-import { useRef, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { useIntl } from "react-intl";
 import type { MessageId } from "../../i18n/messages";
@@ -226,34 +226,61 @@ export function ActionCard({ messageId, metadata, channelId }: Props) {
   // never block the underlying user action. The server validates the card
   // + access and re-derives `action_type` from the canonical card row, so
   // the metadata we pass here is intentionally minimal.
-  function emitEvent(
-    eventType: ClientEventType,
-    payload?: OpenMetadata | DismissMetadata | AttemptMetadata | FailMetadata,
-  ): void {
-    api
-      .post(`/actions/${messageId}/event`, {
-        eventType,
-        metadata: payload ?? {},
-      })
-      .catch((err) => {
-        // Silent: the funnel is best-effort.
-        console.debug("[actionCard] event emit failed:", eventType, err);
-      });
-  }
+  const emitEvent = useCallback(
+    (
+      eventType: ClientEventType,
+      payload?: OpenMetadata | DismissMetadata | AttemptMetadata | FailMetadata,
+    ): void => {
+      api
+        .post(`/actions/${messageId}/event`, {
+          eventType,
+          metadata: payload ?? {},
+        })
+        .catch((err) => {
+          // Silent: the funnel is best-effort.
+          console.debug("[actionCard] event emit failed:", eventType, err);
+        });
+    },
+    [messageId],
+  );
 
-  function applyActionCardMutation(out: ActionCardMutationResponse): void {
-    useMessageStore.getState().updateMessage({
-      id: out.messageId,
-      channelId,
-      actionMetadata: out.metadata,
-    });
-  }
+  const applyActionCardMutation = useCallback(
+    (out: ActionCardMutationResponse): void => {
+      useMessageStore.getState().updateMessage({
+        id: out.messageId,
+        channelId,
+        actionMetadata: out.metadata,
+      });
+    },
+    [channelId],
+  );
+
+  const confirmationVersion = metadata.confirmationVersion;
+  const actionType = action.type;
 
   // Dialog-backed cards keep the stdrc 2026-05-10 #proj-approval contract:
   // open the regular user-facing dialog with editable prefilled values, then
   // mark the card executed only after the normal API succeeds. Owner-commit
   // cards below execute server-side because the commit itself is the action.
-  function handleClick() {
+  const handleClick = useCallback(() => {
+    async function executeInlineAction() {
+      setBusy(true);
+      try {
+        const { data } = await api.post<ActionCardMutationResponse>(
+          `/actions/${messageId}/execute`,
+          { expectedState: "prepared", expectedConfirmationVersion: confirmationVersion },
+        );
+        // Server also emits message:updated, but applying the response keeps
+        // the clicked card in sync even if realtime delivery lags or is missed.
+        applyActionCardMutation(data);
+      } catch (err) {
+        const e = err as { response?: { data?: { error?: string } }; message?: string } | null;
+        setError(e?.response?.data?.error ?? e?.message ?? formatMessage({ id: "actionCard.executeFailed" }));
+      } finally {
+        setBusy(false);
+      }
+    }
+
     setError(null);
     if (isFrozen || !canOperateCard) return;
     if (needsReconfirmation) {
@@ -269,11 +296,11 @@ export function ActionCard({ messageId, metadata, channelId }: Props) {
     }
     submitSucceededRef.current = false;
     if (
-      action.type === "integration:approve_agent_login"
-      || action.type === "integration:install_marketplace_app"
-      || action.type === "integration:register_app"
-      || action.type === "integration:update_app_registration"
-      || action.type === "integration:recover_app_owner"
+      actionType === "integration:approve_agent_login"
+      || actionType === "integration:install_marketplace_app"
+      || actionType === "integration:register_app"
+      || actionType === "integration:update_app_registration"
+      || actionType === "integration:recover_app_owner"
     ) {
       void executeInlineAction();
       return;
@@ -282,7 +309,7 @@ export function ActionCard({ messageId, metadata, channelId }: Props) {
     // dialog doesn't lose the signal. Best-effort; swallowed on failure.
     // No metadata — server derives `action_type` from the card row.
     emitEvent("action_card.open", {});
-    switch (action.type) {
+    switch (actionType) {
       case "channel:create":
         setChannelDialogOpen(true);
         return;
@@ -293,25 +320,17 @@ export function ActionCard({ messageId, metadata, channelId }: Props) {
         setAddMembersDialogOpen(true);
         return;
     }
-  }
-
-  async function executeInlineAction() {
-    setBusy(true);
-    try {
-      const { data } = await api.post<ActionCardMutationResponse>(
-        `/actions/${messageId}/execute`,
-        { expectedState: "prepared", expectedConfirmationVersion: metadata.confirmationVersion },
-      );
-      // Server also emits message:updated, but applying the response keeps
-      // the clicked card in sync even if realtime delivery lags or is missed.
-      applyActionCardMutation(data);
-    } catch (err) {
-      const e = err as { response?: { data?: { error?: string } }; message?: string } | null;
-      setError(e?.response?.data?.error ?? e?.message ?? formatMessage({ id: "actionCard.executeFailed" }));
-    } finally {
-      setBusy(false);
-    }
-  }
+  }, [
+    actionType,
+    applyActionCardMutation,
+    canOperateCard,
+    confirmationVersion,
+    emitEvent,
+    formatMessage,
+    isFrozen,
+    messageId,
+    needsReconfirmation,
+  ]);
 
   // Funnel hook: dialog closed without a successful submit. The
   // `submitSucceededRef` flag is set in onCreated/onSubmitted handlers
@@ -320,18 +339,30 @@ export function ActionCard({ messageId, metadata, channelId }: Props) {
   // close-button / ESC / backdrop on the FE — all collapse to a single
   // dismiss without a `dismiss_reason`. Adding that resolution is a
   // follow-up.
-  function handleDialogClose(closeFn: () => void) {
-    return () => {
-      if (!submitSucceededRef.current) {
-        // No metadata — server derives `action_type` from the card row.
-        // dismiss_reason omitted in v1 (FE doesn't distinguish X / ESC /
-        // backdrop yet). Adding that resolution is a follow-up.
-        emitEvent("action_card.dismiss", {});
-      }
-      submitSucceededRef.current = false;
-      closeFn();
-    };
-  }
+  const recordDialogClose = useCallback(() => {
+    if (!submitSucceededRef.current) {
+      // No metadata — server derives `action_type` from the card row.
+      // dismiss_reason omitted in v1 (FE doesn't distinguish X / ESC /
+      // backdrop yet). Adding that resolution is a follow-up.
+      emitEvent("action_card.dismiss", {});
+    }
+    submitSucceededRef.current = false;
+  }, [emitEvent]);
+
+  const handleAgentDialogClose = useCallback(() => {
+    recordDialogClose();
+    setAgentDialogOpen(false);
+  }, [recordDialogClose]);
+
+  const handleChannelDialogClose = useCallback(() => {
+    recordDialogClose();
+    setChannelDialogOpen(false);
+  }, [recordDialogClose]);
+
+  const handleAddMembersDialogClose = useCallback(() => {
+    recordDialogClose();
+    setAddMembersDialogOpen(false);
+  }, [recordDialogClose]);
 
   // Funnel hooks for the dialog-driven submit lifecycle. The dialogs run
   // their own create API and may fail before mark-executed is reached,
@@ -342,19 +373,19 @@ export function ActionCard({ messageId, metadata, channelId }: Props) {
   //     stays open for retry; on a successful retry, the corresponding
   //     `execute_success` will arrive server-side via mark-executed.
   // Per Dozy guardrail msg=a1dbc464: client may NOT emit `execute_success`.
-  function handleSubmitStart() {
+  const handleSubmitStart = useCallback(() => {
     emitEvent("action_card.execute_attempt", {});
-  }
+  }, [emitEvent]);
 
-  function handleSubmitError(err: unknown) {
+  const handleSubmitError = useCallback((err: unknown) => {
     emitEvent("action_card.execute_fail", classifyClientError(err));
-  }
+  }, [emitEvent]);
 
-  async function markExecuted(result: ActionCardResult) {
+  const markExecuted = useCallback(async (result: ActionCardResult) => {
     try {
       const { data } = await api.post<ActionCardMutationResponse>(
         `/actions/${messageId}/mark-executed`,
-        { result, expectedConfirmationVersion: metadata.confirmationVersion },
+        { result, expectedConfirmationVersion: confirmationVersion },
       );
       // The socket update is still useful for other tabs/clients; the local
       // response closes the stale-button window on this tab immediately.
@@ -375,24 +406,24 @@ export function ActionCard({ messageId, metadata, channelId }: Props) {
       // failure leg.
       handleSubmitError(err);
     }
-  }
+  }, [applyActionCardMutation, confirmationVersion, handleSubmitError, messageId]);
 
-  function handleAgentCreated(agent: { id: string; name: string }) {
+  const handleAgentCreated = useCallback((agent: { id: string; name: string }) => {
     submitSucceededRef.current = true;
     void markExecuted({ kind: "agent", id: agent.id, name: agent.name });
-  }
+  }, [markExecuted]);
 
-  function handleChannelCreated(channel: { id: string; name: string }) {
+  const handleChannelCreated = useCallback((channel: { id: string; name: string }) => {
     submitSucceededRef.current = true;
     void markExecuted({ kind: "channel", id: channel.id, name: channel.name });
-  }
+  }, [markExecuted]);
 
-  function handleMembersAdded(result: {
+  const handleMembersAdded = useCallback((result: {
     channelId: string;
     channelName: string;
     addedHumanIds: string[];
     addedAgentIds: string[];
-  }) {
+  }) => {
     submitSucceededRef.current = true;
     void markExecuted({
       kind: "channel-members",
@@ -401,7 +432,7 @@ export function ActionCard({ messageId, metadata, channelId }: Props) {
       addedHumanIds: result.addedHumanIds,
       addedAgentIds: result.addedAgentIds,
     });
-  }
+  }, [markExecuted]);
 
   return (
     <div className="action-card relative mt-1 flex w-full items-start gap-3 border-2 border-line-muted bg-layer-panel p-3 text-left">
@@ -485,7 +516,7 @@ export function ActionCard({ messageId, metadata, channelId }: Props) {
 
       {action.type === "agent:create" && agentDialogOpen ? (
         <CreateAgentDialog
-          onClose={handleDialogClose(() => setAgentDialogOpen(false))}
+          onClose={handleAgentDialogClose}
           prefilledName={action.name}
           prefilledDescription={action.description}
           prefilledMachineId={action.requiredComputer ?? action.suggestedComputer}
@@ -501,7 +532,7 @@ export function ActionCard({ messageId, metadata, channelId }: Props) {
 
       {action.type === "channel:create" && channelDialogOpen ? (
         <CreateChannelDialog
-          onClose={handleDialogClose(() => setChannelDialogOpen(false))}
+          onClose={handleChannelDialogClose}
           prefilledName={action.name}
           prefilledDescription={action.description}
           prefilledVisibility={action.visibility}
@@ -521,7 +552,7 @@ export function ActionCard({ messageId, metadata, channelId }: Props) {
           prefilledHumanIds={action.humans}
           prefilledAgentIds={action.agents}
           draftHint={action.draftHint}
-          onClose={handleDialogClose(() => setAddMembersDialogOpen(false))}
+          onClose={handleAddMembersDialogClose}
           onSubmitted={handleMembersAdded}
           actionCardMessageId={messageId}
           actionCardConfirmationVersion={metadata.confirmationVersion}

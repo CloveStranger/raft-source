@@ -1,3 +1,4 @@
+import { MemoryRouter } from "react-router-dom";
 /**
  * Onboarding ⇄ announcement exclusivity (task #4, items ② and ③).
  *
@@ -50,9 +51,9 @@ function suppressionForServer(): boolean {
 function renderAsMainLayoutDoes() {
   const suppressed = suppressionForServer();
   return render(
-    <TestIntlProvider>
+    <MemoryRouter><TestIntlProvider>
       <AnnouncementModal suppressed={suppressed} />
-    </TestIntlProvider>,
+    </TestIntlProvider></MemoryRouter>,
   );
 }
 

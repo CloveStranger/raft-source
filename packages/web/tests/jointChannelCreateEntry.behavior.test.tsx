@@ -13,7 +13,6 @@ import { useChannelStore } from "../src/store/channelStore";
 import { useMachineStore } from "../src/store/machineStore";
 import { useMessageStore } from "../src/store/messageStore";
 import { useServerStore } from "../src/store/serverStore";
-import { useWorkspaceGridNavigationStore } from "../src/components/workspace/workspaceGridNavigationStore";
 import { TestIntlProvider } from "./helpers/intl";
 
 // Mounted-DOM replacement for the sidebar/dialog half of
@@ -50,7 +49,6 @@ afterEach(() => {
   useMachineStore.setState({ machines: [], loading: true } as never);
   useServerStore.setState(useServerStore.getInitialState(), true);
   useAuthStore.setState({ user: null, loading: false, initialized: true } as never);
-  useWorkspaceGridNavigationStore.setState({ active: false, enabled: false, railMode: null } as never);
 });
 
 function installApiStub() {

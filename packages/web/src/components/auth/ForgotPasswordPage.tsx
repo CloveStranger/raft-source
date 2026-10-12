@@ -1,12 +1,13 @@
-import { useState } from "react";
-import type { FormEvent, ReactNode } from "react";
+import { useCallback, useState } from "react";
+import type { ChangeEvent, FormEvent, ReactNode } from "react";
 import { useIntl } from "react-intl";
-import { Button, Input } from "raft-ui";
+import { Button, Input, TextSans } from "raft-ui";
 import { useAuthStore } from "../../store/authStore";
 import { ArrowLeft } from "lucide-react";
 import AuthPageFrame, { AuthPageIntro } from "./AuthPageFrame";
 import Banner from "../ui/Banner";
 import FormField from "../ui/FormField";
+import TextLink from "../ui/TextLink";
 
 interface ForgotPasswordPageProps {
   onBack: () => void;
@@ -19,6 +20,10 @@ export default function ForgotPasswordPage({ onBack }: ForgotPasswordPageProps) 
   const [loading, setLoading] = useState(false);
   const [sent, setSent] = useState(false);
   const [error, setError] = useState("");
+
+  const handleEmailChange = useCallback((e: ChangeEvent<HTMLInputElement>) => {
+    setEmail(e.target.value);
+  }, []);
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
@@ -88,7 +93,7 @@ export default function ForgotPasswordPage({ onBack }: ForgotPasswordPageProps) 
             <Input
               type="email"
               value={email}
-              onChange={(e) => setEmail(e.target.value)}
+              onChange={handleEmailChange}
               required
             />
           </FormField>
@@ -105,11 +110,11 @@ export default function ForgotPasswordPage({ onBack }: ForgotPasswordPageProps) 
           </Button>
         </form>
 
-        <p className="mt-4 text-center text-sm">
-          <button onClick={onBack} className="font-bold text-accent-strong underline theme-brutal:text-brutal-pink">
+        <TextSans size="small" className="mt-4 text-center theme-brutal:text-black/60">
+          <TextLink variant="primary" onClick={onBack}>
             {formatMessage({ id: "auth.backToSignIn.link" })}
-          </button>
-        </p>
+          </TextLink>
+        </TextSans>
       </div>
     </AuthPageFrame>
   );

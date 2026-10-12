@@ -309,7 +309,8 @@ test("probeClaude recovers on the next Windows detection after a command lookup 
     windowsEnvironmentReaderFn: () => null,
   };
 
-  assert.deepEqual(probeClaude(deps), { available: false });
+  // A timed-out lookup is undecided, not "not installed".
+  assert.deepEqual(probeClaude(deps), { available: false, unavailableReason: "probe_timeout" });
   assert.deepEqual(probeClaude(deps), {
     available: true,
     version: "2.1.210 (Claude Code)",

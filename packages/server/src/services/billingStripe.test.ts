@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import type Stripe from "stripe";
 import { eq } from "drizzle-orm";
+import { vi } from "vitest";
 import {
   PRO_AGENT_SEAT_BLOCK_SIZE,
   calculateAgentSeatBlockQuantity,
@@ -13,13 +14,23 @@ import {
   type TraceEvent,
 } from "@botiverse/raft-shared";
 import { getDb } from "../db/index";
-import { subscriptions, servers, users, webhookEvents } from "../db/schema";
+import {
+  referralDiscountFinancialAdjustments,
+  referralDiscountProviderEvents,
+  referralDiscountProviderOperations,
+  referralDiscountRedemptions,
+  subscriptions,
+  servers,
+  users,
+  webhookEvents,
+} from "../db/schema";
 import { runWithTraceSpan } from "../tracing/semanticTrace";
 import { createServer } from "./serverService";
 import { createAgent } from "./agentService";
 import {
   __resetBillingPreviewClockForTests,
   __resetStripeForTests,
+  __setReferralStripeForTests,
   __setBillingPreviewClockForTests,
   __setStripeForTests,
   cancelSubscriptionAtPeriodEnd,
@@ -31,6 +42,20 @@ import {
 } from "./billingService";
 import { getServerBillingEntitlement, requireTeamBillingFeature } from "./planService";
 
+vi.mock("@botiverse/raft-trace-client", () => ({
+  getActiveSpan: () => activeTraceSpan,
+  runWithActiveSpan: async (span: unknown, work: () => unknown) => {
+    const previous = activeTraceSpan;
+    activeTraceSpan = span;
+    try {
+      return await work();
+    } finally {
+      activeTraceSpan = previous;
+    }
+  },
+}));
+
+let activeTraceSpan: unknown = null;
 
 const ENV_KEYS = [
   "STRIPE_BILLING_ENABLED",
@@ -38,6 +63,7 @@ const ENV_KEYS = [
   "STRIPE_WEBHOOK_SECRET",
   "STRIPE_PRO_SEAT_MONTHLY_PRICE_ID",
   "STRIPE_PRO_SEAT_ANNUAL_PRICE_ID",
+  "REFERRAL_DISCOUNT_CHECKOUT_MODE",
   "JWT_SECRET",
 ] as const;
 
@@ -119,6 +145,24 @@ function traceEvent(events: readonly TraceEvent[], name: string): TraceEvent {
   const event = events.find((candidate) => candidate.name === name);
   assert.ok(event, `missing trace event ${name}`);
   return event;
+}
+
+async function assertNoReferralCheckoutRows(label: string) {
+  const [
+    redemptions,
+    providerOperations,
+    providerEvents,
+    financialAdjustments,
+  ] = await Promise.all([
+    getDb().select().from(referralDiscountRedemptions),
+    getDb().select().from(referralDiscountProviderOperations),
+    getDb().select().from(referralDiscountProviderEvents),
+    getDb().select().from(referralDiscountFinancialAdjustments),
+  ]);
+  assert.equal(redemptions.length, 0, `${label}: must not create referral reservation/redemption rows`);
+  assert.equal(providerOperations.length, 0, `${label}: must not create referral provider-operation rows`);
+  assert.equal(providerEvents.length, 0, `${label}: must not create referral provider-event rows`);
+  assert.equal(financialAdjustments.length, 0, `${label}: must not create referral financial rows`);
 }
 
 async function seedUser(label: string) {
@@ -446,6 +490,122 @@ test("checkout creates paid Pro seat params and no local entitlement", async () 
     await assertCheckoutSeats(1, 10);
     await assertCheckoutSeats(2, 12);
     await assertCheckoutSeats(2, 12, "monthly");
+  } finally {
+    restoreEnv(env);
+  }
+});
+
+test("checkout without referral code keeps legacy promotion-code path and creates no referral rows", async () => {
+  const env = snapshotEnv();
+  configureStripeEnv();
+  delete process.env.REFERRAL_DISCOUNT_CHECKOUT_MODE;
+  await openTestDatabase("pglite://");
+  try {
+    const owner = await seedUser("checkout-legacy-no-referral-owner");
+    const server = await createServer("Checkout Legacy No Referral", `checkout-legacy-no-referral-${randomUUID()}`, owner.id);
+    const legacyCreateCalls: unknown[] = [];
+    let referralCreateCalls = 0;
+    __setStripeForTests({
+      checkout: {
+        sessions: {
+          create: async (params: unknown) => {
+            legacyCreateCalls.push(params);
+            return { id: "cs_legacy_no_referral", object: "checkout.session", url: "https://checkout.stripe.test/legacy-no-referral" };
+          },
+        },
+      },
+    } as unknown as Stripe);
+    __setReferralStripeForTests({
+      checkout: {
+        sessions: {
+          create: async () => {
+            referralCreateCalls += 1;
+            throw new Error("referral Stripe client must not handle no-referral checkout");
+          },
+        },
+      },
+    } as unknown as Stripe);
+
+    const url = await createCheckoutSession(
+      server.id,
+      owner.id,
+      "http://localhost:5173/success",
+      "http://localhost:5173/cancel",
+      { targetPlan: "pro", humanSeatQuantity: 2, agentSeatQuantity: 12, billingInterval: "monthly" },
+    );
+
+    assert.equal(url, "https://checkout.stripe.test/legacy-no-referral");
+    assert.equal(referralCreateCalls, 0, "no-referral checkout must not invoke referral Stripe client");
+    assert.equal(legacyCreateCalls.length, 1, "no-referral checkout must use the legacy billing Stripe client");
+    const params = legacyCreateCalls[0] as {
+      allow_promotion_codes?: boolean;
+      discounts?: unknown;
+      customer?: string;
+      line_items?: Array<{ price: string; quantity: number }>;
+      metadata?: Record<string, string>;
+      subscription_data?: { metadata?: Record<string, string> };
+    };
+    assert.equal(params.allow_promotion_codes, true);
+    assert.equal(params.discounts, undefined, "legacy no-referral checkout must not send explicit discounts");
+    assert.equal(params.customer, undefined, "new first checkout must not fabricate a Stripe customer");
+    const expectedSeatQuantity = calculateProPackQuantity(2, 12);
+    assert.deepEqual(params.line_items, [{ price: "price_pro_seat", quantity: expectedSeatQuantity }]);
+    assert.equal(params.metadata?.pricingContract, "raft-pro-seat-v1");
+    assert.equal(params.metadata?.billingInterval, "monthly");
+    assert.equal(params.metadata?.seatQuantity, String(expectedSeatQuantity));
+    assert.equal(params.metadata?.humanSeatQuantity, "2");
+    assert.equal(params.metadata?.requestedAgentSeats, "12");
+    assert.deepEqual(params.subscription_data?.metadata, params.metadata);
+    await assertNoReferralCheckoutRows("legacy no-referral checkout");
+  } finally {
+    restoreEnv(env);
+  }
+});
+
+test("checkout referral code under disabled mode returns generic unavailable before any Stripe client", async () => {
+  const env = snapshotEnv();
+  configureStripeEnv();
+  delete process.env.REFERRAL_DISCOUNT_CHECKOUT_MODE;
+  await openTestDatabase("pglite://");
+  try {
+    const owner = await seedUser("checkout-disabled-referral-owner");
+    const server = await createServer("Checkout Disabled Referral", `checkout-disabled-referral-${randomUUID()}`, owner.id);
+    let legacyCreateCalls = 0;
+    let referralCreateCalls = 0;
+    __setStripeForTests({
+      checkout: {
+        sessions: {
+          create: async () => {
+            legacyCreateCalls += 1;
+            throw new Error("legacy Stripe client must not be invoked for disabled referral code");
+          },
+        },
+      },
+    } as unknown as Stripe);
+    __setReferralStripeForTests({
+      checkout: {
+        sessions: {
+          create: async () => {
+            referralCreateCalls += 1;
+            throw new Error("referral Stripe client must not be invoked while referral checkout is disabled");
+          },
+        },
+      },
+    } as unknown as Stripe);
+
+    await assert.rejects(
+      () => createCheckoutSession(
+        server.id,
+        owner.id,
+        "http://localhost:5173/success",
+        "http://localhost:5173/cancel",
+        { targetPlan: "pro", referralCode: "FRIEND20" },
+      ),
+      /^Error: Referral discount unavailable$/,
+    );
+    assert.equal(legacyCreateCalls, 0);
+    assert.equal(referralCreateCalls, 0);
+    await assertNoReferralCheckoutRows("disabled referral-code checkout");
   } finally {
     restoreEnv(env);
   }

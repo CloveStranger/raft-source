@@ -10,7 +10,12 @@ function read(path: string) {
 
 test("settings billing pricing copy matches current landing pricing copy", () => {
   const shared = read("../shared/src/index.ts");
-  const settings = read("src/components/settings/SettingsPanel.tsx");
+  // PlanSectionContent was split out of SettingsPanel into its own file; read
+  // both so the billing copy surface is the same text as before the move.
+  const settings = [
+    read("src/components/settings/SettingsPanel.tsx"),
+    read("src/components/settings/PlanSectionContent.tsx"),
+  ].join("\n");
   const billingCopy = `${shared}\n${settings}`;
   // PRE-EXISTING BUG, found while re-anchoring: this slice looked for
   // `const freeIncludedFeatures` in SettingsPanel, but those constants live in

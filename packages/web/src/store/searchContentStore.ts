@@ -1,3 +1,4 @@
+import { useUIStore } from "./uiStore";
 import { create } from "zustand";
 import { registerServerReset } from "./serverResetRegistry";
 
@@ -43,7 +44,10 @@ interface SearchContentState {
 
 export const useSearchContentStore = create<SearchContentState>((set) => ({
   slot: null,
-  open: (slot) => set({ slot }),
+  open: (slot) => {
+    useUIStore.getState().restoreThreadLayout();
+    set({ slot });
+  },
   close: () => set({ slot: null }),
   consumeMessageFocus: (kind, id) => set((state) => {
     if (

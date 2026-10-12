@@ -1,7 +1,6 @@
 import {
   AGENT_MIGRATION_FEATURE_FLAG_KEY,
   ANTIPROTON_HOSTED_RUNTIME_FEATURE_FLAG_KEY,
-  CHAT_GRID_LAYOUT_FEATURE_FLAG_KEY,
   CHANNEL_TO_JOINT_CONVERSION_FEATURE_FLAG_KEY,
   CHANNEL_MANAGER_ROLE_ACTIONS_FEATURE_FLAG_KEY,
   COMPOSER_RESOURCE_REFERENCES_FEATURE_FLAG_KEY,
@@ -10,6 +9,7 @@ import {
   SERVER_LABS_UI_FEATURE_FLAG_KEY,
   SLACK_BRIDGE_FEATURE_FLAG_KEYS,
   SERVER_GUEST_FEATURE_FLAG_KEY,
+  USAGE_LIMIT_ATTENTION_FEATURE_FLAG_KEY,
   setClockTimeout,
 } from "@botiverse/raft-shared";
 import { useCallback, useSyncExternalStore } from "react";
@@ -19,7 +19,6 @@ import { isServerLabEffectivelyEnabled } from "../utils/serverLabsSettings";
 import type { ServerLabSettingsReadback } from "../utils/serverLabsSettings";
 import { useServerStore } from "./serverStore";
 
-export const SYNC_CORE_MESSAGES_FLAG_KEY = "sync_core_messages_v0";
 export const SYNC_CORE_NOTIFICATION_PREFS_FLAG_KEY = "sync_core_notification_prefs_v0";
 export const ATTACHMENT_COMMENTS_FEATURE_FLAG_KEY = "attachment_comments_v0";
 export const READ_RECEIPTS_FEATURE_FLAG_KEY = "read_receipts_v0";
@@ -34,13 +33,18 @@ export const RUNTIME_FORM_V2_WEB_FLAG_KEY = "runtime_form_v2_web";
  * section are confirmed (#proj-analytics:63b84f03).
  */
 export const PRODUCT_ANALYTICS_SETTINGS_FLAG_KEY = "product_analytics_settings_v0";
+/**
+ * Computer detail bulk "Change model" (task #1287, designs task #1285).
+ * Default off: the toolbar button is not rendered until the flag is enabled.
+ */
+export const BULK_CHANGE_MODEL_WEB_FLAG_KEY = "bulk_change_model_web_v0";
 
 const SERVER_FEATURE_FLAG_REGISTRY = {
   activitySidebarInbox: ACTIVITY_SIDEBAR_INBOX_FLAG_KEY,
   agentMigration: AGENT_MIGRATION_FEATURE_FLAG_KEY,
   antiprotonHostedRuntime: ANTIPROTON_HOSTED_RUNTIME_FEATURE_FLAG_KEY,
   attachmentComments: ATTACHMENT_COMMENTS_FEATURE_FLAG_KEY,
-  chatGridLayout: CHAT_GRID_LAYOUT_FEATURE_FLAG_KEY,
+  bulkChangeModelWeb: BULK_CHANGE_MODEL_WEB_FLAG_KEY,
   channelToJointConversion: CHANNEL_TO_JOINT_CONVERSION_FEATURE_FLAG_KEY,
   channelManagerRoleActions: CHANNEL_MANAGER_ROLE_ACTIONS_FEATURE_FLAG_KEY,
   composerResourceReferences: COMPOSER_RESOURCE_REFERENCES_FEATURE_FLAG_KEY,
@@ -53,8 +57,8 @@ const SERVER_FEATURE_FLAG_REGISTRY = {
   serverLabsUi: SERVER_LABS_UI_FEATURE_FLAG_KEY,
   slackBridge: SLACK_BRIDGE_FEATURE_FLAG_KEYS.master,
   serverGuest: SERVER_GUEST_FEATURE_FLAG_KEY,
-  syncCoreMessages: SYNC_CORE_MESSAGES_FLAG_KEY,
   syncCoreNotificationPrefs: SYNC_CORE_NOTIFICATION_PREFS_FLAG_KEY,
+  usageLimitAttention: USAGE_LIMIT_ATTENTION_FEATURE_FLAG_KEY,
 } as const;
 
 export const REGISTERED_SERVER_FEATURE_FLAG_KEYS = Object.freeze(

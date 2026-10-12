@@ -27,6 +27,8 @@ test("Agent JWT issuance binds the authenticated actor, requires live local auth
     const agent = await createAgent(server.id, "JwtAgent", { runtime: "external", model: "external" });
     const credential = await mintAgentCredential({ agentId: agent.id, scopes: ["read"], name: "jwt-test", createdByUserId: null });
     const { client } = await createOAuthClient({ serverId: server.id, createdByUserId: owner.id, clientId: `jwt-${suffix.slice(0, 8)}`, name: "JWT RP", allowedScopes: ["openid", "profile"], returnUrl: "https://rp.example.test/callback" });
+    // This fixture represents a client present before the policy migration.
+    await getDb().update(oauthClients).set({ agentJwtEnabled: null }).where(eq(oauthClients.id, client.id));
     const { client: foreignClient } = await createOAuthClient({ serverId: foreign.id, createdByUserId: owner.id, clientId: `other-${suffix.slice(0, 8)}`, name: "Foreign RP", allowedScopes: ["openid", "profile"] });
     const post = (body: Record<string, unknown> = { service: client.clientId }, token = credential.apiKey) => fetch(`${app.baseUrl}/internal/agent-api/integrations/token`, {
       method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` }, body: JSON.stringify(body),

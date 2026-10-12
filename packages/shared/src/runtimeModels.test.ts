@@ -57,24 +57,38 @@ test("declared static model sources carry their daemon verification contract", (
   assert.equal(getStaticRuntimeModelSourceSet("opencode"), undefined);
 });
 
-test("Codex bundled fallback tracks upstream Astra picker default", () => {
-  assert.equal(getDefaultModel("codex"), "gpt-6-astra");
-  assert.deepEqual(RUNTIME_MODELS.codex.slice(0, 4).map((model) => model.id), [
+test("Codex bundled fallback tracks upstream picker order and default (GPT-6.1 Sol first)", () => {
+  // Upstream codex-rs/models-manager/models.json (rust-v0.162.0) priorities:
+  // gpt-6.1-sol 1, gpt-6-astra 2, gpt-6-sol 3, gpt-6-luna 4, gpt-5.6-sol 5, ...
+  assert.equal(getDefaultModel("codex"), "gpt-6.1-sol");
+  assert.deepEqual(RUNTIME_MODELS.codex.slice(0, 7).map((model) => model.id), [
+    "gpt-6.1-sol",
     "gpt-6-astra",
+    "gpt-6-sol",
+    "gpt-6-luna",
     "gpt-5.6-sol",
     "gpt-5.6-terra",
     "gpt-5.6-luna",
   ]);
-  assert.deepEqual(
-    RUNTIME_MODELS.codex.find((model) => model.id === "gpt-6-astra"),
-    {
-      id: "gpt-6-astra",
-      label: "GPT-6-Astra",
-      supportedReasoningEfforts: ["low", "medium", "high", "xhigh", "max", "ultra"],
-      defaultReasoningEffort: "low",
-      verified: "launchable",
-    },
-  );
+  const byId = (id: string) => RUNTIME_MODELS.codex.find((model) => model.id === id);
+  assert.deepEqual(byId("gpt-6.1-sol"), {
+    id: "gpt-6.1-sol",
+    label: "GPT-6.1 Sol",
+    supportedReasoningEfforts: ["low", "medium", "high", "xhigh", "max", "ultra"],
+    defaultReasoningEffort: "low",
+    verified: "launchable",
+  });
+  assert.deepEqual(byId("gpt-6-astra"), {
+    id: "gpt-6-astra",
+    label: "GPT-6-Astra",
+    supportedReasoningEfforts: ["low", "medium", "high", "xhigh", "max", "ultra"],
+    defaultReasoningEffort: "low",
+    verified: "launchable",
+  });
+  assert.deepEqual(byId("gpt-6-sol")?.supportedReasoningEfforts, ["low", "medium", "high", "xhigh", "max", "ultra"]);
+  assert.equal(byId("gpt-6-sol")?.defaultReasoningEffort, "medium");
+  assert.deepEqual(byId("gpt-6-luna")?.supportedReasoningEfforts, ["low", "medium", "high", "xhigh", "max"]);
+  assert.equal(byId("gpt-6-luna")?.defaultReasoningEffort, "medium");
 });
 
 test("Claude model catalog includes latest aliases and selected pinned versions", () => {
@@ -97,6 +111,7 @@ test("Claude model catalog includes latest aliases and selected pinned versions"
       "Claude Sonnet 5.5",
       "Claude Sonnet 5",
       "Claude Sonnet 4.6",
+      "Claude Haiku 5.5",
       "Claude Haiku 4.5",
     ],
   );
@@ -117,6 +132,7 @@ test("Claude model catalog includes latest aliases and selected pinned versions"
     "claude-sonnet-5-5",
     "claude-sonnet-5",
     "claude-sonnet-4-6",
+    "claude-haiku-5-5",
     "claude-haiku-4-5",
   ]) {
     assert.ok(claudeModelIds.includes(id), `expected Claude model catalog to include ${id}`);
@@ -181,7 +197,7 @@ test("Built-in Kimi provider defaults mirror Pi internal defaults independent of
 test("Built-in Xiaomi MiMo provider is generated from the Pi model catalog", () => {
   const xiaomiModels = PI_BUILTIN_PROVIDER_MODELS.xiaomi;
 
-  // pi 1.0.2 lists MiMo-V2.6 first but keeps V2.5-Pro as the provider default.
+  // pi 1.1.0 (as 1.0.2 did) lists MiMo-V2.6 first but keeps V2.5-Pro as the provider default.
   assert.equal(PI_BUILTIN_PROVIDER_DEFAULT_MODELS.xiaomi, "xiaomi/mimo-v2.5-pro");
   assert.equal(xiaomiModels[0]?.id, "xiaomi/mimo-v2.6-pro");
   assert.equal(xiaomiModels[0]?.label, "MiMo-V2.6-Pro");

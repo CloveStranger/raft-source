@@ -28,7 +28,10 @@ test("markdown inline code renderers use raft-ui InlineCode directly", () => {
 test("inline prose tokens use InlineCode while command blocks retain code semantics through RUI", () => {
   const skillsPanel = readSource("src/components/agent/AgentSkills.tsx");
   const paletteAudit = readSource("src/pages/PaletteAuditPage.tsx");
-  const computerCommandGuide = readSource("src/components/machine/ComputerCommandGuide.tsx");
+  const computerCommandGuide = [
+    readSource("src/components/machine/ComputerCommandGuide.tsx"),
+    readSource("src/components/machine/CommandRow.tsx"),
+  ].join("\n");
 
   assert.match(skillsPanel, /<InlineCode className="text-\[11px\] text-foreground-placeholder theme-brutal:text-black\/40">\{path\}<\/InlineCode>/);
   assert.match(paletteAudit, /<InlineCode>file:line<\/InlineCode>/);

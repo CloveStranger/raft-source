@@ -1,5 +1,6 @@
 import { dbTest as test } from "../test/integration/dbTest";
 import assert from "node:assert/strict";
+import { vi } from "vitest";
 
 import {
   StartIntentRemoteError,
@@ -39,6 +40,7 @@ import {
   type SkillInfo,
   type RuntimeAccountUsageProvider,
   MODEL_SEEN_MAX_ITEMS_PER_REPORT,
+  SPAWN_FAILURE_RETRY_ONCE_DELAY_MS,
 } from "@botiverse/raft-shared";
 import {
   REPLICA_ID,
@@ -52,6 +54,7 @@ import { runWithTraceSpan } from "../tracing/semanticTrace";
 import {
   AgentOrchestrator,
   KimiReasoningEffortUpgradeRequiredError,
+  deliveryChannelKind,
   mapExternalPluginActivityEvent,
   nextActivityServerSeq,
   partitionTargetScopedMessagesUpToSeq,
@@ -64,7 +67,7 @@ import {
 import { AGENT_ACTIVITY_WRITER_REGISTRY, classifyDaemonActivityObservation } from "./agentLifecycleReducer";
 import { buildMachineReadModel } from "./machineReadModel";
 import type { AgentRuntimeErrorMirror, MachineMeta, PersistedActivityTypedCarriers, PersistedAgentActivity, ReplicaStateStore } from "./replicaStateStore";
-import { InMemoryWakeCrashLoopStateStore, WakeCrashLoopBreaker, type WakeCrashLoopEpisodeState, type WakeCrashLoopStateRecord } from "./wakeCrashLoopBreaker";
+import { InMemoryWakeCrashLoopStateStore, START_FAILURE_THRESHOLD, WakeCrashLoopBreaker, type WakeCrashLoopEpisodeState, type WakeCrashLoopStateRecord } from "./wakeCrashLoopBreaker";
 import type {
   ClaimedComputerLifecycleDispatch,
   ObserveComputerLifecycleResult,
@@ -76,8 +79,9 @@ import {
   type EvaluateComputerBroadcastPolicyInput,
 } from "./computerBroadcastPolicyService";
 import { REMOTE_COMPUTER_UPGRADE_V2_FEATURE_FLAG_KEY } from "./featureFlagService";
+import { createComputerUpgradeRequest, getOpenComputerUpgradeRequest } from "./computerUpgradeRequestService";
 import { randomUUID } from "node:crypto";
-import { agentDeliveryAckSeconds, agentDeliveryOutcomesTotal, agentDeliveryTrackedTotal } from "../metrics";
+import { agentDeliveryAckSeconds, agentDeliveryOutcomesTotal, agentDeliveryPending, agentDeliveryTrackedTotal } from "../metrics";
 import { eq } from "drizzle-orm";
 import { getDb } from "../db/index";
 import { featureFlagRules, featureFlags, machines, users } from "../db/schema";
@@ -1077,6 +1081,7 @@ class EndpointRoutedMessageDeliverabilityOrchestrator extends MessageDeliverabil
     machineId: string,
     message: AgentMessage,
     localMachineIds: Set<string>,
+    deliveryOptions: RoutedInboxDeliveryOptions = {},
   ): Promise<boolean> {
     if (localMachineIds.has(machineId)) return false;
     const targetReplica = this.network.owners.get(machineId);
@@ -1084,7 +1089,7 @@ class EndpointRoutedMessageDeliverabilityOrchestrator extends MessageDeliverabil
 
     const target = this.network.replicas.get(targetReplica);
     assert.ok(target, `missing target replica ${targetReplica}`);
-    return target.handleRoutedInboxDelivery(agentId, machineId, message);
+    return target.handleRoutedInboxDelivery(agentId, machineId, message, deliveryOptions);
   }
 
   protected override async routeInboxDeliveryWithReceiptCrossReplica(
@@ -1161,6 +1166,15 @@ class MalformedQueuedReceiptOrchestrator extends DeterministicAgentOrchestrator 
 
 class AccessRevokedEndpointRoutedOrchestrator extends EndpointRoutedMessageDeliverabilityOrchestrator {
   protected override async canAgentAccessDeliveryTarget(): Promise<boolean> {
+    return false;
+  }
+}
+
+class VisibilityDenyingEndpointRoutedOrchestrator extends EndpointRoutedMessageDeliverabilityOrchestrator {
+  readonly visibilityChecks: string[] = [];
+
+  protected override async canAgentAccessDeliveryTarget(_agentId: string, _agent: any, message: AgentMessage): Promise<boolean> {
+    this.visibilityChecks.push(message.channel_id);
     return false;
   }
 }
@@ -3513,7 +3527,13 @@ test("a start requested on a peer replica is prepared on the socket owner, so th
       await owner.startAgent("agent-1");
       const ownLaunch = startMessagesSentOn(ws).at(-1)!.launchId!;
       assert.ok(ownLaunch, "the owner's own start carries a launchId");
-      // That start has settled; its wake lock is no longer held.
+      // That start has settled (its launch reported a session); its wake lock is no longer held.
+      await owner.handleMachineMessage("machine-1", {
+        type: "agent:session",
+        agentId: "agent-1",
+        sessionId: "session-of-own-launch",
+        launchId: ownLaunch,
+      });
       shared.wakeLocks.delete("agent-1");
 
       // A new start is requested on the peer replica.
@@ -3621,6 +3641,42 @@ test("a reset requested on a peer replica runs on the socket owner", async () =>
   await peer.resetAgent("agent-1", "session", { restartEvenIfInactive: false });
   assert.deepEqual(owner.intentsHandled, ["reset"]);
   assert.equal((owner as any).agentStateCache.get("agent-1").sessionId, null, "the owner's session is cleared");
+  owner.shutdown();
+  peer.shutdown();
+});
+
+test("a routed resend of a start the owner already settled leaves the current launch's pending start and guard alone (task #368)", async () => {
+  const { shared, owner, peer, ws } = ownerAndPeer({ ownerCapable: false });
+  // S1: the owner's own start.
+  await owner.startAgent("agent-1");
+  const s1 = startMessagesSentOn(ws).at(-1)!;
+  shared.wakeLocks.delete("agent-1");
+  // S2: a newer start from the peer, forwarded raw; it supersedes S1 on the owner.
+  await peer.startAgent("agent-1");
+  const s2 = startMessagesSentOn(ws).at(-1)!;
+  assert.ok(s1.startDispatchId && s2.startDispatchId && s1.startDispatchId !== s2.startDispatchId);
+  assert.notEqual(s2.launchId, s1.launchId);
+  // Positive control: S1 is settled on the owner and S2 is the one pending.
+  assert.deepEqual([...(owner as any).pendingAgentStartAcks.keys()], [s2.startDispatchId]);
+  const guardBefore = (owner as any).agentStateCache.get("agent-1").expectedLaunchId;
+  assert.equal(guardBefore, s2.launchId ?? null);
+  const startsBefore = startMessagesSentOn(ws).length;
+
+  // An old resend of S1 reaches the owner through the routed path.
+  const sent = await (peer as any).sendAgentStartWithAckRetry("machine-1", s1);
+
+  assert.equal(sent, true, "the forwarder is told the old start is handled, so it stops retrying");
+  assert.deepEqual(
+    [...(owner as any).pendingAgentStartAcks.keys()],
+    [s2.startDispatchId],
+    "the current launch keeps its resend protection",
+  );
+  assert.equal(startMessagesSentOn(ws).length, startsBefore, "the settled start is not sent to the daemon again");
+  assert.equal(
+    (owner as any).agentStateCache.get("agent-1").expectedLaunchId,
+    guardBefore,
+    "the owner keeps guarding the current launch, not the old one",
+  );
   owner.shutdown();
   peer.shutdown();
 });
@@ -4449,6 +4505,37 @@ test("user-visible machine read model stays online and agent activity stays onli
 
   assert.equal(machine.status, "online");
   assert.deepEqual(activity, { activity: "online", activityDetail: "" });
+
+  orchestrator.shutdown();
+});
+
+test("machine read model falls back to the stored version report while online with no live version fact", async () => {
+  // Reconnect window after an upgrade: the replica sees the machine online
+  // before it has a live version fact. The row's last report fills in,
+  // labelled stored_report; offline shows no version.
+  const store = new InMemoryReplicaStateStore();
+  store.machineReplicas.add("machine-1");
+  const orchestrator = new DeterministicAgentOrchestrator(store);
+  const reportedAt = new Date("2026-10-12T02:43:15.000Z");
+  const record = { ...makeMachineRecord(), computerVersion: "1.0.47", computerVersionReportedAt: reportedAt };
+
+  const online = await buildMachineReadModel(record, orchestrator);
+  assert.equal(online.status, "online");
+  assert.equal(online.computerVersion, "1.0.47");
+  assert.equal(online.computerVersionProvenance, "stored_report");
+  assert.equal(online.computerVersionObservedAt, reportedAt.toISOString());
+
+  await store.setMachineMeta("machine-1", { computerVersion: "1.0.48", computerVersionObservedAt: "2026-10-12T03:00:00.000Z" });
+  const live = await buildMachineReadModel(record, orchestrator);
+  assert.equal(live.computerVersion, "1.0.48", "a live fact always wins over the stored report");
+  assert.equal(live.computerVersionProvenance, "replica_meta");
+
+  store.machineReplicas.delete("machine-1");
+  await store.clearMachineMeta("machine-1");
+  const offline = await buildMachineReadModel(record, orchestrator);
+  assert.equal(offline.status, "offline");
+  assert.equal(offline.computerVersion, null);
+  assert.equal(offline.computerVersionProvenance, null);
 
   orchestrator.shutdown();
 });
@@ -8553,6 +8640,67 @@ test("receipt-required remote membership delivery reconciles a queued non-member
   target.shutdown();
 });
 
+test("intrinsic delivery routed to the owning replica skips the owner's visibility check", async () => {
+  // onboarding owner facts: channel_id is a label, and a visibility check on it
+  // throws (22P02) and drops the delivery on the owner replica.
+  const network: DeliverabilityNetwork = { owners: new Map([["machine-1", "replica-b"]]), replicas: new Map() };
+  const source = new EndpointRoutedMessageDeliverabilityOrchestrator("replica-a", network);
+  const target = new VisibilityDenyingEndpointRoutedOrchestrator("replica-b", network);
+  seedActiveAgent(source);
+  seedActiveAgent(target);
+  seedMachineConnection(target, "machine-1", makeFakeWs(1));
+  const message = { ...makeAgentMessage("owner facts"), channel_id: "onboarding-context", seq: 0 };
+
+  await source.deliverMessage("agent-1", message, { intrinsic: true });
+
+  assert.deepEqual(target.visibilityChecks, []);
+  const targetInboxes = (target as unknown as { agentInboxes: Map<string, { inbox: unknown[] }> }).agentInboxes;
+  assert.equal(targetInboxes.get("agent-1")?.inbox.length, 1);
+  source.shutdown();
+  target.shutdown();
+});
+
+test("non-intrinsic routed delivery is still visibility-checked on the owning replica", async () => {
+  const network: DeliverabilityNetwork = { owners: new Map([["machine-1", "replica-b"]]), replicas: new Map() };
+  const source = new EndpointRoutedMessageDeliverabilityOrchestrator("replica-a", network);
+  const target = new VisibilityDenyingEndpointRoutedOrchestrator("replica-b", network);
+  seedActiveAgent(source);
+  seedActiveAgent(target);
+  seedMachineConnection(target, "machine-1", makeFakeWs(1));
+  const message = makeAgentMessage("channel content");
+
+  await source.deliverMessage("agent-1", message);
+
+  assert.deepEqual(target.visibilityChecks, [message.channel_id]);
+  const targetInboxes = (target as unknown as { agentInboxes: Map<string, { inbox: unknown[] }> }).agentInboxes;
+  assert.equal(targetInboxes.get("agent-1")?.inbox.length ?? 0, 0);
+  source.shutdown();
+  target.shutdown();
+});
+
+test("routed delivery reads intrinsic only from the replica envelope, not the message payload", async () => {
+  const network: DeliverabilityNetwork = { owners: new Map([["machine-1", "replica-b"]]), replicas: new Map() };
+  const target = new VisibilityDenyingEndpointRoutedOrchestrator("replica-b", network);
+  seedActiveAgent(target);
+  seedMachineConnection(target, "machine-1", makeFakeWs(1));
+  const message = { ...makeAgentMessage("payload claims intrinsic"), intrinsic: true } as AgentMessage;
+
+  await target.handleRoutedInboxDelivery("agent-1", "machine-1", message);
+
+  assert.deepEqual(target.visibilityChecks, [message.channel_id]);
+  const targetInboxes = (target as unknown as { agentInboxes: Map<string, { inbox: unknown[] }> }).agentInboxes;
+  assert.equal(targetInboxes.get("agent-1")?.inbox.length ?? 0, 0);
+  target.shutdown();
+});
+
+test("deliveryChannelKind bounds channel ids for visibility telemetry", () => {
+  assert.equal(deliveryChannelKind("0b4c7d1e-2f3a-4b5c-8d9e-0f1a2b3c4d5e"), "uuid");
+  assert.equal(deliveryChannelKind("onboarding-context"), "onboarding-context");
+  assert.equal(deliveryChannelKind("third-party-agent-events:agent-123"), "third-party-agent-events");
+  assert.equal(deliveryChannelKind("Weird Value!"), "other");
+  assert.equal(deliveryChannelKind(""), "none");
+});
+
 test("receipt-required delivery stays dropped when a subscribed target replica rejects the enqueue", async () => {
   const cases = ["inactive", "access-revoked"] as const;
 
@@ -9603,6 +9751,44 @@ test("relays computer restart terminal receipts to web with machineId added", as
   assert.deepEqual(relaySpans.map((span) => span.attrs?.event_type), ["computer:restart:done"]);
   assert.equal(relaySpans[0]?.attrs?.request_id, "restart-1");
   assert.equal(relaySpans[0]?.attrs?.ok, true);
+  orchestrator.shutdown();
+});
+
+test("computer:upgrade:done ok:false settles this machine's open upgrade request by id and tells the web", async ({ db }) => {
+  // Remote upgrade v2: a refusal before the installer ran means no reconnect
+  // will carry a receipt, so the daemon reports it and the request closes now
+  // instead of at its 30 min deadline. Settled by request id and only for the
+  // sending machine (#374: the same key online twice).
+  const [user] = await db.insert(users).values({ email: "upgrade-refused@example.com", name: "upgrade-refused", passwordHash: "test" }).returning();
+  const server = await createServer("upgrade-refused", "upgrade-refused", user!.id);
+  const machineId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+  const { row } = await createComputerUpgradeRequest({ serverId: server.id, machineId, targetVersion: "1.0.48", requestedByUserId: user!.id });
+  const orchestrator = new ReadyReconcileDeterministicOrchestrator();
+  const captured: Array<{ room: string; event: string; payload: unknown }> = [];
+  (orchestrator as unknown as { io: ReturnType<typeof makeFakeServerIO> }).io = makeFakeServerIO(captured);
+  seedMachineConnection(orchestrator, machineId, makeFakeWs());
+  seedMachineConnection(orchestrator, "machine-other", makeFakeWs(2));
+
+  // Another machine cannot settle it, and `ok: true` (installer started) does not.
+  await orchestrator.handleMachineMessage("machine-other", { type: "computer:upgrade:done", requestId: row.id, ok: false, reason: "not mine" } as MachineToServerMessage);
+  await orchestrator.handleMachineMessage(machineId, { type: "computer:upgrade:done", requestId: row.id, ok: true } as MachineToServerMessage);
+  assert.equal((await getOpenComputerUpgradeRequest(machineId))?.id, row.id);
+
+  await orchestrator.handleMachineMessage(machineId, {
+    type: "computer:upgrade:done",
+    requestId: row.id,
+    ok: false,
+    code: "upgrade_start_rejected",
+    reason: "Set KillMode=process in raft-computer.service",
+  } as MachineToServerMessage);
+  assert.equal(await getOpenComputerUpgradeRequest(machineId), null);
+  const relayed = captured.find((e) => e.event === "machine:upgrade-request");
+  assert.ok(relayed, "the web learns the verdict now");
+  const payload = relayed.payload as { machineId: string; upgradeRequest: { id: string; state: string; reason: string | null } };
+  assert.equal(payload.machineId, machineId);
+  assert.equal(payload.upgradeRequest.id, row.id);
+  assert.equal(payload.upgradeRequest.state, "failed");
+  assert.equal(payload.upgradeRequest.reason, "Set KillMode=process in raft-computer.service");
   orchestrator.shutdown();
 });
 
@@ -10776,7 +10962,7 @@ test("ready reconcile marks missing active agents wakeable without eager startup
   orchestrator.shutdown();
 });
 
-test("ready reconciliation records running agents the database places elsewhere, without stopping them yet", async () => {
+test("ready reconciliation stops running agents that were deleted, and only records ones the database places on another machine", async () => {
   const { sink, tracer, traceId } = makeDeterministicTracer();
   class ForeignRunningOrchestrator extends ReadyReconcileDeterministicOrchestrator {
     readonly placementLookups: string[][] = [];
@@ -10813,13 +10999,54 @@ test("ready reconciliation records running agents the database places elsewhere,
       .map((event) => [event.attrs.agent_id, event.attrs.reason, event.attrs.enforcement]),
     [
       ["agent-moved", "moved", "observe_only"],
-      ["agent-deleted", "deleted", "observe_only"],
-      ["agent-gone", "deleted", "observe_only"],
+      ["agent-deleted", "deleted", "stopped"],
+      ["agent-gone", "deleted", "stopped"],
     ],
   );
-  assert.equal(orchestrator.sentToMachine.filter((msg) => msg.type === "agent:stop").length, 0, "observe-only: nothing is stopped yet");
+  assert.deepEqual(
+    orchestrator.sentToMachine.filter((msg) => msg.type === "agent:stop").map((msg) => (msg as { agentId: string }).agentId),
+    ["agent-deleted", "agent-gone"],
+    "deleted agents are stopped on this machine; a moved agent is not (still observe-only)",
+  );
   const readySpan = sink.getTrace(traceId).find((span) => span.name === "server.machine.ready.reconcile");
   assert.equal(readySpan?.attrs?.foreign_running_count, 3);
+  assert.equal(readySpan?.attrs?.foreign_running_stopped_count, 2);
+  orchestrator.shutdown();
+});
+
+test("ready reconciliation records a deleted foreign agent's stop as not sent when the machine cannot be reached", async () => {
+  class UnreachableForeignOrchestrator extends ReadyReconcileDeterministicOrchestrator {
+    readonly events: Array<{ name: string; attrs: Record<string, unknown> }> = [];
+    protected override async loadAgentPlacements() {
+      return [];
+    }
+    protected override async sendToMachine(_machineId: string, msg: ServerToMachineMessage): Promise<boolean> {
+      this.sentToMachine.push(msg);
+      return msg.type !== "agent:stop";
+    }
+  }
+  const orchestrator = new UnreachableForeignOrchestrator();
+  const recordEvent = (orchestrator as any).recordEvent.bind(orchestrator);
+  (orchestrator as any).recordEvent = (name: string, attrs: Record<string, unknown> = {}) => {
+    orchestrator.events.push({ name, attrs });
+    return recordEvent(name, attrs);
+  };
+  seedMachineConnection(orchestrator, "machine-1", makeFakeWs());
+
+  await orchestrator.handleMachineMessage("machine-1", {
+    type: "ready",
+    capabilities: [],
+    runtimes: ["codex"],
+    daemonVersion: "1.0.0",
+    runningAgents: ["agent-gone"],
+  } as MachineToServerMessage);
+
+  assert.deepEqual(
+    orchestrator.events
+      .filter((event) => event.name === "machine.ready.reconcile.foreign_running")
+      .map((event) => [event.attrs.agent_id, event.attrs.reason, event.attrs.enforcement]),
+    [["agent-gone", "deleted", "stop_not_sent"]],
+  );
   orchestrator.shutdown();
 });
 
@@ -13305,6 +13532,406 @@ test("SLO v1 SLI 4: one tracked delivery, latency measured from the first attemp
   orchestrator.shutdown();
 });
 
+test("SLO v1 SLI 4: pending records are a scrape-time gauge, and shutdown logs those still awaiting an ack", async () => {
+  const clock = new FakeClock();
+  clock.advance(1_000);
+  const orchestrator = new DeterministicAgentOrchestrator(undefined, clock);
+  seedActiveAgent(orchestrator);
+  const ws = makeFakeWs(1);
+  seedMachineConnection(orchestrator, "machine-1", ws);
+
+  await orchestrator.deliverMessage("agent-1", makeAgentMessage("in flight at shutdown", 44));
+  assert.equal(JSON.parse(ws.sent[0] ?? "{}").type, "agent:deliver");
+  const pendingGauge = await agentDeliveryPending.get();
+  const pendingBy = (parked: string) => pendingGauge.values
+    .filter((v) => v.labels.parked === parked).reduce((sum, v) => sum + v.value, 0);
+  assert.equal(pendingBy("false"), 1, "the in-flight record is visible at scrape time");
+  assert.equal(pendingBy("true"), 0);
+
+  const logged: string[] = [];
+  const log = vi.spyOn(console, "log").mockImplementation((...args: unknown[]) => { logged.push(args.map(String).join(" ")); });
+  try {
+    await orchestrator.shutdown();
+  } finally {
+    log.mockRestore();
+  }
+
+  assert.ok(
+    logged.includes("[Orchestrator] shutdown: 1 agent deliveries still awaiting ack (0 parked)"),
+    `expected the shutdown count line, got: ${JSON.stringify(logged)}`,
+  );
+  const afterRelease = await agentDeliveryPending.get();
+  assert.deepEqual(afterRelease.values, [], "a released provider exports nothing, not its last value");
+});
+
+test("SLO v1 SLI 4: delivery_kind splits mentions from plain deliveries; gave_up carries the connection age", async () => {
+  const clock = new FakeClock();
+  clock.advance(10 * 3_600_000);
+  const orchestrator = new DeterministicAgentOrchestrator(undefined, clock);
+  seedActiveAgent(orchestrator);
+  seedMachineConnection(orchestrator, "machine-1", makeFakeWs(1));
+  (orchestrator as any).machineConnections.get("machine-1").connectedAt = clock.now() - 7 * 3_600_000;
+  const count = async (labels: Record<string, string>) => (await agentDeliveryOutcomesTotal.get()).values
+    .filter((v) => Object.entries(labels).every(([k, value]) => (v.labels as Record<string, string>)[k] === value))
+    .reduce((sum, v) => sum + v.value, 0);
+  const trackedOf = async (kind: string) => (await agentDeliveryTrackedTotal.get()).values
+    .filter((v) => v.labels.delivery_kind === kind).reduce((sum, v) => sum + v.value, 0);
+  const mentionTrackedBefore = await trackedOf("mention");
+  const mentionGaveUpBefore = await count({ outcome: "gave_up", delivery_kind: "mention", conn_age: ">6h" });
+
+  const mentionMsg = {
+    type: "agent:deliver" as const,
+    agentId: "agent-1",
+    message: makeAgentMessage("mention awaiting the turn end", 77),
+    seq: 77,
+    deliveryId: "occurrence-sli4-kind",
+    mentionDelivery: { occurrenceId: "occurrence-sli4-kind", messageId: "m-77", machineId: "machine-1", launchId: null, sessionId: null },
+  };
+  (orchestrator as any).trackPendingAgentDeliveryAck("machine-1", mentionMsg);
+  assert.equal(await trackedOf("mention") - mentionTrackedBefore, 1, "a tracked mention is labeled delivery_kind=mention");
+
+  const pending = (orchestrator as any).pendingAgentDeliveryAcks.get("delivery:occurrence-sli4-kind");
+  pending.attempts = 24;
+  await (orchestrator as any).retryPendingAgentDelivery("delivery:occurrence-sli4-kind", "ack_timeout");
+  assert.equal(
+    await count({ outcome: "gave_up", delivery_kind: "mention", conn_age: ">6h" }) - mentionGaveUpBefore,
+    1,
+    "the give-up is recorded with the 7 h connection in the >6h bucket",
+  );
+  orchestrator.shutdown();
+});
+
+async function parkedDeliveryFixture(opts: { mention: boolean; status: () => "online" | "offline" }) {
+  const clock = new FakeClock();
+  clock.advance(1_000);
+  const orchestrator = new DeterministicAgentOrchestrator(undefined, clock);
+  seedActiveAgent(orchestrator);
+  seedMachineConnection(orchestrator, "machine-1", makeFakeWs(1));
+  (orchestrator as any).getMachineStatus = async () => opts.status();
+  const deliveryId = `parked-${opts.mention ? "mention" : "plain"}`;
+  const msg = {
+    type: "agent:deliver" as const,
+    agentId: "agent-1",
+    message: makeAgentMessage("parked delivery", 91),
+    seq: 91,
+    deliveryId,
+    ...(opts.mention
+      ? { mentionDelivery: { occurrenceId: deliveryId, messageId: "m-91", machineId: "machine-1", launchId: null, sessionId: null } }
+      : {}),
+  };
+  (orchestrator as any).trackPendingAgentDeliveryAck("machine-1", msg);
+  const key = `delivery:${deliveryId}`;
+  const pending = (orchestrator as any).pendingAgentDeliveryAcks.get(key);
+  (orchestrator as any).parkPendingAgentDeliveryAck(key, pending, "machine_offline");
+  const settle = async () => { for (let i = 0; i < 20; i += 1) await Promise.resolve(); };
+  const outcome = async (name: string) => (await agentDeliveryOutcomesTotal.get()).values
+    .filter((v) => v.labels.outcome === name).reduce((sum, v) => sum + v.value, 0);
+  return { clock, orchestrator, msg, key, pending, settle, outcome };
+}
+
+test("SLI 4: a parked delivery whose machine never returns ends as parked_expired after 30 min, not at shutdown", async () => {
+  const f = await parkedDeliveryFixture({ mention: false, status: () => "offline" });
+  const expiredBefore = await f.outcome("parked_expired");
+  for (let elapsed = 0; elapsed < 29 * 60_000; elapsed += 30_000) {
+    f.clock.advance(30_000);
+    await f.settle();
+  }
+  assert.ok((f.orchestrator as any).pendingAgentDeliveryAcks.has(f.key), "still parked before the max age");
+  assert.equal(f.pending.attempts, 1, "probing an offline machine does not spend delivery attempts");
+  for (let step = 0; step < 4; step += 1) {
+    f.clock.advance(30_000);
+    await f.settle();
+  }
+  assert.equal((f.orchestrator as any).pendingAgentDeliveryAcks.has(f.key), false, "the record is gone");
+  assert.equal(await f.outcome("parked_expired") - expiredBefore, 1, "and it has an outcome");
+  f.orchestrator.shutdown();
+});
+
+test("SLI 4: a parked mention ends as routed once its machine is online again (durable recovery re-tracks it)", async () => {
+  let status: "online" | "offline" = "offline";
+  const f = await parkedDeliveryFixture({ mention: true, status: () => status });
+  const routedBefore = await f.outcome("routed");
+  f.clock.advance(30_000);
+  await f.settle();
+  assert.ok((f.orchestrator as any).pendingAgentDeliveryAcks.has(f.key), "offline: still parked");
+  status = "online";
+  f.clock.advance(30_000);
+  await f.settle();
+  assert.equal((f.orchestrator as any).pendingAgentDeliveryAcks.has(f.key), false);
+  assert.equal(await f.outcome("routed") - routedBefore, 1);
+  f.orchestrator.shutdown();
+});
+
+test("SLI 4: a parked plain delivery is retried once its machine is online again", async () => {
+  let status: "online" | "offline" = "offline";
+  const f = await parkedDeliveryFixture({ mention: false, status: () => status });
+  const retries: string[] = [];
+  (f.orchestrator as any).retryPendingAgentDelivery = async (key: string, reason: string) => { retries.push(`${key}:${reason}`); };
+  status = "online";
+  f.clock.advance(30_000);
+  await f.settle();
+  assert.deepEqual(retries, [`${f.key}:ack_timeout`]);
+  assert.equal(f.pending.parked, false, "unparked before the retry runs");
+  f.orchestrator.shutdown();
+});
+
+test("SLI 4: re-sending a parked delivery keeps it parked with its status probe (task #285 budget)", async () => {
+  const f = await parkedDeliveryFixture({ mention: true, status: () => "offline" });
+  const probeTimer = f.pending.timer;
+  (f.orchestrator as any).trackPendingAgentDeliveryAck("machine-1", f.msg);
+  assert.equal(f.pending.parked, true, "a re-send must not make a parked cycle count as in flight");
+  assert.equal(f.pending.timer, probeTimer, "the status probe is kept, not replaced by an ack timeout");
+  f.orchestrator.shutdown();
+});
+
+test("SLI 4: a give-up logs the machine, daemon version, kind and connection age (task #432)", async () => {
+  const clock = new FakeClock();
+  clock.advance(10 * 3_600_000);
+  const orchestrator = new DeterministicAgentOrchestrator(undefined, clock);
+  seedActiveAgent(orchestrator);
+  seedMachineConnection(orchestrator, "machine-1", makeFakeWs(1));
+  const conn = (orchestrator as any).machineConnections.get("machine-1");
+  conn.connectedAt = clock.now() - 2 * 3_600_000;
+  conn.daemonVersion = "1.0.43";
+  const msg = {
+    type: "agent:deliver" as const,
+    agentId: "agent-1",
+    message: makeAgentMessage("never acked", 95),
+    seq: 95,
+    deliveryId: "gave-up-log",
+  };
+  (orchestrator as any).trackPendingAgentDeliveryAck("machine-1", msg);
+  const pending = (orchestrator as any).pendingAgentDeliveryAcks.get("delivery:gave-up-log");
+  pending.attempts = 24;
+  // Drive the give-up explicitly: the record's own ack timer must not race it.
+  clock.clearTimeout(pending.timer);
+  clock.advance(120_000);
+  conn.lastPong = clock.now(); // a live socket on this replica
+  const logged: string[] = [];
+  const log = vi.spyOn(console, "log").mockImplementation((...args: unknown[]) => { logged.push(args.map(String).join(" ")); });
+  try {
+    await (orchestrator as any).retryPendingAgentDelivery("delivery:gave-up-log", "ack_timeout");
+  } finally {
+    log.mockRestore();
+  }
+  const lines = logged.filter((line) => line.includes("agent_delivery.gave_up")).map((line) => JSON.parse(line));
+  assert.deepEqual(lines, [{
+    event: "agent_delivery.gave_up",
+    machine_id: "machine-1",
+    agent_id: "agent-1",
+    delivery_correlation_id: "gave-up-log",
+    seq: 95,
+    local_socket_present: true,
+    daemon_version: "1.0.43",
+    daemon_version_source: "connection",
+    delivery_kind: "plain",
+    conn_age: "1-6h",
+    attempts: 24,
+    first_attempt_age_ms: 120000,
+  }]);
+  orchestrator.shutdown();
+});
+
+async function arrivedMentionFixture() {
+  const clock = new FakeClock();
+  clock.advance(1_000);
+  const orchestrator = new DeterministicAgentOrchestrator(undefined, clock);
+  seedActiveAgent(orchestrator);
+  const ws = makeFakeWs(1);
+  seedMachineConnection(orchestrator, "machine-1", ws);
+  const identity = { occurrenceId: "occ-arrival", messageId: "m-arrival", machineId: "machine-1", launchId: null, sessionId: null };
+  const msg = {
+    type: "agent:deliver" as const,
+    agentId: "agent-1",
+    message: makeAgentMessage("mention to a busy agent", 97),
+    seq: 97,
+    deliveryId: identity.occurrenceId,
+    mentionDelivery: identity,
+  };
+  (orchestrator as any).trackPendingAgentDeliveryAck("machine-1", msg);
+  const key = `delivery:${identity.occurrenceId}`;
+  const pending = (orchestrator as any).pendingAgentDeliveryAcks.get(key);
+  const mentionArrivals = async () => (await agentDeliveryAckSeconds.get()).values
+    .filter((v) => (v.labels as Record<string, string>).delivery_kind === "mention" && (v.labels as Record<string, string | number>).le === "+Inf")
+    .reduce((sum, v) => sum + v.value, 0);
+  const outcome = async (name: string) => (await agentDeliveryOutcomesTotal.get()).values
+    .filter((v) => v.labels.outcome === name).reduce((sum, v) => sum + v.value, 0);
+  const transition = () => orchestrator.handleMachineMessage("machine-1", {
+    type: "agent:delivery:transition",
+    agentId: "agent-1",
+    stage: "daemon_pending",
+    outcome: "accepted",
+    mentionDelivery: identity,
+  } as unknown as MachineToServerMessage).catch(() => undefined);
+  return { clock, orchestrator, ws, msg, key, pending, identity, mentionArrivals, outcome, transition };
+}
+
+test("SLI 4: a give-up for a machine not connected here takes its daemon version from the machine record", async () => {
+  const clock = new FakeClock();
+  clock.advance(1_000);
+  const orchestrator = new DeterministicAgentOrchestrator(undefined, clock);
+  seedActiveAgent(orchestrator);
+  (orchestrator as any).loadMachineDaemonVersion = async (machineId: string) => (machineId === "machine-1" ? "1.0.26" : null);
+  const msg = { type: "agent:deliver" as const, agentId: "agent-1", message: makeAgentMessage("remote", 96), seq: 96, deliveryId: "gave-up-remote" };
+  (orchestrator as any).trackPendingAgentDeliveryAck("machine-1", msg);
+  const remote = (orchestrator as any).pendingAgentDeliveryAcks.get("delivery:gave-up-remote");
+  remote.attempts = 24;
+  clock.clearTimeout(remote.timer);
+  const logged: string[] = [];
+  const log = vi.spyOn(console, "log").mockImplementation((...args: unknown[]) => { logged.push(args.map(String).join(" ")); });
+  try {
+    await (orchestrator as any).retryPendingAgentDelivery("delivery:gave-up-remote", "ack_timeout");
+  } finally {
+    log.mockRestore();
+  }
+  const line = JSON.parse(logged.find((entry) => entry.includes("agent_delivery.gave_up")) ?? "{}");
+  assert.equal(line.local_socket_present, false);
+  assert.equal(line.daemon_version, "1.0.26");
+  assert.equal(line.daemon_version_source, "machine_record");
+  assert.equal(line.conn_age, "none");
+  orchestrator.shutdown();
+});
+
+test("SLI 4: daemon_pending counts a mention as arrived and stops the re-sends (task #432)", async () => {
+  const f = await arrivedMentionFixture();
+  const arrivalsBefore = await f.mentionArrivals();
+  f.clock.advance(3_000);
+  await f.transition();
+  assert.equal(f.pending.arrivedAt, f.clock.now(), "arrival recorded at daemon_pending");
+  assert.equal(await f.mentionArrivals() - arrivalsBefore, 1, "observed once in the SLI 4 latency histogram");
+  const sentBefore = f.ws.sent.length;
+  for (let i = 0; i < 30; i += 1) {
+    f.clock.advance(5_000);
+    await Promise.resolve();
+  }
+  assert.equal(f.ws.sent.length, sentBefore, "no re-sends after the daemon has it");
+  // Other retry triggers (machine re-register / ready reconcile) must not re-send it either.
+  await (f.orchestrator as any).retryPendingAgentDelivery(f.key, "register");
+  assert.equal(f.ws.sent.length, sentBefore, "a register-triggered retry does not re-send an arrived mention");
+  assert.ok((f.orchestrator as any).pendingAgentDeliveryAcks.has(f.key), "the cycle stays in flight until the final ack");
+  assert.equal((f.orchestrator as any).hasLiveAgentDeliveryAckCycle(f.msg), true, "task #285: still a live cycle");
+  f.orchestrator.shutdown();
+});
+
+test("SLI 4: the final ack of an arrived mention settles it without a second latency sample", async () => {
+  const f = await arrivedMentionFixture();
+  await f.transition();
+  const arrivals = await f.mentionArrivals();
+  const ackedBefore = await f.outcome("acked");
+  f.clock.advance(90_000);
+  await f.orchestrator.handleMachineMessage("machine-1", {
+    type: "agent:deliver:ack",
+    agentId: "agent-1",
+    seq: 97,
+    deliveryId: f.identity.occurrenceId,
+  } as MachineToServerMessage);
+  assert.equal((f.orchestrator as any).pendingAgentDeliveryAcks.has(f.key), false);
+  assert.equal(await f.outcome("acked") - ackedBefore, 1);
+  assert.equal(await f.mentionArrivals(), arrivals, "arrival was already counted at daemon_pending");
+  f.orchestrator.shutdown();
+});
+
+test("SLI 4: an arrived mention never settled ends as held_expired after 30 min; a re-send does not restart retries", async () => {
+  const f = await arrivedMentionFixture();
+  await f.transition();
+  const heldTimer = f.pending.timer;
+  (f.orchestrator as any).trackPendingAgentDeliveryAck("machine-1", f.msg); // durable recovery re-send
+  assert.equal(f.pending.timer, heldTimer, "the held timer is kept, no ack-retry cycle restarts");
+  const expiredBefore = await f.outcome("held_expired");
+  f.clock.advance(30 * 60_000);
+  assert.equal((f.orchestrator as any).pendingAgentDeliveryAcks.has(f.key), false);
+  assert.equal(await f.outcome("held_expired") - expiredBefore, 1);
+  f.orchestrator.shutdown();
+});
+
+test("SLI 4: two concurrent retries of one record give up once, not twice (task #432)", async () => {
+  const clock = new FakeClock();
+  clock.advance(1_000);
+  const orchestrator = new DeterministicAgentOrchestrator(undefined, clock);
+  seedActiveAgent(orchestrator);
+  seedMachineConnection(orchestrator, "machine-1", makeFakeWs(1));
+  const msg = { type: "agent:deliver" as const, agentId: "agent-1", message: makeAgentMessage("race", 98), seq: 98, deliveryId: "race-giveup" };
+  (orchestrator as any).trackPendingAgentDeliveryAck("machine-1", msg);
+  const pending = (orchestrator as any).pendingAgentDeliveryAcks.get("delivery:race-giveup");
+  clock.clearTimeout(pending.timer);
+  pending.attempts = 24;
+  const gaveUp = async () => (await agentDeliveryOutcomesTotal.get()).values
+    .filter((v) => v.labels.outcome === "gave_up").reduce((sum, v) => sum + v.value, 0);
+  const before = await gaveUp();
+  const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+  try {
+    await Promise.all([
+      (orchestrator as any).retryPendingAgentDelivery("delivery:race-giveup", "ack_timeout"),
+      (orchestrator as any).retryPendingAgentDelivery("delivery:race-giveup", "register"),
+    ]);
+  } finally {
+    log.mockRestore();
+  }
+  assert.equal(await gaveUp() - before, 1);
+  orchestrator.shutdown();
+});
+
+test("SLI 4: a record acked while its retry is mid-flight gets no second outcome and no re-send (task #432)", async () => {
+  const clock = new FakeClock();
+  clock.advance(1_000);
+  const orchestrator = new DeterministicAgentOrchestrator(undefined, clock);
+  seedActiveAgent(orchestrator);
+  const ws = makeFakeWs(1);
+  seedMachineConnection(orchestrator, "machine-1", ws);
+  const msg = { type: "agent:deliver" as const, agentId: "agent-1", message: makeAgentMessage("acked mid-retry", 99), seq: 99, deliveryId: "ack-mid-retry" };
+  (orchestrator as any).trackPendingAgentDeliveryAck("machine-1", msg);
+  const pending = (orchestrator as any).pendingAgentDeliveryAcks.get("delivery:ack-mid-retry");
+  clock.clearTimeout(pending.timer);
+  let releaseGate!: () => void;
+  const gateHeld = new Promise<void>((resolve) => { releaseGate = resolve; });
+  const realGate = (orchestrator as any).loadPendingAgentDeliveryRetryGate.bind(orchestrator);
+  (orchestrator as any).loadPendingAgentDeliveryRetryGate = async (p: unknown) => { await gateHeld; return realGate(p); };
+  const outcomes = async () => {
+    const values = (await agentDeliveryOutcomesTotal.get()).values;
+    const sum = (name: string) => values.filter((v) => v.labels.outcome === name).reduce((acc, v) => acc + v.value, 0);
+    return { acked: sum("acked"), dropped: sum("dropped"), routed: sum("routed") };
+  };
+  const before = await outcomes();
+  const retry = (orchestrator as any).retryPendingAgentDelivery("delivery:ack-mid-retry", "ack_timeout");
+  await Promise.resolve();
+  await orchestrator.handleMachineMessage("machine-1", { type: "agent:deliver:ack", agentId: "agent-1", seq: 99, deliveryId: "ack-mid-retry" } as MachineToServerMessage);
+  const sentAfterAck = ws.sent.length;
+  releaseGate();
+  await retry;
+  const after = await outcomes();
+  assert.deepEqual(
+    { acked: after.acked - before.acked, dropped: after.dropped - before.dropped, routed: after.routed - before.routed },
+    { acked: 1, dropped: 0, routed: 0 },
+  );
+  assert.equal(ws.sent.length, sentAfterAck, "no re-send of an acked record");
+  orchestrator.shutdown();
+});
+
+test("SLI 4: delivery metrics carry the daemon version of the machine connection (zhiqiang-zhou 1ad4e118)", async () => {
+  const clock = new FakeClock();
+  clock.advance(1_000);
+  const orchestrator = new DeterministicAgentOrchestrator(undefined, clock);
+  seedActiveAgent(orchestrator);
+  const ws = makeFakeWs(1);
+  seedMachineConnection(orchestrator, "machine-1", ws);
+  (orchestrator as any).machineConnections.get("machine-1").daemonVersion = "1.0.43";
+  const trackedFor = async (version: string) => (await agentDeliveryTrackedTotal.get()).values
+    .filter((v) => (v.labels as Record<string, string>).daemon_version === version).reduce((sum, v) => sum + v.value, 0);
+  const ackedFor = async (version: string) => (await agentDeliveryOutcomesTotal.get()).values
+    .filter((v) => v.labels.outcome === "acked" && (v.labels as Record<string, string>).daemon_version === version)
+    .reduce((sum, v) => sum + v.value, 0);
+  const trackedBefore = await trackedFor("1.0.43");
+  const ackedBefore = await ackedFor("1.0.43");
+  await orchestrator.deliverMessage("agent-1", makeAgentMessage("versioned", 100));
+  const delivered = JSON.parse(ws.sent[0] ?? "{}") as Extract<ServerToMachineMessage, { type: "agent:deliver" }>;
+  await orchestrator.handleMachineMessage("machine-1", { type: "agent:deliver:ack", agentId: "agent-1", seq: delivered.seq });
+  assert.equal(await trackedFor("1.0.43") - trackedBefore, 1);
+  assert.equal(await ackedFor("1.0.43") - ackedBefore, 1, "the outcome shares the record's label set");
+  const gauge = await agentDeliveryPending.get();
+  assert.ok(gauge.values.every((v) => typeof (v.labels as Record<string, string>).daemon_version === "string"));
+  orchestrator.shutdown();
+});
+
 test("delivery ack clears inbox but does not reauthor stale runtime activity", async () => {
   const { sink, tracer } = makeDeterministicTracer();
   const clock = new FakeClock();
@@ -14227,7 +14854,9 @@ test("ack timeout parks pending delivery while machine is offline and ready reco
   assert.equal(pendingAcks.size, 1);
   assert.equal(parkedPending?.parked, true);
   assert.equal(parkedPending?.attempts, 1);
-  assert.equal(parkedPending?.timer, null);
+  // The ack timer is replaced by a machine-status probe (task #432): a parked
+  // record no longer waits forever for this replica's register/ready.
+  assert.notEqual(parkedPending?.timer, null);
 
   clock.advance(60_000);
   await flushMicrotasks(10);
@@ -18852,6 +19481,69 @@ test("agent:delivery:rejected converts the pending delivery into one agent:start
   }
 });
 
+test("two rejected deliveries for the same agent a few ms apart send one start; the second delivery waits for it", async () => {
+  // Production (v1.21.3): a process exited while four deliveries were being
+  // resent; two of the rejections each became a wake start 20 ms apart, the
+  // daemon spawned one launch, the server kept the other, and every frame of
+  // the running launch was dropped as stale for an hour.
+  const orchestrator = new ServerWakeDeterministicOrchestrator();
+  seedMachineConnection(orchestrator, "machine-1", makeFakeWs()); // a live local socket, as in production
+  seedActiveAgent(orchestrator, "agent-1", "machine-1");
+  (orchestrator as any).trackPendingAgentDeliveryAck("machine-1", pendingDeliver(11, "delivery-11"), { scheduleTimeout: false });
+  (orchestrator as any).trackPendingAgentDeliveryAck("machine-1", pendingDeliver(12, "delivery-12"), { scheduleTimeout: false });
+  try {
+    await orchestrator.handleMachineMessage("machine-1", deliveryRejected(11, "delivery-11"));
+    // What let the second start through: the previous process's exit released the wake lock.
+    (orchestrator as any).releaseWakeLock("agent-1");
+    await orchestrator.handleMachineMessage("machine-1", deliveryRejected(12, "delivery-12"));
+
+    assert.equal(orchestrator.startMessages.length, 1, "one start in flight per agent");
+    assert.deepEqual(pendingDeliveryKeys(orchestrator).length, 1, "the second delivery is re-tracked for the start already in flight");
+  } finally {
+    orchestrator.shutdown();
+  }
+});
+
+test("starts for the same agent issued concurrently on one replica dispatch once, even without the Redis wake lock", async () => {
+  const orchestrator = new ServerWakeDeterministicOrchestrator(new RedisUnavailableReplicaStateStore());
+  seedMachineConnection(orchestrator, "machine-1", {});
+  seedActiveAgent(orchestrator, "agent-1", "machine-1");
+  try {
+    const results = await Promise.all([
+      orchestrator.startAgent("agent-1"),
+      orchestrator.startAgent("agent-1"),
+      orchestrator.startAgent("agent-1"),
+    ]);
+    assert.equal(orchestrator.startMessages.length, 1);
+    assert.deepEqual(results.map((result) => result.outcome).sort(), ["dispatched", "skipped", "skipped"]);
+  } finally {
+    orchestrator.shutdown();
+  }
+});
+
+test("once its start is acknowledged, the agent can be started again", async () => {
+  const orchestrator = new ServerWakeDeterministicOrchestrator();
+  seedMachineConnection(orchestrator, "machine-1", makeFakeWs());
+  seedActiveAgent(orchestrator, "agent-1", "machine-1");
+  try {
+    await orchestrator.startAgent("agent-1");
+    const first = orchestrator.startMessages[0]!;
+    // The daemon acknowledges that start; its wake lock is released.
+    await orchestrator.handleMachineMessage("machine-1", {
+      type: "agent:start:ack",
+      agentId: "agent-1",
+      launchId: first.launchId,
+      startDispatchId: first.startDispatchId,
+      queueState: "starting",
+    } as MachineToServerMessage);
+    (orchestrator as any).releaseWakeLock("agent-1");
+    await orchestrator.startAgent("agent-1");
+    assert.equal(orchestrator.startMessages.length, 2);
+  } finally {
+    orchestrator.shutdown();
+  }
+});
+
 test("agent:delivery:rejected for a manually stopped agent starts nothing and settles the delivery as a typed terminal outcome", async () => {
   const orchestrator = new ServerWakeDeterministicOrchestrator();
   seedMachineConnection(orchestrator, "machine-1", {});
@@ -19714,7 +20406,7 @@ async function reportStartFailure(orchestrator: WakeCrashLoopDeterministicOrches
     launchId,
     observedAtMs: 1_000,
     isHeartbeat: false,
-    spawnFailure: { reason, ...(reason === "model_not_configured" ? { model: "devin/swe-2" } : {}) },
+    spawnFailure: { reason, ...(reason === "model_not_configured" || reason === "model_not_found" ? { model: "devin/swe-2" } : {}) },
   } as MachineToServerMessage);
   await flushMicrotasks();
 }
@@ -19769,11 +20461,63 @@ test("task #1221: a runtime-config change lifts the block; retryable failures ke
     await orchestrator.handleMachineMessage("machine-1", crashLoopWake(4));
     await flushMicrotasks();
     assert.equal(orchestrator.startMessages.length, 3, "runtime_spawn_failed keeps its existing relaunch behaviour");
-    // Pi's model_not_found is out of scope: it keeps its existing relaunch behaviour too.
+  } finally {
+    orchestrator.shutdown();
+  }
+});
+
+test("model_not_found: messages do not relaunch; one retry a minute later; a second failure pauses until the config changes", async () => {
+  const orchestrator = new WakeCrashLoopDeterministicOrchestrator();
+  seedMachineConnection(orchestrator, "machine-1", makeFakeWs(1));
+  seedActiveAgent(orchestrator, "agent-1", "machine-1");
+  const lastSpawnFailure = () => (orchestrator.emitted.filter((e) => e.event === "agent:activity").at(-1)?.payload as Record<string, unknown>).spawnFailure;
+  try {
+    await startFailureTurn(orchestrator, 1, "model_not_found");
+    assert.deepEqual(lastSpawnFailure(), { reason: "model_not_found", model: "devin/swe-2" }, "not paused yet: a retry is coming");
+    for (let n = 2; n <= 4; n++) {
+      await orchestrator.handleMachineMessage("machine-1", crashLoopWake(n));
+      await flushMicrotasks();
+    }
+    assert.equal(orchestrator.startMessages.length, 1, "messages during the wait do not relaunch");
+    assert.equal(orchestrator.getRecentLifecycleEvents("agent-1").filter((e) => e.detail === "start_failure_retry_pending").length, 3);
+
+    // The one automatic retry, a minute later.
+    await advanceClockAndWaitForCondition(orchestrator.fakeClock, SPAWN_FAILURE_RETRY_ONCE_DELAY_MS + 1_000, () => orchestrator.startMessages.length === 2);
+    assert.equal(orchestrator.startMessages.length, 2, "the retry starts once");
     await reportStartFailure(orchestrator, orchestrator.startMessages.at(-1)!.launchId!, "model_not_found");
-    await orchestrator.handleMachineMessage("machine-1", crashLoopWake(5));
+    assert.deepEqual(lastSpawnFailure(), { reason: "model_not_found", model: "devin/swe-2", autoRestartPaused: true });
+
+    for (let n = 5; n <= 7; n++) {
+      await orchestrator.handleMachineMessage("machine-1", crashLoopWake(n));
+      await flushMicrotasks();
+    }
+    await advanceClockAndWaitForCondition(orchestrator.fakeClock, 10 * SPAWN_FAILURE_RETRY_ONCE_DELAY_MS, () => false);
+    assert.equal(orchestrator.startMessages.length, 2, "paused: no more relaunches, no more retries");
+
+    // The owner picks another model: the next message starts the agent again.
+    await orchestrator.liftWakeBlockForConfigChange("agent-1", { runtimeValuesChanged: true });
+    await orchestrator.handleMachineMessage("machine-1", crashLoopWake(8));
     await flushMicrotasks();
-    assert.equal(orchestrator.startMessages.length, 4, "model_not_found (Pi) is unchanged");
+    assert.equal(orchestrator.startMessages.length, 3, "a config change recovers");
+  } finally {
+    orchestrator.shutdown();
+  }
+});
+
+test("five failed starts in a row pause automatic wakes with the last failure code; a human start lifts it", async () => {
+  const orchestrator = new WakeCrashLoopDeterministicOrchestrator();
+  seedMachineConnection(orchestrator, "machine-1", makeFakeWs(1));
+  seedActiveAgent(orchestrator, "agent-1", "machine-1");
+  try {
+    for (let n = 1; n <= START_FAILURE_THRESHOLD; n++) {
+      await startFailureTurn(orchestrator, n, n === START_FAILURE_THRESHOLD ? "agent_proxy_bind_failed" : "runtime_spawn_failed");
+    }
+    const paused = (orchestrator.emitted.filter((e) => e.event === "agent:activity").at(-1)?.payload as Record<string, unknown>).spawnFailure;
+    assert.deepEqual(paused, { reason: "agent_proxy_bind_failed", autoRestartPaused: true });
+    await orchestrator.handleMachineMessage("machine-1", crashLoopWake(99));
+    await flushMicrotasks();
+    assert.equal(orchestrator.startMessages.length, START_FAILURE_THRESHOLD, "no sixth automatic start");
+    assert.equal((await orchestrator.startAgent("agent-1")).outcome, "dispatched", "the owner's restart still starts it");
   } finally {
     orchestrator.shutdown();
   }
@@ -19815,7 +20559,7 @@ test("task #1221: an owed catch-up clears only when the start that carried it re
   try {
     const breaker = (orchestrator as any).wakeCrashLoopBreaker as WakeCrashLoopBreaker;
     await breaker.recordStart("agent-1", "launch-a", 1_000);
-    await breaker.recordNonRetryableStartFailure("agent-1", { launchId: "launch-a", reason: "model_not_configured", nowMs: 1_500 });
+    await breaker.recordStartFailure("agent-1", { launchId: "launch-a", reason: "model_not_configured", nowMs: 1_500 });
     await breaker.recordStart("agent-1", "launch-b", 2_000, { human: true });
     // launch-b did not carry it (e.g. the catch-up query failed): active does not clear.
     await orchestrator.handleMachineMessage("machine-1", { type: "agent:status", agentId: "agent-1", status: "active", launchId: "launch-b" } as MachineToServerMessage);
@@ -19911,6 +20655,205 @@ test("getActivity with the caller's row: a deleted agent and an inactive live ag
     assert.equal((orchestrator as any).agentStateCache.get("agent-inactive")?.status, "inactive");
     assert.equal(orchestrator.hintLoads, 0);
   } finally {
+    orchestrator.shutdown();
+  }
+});
+
+test("getActivity: an explicit prefetched option answers every read without touching the store", async () => {
+  class CountingStore extends InMemoryReplicaStateStore {
+    reads = 0;
+    override async getAgentActivity(agentId: string) { this.reads += 1; return super.getAgentActivity(agentId); }
+    override async getAgentRuntimeError(agentId: string) { this.reads += 1; return super.getAgentRuntimeError(agentId); }
+    override async getMachineReplicaOwner(machineId: string) { this.reads += 1; return super.getMachineReplicaOwner(machineId); }
+  }
+  class HintCountingOrchestrator extends DeterministicAgentOrchestrator {
+    hintReads = 0;
+    protected override async loadLatestPersistedActivityHint(): Promise<any> {
+      this.hintReads += 1;
+      return null;
+    }
+  }
+  const store = new CountingStore();
+  const orchestrator = new HintCountingOrchestrator(store, new FakeClock());
+  const row: any = {
+    id: "agent-explicit", serverId: "server-1", machineId: "machine-remote", sessionId: null, status: "active", name: "agent-explicit",
+    displayName: null, avatarUrl: null, description: null, model: "gpt-5", runtime: "codex", lastRuntimeError: null,
+    reasoningEffort: null, envVars: null, executionMode: "cloud", deletedAt: null, createdAt: new Date(0), updatedAt: new Date(0),
+  };
+  try {
+    const resolved = await orchestrator.getActivity(row.id, {
+      persistedAgent: row,
+      prefetched: {
+        agentActivity: new Map([[row.id, { activity: "working", detail: "Running tests", detailKind: "other", updatedAt: Date.now() } as any]]),
+        runtimeError: new Map([[row.id, null]]),
+        replicaOwner: new Map([["machine-remote", "remote-replica"]]),
+        latestHint: new Map([[row.id, null]]),
+      },
+    });
+    assert.equal(resolved.activity, "working");
+    assert.equal(store.reads, 0, "no store read when the answer was passed in");
+    assert.equal(orchestrator.hintReads, 0);
+  } finally {
+    orchestrator.shutdown();
+  }
+});
+
+test("getActivities: a failed batch read fails the call with no per-agent retry reads", async () => {
+  class FailingBatchStore extends InMemoryReplicaStateStore {
+    singleReads = 0;
+    override async getAgentActivity(agentId: string) {
+      this.singleReads += 1;
+      return super.getAgentActivity(agentId);
+    }
+    override async getAgentRuntimeError(agentId: string) {
+      this.singleReads += 1;
+      return super.getAgentRuntimeError(agentId);
+    }
+    override async getMachineReplicaOwner(machineId: string) {
+      this.singleReads += 1;
+      return super.getMachineReplicaOwner(machineId);
+    }
+    async getAgentActivities(): Promise<Map<string, any>> {
+      throw new Error("redis pipeline failed");
+    }
+    async getAgentRuntimeErrors(agentIds: readonly string[]) {
+      return new Map(agentIds.map((id) => [id, null]));
+    }
+    async getMachineReplicaOwners(machineIds: readonly string[]) {
+      return new Map(machineIds.map((id) => [id, null]));
+    }
+  }
+  class NoHintOrchestrator extends DeterministicAgentOrchestrator {
+    singleHints = 0;
+    protected override async loadLatestPersistedActivityHint(): Promise<any> {
+      this.singleHints += 1;
+      return null;
+    }
+    protected override async loadLatestPersistedActivityHints(agentIds: readonly string[]): Promise<any> {
+      return new Map(agentIds.map((id) => [id, null]));
+    }
+  }
+  const store = new FailingBatchStore();
+  const orchestrator = new NoHintOrchestrator(store, new FakeClock());
+  const rows = Array.from({ length: 20 }, (_, index) => ({
+    id: `agent-${index}`, serverId: "server-1", machineId: "machine-1", sessionId: null, status: "active", name: `agent-${index}`,
+    displayName: null, avatarUrl: null, description: null, model: "gpt-5", runtime: "codex", lastRuntimeError: null,
+    reasoningEffort: null, envVars: null, executionMode: "cloud", deletedAt: null, createdAt: new Date(0), updatedAt: new Date(0),
+  })) as any[];
+  try {
+    await assert.rejects(() => orchestrator.getActivities(rows), /redis pipeline failed/);
+    assert.equal(store.singleReads, 0, "no one-key-at-a-time retries after a failed batch");
+    assert.equal(orchestrator.singleHints, 0);
+  } finally {
+    orchestrator.shutdown();
+  }
+});
+
+test("getActivities: one batch read per source for the whole list, same results as per-agent getActivity, deleted agents offline without reads", async () => {
+  class CountingStore extends InMemoryReplicaStateStore {
+    single = { activity: 0, runtimeError: 0, owner: 0 };
+    batch = { activity: 0, runtimeError: 0, owner: 0 };
+    override async getAgentActivity(agentId: string) {
+      this.single.activity += 1;
+      return super.getAgentActivity(agentId);
+    }
+    override async getAgentRuntimeError(agentId: string) {
+      this.single.runtimeError += 1;
+      return super.getAgentRuntimeError(agentId);
+    }
+    override async getMachineReplicaOwner(machineId: string) {
+      this.single.owner += 1;
+      return super.getMachineReplicaOwner(machineId);
+    }
+    async getAgentActivities(agentIds: readonly string[]) {
+      this.batch.activity += 1;
+      return new Map(agentIds.map((id) => [id, (this.agentActivities.get(id) ?? null) as any]));
+    }
+    async getAgentRuntimeErrors(agentIds: readonly string[]) {
+      this.batch.runtimeError += 1;
+      return new Map(agentIds.map((id) => [id, this.agentRuntimeErrors.get(id) ?? null]));
+    }
+    async getMachineReplicaOwners(machineIds: readonly string[]) {
+      this.batch.owner += 1;
+      return new Map(machineIds.map((id) => [id, this.machineReplicaOwners.get(id) ?? (this.machineReplicas.has(id) ? "remote-replica" : null)]));
+    }
+  }
+  class HintOrchestrator extends DeterministicAgentOrchestrator {
+    singleHints = 0;
+    batchHints = 0;
+    constructor(store: InMemoryReplicaStateStore, readonly hints: Map<string, any>) {
+      super(store, new FakeClock());
+    }
+    protected override async loadLatestPersistedActivityHint(agentId: string): Promise<any> {
+      this.singleHints += 1;
+      return this.hints.get(agentId) ?? null;
+    }
+    protected override async loadLatestPersistedActivityHints(agentIds: readonly string[]): Promise<any> {
+      this.batchHints += 1;
+      return new Map(agentIds.map((id) => [id, this.hints.get(id) ?? null]));
+    }
+  }
+  const row = (id: string, overrides: Record<string, unknown> = {}): any => ({
+    id,
+    serverId: "server-1",
+    machineId: "machine-remote",
+    sessionId: null,
+    status: "active",
+    name: id,
+    displayName: null,
+    avatarUrl: null,
+    description: null,
+    model: "gpt-5",
+    runtime: "codex",
+    lastRuntimeError: null,
+    reasoningEffort: null,
+    envVars: null,
+    executionMode: "cloud",
+    deletedAt: null,
+    createdAt: new Date(0),
+    updatedAt: new Date(0),
+    ...overrides,
+  });
+  const rows = [
+    row("agent-working"),
+    row("agent-no-machine", { machineId: null }),
+    row("agent-inactive", { status: "inactive" }),
+    row("agent-error"),
+    row("agent-hinted", { machineId: "machine-other" }),
+    row("agent-deleted", { deletedAt: new Date(1) }),
+  ];
+  const seed = async (store: InMemoryReplicaStateStore) => {
+    store.machineReplicas.add("machine-remote");
+    store.machineReplicaOwners.set("machine-remote", "remote-replica");
+    store.machineReplicaOwners.set("machine-other", "remote-replica");
+    await store.setAgentActivity("agent-working", "working", "Running tests", "other" as any);
+    await store.setAgentActivity("agent-deleted", "working", "stale snapshot from before deletion", "other" as any);
+    await store.setAgentRuntimeError("agent-error", { message: "usage limit", at: new Date(0).toISOString(), actionRequired: true });
+  };
+  const hints = new Map<string, any>([["agent-hinted", { activity: "thinking", detail: "", detailKind: "other", updatedAt: Date.now() }]]);
+
+  // Reference: the per-agent path, one getActivity per live agent.
+  const referenceStore = new CountingStore();
+  await seed(referenceStore);
+  const reference = new HintOrchestrator(referenceStore, hints);
+  const expected = [];
+  for (const r of rows.filter((candidate) => !candidate.deletedAt)) {
+    expected.push(await reference.getActivity(r.id, { persistedAgent: r }));
+  }
+
+  const store = new CountingStore();
+  await seed(store);
+  const orchestrator = new HintOrchestrator(store, hints);
+  try {
+    const resolved = await orchestrator.getActivities(rows);
+    assert.deepEqual(resolved.slice(0, 5), expected, "same results as resolving each agent on its own");
+    assert.deepEqual(resolved[5], { activity: "offline", activityDetail: "" }, "a deleted agent is offline, whatever Redis still holds");
+    assert.deepEqual(store.single, { activity: 0, runtimeError: 0, owner: 0 }, "no one-key-at-a-time Redis reads");
+    assert.deepEqual(store.batch, { activity: 1, runtimeError: 1, owner: 1 });
+    assert.equal(orchestrator.batchHints, 1);
+    assert.equal(orchestrator.singleHints, 0);
+  } finally {
+    reference.shutdown();
     orchestrator.shutdown();
   }
 });

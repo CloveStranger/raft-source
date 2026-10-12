@@ -1,4 +1,5 @@
-import { isProcessAlive } from "./internal/process-primitives";
+import { isProcessAlive, writePidfileAt } from "./internal/process-primitives";
+import { servicePidPath } from "./paths";
 import { currentTimeMs, setClockTimeout } from "@botiverse/raft-shared";
 import { connectService } from "./lib/ipc-client";
 import {
@@ -22,6 +23,16 @@ export interface ServiceSelfRestartControlDeps {
   killProcess?: (pid: number, signal: NodeJS.Signals) => void;
   releaseServiceOwnership?: () => Promise<void>;
   restoreServiceOwnership?: () => Promise<void>;
+  /**
+   * Rollback seam (task #912): `spawnDetachedServiceFn` registers the
+   * replacement pid in `run/service.pid`. When the takeover fails, the
+   * incumbent is still the live service, so the pidfile must name it again
+   * before anything else can run (`stop` reads the pidfile first). Written
+   * before ownership restoration, which can fail (EADDRINUSE on Windows
+   * named pipes) and must not leave the dead replacement pid behind.
+   * Defaults to writing `process.pid` to `servicePidPath(slockHome)`.
+   */
+  writeIncumbentPidfile?: () => Promise<void>;
   readReplacementAttestationFn?: typeof readMachineServiceAttestation;
   readManagedMachineIdentitiesFn?: typeof readManagedMachineIdentities;
   listManagedServerIdsFn?: typeof listManagedServerIds;
@@ -214,6 +225,17 @@ export async function performServiceSelfRestart(
         }
       }
     }
+    // The incumbent (this process) is still the live service. Put its pid
+    // back before trying to re-own the endpoint: if restoration fails, the
+    // pidfile must not keep pointing at the replacement we just killed, or
+    // `raft-computer stop` reports stale_pidfile_cleared and leaves this
+    // service and its runners running (task #912, Windows field report).
+    let pidfileError: unknown = null;
+    try {
+      await (deps.writeIncumbentPidfile ?? (() => writePidfileAt(servicePidPath(slockHome), process.pid)))();
+    } catch (candidatePidfileError) {
+      pidfileError = candidatePidfileError;
+    }
     let restoreError: unknown = null;
     let restored = !ownershipMayNeedRestore;
     const restoreDeadline = now() + restoreOwnershipTimeoutMs;
@@ -230,9 +252,12 @@ export async function performServiceSelfRestart(
     const restoreDetail = restored
       ? ""
       : `; incumbent ownership restore failed: ${restoreError instanceof Error ? restoreError.message : String(restoreError)}`;
+    const pidfileDetail = pidfileError === null
+      ? ""
+      : `; incumbent pidfile restore failed: ${pidfileError instanceof Error ? pidfileError.message : String(pidfileError)}`;
     throw new ServiceClientError(
       "SELF_RELAUNCH_UNAVAILABLE",
-      `SELF_RELAUNCH_UNAVAILABLE: ${error instanceof Error ? error.message : String(error)}${restoreDetail}`,
+      `SELF_RELAUNCH_UNAVAILABLE: ${error instanceof Error ? error.message : String(error)}${restoreDetail}${pidfileDetail}`,
       error,
     );
   }

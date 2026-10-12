@@ -133,16 +133,20 @@ export async function uploadFeedbackTranscriptOutcome(input: FeedbackTranscriptO
 
 /**
  * One feedback transcript request, in order: collect → send the result frame
- * → (only then) upload the outcome object. Resolves right after the send; the
- * outcome upload continues in `outcome`, which never rejects.
+ * → (only then) upload the outcome object and, beside it, the agent event
+ * tail (task #1230). Resolves right after the send; both uploads continue in
+ * `outcome` / `agentEventTail`, which never reject and which nothing on this
+ * path awaits (neither waits for the other either).
  */
 export async function runFeedbackTranscriptRequest(input: {
   collect: () => Promise<FeedbackTranscriptCollectionResult>;
   send: (result: FeedbackTranscriptCollectionResult) => void;
   uploadOutcome: (result: FeedbackTranscriptCollectionResult) => Promise<unknown>;
+  /** Optional sibling upload with its own budget; started after the send. */
+  uploadAgentEventTail?: () => Promise<unknown>;
   workerConfigured: boolean;
   tag: string;
-}): Promise<{ outcome: Promise<void> }> {
+}): Promise<{ outcome: Promise<void>; agentEventTail: Promise<void> }> {
   let result: FeedbackTranscriptCollectionResult;
   try {
     result = await input.collect();
@@ -167,5 +171,13 @@ export async function runFeedbackTranscriptRequest(input: {
       }
     })()
     : Promise.resolve();
-  return { outcome };
+  const startTail = input.uploadAgentEventTail;
+  const agentEventTail = input.workerConfigured && startTail
+    ? Promise.resolve()
+      .then(startTail)
+      .then(() => undefined, (err: unknown) => {
+        logger.warn(`[FeedbackAgentEventTail] failed for ${input.tag}: ${messageOf(err)}`);
+      })
+    : Promise.resolve();
+  return { outcome, agentEventTail };
 }

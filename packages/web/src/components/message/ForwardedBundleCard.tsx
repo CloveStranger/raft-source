@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import type { MouseEvent } from "react";
 import { ChevronRight, ChevronUp, Forward, Image as ImageIcon } from "lucide-react";
 import { useIntl } from "react-intl";
@@ -261,7 +261,7 @@ function ForwardedBundleAttachmentChip({
   // its own compact chip, which is why every attachment behaviour (preview vs
   // download, cursor, tooltip, styling) had to be re-implemented here and kept
   // drifting. One component means one behaviour by construction.
-  const asMessageAttachment: MessageAttachment = {
+  const asMessageAttachment = useMemo<MessageAttachment>(() => ({
     id: attachment.id ?? "",
     filename: attachment.filename,
     mimeType: attachment.mimeType || "application/octet-stream",
@@ -271,7 +271,8 @@ function ForwardedBundleAttachmentChip({
     thumbnailUrl: null,
     rasterPreviewUrl: null,
     localPreviewUrl: null,
-  };
+  }), [attachment]);
+  const handleOpen = useCallback(() => onOpen?.(attachment), [attachment, onOpen]);
   const previewable = isDocumentPreviewAttachment(asMessageAttachment);
   return (
     <span data-testid={onOpen && attachment.id ? "forwarded-bundle-attachment" : undefined} className="inline-flex max-w-full">
@@ -280,7 +281,7 @@ function ForwardedBundleAttachmentChip({
         ariaLabel={formatMessage({ id: "message.forwardedBundle.openAttachment" }, { filename: attachment.filename })}
       variant="compact"
       isOptimistic={false}
-      onClick={onOpen && attachment.id ? () => onOpen(attachment) : undefined}
+      onClick={onOpen && attachment.id ? handleOpen : undefined}
       affordance={previewable ? "preview" : "download"}
       affordanceName={previewable ? "document-preview" : "file-download"}
         meta={(
@@ -293,6 +294,8 @@ function ForwardedBundleAttachmentChip({
   );
 }
 
+const EMPTY_ATTACHMENT_SNAPSHOTS: ForwardedBundleAttachmentSnapshot[] = [];
+
 function ForwardedBundleAttachments({
   item,
   onOpenAttachment,
@@ -300,12 +303,15 @@ function ForwardedBundleAttachments({
   item: ForwardedBundleItem;
   onOpenAttachment?: (attachment: ForwardedBundleAttachmentSnapshot) => void;
 }) {
-  const attachments = Array.isArray(item.attachmentSnapshots) ? item.attachmentSnapshots : [];
-  if (attachments.length === 0) return null;
+  const attachments = Array.isArray(item.attachmentSnapshots) ? item.attachmentSnapshots : EMPTY_ATTACHMENT_SNAPSHOTS;
   const projected = item.attachmentPolicy === "projected";
-  const imageAttachments = projected
-    ? attachments.filter((attachment) => attachment.id && isForwardedImagePreview(attachment))
-    : [];
+  const imageAttachments = useMemo(
+    () => (projected
+      ? attachments.filter((attachment) => attachment.id && isForwardedImagePreview(attachment))
+      : EMPTY_ATTACHMENT_SNAPSHOTS),
+    [attachments, projected],
+  );
+  if (attachments.length === 0) return null;
   const fileAttachments = imageAttachments.length > 0
     ? attachments.filter((attachment) => !imageAttachments.includes(attachment))
     : attachments;

@@ -151,6 +151,17 @@ if (!signal.ok) return new Response(signal.message, { status: 401 });
   explicit and idempotent; `#name` targets resolve through server info.
   `raft.channels.info({ target })` — one regular channel's facts (visibility,
   joined, your channel role, mute, description, member counts).
+- `raft.channels.create / update / archive / unarchive / addMember /
+  removeMember` and `raft.server.update` — administration. The Server checks
+  on every call (server role; for update / archive / unarchive /
+  removeMember also the channel-admin role in that channel); the SDK never
+  pre-checks. A refusal is an `HTTP_ERROR` with the Server's `serverCode` and
+  `nextAction`, or a permission next action when the Server gave none. `addMember` /
+  `removeMember` take exactly one of `user` (a human) and `agent`.
+  `server.update` also needs the `server` credential capability.
+- `raft.labs.list / setAccess / setEnrollment` — the server's Labs. Writes
+  take the Labs `version` as `expectedVersion`, or read it first when you
+  omit it; owner / settings authority is checked by the Server.
 - `raft.server.info()` — summary by default; `view: "channels" | "agents" |
   "humans"` pages a section with the CLI's `More:` line (`query` filters it,
   `joined` keeps your channels); `view: "full"` is the whole overview. `raft.users.info({ name })` — a human's or agent's visible

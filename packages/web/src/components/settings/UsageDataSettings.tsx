@@ -5,7 +5,7 @@
 // Both save on toggle; the server gate (productAnalyticsGate) is what enforces
 // them, and the tracker asks /product-events/config before sending anything.
 
-import { useEffect, useId, useState } from "react";
+import { useCallback, useEffect, useId, useState } from "react";
 import type { ReactNode } from "react";
 import { useIntl } from "react-intl";
 import { Card, Switch } from "raft-ui";
@@ -76,17 +76,13 @@ function UsageDataSettingsCardContent() {
   const [saving, setSaving] = useState(false);
   const [failed, setFailed] = useState(false);
 
-  const handleChange = async (checked: boolean) => {
+  const handleChange = useCallback((checked: boolean) => {
     setSaving(true);
     setFailed(false);
-    try {
-      await updateProfile({ shareUsageData: checked });
-    } catch {
-      setFailed(true);
-    } finally {
-      setSaving(false);
-    }
-  };
+    void updateProfile({ shareUsageData: checked })
+      .catch(() => setFailed(true))
+      .finally(() => setSaving(false));
+  }, [updateProfile]);
 
   return (
     <div className="mt-6">
@@ -103,7 +99,7 @@ function UsageDataSettingsCardContent() {
         )}
         checked={shareUsageData ?? SHARE_USAGE_DATA_DEFAULT}
         disabled={saving}
-        onCheckedChange={(checked) => void handleChange(checked)}
+        onCheckedChange={handleChange}
         footer={failed && (
           <Banner intent="warning" density="sm" className="mt-3 font-bold">
             {formatMessage({ id: "settings.usageData.saveFailed" })}
@@ -148,23 +144,21 @@ function WorkspaceProductAnalyticsSectionContent() {
     };
   }, [serverId]);
 
-  if (!serverId) return null;
-
-  const handleChange = async (checked: boolean) => {
+  // Declared before the early return below: hooks must run on every render.
+  const handleChange = useCallback((checked: boolean) => {
+    if (!serverId) return;
     setSaving(true);
     setFailed(false);
-    try {
-      const { data } = await api.patch<WorkspaceProductAnalyticsSettings>(
-        `/servers/${serverId}/product-analytics-settings`,
-        { productAnalyticsEnabled: checked },
-      );
-      setSettings(data);
-    } catch {
-      setFailed(true);
-    } finally {
-      setSaving(false);
-    }
-  };
+    void api.patch<WorkspaceProductAnalyticsSettings>(
+      `/servers/${serverId}/product-analytics-settings`,
+      { productAnalyticsEnabled: checked },
+    )
+      .then(({ data }) => setSettings(data))
+      .catch(() => setFailed(true))
+      .finally(() => setSaving(false));
+  }, [serverId]);
+
+  if (!serverId) return null;
 
   return (
     <div className="mb-6">
@@ -179,7 +173,7 @@ function WorkspaceProductAnalyticsSectionContent() {
         description={formatMessage({ id: "settings.workspaceProductAnalytics.description" })}
         checked={settings?.productAnalyticsEnabled ?? true}
         disabled={saving || settings === null || !settings.canManageProductAnalytics}
-        onCheckedChange={(checked) => void handleChange(checked)}
+        onCheckedChange={handleChange}
         footer={failed && (
           <Banner intent="warning" density="sm" className="mt-3 font-bold">
             {formatMessage({ id: "settings.workspaceProductAnalytics.saveFailed" })}

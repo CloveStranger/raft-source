@@ -262,3 +262,33 @@ test("THE DEFECT: a number owned by another channel still renders as a link in t
     "same markup whether the number is owned by this channel or another one — indistinguishable",
   );
 });
+
+// ── #mention-mix layout regression (Artea): a task ref sits inline in body text
+// mixed with other chips and inline code, and must keep the body-baseline chip
+// treatment. An earlier revision of the raft-ui integration rendered it as a
+// bordered status badge, which grew the line box by 2px and reflowed the mix. ──
+
+test("#mention-mix: an inline task ref keeps the body-baseline chip shape", () => {
+  const task = makeTask(READING_CHANNEL_ID, 15, "align inline chips");
+  renderWith(`blocked until #15 and some inline code \`pnpm run test\` here`, {
+    channelTasks: [task],
+    serverTasks: [task],
+  });
+
+  const link = taskRefLink(15);
+  assert.ok(link, "the task ref renders as a link");
+
+  // The inline ref must be rui's inline TaskChip (data-slot=task-chip), NOT the
+  // bordered status badge (data-slot=task-status-badge).
+  const chip = link.closest('[data-slot="task-chip"]') ?? link.querySelector('[data-slot="task-chip"]');
+  assert.ok(chip, "an inline reference is a rui TaskChip, not a badge");
+  assert.ok(
+    link.closest('[data-slot="task-status-badge"]') === null,
+    "an inline reference must NOT be a status badge (it would inflate the line box)",
+  );
+
+  // The inline variant is borderless and body-sized — the property that keeps
+  // the mixed line from reflowing.
+  const chipEl = chip as HTMLElement;
+  assert.ok(chipEl.hasAttribute("data-inline-reference"), "the inline chip carries its inline marker");
+});

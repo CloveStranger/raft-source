@@ -1,0 +1,36 @@
+{
+  "id": "promo_referral_fixture",
+  "object": "promotion_code",
+  "livemode": false,
+  "active": true,
+  "code": "RAFTREF222222222222422282222222",
+  "max_redemptions": 10,
+  "expires_at": null,
+  "promotion": {
+    "type": "coupon",
+    "coupon": {
+      "id": "raft_ref_coupon_11111111111141118111111111111111",
+      "object": "coupon",
+      "livemode": false,
+      "percent_off": 20,
+      "duration": "repeating",
+      "duration_in_months": 3,
+      "metadata": {
+        "raft_use": "referral_discount_checkout",
+        "referral_campaign_id": "11111111-1111-4111-8111-111111111111",
+        "provider_strategy": "stripe_coupon_repeating_v1@2026-02-25.clover"
+      }
+    }
+  },
+  "metadata": {
+    "raft_use": "referral_discount_checkout",
+    "referral_campaign_id": "11111111-1111-4111-8111-111111111111",
+    "referral_code_id": "22222222-2222-4222-8222-222222222222",
+    "referral_referrer_user_id": "33333333-3333-4333-8333-333333333333",
+    "provider_strategy": "stripe_coupon_repeating_v1@2026-02-25.clover"
+  },
+  "lastResponse": {
+    "apiVersion": "2026-02-25.clover",
+    "requestId": "req_referral_promotion_retrieve_fixture"
+  }
+}

@@ -138,6 +138,12 @@ export interface CaptureOptions {
    * connector line, per huxijin's v1.4 spec ("纯 padding 缩紧").
    */
   threadChildIds?: ReadonlySet<string>;
+  /**
+   * Panel the selection was made in. A thread's parent message also renders
+   * in the channel timeline, so a document-wide id lookup can pick that copy
+   * and size the export to the wrong column.
+   */
+  scope?: ParentNode | null;
 }
 
 /**
@@ -547,6 +553,24 @@ async function inlineImageForScreenshot(img: HTMLImageElement): Promise<void> {
   }
 }
 
+/**
+ * Live rows for the selected ids in document order, preferring rows inside
+ * `scope` (the panel the selection was made in) over same-id rows elsewhere.
+ */
+export function findSelectedMessageRows(messageIds: readonly string[], scope?: ParentNode | null): HTMLElement[] {
+  const nodes: HTMLElement[] = [];
+  for (const id of messageIds) {
+    const el = scope?.querySelector<HTMLElement>(`[id="message-${id}"]`) ?? document.getElementById(`message-${id}`);
+    if (el) nodes.push(el);
+  }
+  return nodes.sort((a, b) => {
+    const pos = a.compareDocumentPosition(b);
+    if (pos & Node.DOCUMENT_POSITION_FOLLOWING) return -1;
+    if (pos & Node.DOCUMENT_POSITION_PRECEDING) return 1;
+    return 0;
+  });
+}
+
 export async function captureSelectedMessages(
   messageIds: string[],
   options: CaptureOptions = {},
@@ -562,20 +586,10 @@ async function captureSelectedMessagesUnsafe(
     throw new Error("captureSelectedMessages: no message ids");
   }
 
-  const nodes: HTMLElement[] = [];
-  for (const id of messageIds) {
-    const el = document.getElementById(`message-${id}`);
-    if (el) nodes.push(el);
-  }
+  const nodes = findSelectedMessageRows(messageIds, options.scope);
   if (nodes.length === 0) {
     throw new Error("captureSelectedMessages: no DOM matches");
   }
-  nodes.sort((a, b) => {
-    const pos = a.compareDocumentPosition(b);
-    if (pos & Node.DOCUMENT_POSITION_FOLLOWING) return -1;
-    if (pos & Node.DOCUMENT_POSITION_PRECEDING) return 1;
-    return 0;
-  });
 
   // Match the live surface so cloned dark-theme text keeps its original contrast.
   const surface = resolveScreenshotSurface(nodes[0]);

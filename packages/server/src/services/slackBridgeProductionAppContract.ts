@@ -23,7 +23,14 @@ export const SLACK_BRIDGE_ACTIVE_BOT_SCOPES = [
   "chat:write.customize",
   "groups:history",
   "groups:read",
+  "usergroups:read",
+  "usergroups:write",
   "users:read",
+] as const;
+
+export const SLACK_BRIDGE_AGENT_MENTION_BOT_SCOPES = [
+  "usergroups:read",
+  "usergroups:write",
 ] as const;
 
 /** Product-confirmed follow-up capabilities authorized at initial install. */
@@ -32,6 +39,21 @@ export const SLACK_BRIDGE_PREAUTHORIZED_BOT_SCOPES = [
   "files:write",
   "reactions:read",
   "reactions:write",
+] as const;
+
+/** The pre-Agent-mention grant remains sufficient for existing message sync. */
+export const SLACK_BRIDGE_CORE_BOT_SCOPES = [
+  "channels:history",
+  "channels:read",
+  "chat:write",
+  "chat:write.customize",
+  "files:read",
+  "files:write",
+  "groups:history",
+  "groups:read",
+  "reactions:read",
+  "reactions:write",
+  "users:read",
 ] as const;
 
 /** Exact scope set requested on every new production-compatible install. */
@@ -46,6 +68,8 @@ export const SLACK_BRIDGE_REQUIRED_BOT_SCOPES = [
   "groups:read",
   "reactions:read",
   "reactions:write",
+  "usergroups:read",
+  "usergroups:write",
   "users:read",
 ] as const;
 

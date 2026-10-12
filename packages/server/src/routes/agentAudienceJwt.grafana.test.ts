@@ -30,9 +30,9 @@ test.skipIf(!enabled)("issued JWT interoperates with real Grafana 12.4.12 withou
     const [server] = await getDb().insert(servers).values({ name: "Grafana fixture", slug: `jwt-${suffix}`, ownerId: owner.id }).returning();
     const [agent] = await getDb().insert(agents).values({ serverId: server.id, name: "grafana-agent" }).returning();
     await getDb().insert(serverAgentMembers).values({ serverId: server.id, agentId: agent.id });
-    const [client] = await getDb().insert(oauthClients).values({ serverId: server.id, createdByUserId: owner.id, name: "Grafana", clientId: "test-grafana", clientSecretHash: "fixture", allowedScopes: ["openid", "profile"], enabled: true, appType: "server_local" }).returning();
+    const [client] = await getDb().insert(oauthClients).values({ serverId: server.id, createdByUserId: owner.id, name: "Grafana", clientId: "test-grafana", clientSecretHash: "fixture", allowedScopes: ["openid", "profile"], enabled: true, appType: "server_local", agentJwtEnabled: true }).returning();
     const credential = await mintAgentCredential({ agentId: agent.id, scopes: ["read"], name: "grafana-e2e", createdByUserId: null });
-    process.env.RAFT_AGENT_JWT_AUDIENCES = JSON.stringify([{ serverId: server.id, clientId: client.clientId }]);
+    delete process.env.RAFT_AGENT_JWT_AUDIENCES;
     const issuer = `https://issuer.example.test/oidc/${server.slug}`;
     fs.writeFileSync(path.join(folder, "jwks.json"), JSON.stringify(getOidcJwks()), { mode: 0o644 });
     fs.chmodSync(folder, 0o755); // only public JWKS, needed by the container user

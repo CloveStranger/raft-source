@@ -101,8 +101,10 @@ export interface CleanerRuntimeOptions {
   /** Bounded measurement of Raft's own files, traced with a low-disk decision. */
   measureRaftDiskFootprint?: () => Promise<Readonly<Record<string, unknown>>>;
   /**
-   * Advisory notice for a running agent. Production never starts a stopped
-   * agent for it; the item waits in the Inbox until the agent wakes anyway.
+   * Advisory notice for a running agent, called right after the agent went from
+   * Working to Idle. Production never starts a stopped agent for it and never
+   * writes into a turn that started meanwhile; the item then waits in the Inbox
+   * for the next idle drain or wake.
    */
   wake: (ownerAgentId: string, item: AgentInboxAppItem) => void | Promise<void>;
   /** Production shares Core's per-owner typed Inbox; tests may use the fallback. */
@@ -140,12 +142,20 @@ export type CleanerConfigApplyResult =
 const DEFAULT_MEASUREMENT_TIMEOUT_MS = 10_000;
 
 /**
- * The MEMORY.md hint may also suggest clearing workspace files the agent
- * knows are unused, at most once per agent per week. Nothing scans the
- * workspace; the agent decides what, if anything, to delete.
+ * Workspace tip: a separate item asking the agent to delete workspace files it
+ * is sure it no longer needs and to ask its owner or creator about the ones it
+ * is unsure of. It rides along with the MEMORY.md hint at most once per agent
+ * per week, and low disk space may add one more per low-disk episode. Nothing
+ * scans the workspace; the agent decides. It reuses the disk hint's
+ * notification class, which the Server manifest already declares.
  */
-export const CLEANER_WORKSPACE_CLEANUP_TIP = "; also delete workspace files you know are unused";
+export const CLEANER_WORKSPACE_CLEANUP_TIP_TITLE =
+  "When you have time: delete workspace files you are sure are unneeded; ask your owner or creator about unsure ones";
+export const CLEANER_WORKSPACE_CLEANUP_TIP_SUMMARY =
+  "Ask only about files new since you last asked. Also keep .raftmigrateignore up to date.";
 export const CLEANER_WORKSPACE_CLEANUP_TIP_MIN_INTERVAL_MS = 7 * 24 * 60 * 60 * 1_000;
+
+type CleanerWorkspaceTipTrigger = "memory_hint" | "disk_low";
 
 /**
  * The MEMORY.md hint is advisory. Once presented, it is not presented (or
@@ -157,6 +167,12 @@ export const CLEANER_MEMORY_HINT_REWAKE_COOLDOWN_MS = 24 * 60 * 60 * 1_000;
 export const CLEANER_MEMORY_HINT_REWAKE_GROWTH_RATIO = 1.25;
 
 type CleanerWakeReason = "first" | "cooldown_elapsed" | "grew";
+
+/** A hint the period decided on; it is presented when the agent next goes from Working to Idle. */
+interface CleanerDueHints {
+  memory?: CleanerWakeReason;
+  disk?: { availableBytes: number; totalBytes: number };
+}
 
 /**
  * Computer-local system.cleaner runtime.
@@ -183,6 +199,11 @@ export class SystemCleanerRuntime {
   private readonly getInbox: (ownerAgentId: string) => AgentAppInboxStore;
   /** Process-local, like the rest of the runtime: a restart may repeat the tip once early. */
   private readonly workspaceCleanupTipAtMs = new Map<string, number>();
+  /** Last low-disk tip per owner, and owners already tipped in the current low-disk episode. */
+  private readonly diskWorkspaceTipAtMs = new Map<string, number>();
+  private readonly diskLowTipped = new Set<string>();
+  /** Hints waiting for the owner's next Working → Idle transition. */
+  private readonly due = new Map<string, CleanerDueHints>();
   /** Last MEMORY.md hint per owner; process-local as above. */
   private readonly memoryHintPresented = new Map<string, { atMs: number; bytes: number }>();
 
@@ -279,7 +300,7 @@ export class SystemCleanerRuntime {
       this.cancelStateTimer(state);
       this.dropCurrentOwnerItem(ownerAgentId);
       this.states.delete(ownerAgentId);
-      this.workspaceCleanupTipAtMs.delete(ownerAgentId);
+      this.forgetOwner(ownerAgentId);
     }
     return parsedRows.map((row) => this.applyConfig(row));
   }
@@ -298,7 +319,7 @@ export class SystemCleanerRuntime {
       this.cancelStateTimer(existing);
       this.dropCurrentOwnerItem(ownerAgentId);
       this.states.delete(ownerAgentId);
-      this.workspaceCleanupTipAtMs.delete(ownerAgentId);
+      this.forgetOwner(ownerAgentId);
       return { kind: "removed", activeSchedules: 0 };
     }
     const parsed = parseCleanerConfigEnvelope(raw, this.schemaBounds);
@@ -332,6 +353,52 @@ export class SystemCleanerRuntime {
     }
     this.states.clear();
     this.workspaceCleanupTipAtMs.clear();
+    this.diskWorkspaceTipAtMs.clear();
+    this.diskLowTipped.clear();
+    this.due.clear();
+  }
+
+  /**
+   * The owner just went from Working to Idle: present whatever the period
+   * decided is due. Hints are only ever presented here, so a due hint never
+   * reaches an agent mid-turn, and an agent that stays idle or stopped is not
+   * interrupted for one.
+   */
+  onAgentWorkingToIdle(ownerAgentId: string): void {
+    const due = this.due.get(ownerAgentId);
+    if (!due) return;
+    this.due.delete(ownerAgentId);
+    const state = this.states.get(ownerAgentId);
+    if (!state || !state.config.enabled) return;
+    this.track(this.presentDue(ownerAgentId, state, due), ownerAgentId);
+  }
+
+  private forgetOwner(ownerAgentId: string): void {
+    this.workspaceCleanupTipAtMs.delete(ownerAgentId);
+    this.diskWorkspaceTipAtMs.delete(ownerAgentId);
+    this.diskLowTipped.delete(ownerAgentId);
+    this.due.delete(ownerAgentId);
+  }
+
+  private markDue(ownerAgentId: string, hints: CleanerDueHints): void {
+    this.due.set(ownerAgentId, { ...this.due.get(ownerAgentId), ...hints });
+  }
+
+  private clearDue(ownerAgentId: string, kind: keyof CleanerDueHints): void {
+    const due = this.due.get(ownerAgentId);
+    if (!due) return;
+    delete due[kind];
+    if (due.memory === undefined && due.disk === undefined) this.due.delete(ownerAgentId);
+  }
+
+  private track(work: Promise<void>, ownerAgentId: string): void {
+    const run = work.catch(() => {
+      // Expected measurement/wake failures become typed trace decisions. This
+      // guard keeps an injected seam bug from breaking the daemon timer loop.
+      this.trace("daemon.cleaner.drop", { ownerAgentId, reason: "runtime_failure" });
+    });
+    this.pendingRuns.add(run);
+    void run.finally(() => this.pendingRuns.delete(run));
   }
 
   private arm(state: AppliedConfigState): void {
@@ -343,14 +410,7 @@ export class SystemCleanerRuntime {
   }
 
   private startRun(ownerAgentId: string, token: symbol): void {
-    const run = this.runPeriod(ownerAgentId, token).catch(() => {
-      // runPeriod converts all expected measurement/wake failures into typed
-      // trace decisions. This guard prevents an injected seam bug from breaking
-      // the daemon timer loop.
-      this.trace("daemon.cleaner.drop", { ownerAgentId, reason: "runtime_failure" });
-    });
-    this.pendingRuns.add(run);
-    void run.finally(() => this.pendingRuns.delete(run));
+    this.track(this.runPeriod(ownerAgentId, token), ownerAgentId);
   }
 
   private async runPeriod(ownerAgentId: string, token: symbol): Promise<void> {
@@ -374,6 +434,7 @@ export class SystemCleanerRuntime {
     });
     if (!config.enabled) {
       this.dropCurrentOwnerItem(ownerAgentId);
+      this.due.delete(ownerAgentId);
       this.trace("daemon.cleaner.decision", {
         ...configTrace,
         ownerAgentId,
@@ -391,14 +452,18 @@ export class SystemCleanerRuntime {
     ]);
   }
 
-  private async checkMemory(ownerAgentId: string, state: AppliedConfigState, scheduledNextFireAtMs: number | null): Promise<void> {
-    const config = state.config;
-    const configTrace = appConfigTraceAttrs(config);
-    const measurement = await this.measureWithTimeout<CleanerMeasurement>(() => this.measureMemoryFile({
+  private measureMemory(ownerAgentId: string) {
+    return this.measureWithTimeout<CleanerMeasurement>(() => this.measureMemoryFile({
       ownerAgentId,
       literalFileName: "MEMORY.md",
       absolutePath: path.join(this.agentsDataDir, ownerAgentId, "MEMORY.md"),
     }));
+  }
+
+  private async checkMemory(ownerAgentId: string, state: AppliedConfigState, scheduledNextFireAtMs: number | null): Promise<void> {
+    const config = state.config;
+    const configTrace = appConfigTraceAttrs(config);
+    const measurement = await this.measureMemory(ownerAgentId);
 
     // A config update may cancel/replace the next timer while I/O is in flight.
     // Never publish a result derived from the obsolete snapshot.
@@ -409,6 +474,7 @@ export class SystemCleanerRuntime {
     }
 
     if (measurement.kind === "not_established") {
+      this.clearDue(ownerAgentId, "memory");
       const dropped = this.dropCurrentOwnerItem(ownerAgentId, "superseded", CLEANER_NOTIFICATION_CLASS);
       this.trace("daemon.cleaner.measurement", {
         ...configTrace,
@@ -433,6 +499,7 @@ export class SystemCleanerRuntime {
       thresholdBytes: config.thresholdBytes,
     });
     if (measurement.bytes <= config.thresholdBytes) {
+      this.clearDue(ownerAgentId, "memory");
       const dropped = this.dropCurrentOwnerItem(ownerAgentId, "superseded", CLEANER_NOTIFICATION_CLASS);
       this.trace("daemon.cleaner.decision", {
         ...configTrace,
@@ -443,23 +510,22 @@ export class SystemCleanerRuntime {
       return;
     }
 
-    const next = deriveCleanerNextThreshold({
+    if (!deriveCleanerNextThreshold({
       thresholdBytes: config.thresholdBytes,
       maximumThresholdBytes: this.schemaBounds.maximumThresholdBytes,
-    });
-    if (!next || scheduledNextFireAtMs === null) {
+    }) || scheduledNextFireAtMs === null) {
+      this.clearDue(ownerAgentId, "memory");
       this.dropCurrentOwnerItem(ownerAgentId, "superseded", CLEANER_NOTIFICATION_CLASS);
       this.trace("daemon.cleaner.drop", { ownerAgentId, reason: "action_config_invalid" });
       return;
     }
-    const nowMs = this.clock.now();
-    const wakeReason = this.memoryHintWakeReason(ownerAgentId, measurement.bytes, nowMs);
+    const wakeReason = this.memoryHintWakeReason(ownerAgentId, measurement.bytes, this.clock.now());
+    this.trace("daemon.cleaner.decision", {
+      ...configTrace,
+      ownerAgentId,
+      decision: "over_threshold",
+    });
     if (wakeReason === null) {
-      this.trace("daemon.cleaner.decision", {
-        ...configTrace,
-        ownerAgentId,
-        decision: "over_threshold",
-      });
       this.trace("daemon.cleaner.drop", {
         ownerAgentId,
         notificationClass: CLEANER_NOTIFICATION_CLASS,
@@ -467,10 +533,89 @@ export class SystemCleanerRuntime {
       });
       return;
     }
+    this.markDue(ownerAgentId, { memory: wakeReason });
+    this.trace("daemon.cleaner.hint_due", {
+      ...configTrace,
+      ownerAgentId,
+      notificationClass: CLEANER_NOTIFICATION_CLASS,
+      wake_reason: wakeReason,
+    });
+  }
+
+  private async presentDue(ownerAgentId: string, state: AppliedConfigState, due: CleanerDueHints): Promise<void> {
+    const minted: AgentInboxAppItem[] = [];
+    const memoryItem = due.memory === undefined ? null : await this.presentMemoryHint(ownerAgentId, state, due.memory);
+    if (this.states.get(ownerAgentId) !== state || !state.config.enabled) return;
+    if (memoryItem) minted.push(memoryItem);
+
+    const nowMs = this.clock.now();
     const lastTipAtMs = this.workspaceCleanupTipAtMs.get(ownerAgentId);
-    const workspaceCleanupTip = lastTipAtMs === undefined
+    const weeklyTipAllowed = lastTipAtMs === undefined
       || nowMs - lastTipAtMs >= CLEANER_WORKSPACE_CLEANUP_TIP_MIN_INTERVAL_MS;
-    const title = memoryHintTitle(measurement.bytes, config.thresholdBytes, config.intervalMs, workspaceCleanupTip);
+    const trigger: CleanerWorkspaceTipTrigger | null = due.disk !== undefined
+      ? "disk_low"
+      : memoryItem && weeklyTipAllowed ? "memory_hint" : null;
+    if (memoryItem) {
+      this.trace("daemon.cleaner.present", {
+        ...appConfigTraceAttrs(state.config),
+        item_correlation_id: appInboxItemTraceAttrs(ownerAgentId, memoryItem).app_correlation_id,
+        ownerAgentId,
+        itemId: memoryItem.itemId,
+        notificationClass: CLEANER_NOTIFICATION_CLASS,
+        nextFireAtMs: state.nextFireAtMs,
+        wake_reason: due.memory,
+        workspace_cleanup_tip: trigger !== null,
+        // The hint still presented; only the tip was held back. Not a drop.
+        ...(trigger !== null ? {} : { workspace_cleanup_tip_skipped: "weekly_cap" }),
+      });
+    }
+    if (trigger !== null) {
+      const tipItem = this.presentWorkspaceTip(ownerAgentId, state, trigger, due.disk);
+      if (tipItem) {
+        minted.push(tipItem);
+        this.workspaceCleanupTipAtMs.set(ownerAgentId, nowMs);
+        if (trigger === "disk_low") this.diskWorkspaceTipAtMs.set(ownerAgentId, nowMs);
+      }
+    }
+    if (minted.length === 0) return;
+    try {
+      await this.wake(ownerAgentId, minted[0]!);
+    } catch {
+      this.trace("daemon.cleaner.drop", { ownerAgentId, reason: "wake_failed" });
+    }
+  }
+
+  /** Remeasures, since the agent may have trimmed MEMORY.md during the turn. */
+  private async presentMemoryHint(
+    ownerAgentId: string,
+    state: AppliedConfigState,
+    wakeReason: CleanerWakeReason,
+  ): Promise<AgentInboxAppItem | null> {
+    const measurement = await this.measureMemory(ownerAgentId);
+    if (this.states.get(ownerAgentId) !== state || !state.config.enabled) {
+      this.trace("daemon.cleaner.drop", { ownerAgentId, reason: "stale_measurement" });
+      return null;
+    }
+    const config = state.config;
+    const configTrace = appConfigTraceAttrs(config);
+    const next = deriveCleanerNextThreshold({
+      thresholdBytes: config.thresholdBytes,
+      maximumThresholdBytes: this.schemaBounds.maximumThresholdBytes,
+    });
+    if (measurement.kind === "not_established" || measurement.bytes <= config.thresholdBytes || !next) {
+      const dropped = this.dropCurrentOwnerItem(ownerAgentId, "superseded", CLEANER_NOTIFICATION_CLASS);
+      this.trace("daemon.cleaner.decision", {
+        ...configTrace,
+        ownerAgentId,
+        decision: measurement.kind === "not_established"
+          ? "not_established"
+          : !next ? "action_config_invalid" : "under_threshold",
+        checked_at: "idle_transition",
+        droppedItems: dropped,
+      });
+      return null;
+    }
+    const title = memoryHintTitle(measurement.bytes, config.thresholdBytes, config.intervalMs);
     const actionCopy = next.copyKind === "doubles"
       ? "Action doubles threshold (or set lower)"
       : next.copyKind === "raises_to_maximum"
@@ -490,32 +635,44 @@ export class SystemCleanerRuntime {
         reason: "mint_rejected",
         code: minted.code,
       });
-      return;
+      return null;
     }
-    if (workspaceCleanupTip) this.workspaceCleanupTipAtMs.set(ownerAgentId, nowMs);
-    this.memoryHintPresented.set(ownerAgentId, { atMs: nowMs, bytes: measurement.bytes });
-    this.trace("daemon.cleaner.decision", {
-      ...configTrace,
-      ownerAgentId,
-      decision: "over_threshold",
+    this.memoryHintPresented.set(ownerAgentId, { atMs: this.clock.now(), bytes: measurement.bytes });
+    return minted.item;
+  }
+
+  private presentWorkspaceTip(
+    ownerAgentId: string,
+    state: AppliedConfigState,
+    trigger: CleanerWorkspaceTipTrigger,
+    disk: CleanerDueHints["disk"],
+  ): AgentInboxAppItem | null {
+    const minted = this.getInbox(ownerAgentId).mint({
+      appId: CLEANER_APP_ID,
+      notificationClass: CLEANER_DISK_NOTIFICATION_CLASS,
+      sourceRef: { kind: "disk_hint", agentId: ownerAgentId },
+      title: CLEANER_WORKSPACE_CLEANUP_TIP_TITLE,
+      summary: workspaceTipSummary(disk?.availableBytes),
     });
+    if (!minted.ok) {
+      this.trace("daemon.cleaner.drop", {
+        ownerAgentId,
+        notificationClass: CLEANER_DISK_NOTIFICATION_CLASS,
+        reason: "mint_rejected",
+        code: minted.code,
+      });
+      return null;
+    }
     this.trace("daemon.cleaner.present", {
-      ...configTrace,
-      item_correlation_id: appInboxItemTraceAttrs(ownerAgentId, minted.item)
-        .app_correlation_id,
+      ...appConfigTraceAttrs(state.config),
+      item_correlation_id: appInboxItemTraceAttrs(ownerAgentId, minted.item).app_correlation_id,
       ownerAgentId,
       itemId: minted.item.itemId,
-      nextFireAtMs: scheduledNextFireAtMs,
-      wake_reason: wakeReason,
-      workspace_cleanup_tip: workspaceCleanupTip,
-      // The hint still presented; only the tip was held back. Not a drop.
-      ...(workspaceCleanupTip ? {} : { workspace_cleanup_tip_skipped: "weekly_cap" }),
+      notificationClass: CLEANER_DISK_NOTIFICATION_CLASS,
+      workspace_tip_trigger: trigger,
+      ...(disk ? { disk_available_bytes: disk.availableBytes, disk_total_bytes: disk.totalBytes } : {}),
     });
-    try {
-      await this.wake(ownerAgentId, minted.item);
-    } catch {
-      this.trace("daemon.cleaner.drop", { ownerAgentId, reason: "wake_failed" });
-    }
+    return minted.item;
   }
 
   private async checkDisk(ownerAgentId: string, state: AppliedConfigState): Promise<void> {
@@ -524,26 +681,33 @@ export class SystemCleanerRuntime {
     if (this.states.get(ownerAgentId) !== state) return;
     const traceAttrs = { ...appConfigTraceAttrs(state.config), ownerAgentId, notificationClass: CLEANER_DISK_NOTIFICATION_CLASS };
     if (measurement.kind === "not_established") {
-      this.dropCurrentOwnerItem(ownerAgentId, "superseded", CLEANER_DISK_NOTIFICATION_CLASS);
       this.trace("daemon.cleaner.measurement", { ...traceAttrs, established: false, reason: measurement.reason });
       return;
     }
     const { availableBytes, totalBytes } = measurement;
     if (!Number.isFinite(availableBytes) || availableBytes < 0
       || !Number.isFinite(totalBytes) || totalBytes <= 0 || availableBytes > totalBytes) {
-      this.dropCurrentOwnerItem(ownerAgentId, "superseded", CLEANER_DISK_NOTIFICATION_CLASS);
       this.trace("daemon.cleaner.measurement", { ...traceAttrs, established: false, reason: "invalid_disk_measurement" });
       return;
     }
     this.trace("daemon.cleaner.measurement", { ...traceAttrs, established: true, availableBytes, totalBytes });
     if (!isMachineDiskLow({ availableBytes, totalBytes })) {
-      this.dropCurrentOwnerItem(ownerAgentId, "superseded", CLEANER_DISK_NOTIFICATION_CLASS);
+      // The episode is over; the next one may tip again.
+      this.diskLowTipped.delete(ownerAgentId);
+      this.clearDue(ownerAgentId, "disk");
       return;
     }
-    // Low disk space is a machine condition most agents cannot fix, so it no
-    // longer reaches agents at all; only the decision is traced. A hint left
-    // by an older runtime is retracted.
-    this.dropCurrentOwnerItem(ownerAgentId, "superseded", CLEANER_DISK_NOTIFICATION_CLASS);
+    // Low disk space is a machine condition most agents cannot fix, so there
+    // is no disk warning for agents. It may add one workspace tip per low-disk
+    // episode (at most one a week), presented at the next Working → Idle.
+    const lastDiskTipAtMs = this.diskWorkspaceTipAtMs.get(ownerAgentId);
+    const diskTipAllowed = !this.diskLowTipped.has(ownerAgentId)
+      && (lastDiskTipAtMs === undefined
+        || this.clock.now() - lastDiskTipAtMs >= CLEANER_WORKSPACE_CLEANUP_TIP_MIN_INTERVAL_MS);
+    if (diskTipAllowed) {
+      this.diskLowTipped.add(ownerAgentId);
+      this.markDue(ownerAgentId, { disk: { availableBytes, totalBytes } });
+    }
     const footprint = this.measureRaftDiskFootprint
       ? await this.measureRaftDiskFootprint().catch(() => ({ measure_outcome: "failed" }))
       : {};
@@ -553,6 +717,7 @@ export class SystemCleanerRuntime {
       decision: "disk_low",
       disk_available_bytes: availableBytes,
       disk_total_bytes: totalBytes,
+      workspace_tip_due: diskTipAllowed,
       ...footprint,
     });
   }
@@ -731,14 +896,14 @@ export function formatBytes(bytes: number): string {
   return `${bytes} B`;
 }
 
-export function memoryHintTitle(
-  bytes: number,
-  thresholdBytes: number,
-  intervalMs: number,
-  workspaceCleanupTip: boolean,
-): string {
-  const tip = workspaceCleanupTip ? CLEANER_WORKSPACE_CLEANUP_TIP : "";
-  return `MEMORY.md is ${formatBytes(bytes)}, over ${formatBytes(thresholdBytes)}${tip}; recheck in ${formatInterval(intervalMs)}`;
+export function memoryHintTitle(bytes: number, thresholdBytes: number, intervalMs: number): string {
+  return `MEMORY.md is ${formatBytes(bytes)}, over ${formatBytes(thresholdBytes)}; recheck in ${formatInterval(intervalMs)}`;
+}
+
+export function workspaceTipSummary(diskAvailableBytes?: number): string {
+  return diskAvailableBytes === undefined
+    ? CLEANER_WORKSPACE_CLEANUP_TIP_SUMMARY
+    : `Disk is low (${formatBytes(diskAvailableBytes)} free). ${CLEANER_WORKSPACE_CLEANUP_TIP_SUMMARY}`;
 }
 
 export function formatInterval(intervalMs: number): string {

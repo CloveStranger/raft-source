@@ -2040,6 +2040,43 @@ test("members entry row shows the human/agent split count", async () => {
   assert.equal(agentTile?.querySelector('img[src="pixel:random:strip-agent"]'), null);
 });
 
+test("members entry row counts and shows Slack participants of a bridged channel", async () => {
+  const channel = makeChannel();
+  seedBaseStores(channel);
+  useServerStore.setState({
+    members: [makeHuman({ userId: "owner-1", name: "owner", role: "owner" })],
+  });
+  mockApis({});
+  const mockedGet = api.get;
+  api.get = (async (url: string) => {
+    if (url === `/channels/${channel.id}/members`) {
+      return {
+        data: {
+          humans: [{ ...makeHuman({ userId: "owner-1", name: "owner", role: "owner" }), id: "owner-1" }],
+          agents: [makeAgent({ id: "agent-1", name: "agent-1" })],
+          externalMembers: [
+            { id: "ext-1", provider: "slack", displayName: "Ada Slack", handles: ["ada"], actorKind: "human", avatarUrl: "/avatars/external/ada.webp" },
+            { id: "ext-2", provider: "slack", displayName: "Bo Slack", handles: [], actorKind: "human", avatarUrl: null },
+          ],
+        },
+      };
+    }
+    return mockedGet(url);
+  }) as typeof api.get;
+  renderChatPanel(channel);
+
+  fireEvent.click(await screen.findByTestId("channel-overflow-trigger"));
+  const entry = await screen.findByTestId("channel-overflow-members-entry");
+  await waitFor(() => {
+    assert.ok(entry.textContent?.includes("1 human · 1 agent · 2 Slack"), entry.textContent ?? "");
+  });
+  const strip = screen.getByTestId("channel-overflow-members-strip");
+  const slackTiles = [...strip.querySelectorAll<HTMLButtonElement>('[data-kind="external"]')];
+  assert.deepEqual(slackTiles.map((tile) => tile.getAttribute("aria-label")), ["Ada Slack (Slack)", "Bo Slack (Slack)"]);
+  // Same avatar renderer as the full member list's Slack rows.
+  assert.ok(slackTiles[0]?.querySelector('[data-slot="avatar"][data-avatar-type="human"]'));
+});
+
 test("members page stays in loading state until the prefetched roster is settled", async () => {
   const channel = makeChannel();
   seedBaseStores(channel);
@@ -2839,4 +2876,33 @@ test("channel overflow keeps the mobile back arrow while desktop X is removed", 
   assert.ok(!screen.queryByTestId("thread-overflow-sheet"));
   assert.ok(!screen.queryByLabelText("Close thread actions"));
   assert.ok(!screen.queryByLabelText("Close channel settings"));
+});
+
+
+test("channel-side thread menu puts Focus mode first and symmetrically restores the channel", async () => {
+  let collapsed = false;
+  let toggles = 0;
+  const props = {
+    threadChannelId: "thread-channel-1", parentMessageId: "parent-message-1",
+    viewInChannelLabel: "View in channel", onViewInChannel: () => {}, onSearch: () => {},
+    onToggleChannel: () => { collapsed = !collapsed; toggles++; },
+  };
+  const view = render(createElement(ThreadOverflowMenu, { ...props, channelCollapsed: collapsed }));
+  fireEvent.click(await screen.findByTestId("thread-overflow-trigger"));
+  await screen.findByTestId("thread-overflow-menu");
+  assert.equal(screen.getAllByRole("menuitem")[0].textContent, "Focus mode");
+  fireEvent.click(screen.getByTestId("thread-overflow-maximize"));
+  assert.equal(collapsed, true);
+  view.rerender(createElement(ThreadOverflowMenu, { ...props, channelCollapsed: collapsed }));
+  fireEvent.click(await screen.findByTestId("thread-overflow-trigger"));
+  await screen.findByTestId("thread-overflow-menu");
+  assert.equal(screen.getAllByRole("menuitem")[0].textContent, "Standard mode");
+  fireEvent.click(screen.getByTestId("thread-overflow-maximize"));
+  assert.equal(collapsed, false);
+  assert.equal(toggles, 2);
+  view.rerender(createElement(ThreadOverflowMenu, { ...props, onToggleChannel: undefined }));
+  fireEvent.click(await screen.findByTestId("thread-overflow-trigger"));
+  await screen.findByTestId("thread-overflow-menu");
+  assert.ok(!screen.queryByTestId("thread-overflow-maximize"));
+  assert.equal(screen.getAllByRole("menuitem")[0].textContent, "Search in thread");
 });

@@ -202,11 +202,7 @@ export async function seedPlaywrightScenario(
   // contract test (`announcement-modal.spec.ts`) has a known row to drive,
   // but pre-dismissed for the playwright owner so every other test (which
   // logs in as that owner) does not see the modal in the way of its UI.
-  const announcementPages = [
-    { title: "Page 1", body: "First page **markdown** body." },
-    { title: "Page 2", body: "Second page body." },
-    { body: "Final page (no inline title)." },
-  ];
+  const announcementPages = [{ body: "Announcement **markdown** body." }];
   const announcementRow = await announcementService.publish({
     title: "Playwright announcement fixture",
     pages: announcementPages,

@@ -95,11 +95,16 @@ test("agent authorization responses describe the executable action capabilities"
   assert.doesNotMatch(serversRoute, /Only the (?:agent|machine) creator and server/);
   assert.doesNotMatch(serversRoute, /Only server admins and the attaching human/);
   assert.doesNotMatch(internalAgentApiRoute, /human owner\/admin must start migration/);
-  assert.match(agentActionSource, /Agent requires createChannels capability to create channels/);
-  assert.match(agentActionSource, /Agent requires editChannelMetadata or changeChannelVisibility capability to update channels/);
-  assert.match(agentActionSource, /Agent requires addChannelMembers capability to add channel members/);
-  assert.match(agentActionSource, /Agent requires removeChannelMembers capability to remove channel members/);
-  assert.match(agentActionSource, /Agent requires archiveChannels capability to \$\{action\} channels/);
-  assert.match(agentActionSource, /Agent requires editServerSettings capability to edit the server profile/);
+  // Each agent action names the capability it needs; the shared helper turns
+  // it into the 403 (and derives the role from the matrix, never hardcoded).
+  assert.match(agentActionSource, /capabilities: \["createChannels"\], action: "create channels"/);
+  assert.match(agentActionSource, /capabilities: \["editChannelMetadata", "changeChannelVisibility"\],\s*action: "update channels"/);
+  assert.match(agentActionSource, /capabilities: \["addChannelMembers"\], action: "add channel members"/);
+  assert.match(agentActionSource, /capabilities: \["removeChannelMembers"\], action: "remove channel members"/);
+  assert.match(agentActionSource, /capabilities: \["archiveChannels"\], action: `\$\{action\} channels`/);
+  assert.match(agentActionSource, /capabilities: \["editServerSettings"\], action: "edit the server profile"/);
+  const roleRequiredSource = await readFile(path.join(srcRoot, "lib", "agentServerRoleRequired.ts"), "utf8");
+  assert.match(roleRequiredSource, /`Agent requires \$\{input\.capabilities\.join\(" or "\)\} capability to \$\{input\.action\}`/);
+  assert.match(roleRequiredSource, /minimumServerRoleWithCapability/);
   assert.doesNotMatch(agentActionSource, /admin role|required_role|admin_role_required/);
 });

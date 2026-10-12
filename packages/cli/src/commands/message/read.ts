@@ -16,6 +16,7 @@ import { writeText, adoptCliReplyText } from "../../core/renderer";
 import { apiFailureError } from "../_apiFailure";
 import { PEER_KIND_OPTION, requireTargetAlias, type TargetAliasOpts } from "../_target";
 import { formatHistory } from "./_format";
+import { elideSeenSenders } from "./_senderElision";
 import { getConsumedExactSeqs, getConsumedSeq, recordHistoryReadWindow } from "./_consumedSeqState";
 
 interface ReadOpts extends TargetAliasOpts {
@@ -118,7 +119,7 @@ export const messageReadCommand = defineCommand(
       { flags: "--before <idOrSeq>", description: "Return messages strictly before this anchor (pure-decimal values are seqs)" },
       { flags: "--after <idOrSeq>", description: "Return messages strictly after this anchor (pure-decimal values are seqs)" },
       { flags: "--around <idOrSeq>", description: "Center the window on this anchor (8-character values are short ids)" },
-      { flags: "--unread", description: "Read this target's unread messages: start right after your read position and move it forward" },
+      { flags: "--unread", description: "Read this target's unread messages from others: start right after your read position and move it forward" },
       { flags: "--limit <n>", description: "Max messages to return (server default applies if omitted)" },
     ],
   },
@@ -158,9 +159,16 @@ export const messageReadCommand = defineCommand(
     const alreadyShownSeqs = readOpts.unread
       ? alreadyShownIn(agentContext.agentId, typeof res.data.target === "string" && res.data.target ? res.data.target : readOpts.channel, res.data.messages ?? [])
       : undefined;
+    // Sender descriptions already shown in this context print as `@name`
+    // only. Folded messages are not printed, so they claim nothing.
+    const allMessages = res.data.messages ?? [];
+    const printed = allMessages.filter((m) => !(typeof m.seq === "number" && alreadyShownSeqs?.has(m.seq)));
+    const senders = elideSeenSenders(printed, agentContext.agentId);
+    const elidedByMessage = new Map(printed.map((m, index) => [m, senders.messages[index]]));
+    const displayData = { ...res.data, messages: allMessages.map((m) => elidedByMessage.get(m) ?? m) };
     writeText(
       ctx.io, adoptCliReplyText(
-      `${formatHistory(readOpts.channel, res.data, {
+      `${formatHistory(readOpts.channel, displayData, {
         around: readOpts.around,
         after: readOpts.after,
         before: readOpts.before,
@@ -168,6 +176,7 @@ export const messageReadCommand = defineCommand(
         ...(alreadyShownSeqs ? { alreadyShownSeqs } : {}),
       })}\n`,
     ));
+    await senders.settle(ctx.io);
     // What the window consumed (the FH-001 full-body advance contract: target
     // identity from the resolver, `--around` and gapped windows record exact
     // seqs only, old-server boundary inference) is the shared seen policy

@@ -5,6 +5,7 @@ import {
   recordRisingWaveInboxBackendFailed,
   risingWaveInboxFailureAttrs,
 } from "./risingWaveInboxTrace";
+import { RisingWaveReadError } from "../db/risingwave";
 
 const TRACE_EVENT_ROW_TEST_RESOURCE = {
   serviceName: "slock-server",
@@ -175,4 +176,14 @@ test("generic db query failures are labeled postgresql and never receive RW-only
   assert.equal(row.error_kind, null);
   assert.equal(row.timeout_ms, null);
   assert.equal(row.rw_pool_total, null);
+});
+
+test("RW inbox failure attrs classify the driver error inside RisingWaveReadError", () => {
+  const driverError = codedError("connect ECONNREFUSED 10.0.0.1:4566", "ECONNREFUSED");
+  const bare = risingWaveInboxFailureAttrs({ route: "channel_unread", error: driverError });
+  const wrapped = risingWaveInboxFailureAttrs({ route: "channel_unread", error: new RisingWaveReadError(driverError) });
+  for (const field of ["error_class", "error_kind", "rw_failure_stage", "sqlstate", "driver_code", "error_message"] as const) {
+    assert.equal(wrapped[field], bare[field], field);
+  }
+  assert.notEqual(wrapped.error_class, "RisingWaveReadError");
 });

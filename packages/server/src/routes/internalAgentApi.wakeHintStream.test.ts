@@ -18,6 +18,7 @@ import { createChannel, addAgent, addHuman } from "../services/channelService";
 import { mintAgentCredential } from "../services/agentCredentialService";
 import { AgentOrchestrator } from "../services/agentOrchestrator";
 import { referenceAgentInboxChain } from "../test/agentInboxChainReference";
+import { BasicTracer, MemoryTraceSink } from "@botiverse/raft-shared";
 import { createMessage, __setExternalAgentInboxChainSelectorForTests, __setExternalWakeFollowUpPullDelaysMsForTests } from "../services/messageService";
 
 
@@ -286,6 +287,77 @@ test("a wake signal that outruns the inbox chain still reaches the stream throug
   } finally {
     __setExternalWakeFollowUpPullDelaysMsForTests(null);
     __setExternalAgentInboxChainSelectorForTests(async (agentId: string) => ({ source: "chain", rows: await referenceAgentInboxChain(agentId) }));
+    delete process.env.SLOCK_WAKE_STREAM_HEARTBEAT_MS;
+    await app.close();
+  }
+});
+
+// #proj-o11y task #6: a stream lives for hours. Hanging every pull on its
+// request span put thousands of pulls in one trace; each pull is now its own
+// root trace that points back at the stream.
+test("every stream pull is its own root trace that names the stream; the stream span keeps only connection events", async () => {
+  process.env.SLOCK_WAKE_STREAM_HEARTBEAT_MS = "250";
+  const app = await openTestApp("pglite://", 0, { humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
+  try {
+    const sink = new MemoryTraceSink();
+    app.app.set("serverTracer", new BasicTracer({ sink }));
+    const f = await seedExternalFixture();
+    const orchestrator = new AgentOrchestrator() as any;
+    app.app.set("agentOrchestrator", orchestrator);
+
+    const res = await fetch(`${app.baseUrl}/internal/agent-api/wake-hints/stream`, {
+      headers: { Authorization: `Bearer ${f.apiKey}` },
+    });
+    assert.equal(res.status, 200);
+    const reading = readWakeHintEvents(res.body!, 1, 1500);
+    setTimeout(() => { void sendAndDeliver(orchestrator, f, "wake the stream"); }, 300);
+    await reading;
+
+    const isStreamSpan = (span: { name: string; attrs?: Record<string, unknown> }) =>
+      span.name === "server.http.request" && span.attrs?.route_pattern === "/internal/agent-api/wake-hints/stream";
+    const deadline = Date.now() + 3000;
+    while (!sink.getAllSpans().some(isStreamSpan) && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    const spans = sink.getAllSpans();
+    const stream = spans.find(isStreamSpan);
+    assert.ok(stream, "the stream's request span ends when the client goes away");
+
+    const ticks = spans.filter((span) => span.name === "server.agent_api.wake_hints_stream.tick");
+    const triggers = new Set(ticks.map((tick) => tick.attrs?.trigger));
+    assert.ok(triggers.has("open"), "the pull at connect has its own trace");
+    assert.ok(triggers.has("heartbeat"), "heartbeat pulls have their own trace");
+    assert.ok(triggers.has("wake"), "a wake pull has its own trace, not the sender's");
+    assert.equal(new Set(ticks.map((tick) => tick.context.traceId)).size, ticks.length, "one trace per tick");
+    assert.deepEqual(
+      ticks.map((tick) => tick.attrs?.tick_ordinal).sort((a, b) => Number(a) - Number(b)),
+      ticks.map((_, index) => index + 1),
+    );
+    for (const tick of ticks) {
+      assert.equal(tick.context.parentSpanId, null);
+      assert.notEqual(tick.context.traceId, stream.context.traceId);
+      assert.equal(tick.attrs?.stream_trace_id, stream.context.traceId);
+      assert.equal(tick.attrs?.stream_span_id, stream.context.spanId);
+      assert.equal(typeof tick.attrs?.agent_id_hash, "string");
+    }
+
+    const pullsPerTrace = new Map<string, number>();
+    for (const span of spans) {
+      const pulls = span.events.filter((event) => event.name === "external_agent.inbox_pull.finished").length;
+      if (pulls) pullsPerTrace.set(span.context.traceId, (pullsPerTrace.get(span.context.traceId) ?? 0) + pulls);
+    }
+    assert.ok(pullsPerTrace.size >= 2, "the open pull and at least one later pull were recorded");
+    for (const [traceId, pulls] of pullsPerTrace) {
+      assert.equal(pulls, 1, `trace ${traceId} holds ${pulls} inbox pulls`);
+    }
+    assert.ok(!pullsPerTrace.has(stream.context.traceId), "no pull lands on the stream's trace");
+    // Auth on open records one credential use on the request; the per-tick
+    // ones go to the ticks.
+    assert.ok(
+      stream.events.filter((event) => event.name === "agent_credential_auth.last_used.finished").length <= 1,
+      "per-tick credential use is not on the stream span",
+    );
+  } finally {
     delete process.env.SLOCK_WAKE_STREAM_HEARTBEAT_MS;
     await app.close();
   }

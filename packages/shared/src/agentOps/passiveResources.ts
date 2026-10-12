@@ -23,12 +23,14 @@
 //
 // Policy, by the consequence of missing a change:
 // - hold: the action waits until the current version has been delivered.
+// - once: nothing waits; the full form is delivered the first time in a
+//   context (or after the version moved) and a short form after that.
 // A lighter tier (one hint line naming the active command when the version
 // moved) lands with its first user, the channel description type.
 
 import { formatHint, RAFT_HINTS } from "./hint";
 
-export type PassiveResourcePolicy = "hold";
+export type PassiveResourcePolicy = "hold" | "once";
 
 export interface PassiveResourceSpec {
   /** Where the current version comes from. */
@@ -59,6 +61,103 @@ export const PASSIVE_RESOURCES = {
     activeCommand: (id) => `raft ${id} --help`,
     touchedBy: ["the command itself", "--help"],
   },
+  // Who sent a message: the sender's profile description and, for a human web
+  // sender, the time zone the message was sent from, shown next to the name in
+  // agent-facing message text. Version: hash of both.
+  // The first message from a sender in a context carries it; later ones show
+  // only `@name`. Id: `senderObservationId`.
+  sender: {
+    revSource: "content-hash",
+    policy: "once",
+    activeCommand: (id) => formatHint(RAFT_HINTS.userInfo({ name: id.slice(id.indexOf(":") + 1) })),
+    touchedBy: ["daemon message delivery", "message read", "message check", "message resolve", "message send (missed messages)"],
+  },
 } as const satisfies Record<string, PassiveResourceSpec>;
 
 export type PassiveResourceType = keyof typeof PASSIVE_RESOURCES;
+
+// ---- sender (policy "once") ----
+
+/**
+ * Ledger id of a sender. Humans and agents may share a name, so the kind is
+ * part of it. A rename is a new id, which only shows the description once more.
+ */
+export function senderObservationId(senderType: string | null | undefined, senderName: string): string {
+  return `${senderType ?? "unknown"}:${senderName}`;
+}
+
+/** FNV-1a, 32-bit, over UTF-16 code units. */
+function fnv1a32(text: string, seed: number): number {
+  let hash = seed >>> 0;
+  for (let i = 0; i < text.length; i += 1) {
+    hash ^= text.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return hash >>> 0;
+}
+
+/**
+ * Version of what a sender's handle shows. Pure TS (no node:crypto: the SDK
+ * and daemon share this). Two independent 32-bit hashes keep an accidental
+ * collision, which would hide a changed description for one context, remote.
+ */
+export function senderRev(description: string | null | undefined, timezone?: string | null): string {
+  // Without a zone the input is the description alone, so revs recorded
+  // before zones existed stay valid.
+  const text = timezone ? `${description ?? ""}\u0000tz=${timezone}` : (description ?? "");
+  const a = fnv1a32(text, 0x811c9dc5).toString(16).padStart(8, "0");
+  const b = fnv1a32(text, 0x050c5d1f).toString(16).padStart(8, "0");
+  return `${a}${b}`;
+}
+
+/**
+ * Claims the first full showing of `(sender, rev)` in the current context.
+ * `true`: show it in full (and it is now recorded); `false`: already shown in
+ * this context, show `@name` only. Any doubt (no ledger, an error) must answer
+ * `true`: showing a description once too often is the safe direction.
+ */
+export type SenderClaim = (id: string, rev: string) => boolean;
+
+export interface SenderElision<T> {
+  messages: T[];
+  /** What this call recorded, so a caller whose output then fails can release it. */
+  claimed: Array<{ id: string; rev: string }>;
+}
+
+/**
+ * Drops the sender details (description and time zone) from every message
+ * whose sender was already shown in full in this context, oldest first, so
+ * the first message from each sender in a batch keeps them. Messages are not
+ * mutated.
+ */
+export function elideSeenSenderDescriptions<T>(
+  messages: readonly T[],
+  access: {
+    get: (m: T) => {
+      type: string | null | undefined;
+      name: string | null | undefined;
+      description: string | null | undefined;
+      timezone?: string | null | undefined;
+    };
+    /** The same message with neither description nor time zone. */
+    withoutDescription: (m: T) => T;
+  },
+  claim: SenderClaim,
+): SenderElision<T> {
+  const seen = new Set<string>();
+  const claimed: Array<{ id: string; rev: string }> = [];
+  const out = messages.map((m) => {
+    const { type, name, description, timezone } = access.get(m);
+    if (!name || (!description && !timezone)) return m;
+    const id = senderObservationId(type, name);
+    const rev = senderRev(description, timezone);
+    const key = `${id}\u0000${rev}`;
+    // Within one batch only the first message from a sender can be the first.
+    if (seen.has(key)) return access.withoutDescription(m);
+    seen.add(key);
+    if (!claim(id, rev)) return access.withoutDescription(m);
+    claimed.push({ id, rev });
+    return m;
+  });
+  return { messages: out, claimed };
+}

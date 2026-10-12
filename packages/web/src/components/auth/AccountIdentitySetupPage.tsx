@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { Input, Button } from "raft-ui";
 import type { ChangeEvent, FormEvent, ReactNode } from "react";
 import { useIntl } from "react-intl";
@@ -280,8 +280,11 @@ export default function AccountIdentitySetupPage({
   const [fieldErrors, setFieldErrors] = useState<{ displayName?: string; handle?: string }>({});
   const provider = user?.profileSetupProvider ?? null;
 
-  const nameError = (reason: NameValidationReason | null, label: MessageId) =>
-    formatNameValidationError(reason, label, formatMessage);
+  const nameError = useCallback(
+    (reason: NameValidationReason | null, label: MessageId) =>
+      formatNameValidationError(reason, label, formatMessage),
+    [formatMessage],
+  );
   const avatarUploadErrorMessage = (error: unknown) => {
     // The size code must be mapped BEFORE the generic API-error path. This page
     // calls completeOnboardingProfile, which throws AVATAR_TOO_LARGE_CODE for an
@@ -330,18 +333,40 @@ export default function AccountIdentitySetupPage({
 
   // Validate the display name on blur (not just on Continue) so format errors
   // surface as soon as the user leaves the field.
-  const handleDisplayNameBlur = () => {
+  const handleDisplayNameBlur = useCallback(() => {
     setFieldErrors((current) => ({
       ...current,
       displayName: nameError(validateDisplayName(displayName), "pages.identitySetup.displayNameLabel") ?? undefined,
     }));
-  };
+  }, [displayName, nameError]);
 
   // On-blur username validation: run the hard-constraint (format) check FIRST
   // and surface it immediately; only if the format is valid do we hit the
   // uniqueness precheck. Both run on blur, not just on Continue. The uniqueness
   // call is advisory — completeProfile still enforces it authoritatively.
-  const handleUsernameBlur = async () => {
+  const handleHandleChange = useCallback((event: ChangeEvent<HTMLInputElement>) => {
+    const nextHandle = event.target.value.replace(/^@+/, "");
+    setHandle(nextHandle);
+    // Mirror into the display name until the user takes it over.
+    if (!displayNameEdited) {
+      setDisplayName(nextHandle);
+      setFieldErrors((current) => ({ ...current, displayName: undefined }));
+    }
+    setFieldErrors((current) => ({ ...current, handle: undefined }));
+  }, [displayNameEdited]);
+
+  const handleDisplayNameChange = useCallback((event: ChangeEvent<HTMLInputElement>) => {
+    setDisplayName(event.target.value);
+    // Manual edit detaches the display name from the username mirror.
+    setDisplayNameEdited(true);
+    setFieldErrors((current) => ({ ...current, displayName: undefined }));
+  }, []);
+
+  const handleAvatarButtonClick = useCallback(() => {
+    avatarInputRef.current?.click();
+  }, []);
+
+  const handleUsernameBlur = useCallback(async () => {
     const candidate = handle.trim();
     const formatError = nameError(validateNameReason(candidate, 5), "pages.identitySetup.usernameLabel");
     if (formatError) {
@@ -363,7 +388,7 @@ export default function AccountIdentitySetupPage({
     } catch {
       // Best-effort precheck; a failure here must not block the user — submit validates.
     }
-  };
+  }, [handle, formatMessage, nameError]);
 
   const handleSubmit = async (event: FormEvent) => {
     event.preventDefault();
@@ -443,17 +468,8 @@ export default function AccountIdentitySetupPage({
                     type="text"
                     className="min-w-0 flex-1 border-0 bg-transparent shadow-none focus-visible:ring-0 dark:bg-transparent dark:shadow-none"
                     value={handle}
-                    onChange={(event) => {
-                      const nextHandle = event.target.value.replace(/^@+/, "");
-                      setHandle(nextHandle);
-                      // Mirror into the display name until the user takes it over.
-                      if (!displayNameEdited) {
-                        setDisplayName(nextHandle);
-                        setFieldErrors((current) => ({ ...current, displayName: undefined }));
-                      }
-                      setFieldErrors((current) => ({ ...current, handle: undefined }));
-                    }}
-                    onBlur={() => void handleUsernameBlur()}
+                    onChange={handleHandleChange}
+                    onBlur={handleUsernameBlur}
                     placeholder={formatMessage({ id: "pages.identitySetup.previewSampleHandle" })}
                     autoComplete="username"
                     required
@@ -471,12 +487,7 @@ export default function AccountIdentitySetupPage({
                   type="text"
                   value={displayName}
                   // Stryker disable next-line BlockStatement: validation-clear behavior is covered; the empty-handler mutant hangs the focused runner.
-                  onChange={(event) => {
-                    setDisplayName(event.target.value);
-                    // Manual edit detaches the display name from the username mirror.
-                    setDisplayNameEdited(true);
-                    setFieldErrors((current) => ({ ...current, displayName: undefined }));
-                  }}
+                  onChange={handleDisplayNameChange}
                   onBlur={handleDisplayNameBlur}
                   placeholder={formatMessage({ id: "pages.identitySetup.displayNamePlaceholder" })}
                   autoComplete="name"
@@ -510,7 +521,7 @@ export default function AccountIdentitySetupPage({
                         className="gap-1.5"
                         disabled={loading}
                         // Stryker disable next-line OptionalChaining: the visible button and hidden file input mount together; this stays defensive for ref timing.
-                        onClick={() => avatarInputRef.current?.click()}
+                        onClick={handleAvatarButtonClick}
                       >
                         <Camera size={15} />
                         {formatMessage({

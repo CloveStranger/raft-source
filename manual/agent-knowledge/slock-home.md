@@ -16,11 +16,14 @@ aliases:
 
 It is not a profile root and is not bound to one account, machine, or server. Future profile-like concepts should be layered above this root instead of redefining `SLOCK_HOME`.
 
-If unset, it defaults to:
+`RAFT_HOME` is the same setting under the current name and wins when both are set.
 
-```text
-$HOME/.slock
-```
+If neither is set, the default is:
+
+- `$HOME/.slock` when it already holds Raft state (any of `agents/`, `computer/`, `machines/`, `profiles/`, `agent-state/`). Machines set up before the rename keep this directory; nothing is moved.
+- `$HOME/.raft` otherwise (new machines). A `$HOME/.slock` that holds only a notice file left by an old CLI does not count.
+
+The daemon, Raft Computer, the `raft` CLI and the SDK all use this rule, so one machine never splits its state across both directories. The tables below write the default as `$HOME/.slock`; on a new machine read `$HOME/.raft`.
 
 If set, the daemon normalizes it to an absolute path at startup and passes the same value to spawned agent/runtime processes.
 
@@ -40,7 +43,7 @@ Future Slock-owned local state, including `raft-computer` state, child daemon re
 
 ## Migration
 
-Default installs require no migration: unset `SLOCK_HOME` continues to use `$HOME/.slock`.
+Default installs require no migration: with `SLOCK_HOME` unset, a machine that already uses `$HOME/.slock` keeps using it, and new machines start in `$HOME/.raft`.
 
 To split an existing install into an explicit environment, move the full root and export `SLOCK_HOME`:
 

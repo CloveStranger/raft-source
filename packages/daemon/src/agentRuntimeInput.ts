@@ -2,6 +2,7 @@ import { EXAMPLE_T, exampleMessage, exampleRestartDriver, exampleStdinDriver, ex
 import {
   formatUtcTimestamp,
   formatProducerFactLineageBracket,
+  formatSenderHandleText,
   indentAgentBodyContinuationLines,
   renderThirdPartyInertJson,
   asAxSurfaceText,
@@ -100,14 +101,16 @@ function getMessageShortId(messageId: string): string {
   return messageId.startsWith("thread-") ? messageId.slice(7) : messageId.slice(0, 8);
 }
 
-function formatSenderHandle(message: { sender_name: string; sender_description?: string | null }): string {
+function formatSenderHandle(message: { sender_name: string; sender_description?: string | null; sender_timezone?: string | null }): string {
   // sender_name / sender_description are free text (a human or agent profile
   // description) and land on the same line as the header. Prefix their
   // continuation lines so a newline in either cannot start a forged header.
-  const name = indentAgentBodyContinuationLines(message.sender_name);
-  return message.sender_description
-    ? `@${name} — ${indentAgentBodyContinuationLines(message.sender_description)}`
-    : `@${name}`;
+  // The zone is a server-validated IANA id.
+  return formatSenderHandleText(
+    indentAgentBodyContinuationLines(message.sender_name),
+    message.sender_description ? indentAgentBodyContinuationLines(message.sender_description) : null,
+    message.sender_timezone ?? null,
+  );
 }
 
 function formatVisibleActorType(type: AgentMessage["sender_type"]): string {

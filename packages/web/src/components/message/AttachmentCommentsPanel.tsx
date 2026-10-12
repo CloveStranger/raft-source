@@ -115,10 +115,10 @@ export function AttachmentCommentsPanel({
     setAnchorCleared(false);
   }
   const activeAnchor = anchorCleared ? null : (pendingAnchor ?? null);
-  const clearActiveAnchor = () => {
+  const clearActiveAnchor = useCallback(() => {
     setAnchorCleared(true);
     onAnchorCleared?.();
-  };
+  }, [onAnchorCleared]);
 
   // The panel can also be RE-SCOPED while mounted (image lightbox paging,
   // task #10 — Dozy review): a new attachmentId must never show the previous
@@ -200,7 +200,7 @@ export function AttachmentCommentsPanel({
   // message with its ref/anchor in one request, so the composer's store send
   // path is replaced — typing/mentions/shortcuts/error handling stay in
   // MessageInput.
-  const sendComment = async (content: string, mentions: { type: string; id: string; name: string }[]) => {
+  const sendComment = useCallback(async (content: string, mentions: { type: string; id: string; name: string }[]) => {
     const anchorForSend = getPendingAnchor ? getPendingAnchor() : activeAnchor;
     const optimisticId = `optimistic-comment-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     const optimisticComment: AttachmentComment = {
@@ -248,7 +248,7 @@ export function AttachmentCommentsPanel({
       }
       throw err;
     }
-  };
+  }, [getPendingAnchor, activeAnchor, threadChannelId, attachmentId, viewerUserId, currentUser, formatMessage, clearActiveAnchor, load]);
 
   // Fixed order (cindyz 6/11, task #28): by anchor position in the document;
   // comments WITHOUT a position always sit on top. No user-facing sort

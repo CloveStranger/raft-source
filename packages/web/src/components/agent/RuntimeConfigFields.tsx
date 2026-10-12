@@ -1,15 +1,14 @@
 import { ChevronDown, ChevronRight, Info, Pencil, RefreshCw } from "lucide-react";
-import type { RefObject, ReactNode } from "react";
-import { useId, useState } from "react";
+import type { ChangeEvent, RefObject, ReactNode } from "react";
+import { useCallback, useId, useMemo, useState } from "react";
 import {
   isRuntimeFormV2FieldVisible,
-  runtimeFormV2Choices,
-  runtimeFormV2SourceStatus,
+  runtimeFormV2ConnectionActive,
+  runtimeFormV2SelectedConnection,
   validateRuntimeFormV2,
 } from "@botiverse/raft-runtime-form";
 import type {
   ParsedRuntimeFormV2,
-  RuntimeFormV2ChoiceOption,
   RuntimeFormV2Field,
   RuntimeFormV2Sources,
   RuntimeFormV2Value,
@@ -18,8 +17,8 @@ import type {
 import type { RuntimeFormV2State } from "../../hooks/useRuntimeFormV2";
 import { useIntl } from "react-intl";
 import type { IntlShape } from "react-intl";
-import { getModelLabel, getRuntimeDisplayName, getRuntimeProviderDisplayName, REASONING_EFFORT_RUNTIMES } from "@botiverse/raft-shared";
-import type { ProviderConnectionSummary, ResolvedAgentCreateFormDefinition, ReasoningEffort, RuntimeModelInfo, RuntimeReasoningEffort } from "@botiverse/raft-shared";
+import { getRuntimeDisplayName, getRuntimeProviderDisplayName, REASONING_EFFORT_RUNTIMES } from "@botiverse/raft-shared";
+import type { AgentCreateFormOptionSource, ProviderConnectionSummary, ResolvedAgentCreateFormDefinition, ReasoningEffort, RuntimeModelInfo, RuntimeReasoningEffort } from "@botiverse/raft-shared";
 import {
   Button,
   Card,
@@ -43,16 +42,16 @@ import {
   SelectValue,
 } from "raft-ui";
 import StableField from "./StableField";
-import { KeyValueAddButton, KeyValueInputRow } from "../ui/KeyValueInput";
+import { KeyValueAddButton } from "../ui/KeyValueInput";
 import Tooltip from "../ui/Tooltip";
 import { reasoningEffortOptionsForModel } from "../../utils/reasoningEffortOptions";
+import { RUNTIME_LOOKUP_DISPLAY_MESSAGE_ID, runtimeLookupDisplayForReason } from "../../utils/classifyRuntimeError";
 import {
   builtInCatalogCapabilityIsLive,
   projectBuiltInPresetModelOptions,
 } from "../../hooks/useRuntimeModels";
 import type { RuntimeModelSourceState } from "../../hooks/useRuntimeModels";
 import {
-  CUSTOM_MODEL_SELECT_VALUE,
   BUILTIN_RUNTIME_ALL_PROVIDER_IDS,
   PI_BUILTIN_PROVIDER_IDS,
   PI_PROVIDER_CONFIGURED,
@@ -72,8 +71,19 @@ import type {
   PiProviderMode,
   RuntimeProviderMode,
 } from "../../utils/runtimeConfigForm";
+import { SchemaKimiRuntimeFields } from "./SchemaKimiRuntimeFields";
+import { SchemaBuiltInRuntimeFields } from "./SchemaBuiltInRuntimeFields";
+import { RuntimeEnvVarRow } from "./RuntimeEnvVarRow";
+import { RuntimeFormV2FieldControl } from "./RuntimeFormV2FieldControl";
+import { RuntimeChoiceCombobox } from "./RuntimeChoiceCombobox";
 
-const DEFAULT_REASONING_EFFORT_SELECT_VALUE = "__default_reasoning_effort__";
+export const DEFAULT_REASONING_EFFORT_SELECT_VALUE = "__default_reasoning_effort__";
+
+/** Stable fallbacks for optional props, so a defaulted prop keeps one identity
+ *  across renders instead of a fresh `[]` / `() => undefined` each time. */
+export const NO_PROVIDER_CONNECTIONS: readonly ProviderConnectionSummary[] = [];
+const NO_SOURCE_IDS: readonly string[] = [];
+export function ignoreChange(): void {}
 
 /**
  * Field-level action (rescan / retry).
@@ -84,7 +94,7 @@ const DEFAULT_REASONING_EFFORT_SELECT_VALUE = "__default_reasoning_effort__";
  * branch on, and the `className` a caller passes is styling that survives on top
  * of the variant rather than instead of it.
  */
-function FieldAction({ tone, className: _legacyClassName, children, ...props }: {
+export function FieldAction({ tone, className: _legacyClassName, children, ...props }: {
   tone: "icon" | "link";
   /** Accepted and DISCARDED. These are the pre-migration hand-rolled styles
    *  (`font-bold underline`, `ml-auto text-black/40`, …); the tokenised variants
@@ -117,7 +127,7 @@ function FieldAction({ tone, className: _legacyClassName, children, ...props }: 
  * StableField now, so the indirection is just a name — kept because eight
  * callsites read it, and renaming them would bury the actual change in noise.
  */
-const Field = StableField;
+export const Field = StableField;
 
 /**
  * raft-ui builds SelectTrigger on `Button`, so out of the box a select inherits
@@ -230,17 +240,17 @@ function renderSelectItems(options: readonly RuntimeOption[]) {
 
 const PROVIDER_CONNECTION_SELECT_PREFIX = "provider-connection:";
 
-function providerConnectionSelectValue(connectionId: string): string {
+export function providerConnectionSelectValue(connectionId: string): string {
   return `${PROVIDER_CONNECTION_SELECT_PREFIX}${connectionId}`;
 }
 
-function providerConnectionIdFromSelectValue(value: string): string | null {
+export function providerConnectionIdFromSelectValue(value: string): string | null {
   return value.startsWith(PROVIDER_CONNECTION_SELECT_PREFIX)
     ? value.slice(PROVIDER_CONNECTION_SELECT_PREFIX.length)
     : null;
 }
 
-function unifiedBuiltInProviderOptions(input: {
+export function unifiedBuiltInProviderOptions(input: {
   directOptions: readonly RuntimeOption[];
   connections: readonly ProviderConnectionSummary[];
   selectedConnectionId: string;
@@ -277,7 +287,7 @@ function unifiedBuiltInProviderOptions(input: {
  *  so the end of that chain needs asserting somewhere. */
 export { RuntimeSelectControl as RuntimeSelectControlForTest };
 
-function RuntimeSelectControl({
+export function RuntimeSelectControl({
   value,
   onValueChange,
   options,
@@ -308,6 +318,14 @@ function RuntimeSelectControl({
    *  "every field's control is wired" check, not by the unit teeth. */
   "aria-describedby"?: string;
 }) {
+  const handleValueChange = useCallback(
+    (nextValue: string | null) => commitRuntimeSelectValue(options, nextValue, onValueChange),
+    [options, onValueChange],
+  );
+  const contentPortalProps = useMemo(
+    () => (portalContainer ? { container: portalContainer } : undefined),
+    [portalContainer],
+  );
   return (
     <Select
       // `chrome` lives on the Select ROOT and reaches the popup through context,
@@ -317,16 +335,14 @@ function RuntimeSelectControl({
       // rendered at the wrong size.
       chrome="field"
       value={value}
-      onValueChange={(nextValue) => commitRuntimeSelectValue(options, nextValue, onValueChange)}
+      onValueChange={handleValueChange}
       items={options}
     >
       <SelectTrigger className="w-full" data-testid={testId} data-invalid={dataInvalid} aria-describedby={ariaDescribedBy}>
         <SelectValue placeholder={placeholder} />
         <SelectIcon />
       </SelectTrigger>
-      <SelectContent
-        portalProps={portalContainer ? { container: portalContainer } : undefined}
-      >
+      <SelectContent portalProps={contentPortalProps}>
         <SelectList>{renderSelectItems(options)}</SelectList>
       </SelectContent>
     </Select>
@@ -384,8 +400,16 @@ function runtimeModelSourceStatus(
           return runtime === "grok"
             ? intl.formatMessage({ id: "agent.runtimeModels.grokLoginRequired" })
             : intl.formatMessage({ id: "agent.runtimeModels.loginRequired" }, { runtimeName });
-        case "runtime_not_found":
-          return intl.formatMessage({ id: "agent.runtimeModels.runtimeNotFound" }, { runtimeName });
+        case "runtime_not_found": {
+          // task #735: the lookup's reason decides the copy. Only a confirmed
+          // miss keeps the install guidance; a timeout, a permission denial,
+          // an unresolved failure, and an old daemon (no reason) each get the
+          // neutral/own arm — uncertainty never reads as "install it".
+          const lookupDisplay = runtimeLookupDisplayForReason(source.reason);
+          return lookupDisplay === "confirmed_missing"
+            ? intl.formatMessage({ id: "agent.runtimeModels.runtimeNotFound" }, { runtimeName })
+            : intl.formatMessage({ id: RUNTIME_LOOKUP_DISPLAY_MESSAGE_ID[lookupDisplay] }, { runtimeName });
+        }
         case "detect_timeout":
           return intl.formatMessage({ id: "agent.runtimeModels.detectTimeout" }, { runtimeName });
         case "protocol_unsupported":
@@ -399,6 +423,11 @@ function runtimeModelSourceStatus(
       return intl.formatMessage({ id: "agent.runtimeModels.idle" });
   }
 }
+
+/** Test-only alias for the source-status mapper: the runtime_not_found arm
+ *  splits on the lookup reason (task #735), and that mapping is asserted
+ *  against the real catalogs without mounting the whole form. */
+export { runtimeModelSourceStatus as runtimeModelSourceStatusForTest };
 
 function builtInCatalogStatus(
   intl: IntlShape,
@@ -542,36 +571,25 @@ interface RuntimeConfigFieldsProps {
   showValidationErrors?: boolean;
 }
 
-function SchemaDrivenRuntimeFields({
-  definition,
-  providerId,
-  onProviderChange,
-  apiKey,
-  onApiKeyChange,
-  baseUrl,
-  onBaseUrlChange,
-  supportsImageInput,
-  onSupportsImageInputChange,
-  loadLocalPlugins,
-  onLoadLocalPluginsChange,
-  model,
-  persistedModel,
-  onModelChange,
-  reasoningEffort,
-  onReasoningEffortChange,
-  onCustomModelModeChange,
-  envVarEntries,
-  onEnvVarEntriesChange,
-  advancedOpen,
-  onAdvancedOpenChange,
-  portalContainer,
-  managedConnectionActive = false,
-  providerConnections = [],
-  providerConnectionId = "",
-  onProviderConnectionChange = () => undefined,
-  onEditProviderConnection,
-  showValidationErrors = true,
-}: {
+export type SchemaSelectSource = Extract<AgentCreateFormOptionSource, { kind: "select" }>;
+
+/** `onChange` for an input whose owner only wants the typed value. */
+export function useInputValueChange(onValueChange: (value: string) => void) {
+  return useCallback(
+    (event: ChangeEvent<HTMLInputElement>) => onValueChange(event.target.value),
+    [onValueChange],
+  );
+}
+
+/** `onCheckedChange` for a checkbox whose owner wants a plain boolean. */
+export function useCheckedChange(onCheckedChange: (checked: boolean) => void) {
+  return useCallback(
+    (checked: boolean) => onCheckedChange(checked === true),
+    [onCheckedChange],
+  );
+}
+
+export interface SchemaDrivenRuntimeFieldsProps {
   definition: ResolvedAgentCreateFormDefinition;
   providerId: string;
   onProviderChange: (value: string) => void;
@@ -600,346 +618,33 @@ function SchemaDrivenRuntimeFields({
   onProviderConnectionChange?: (connection: ProviderConnectionSummary | null) => void;
   onEditProviderConnection?: (connection: ProviderConnectionSummary) => void;
   showValidationErrors?: boolean;
-}) {
-  const { formatMessage } = useIntl();
-  if (definition.runtimeId === "kimi-sdk") {
-    const modelSource = definition.optionSources.model;
-    if (modelSource?.kind !== "select") return null;
-    const selectedModel = modelSource.options.find((option) => option.value === model);
-    const modelOptions = selectedModel || !model
-      ? modelSource.options
-      : [
-          ...modelSource.options,
-          {
-            value: model,
-            label: formatMessage(
-              { id: "agent.detail.modelNotInComputerConfig" },
-              { model },
-            ),
-            disabled: true,
-          },
-        ];
-    const supportedEfforts = selectedModel?.supportedReasoningEfforts ?? [];
-    const incompatibleEffort = reasoningEffort !== null && !supportedEfforts.includes(reasoningEffort);
-    const effortOptions: RuntimeOption[] = [
-      {
-        value: DEFAULT_REASONING_EFFORT_SELECT_VALUE,
-        label: formatMessage({ id: "agent.runtimeConfig.default" }),
-      },
-      ...supportedEfforts.map((effort) => ({ value: effort, label: effort })),
-      ...(incompatibleEffort
-        ? [{ value: reasoningEffort, label: reasoningEffort, disabled: true }]
-        : []),
-    ];
-    const labels = definition.uiSchema.localization;
-    return (
-      <>
-        <Field
-          label={labels.model?.label ?? formatMessage({ id: "agent.runtimeConfig.model" })}
-          hint={labels.model?.hint}
-          required
-          error={showValidationErrors && !selectedModel
-            ? formatMessage({ id: "agent.runtimeConfig.modelRequired" })
-            : undefined}
-        >
-          <RuntimeSelectControl
-            value={model}
-            onValueChange={(next) => {
-              const nextModel = modelSource.options.find((option) => option.value === next);
-              onModelChange(next);
-              onReasoningEffortChange(nextModel?.defaultReasoningEffort ?? null);
-            }}
-            options={modelOptions}
-            placeholder={labels.model?.placeholder ?? formatMessage({ id: "agent.runtimeConfig.model" })}
-            portalContainer={portalContainer}
-            testId="schema-runtime-model-select"
-          />
-        </Field>
-        {supportedEfforts.length > 0 && (
-          <Field
-            label={labels.reasoningEffort?.label ?? formatMessage({ id: "agent.runtimeConfig.reasoning" })}
-            hint={labels.reasoningEffort?.hint}
-            error={showValidationErrors && incompatibleEffort
-              ? formatMessage({ id: "agent.runtimeConfig.reasoningEffortInvalid" })
-              : undefined}
-          >
-            <RuntimeSelectControl
-              value={reasoningEffort ?? DEFAULT_REASONING_EFFORT_SELECT_VALUE}
-              onValueChange={(next) => onReasoningEffortChange(
-                next === DEFAULT_REASONING_EFFORT_SELECT_VALUE ? null : next,
-              )}
-              options={effortOptions}
-              placeholder={formatMessage({ id: "agent.runtimeConfig.default" })}
-              portalContainer={portalContainer}
-              testId="schema-runtime-reasoning-select"
-            />
-          </Field>
-        )}
-        {definition.uiSchema.layout.advanced.includes("/envVars") && (
-          <div>
-            <button
-              type="button"
-              onClick={() => onAdvancedOpenChange?.(!advancedOpen)}
-              aria-expanded={advancedOpen}
-              className="flex items-center gap-1 text-sm font-bold uppercase tracking-wide text-foreground-muted hover:text-foreground-strong"
-            >
-              {advancedOpen ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
-              {formatMessage({ id: "agent.runtimeConfig.advanced" })}
-            </button>
-            {advancedOpen && (
-              <div className="mt-3 border-l border-line-muted theme-brutal:border-l-2 theme-brutal:border-black/10 pl-3">
-                <RuntimeEnvVarsField
-                  entries={envVarEntries}
-                  onChange={onEnvVarEntriesChange}
-                  hint={labels.envVars?.hint}
-                />
-              </div>
-            )}
-          </div>
-        )}
-      </>
-    );
-  }
-  const providerSource = definition.optionSources.provider;
-  const modelSource = definition.optionSources.model;
-  if (providerSource?.kind !== "select" || modelSource?.kind !== "dependent_select") return null;
-  const selectedProviderConnection = providerConnections.find((connection) => connection.id === providerConnectionId) ?? null;
-  const effectiveProviderId = selectedProviderConnection?.providerId ?? providerId;
-  const providerOption = providerSource.options.find((option) => option.value === effectiveProviderId);
-  const providerOptions = providerOption || !persistedModel
-    ? providerSource.options
-    : [
-        ...providerSource.options,
-        {
-          value: effectiveProviderId,
-          label: effectiveProviderId,
-          providerKind: "preset" as const,
-          disabled: true,
-        },
-      ];
-  const providerSelectOptions = unifiedBuiltInProviderOptions({
-    directOptions: providerOptions,
-    connections: providerConnections.map((connection) => providerSource.options.some(
-      (option) => option.value === connection.providerId,
-    ) ? connection : { ...connection, enabled: false }),
-    selectedConnectionId: providerConnectionId,
-    connectionLabel: (candidateProviderId, connectionName) => formatMessage(
-      { id: "agent.runtimeConfig.savedProviderLabel" },
-      {
-        provider: providerSource.options.find(
-          (option) => option.value === candidateProviderId,
-        )?.label ?? getRuntimeProviderDisplayName(candidateProviderId),
-        connection: connectionName,
-      },
-    ),
-    savedGroupLabel: formatMessage({ id: "agent.runtimeConfig.savedProviders" }),
-    directGroupLabel: formatMessage({ id: "agent.runtimeConfig.directProviders" }),
-    unavailableLabel: formatMessage({ id: "agent.runtimeConfig.savedProviderUnavailable" }),
-  });
-  const providerConnectionInvalid = Boolean(providerConnectionId)
-    && (!selectedProviderConnection || !selectedProviderConnection.enabled || !selectedProviderConnection.hasCredential);
-  const gateway = providerOption?.providerKind === "gateway";
-  const liveModelOptions = modelSource.optionsByValue[effectiveProviderId] ?? [];
-  const modelOptions = persistedModel && !liveModelOptions.some((option) => option.value === persistedModel)
-    ? [
-        ...liveModelOptions,
-        {
-          value: persistedModel,
-          label: getModelLabel("builtin", persistedModel),
-          disabled: true,
-        },
-      ]
-    : liveModelOptions;
-  const labels = definition.uiSchema.localization;
-  const baseUrlVisible = definition.uiSchema.visibility.some((rule) =>
-    rule.pointer === "/baseUrl" && rule.when.pointer === "/providerId" && rule.when.in.includes(effectiveProviderId));
-  const supportsImageInputVisible = definition.uiSchema.visibility.some((rule) =>
-    rule.pointer === "/supportsImageInput" && rule.when.pointer === "/providerId" && rule.when.in.includes(effectiveProviderId));
-  const baseUrlInvalid = baseUrlVisible && !/^https?:\/\//i.test(baseUrl.trim());
-
-  return (
-    <>
-      <Field
-        label={labels.providerId?.label ?? formatMessage({ id: "agent.runtimeConfig.provider" })}
-        hint={labels.providerId?.hint}
-        labelAccessory={selectedProviderConnection && onEditProviderConnection ? (
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon-xs"
-            onClick={() => onEditProviderConnection(selectedProviderConnection)}
-            aria-label={formatMessage({ id: "agent.runtimeConfig.editSavedProvider" })}
-            title={formatMessage({ id: "agent.runtimeConfig.editSavedProvider" })}
-            data-testid="schema-runtime-edit-provider-connection"
-          >
-            <Pencil size={14} aria-hidden="true" />
-          </Button>
-        ) : undefined}
-        error={providerConnectionInvalid
-          ? formatMessage({ id: "agent.runtimeConfig.savedProviderUnavailable" })
-          : undefined}
-      >
-        <RuntimeSelectControl
-          value={providerConnectionId
-            ? providerConnectionSelectValue(providerConnectionId)
-            : effectiveProviderId}
-          onValueChange={(next) => {
-            const connectionId = providerConnectionIdFromSelectValue(next);
-            if (connectionId) {
-              const connection = providerConnections.find((candidate) => candidate.id === connectionId);
-              if (!connection || !connection.enabled || !connection.hasCredential) return;
-              onProviderConnectionChange(connection);
-              onAdvancedOpenChange?.(false);
-              return;
-            }
-            const nextOption = providerSource.options.find((option) => option.value === next);
-            const nextCustom = nextOption?.providerKind === "gateway";
-            onProviderConnectionChange(null);
-            onProviderChange(next);
-            onCustomModelModeChange(nextCustom);
-            onBaseUrlChange("");
-            onSupportsImageInputChange(false);
-            onAdvancedOpenChange?.(false);
-            onModelChange(nextCustom ? "" : (modelSource.defaultValueByValue[next] ?? ""));
-          }}
-          options={providerSelectOptions}
-          placeholder={labels.providerId?.placeholder ?? formatMessage({ id: "agent.runtimeConfig.provider" })}
-          portalContainer={portalContainer}
-          testId="schema-runtime-provider-select"
-        />
-      </Field>
-      <Field
-        label={formatMessage(
-          { id: "agent.runtimeConfig.apiKeyForProvider" },
-          { provider: providerOption?.label ?? labels.apiKey?.label ?? formatMessage({ id: "agent.runtimeConfig.provider" }) },
-        )}
-        required={!managedConnectionActive}
-        error={showValidationErrors && !managedConnectionActive && !apiKey.trim()
-          ? formatMessage({ id: "agent.runtimeConfig.apiKeyRequired" })
-          : undefined}
-      >
-        <Input
-          type="password"
-          value={managedConnectionActive ? "" : apiKey}
-          onChange={(event) => onApiKeyChange(event.target.value)}
-          placeholder={managedConnectionActive
-            ? formatMessage(
-                { id: "agent.runtimeConfig.credentialFromSavedProvider" },
-                { connection: selectedProviderConnection?.name ?? formatMessage({ id: "agent.runtimeConfig.savedProviderUnavailable" }) },
-              )
-            : labels.apiKey?.placeholder ?? "sk-..."}
-          autoComplete="off"
-          disabled={managedConnectionActive}
-          data-testid="schema-runtime-api-key"
-        />
-      </Field>
-      {baseUrlVisible && (
-        <Field
-          label={labels.baseUrl?.label ?? formatMessage({ id: "agent.runtimeConfig.baseUrl" })}
-          required={!managedConnectionActive}
-          error={showValidationErrors && !managedConnectionActive && baseUrlInvalid
-            ? formatMessage({ id: "agent.runtimeConfig.baseUrlInvalid" })
-            : undefined}
-        >
-          <Input
-            type="url"
-            value={managedConnectionActive ? selectedProviderConnection?.endpointUrl ?? "" : baseUrl}
-            onChange={(event) => onBaseUrlChange(event.target.value)}
-            placeholder={labels.baseUrl?.placeholder ?? "https://gateway.example.com/v1"}
-            disabled={managedConnectionActive}
-            data-testid="schema-runtime-base-url"
-          />
-        </Field>
-      )}
-      {supportsImageInputVisible && (
-        <Field
-          label={formatMessage({ id: "agent.runtimeConfig.imageInput" })}
-          hint={labels.supportsImageInput?.hint}
-          adopt={false}
-        >
-          <Card variant="option" render={<label />}>
-            <CardHeader>
-              <CardLeading>
-                <Checkbox
-                  size="md"
-                  checked={managedConnectionActive
-                    ? selectedProviderConnection?.supportsImageInput === true
-                    : supportsImageInput}
-                  onCheckedChange={(checked) => onSupportsImageInputChange(checked === true)}
-                  disabled={managedConnectionActive}
-                  aria-labelledby="schema-image-input-title"
-            data-testid="schema-runtime-supports-image-input"
-                />
-              </CardLeading>
-              <CardTitle id="schema-image-input-title">{labels.supportsImageInput?.label ?? formatMessage({ id: "agent.runtimeConfig.supportsImageInput" })}</CardTitle>
-            </CardHeader>
-          </Card>
-        </Field>
-      )}
-      <Field
-        label={labels.model?.label ?? formatMessage({ id: "agent.runtimeConfig.model" })}
-        required
-        error={showValidationErrors && !model.trim()
-          ? formatMessage({ id: "agent.runtimeConfig.modelRequired" })
-          : undefined}
-      >
-        {gateway ? (
-          <Input
-            type="text"
-            value={model}
-            onChange={(event) => onModelChange(event.target.value)}
-            placeholder={labels.model?.placeholder ?? formatMessage({ id: "agent.runtimeConfig.gatewayModelId" })}
-            data-testid="schema-runtime-custom-model"
-          />
-        ) : (
-          <RuntimeSelectControl
-            value={model}
-            onValueChange={onModelChange}
-            options={modelOptions}
-            placeholder={labels.model?.placeholder ?? formatMessage({ id: "agent.runtimeConfig.model" })}
-            portalContainer={portalContainer}
-            testId="schema-runtime-model-select"
-          />
-        )}
-      </Field>
-      {definition.uiSchema.layout.advanced.includes("/envVars") && (
-        <div>
-          <button
-            type="button"
-            onClick={() => onAdvancedOpenChange?.(!advancedOpen)}
-            aria-expanded={advancedOpen}
-            className="flex items-center gap-1 text-sm font-bold uppercase tracking-wide text-foreground-muted hover:text-foreground-strong"
-          >
-            {advancedOpen ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
-            {formatMessage({ id: "agent.runtimeConfig.advanced" })}
-          </button>
-          {advancedOpen && (
-            <div className="mt-3 border-l border-line-muted theme-brutal:border-l-2 theme-brutal:border-black/10 pl-3">
-              {"loadLocalPlugins" in definition.dataSchema.properties && (
-                <LocalPiPluginsField checked={loadLocalPlugins} onChange={onLoadLocalPluginsChange} />
-              )}
-              <RuntimeEnvVarsField
-                entries={envVarEntries}
-                onChange={onEnvVarEntriesChange}
-                hint={labels.envVars?.hint}
-              />
-            </div>
-          )}
-        </div>
-      )}
-    </>
-  );
 }
 
-function LocalPiPluginsField({ checked, onChange }: { checked: boolean; onChange?: (enabled: boolean) => void }) {
+/** Picks the schema form shape for the definition, or nothing when its option
+ *  sources are not the shape that form needs. */
+function SchemaDrivenRuntimeFields(props: SchemaDrivenRuntimeFieldsProps) {
+  const { definition } = props;
+  const modelSource = definition.optionSources.model;
+  if (definition.runtimeId === "kimi-sdk") {
+    return modelSource?.kind === "select"
+      ? <SchemaKimiRuntimeFields {...props} modelSource={modelSource} />
+      : null;
+  }
+  const providerSource = definition.optionSources.provider;
+  if (providerSource?.kind !== "select" || modelSource?.kind !== "dependent_select") return null;
+  return <SchemaBuiltInRuntimeFields {...props} providerSource={providerSource} modelSource={modelSource} />;
+}
+
+export function LocalPiPluginsField({ checked, onChange }: { checked: boolean; onChange?: (enabled: boolean) => void }) {
   const { formatMessage } = useIntl();
   const titleId = useId();
   const descriptionId = useId();
+  const handleCheckedChange = useCallback((enabled: boolean) => onChange?.(enabled), [onChange]);
   return (
     <Card variant="option" render={<label />} className="mb-3">
       <CardHeader>
         <CardLeading>
-          <Checkbox checked={checked} onCheckedChange={(enabled) => onChange?.(enabled)}
+          <Checkbox checked={checked} onCheckedChange={handleCheckedChange}
             aria-labelledby={titleId}
             aria-describedby={descriptionId} />
         </CardLeading>
@@ -949,6 +654,11 @@ function LocalPiPluginsField({ checked, onChange }: { checked: boolean; onChange
     </Card>
   );
 }
+
+const CLAUDE_COMMAND_INFO_CONTENT_PROPS = {
+  side: "bottom",
+  className: "w-72 max-w-[calc(100vw-3rem)] text-left font-normal",
+} as const;
 
 function ClaudeCommandInfo() {
   const { formatMessage } = useIntl();
@@ -962,7 +672,7 @@ function ClaudeCommandInfo() {
           },
         )
       }
-      contentProps={{ side: "bottom", className: "w-72 max-w-[calc(100vw-3rem)] text-left font-normal" }}
+      contentProps={CLAUDE_COMMAND_INFO_CONTENT_PROPS}
     >
       <button
         type="button"
@@ -975,7 +685,7 @@ function ClaudeCommandInfo() {
   );
 }
 
-function RuntimeEnvVarsField({
+export function RuntimeEnvVarsField({
   entries,
   onChange,
   optional,
@@ -987,37 +697,39 @@ function RuntimeEnvVarsField({
   hint?: string;
 }) {
   const { formatMessage } = useIntl();
+  const handleKeyChange = useCallback((index: number, key: string) => {
+    const updated = [...entries];
+    updated[index] = { ...updated[index], key };
+    onChange(updated);
+  }, [entries, onChange]);
+  const handleValueChange = useCallback((index: number, value: string) => {
+    const updated = [...entries];
+    updated[index] = { ...updated[index], value };
+    onChange(updated);
+  }, [entries, onChange]);
+  const handleRemove = useCallback((index: number) => {
+    onChange(entries.filter((_, i) => i !== index));
+  }, [entries, onChange]);
+  const handleAdd = useCallback(() => {
+    onChange([...entries, { key: "", value: "" }]);
+  }, [entries, onChange]);
   return (
     <Field label={formatMessage({ id: "agent.runtimeConfig.envVars" })} optional={optional} adopt={false}>
       {hint && <p className="mb-2 -mt-1 text-xs text-foreground-muted">{hint}</p>}
       <div className="space-y-2">
         {entries.map((entry, index) => (
-          <KeyValueInputRow
+          <RuntimeEnvVarRow
             key={index}
-            keyValue={entry.key}
-            value={entry.value}
-            onKeyChange={(value) => {
-              const updated = [...entries];
-              updated[index] = { ...updated[index], key: value };
-              onChange(updated);
-            }}
-            onValueChange={(value) => {
-              const updated = [...entries];
-              updated[index] = { ...updated[index], value };
-              onChange(updated);
-            }}
-            onRemove={() => onChange(entries.filter((_, i) => i !== index))}
-            keyLabel={formatMessage({ id: "agent.runtimeConfig.envVarName" })}
-            valueLabel={formatMessage(
-              { id: "agent.runtimeConfig.envVarValueFor" },
-              { name: entry.key || formatMessage({ id: "agent.runtimeConfig.envVarFallback" }) },
-            )}
-            removeLabel={formatMessage({ id: "agent.runtimeConfig.removeEnvVar" })}
+            index={index}
+            entry={entry}
+            onKeyChange={handleKeyChange}
+            onValueChange={handleValueChange}
+            onRemove={handleRemove}
           />
         ))}
         <KeyValueAddButton
           label={formatMessage({ id: "agent.runtimeConfig.addVariable" })}
-          onClick={() => onChange([...entries, { key: "", value: "" }])}
+          onClick={handleAdd}
         />
       </div>
     </Field>
@@ -1045,13 +757,13 @@ export default function RuntimeConfigFields({
   builtInProviderMode,
   onBuiltInProviderModeChange,
   builtInProviderApiKey = "",
-  onBuiltInProviderApiKeyChange = () => undefined,
+  onBuiltInProviderApiKeyChange = ignoreChange,
   builtInProviderBaseUrl = "",
-  onBuiltInProviderBaseUrlChange = () => undefined,
+  onBuiltInProviderBaseUrlChange = ignoreChange,
   loadLocalPlugins = false,
   onLoadLocalPluginsChange,
   builtInProviderSupportsImageInput = false,
-  onBuiltInProviderSupportsImageInputChange = () => undefined,
+  onBuiltInProviderSupportsImageInputChange = ignoreChange,
   piProviderMode,
   onPiProviderModeChange,
   piProviderApiKey,
@@ -1084,12 +796,22 @@ export default function RuntimeConfigFields({
   formDefinitionError = false,
   formDefinitionErrorCode,
   managedConnectionActive = false,
-  providerConnections = [],
+  providerConnections = NO_PROVIDER_CONNECTIONS,
   providerConnectionId = "",
-  onProviderConnectionChange = () => undefined,
+  onProviderConnectionChange = ignoreChange,
   onEditProviderConnection,
   showValidationErrors = true,
 }: RuntimeConfigFieldsProps) {
+  // `provider.saved_connection` (v2 forms): the pencil action bridge, memoized
+  // so the object identity is stable across renders (react-doctor).
+  const savedConnectionsForV2 = useMemo(() => (onEditProviderConnection
+    ? {
+        onEdit: (connectionId: string) => {
+          const connection = providerConnections.find((candidate) => candidate.id === connectionId);
+          if (connection) onEditProviderConnection(connection);
+        },
+      }
+    : undefined), [onEditProviderConnection, providerConnections]);
   const intl = useIntl();
   const { formatMessage } = intl;
   const effectiveRuntimeLabel = runtimeLabel ?? formatMessage({ id: "agent.runtimeConfig.runtime" });
@@ -1110,12 +832,12 @@ export default function RuntimeConfigFields({
   const builtInGatewayProvider = builtInProviderSupported && isBuiltInGatewayProviderMode(effectiveBuiltInProviderMode);
   const customModelInputMode = customModelMode || builtInGatewayProvider;
   const builtInCatalogApplies = builtInProviderSupported && !builtInGatewayProvider;
-  const builtInModelList = builtInCatalogApplies
+  const builtInModelList = useMemo(() => (builtInCatalogApplies
     ? projectBuiltInPresetModelOptions({
         providerModels: builtInProviderModels(effectiveBuiltInProviderMode) ?? [],
         ...(model ? { persistedModel: model } : {}),
       })
-    : null;
+    : null), [builtInCatalogApplies, effectiveBuiltInProviderMode, model]);
   const builtInBaseUrlInvalid = builtInGatewayProvider && !managedConnectionActive && !/^https?:\/\//i.test(builtInProviderBaseUrl.trim());
   const piApiKeyRequired = piProviderSupported && piProviderMode !== PI_PROVIDER_CONFIGURED;
   // Gateway providers are custom-model-only: Slock cannot know what models a
@@ -1124,20 +846,10 @@ export default function RuntimeConfigFields({
   const piBuiltinModelList = piApiKeyRequired ? piBuiltinProviderModels(piProviderMode) : null;
   const providerModelList = builtInModelList ?? piBuiltinModelList;
   const machineSourceApplies = (!providerModelList && !builtInGatewayProvider) || builtInCatalogApplies;
-  const effectiveModelOptions: RuntimeOption[] = providerModelList
-    ? providerModelList.map((m) => {
-        const disabled = "disabled" in m && m.disabled === true;
-        return {
-          value: m.id,
-          label: m.label,
-          ...(disabled ? { disabled } : {}),
-        };
-      })
-    : builtInGatewayProvider ? [] : modelOptions;
-  const providerModeOptions: RuntimeOption[] = [
+  const providerModeOptions = useMemo((): RuntimeOption[] => [
     { value: "default", label: formatMessage({ id: "agent.runtimeConfig.default" }) },
     { value: "custom", label: formatMessage({ id: "agent.runtimeConfig.custom" }) },
-  ];
+  ], [formatMessage]);
   const builtInProviderOptions: RuntimeOption[] = BUILTIN_RUNTIME_ALL_PROVIDER_IDS.map((id) => ({
     value: id,
     label: getRuntimeProviderDisplayName(id),
@@ -1154,31 +866,37 @@ export default function RuntimeConfigFields({
     directGroupLabel: formatMessage({ id: "agent.runtimeConfig.directProviders" }),
     unavailableLabel: formatMessage({ id: "agent.runtimeConfig.savedProviderUnavailable" }),
   });
-  const piProviderOptions: RuntimeOption[] = [
+  const piProviderOptions = useMemo((): RuntimeOption[] => [
     { value: PI_PROVIDER_CONFIGURED, label: formatMessage({ id: "agent.runtimeConfig.configured" }) },
     ...PI_BUILTIN_PROVIDER_IDS.map((id) => ({
       value: id,
       label: getRuntimeProviderDisplayName(id),
     })),
-  ];
-  const modelSelectOptions: RuntimeOption[] = [
-    ...effectiveModelOptions,
-    // A Built-in/Pi provider locks the model picker to its SDK
-    // first-class set; "Custom" doesn't apply because the provider
-    // namespace owns the model list.
-    ...(customModelSupported && !providerModelList ? [{ value: CUSTOM_MODEL_SELECT_VALUE, label: formatMessage({ id: "agent.runtimeConfig.custom" }) }] : []),
-  ];
+  ], [formatMessage]);
+  const modelChoiceOptions = useMemo((): RuntimeOption[] => (providerModelList
+    ? providerModelList.map((m) => {
+        const disabled = "disabled" in m && m.disabled === true;
+        return {
+          value: m.id,
+          label: m.label,
+          ...(disabled ? { disabled } : {}),
+        };
+      })
+    : builtInGatewayProvider ? [] : modelOptions), [providerModelList, builtInGatewayProvider, modelOptions]);
+  // A Built-in/Pi provider locks the model picker to its SDK first-class set;
+  // a typed model doesn't apply because the provider namespace owns the list.
+  const modelAllowsCustom = customModelSupported && !providerModelList;
   // Reasoning options are gated by the selected model's declared
   // supportedReasoningEfforts (data-driven — e.g. GPT-5.6 luna omits Ultra);
   // models that don't declare a set fall back to the full catalog.
-  const reasoningOptions: RuntimeOption[] = [
+  const reasoningOptions = useMemo((): RuntimeOption[] => [
     { value: DEFAULT_REASONING_EFFORT_SELECT_VALUE, label: formatMessage({ id: "agent.runtimeConfig.default" }) },
     ...reasoningEffortOptionsForModel(runtime, model, runtimeModels.models).map((option) => ({
       value: option.value,
       label: formatMessage({ id: option.labelId }),
       description: option.descriptionId ? formatMessage({ id: option.descriptionId }) : undefined,
     })),
-  ];
+  ], [runtime, model, runtimeModels.models, formatMessage]);
   const providerApiUrlInvalid = providerApiUrlRequired
     ? !/^https?:\/\//i.test(providerApiUrl.trim())
     : providerApiUrl.trim().length > 0 && !/^https?:\/\//i.test(providerApiUrl.trim());
@@ -1197,6 +915,65 @@ export default function RuntimeConfigFields({
       ? builtInCatalogStatus(intl, modelSource, model)
       : runtimeModelSourceStatus(intl, runtime, modelSource)
     : null;
+  const handleCommandChange = useInputValueChange(onCommandChange);
+  const handleProviderModeChange = useCallback((next: string) => {
+    const nextMode = next as RuntimeProviderMode;
+    onProviderModeChange(nextMode);
+    if (nextMode !== "custom") {
+      onProviderApiUrlChange("");
+      onProviderApiKeyChange("");
+    }
+  }, [onProviderModeChange, onProviderApiUrlChange, onProviderApiKeyChange]);
+  const handleProviderApiUrlChange = useInputValueChange(onProviderApiUrlChange);
+  const handleProviderApiKeyChange = useInputValueChange(onProviderApiKeyChange);
+  const handleReasoningEffortChange = useCallback((value: string) => {
+    onReasoningEffortChange(
+      value === DEFAULT_REASONING_EFFORT_SELECT_VALUE
+        ? null
+        : value as ReasoningEffort,
+    );
+  }, [onReasoningEffortChange]);
+  const handleFastModeChange = useCheckedChange(onFastModeChange);
+  const handleSchemaProviderChange = useCallback(
+    (value: string) => onBuiltInProviderModeChange(value as BuiltInProviderMode),
+    [onBuiltInProviderModeChange],
+  );
+  const handleEditProviderConnection = useCallback(() => {
+    if (selectedProviderConnection) onEditProviderConnection?.(selectedProviderConnection);
+  }, [selectedProviderConnection, onEditProviderConnection]);
+  const handleBuiltInProviderChange = useCallback((next: string) => {
+    const connectionId = providerConnectionIdFromSelectValue(next);
+    if (connectionId) {
+      const connection = providerConnections.find((candidate) => candidate.id === connectionId);
+      if (!connection || !connection.enabled || !connection.hasCredential) return;
+      onProviderConnectionChange(connection);
+      return;
+    }
+    onProviderConnectionChange(null);
+    onBuiltInProviderModeChange(next as BuiltInProviderMode);
+    onBuiltInProviderSupportsImageInputChange(false);
+  }, [
+    providerConnections,
+    onProviderConnectionChange,
+    onBuiltInProviderModeChange,
+    onBuiltInProviderSupportsImageInputChange,
+  ]);
+  const handleBuiltInProviderApiKeyChange = useInputValueChange(onBuiltInProviderApiKeyChange);
+  const handleBuiltInProviderBaseUrlChange = useInputValueChange(onBuiltInProviderBaseUrlChange);
+  const handleBuiltInProviderSupportsImageInputChange = useCheckedChange(onBuiltInProviderSupportsImageInputChange);
+  const handlePiProviderModeChange = useCallback((nextValue: string) => {
+    const next = nextValue as PiProviderMode;
+    onPiProviderModeChange(next);
+    if (next === PI_PROVIDER_CONFIGURED) {
+      onPiProviderApiKeyChange("");
+    }
+  }, [onPiProviderModeChange, onPiProviderApiKeyChange]);
+  const handlePiProviderApiKeyChange = useInputValueChange(onPiProviderApiKeyChange);
+  const handleModelChoiceChange = useCallback((next: string, custom: boolean) => {
+    onCustomModelModeChange(custom);
+    onModelChange(next);
+  }, [onCustomModelModeChange, onModelChange]);
+  const handleCustomModelChange = useInputValueChange(onModelChange);
   /** The retry action. No `mt-1`: it renders inside the status sentence, and a
    *  top margin on an inline action is what used to force it onto its own row. */
   const retryAction = modelSourceCanRetry ? (
@@ -1228,7 +1005,7 @@ export default function RuntimeConfigFields({
       <Input
         type="text"
         value={command}
-        onChange={(event) => onCommandChange(event.target.value)}
+        onChange={handleCommandChange}
         placeholder="claude"
       />
     </Field>
@@ -1240,14 +1017,7 @@ export default function RuntimeConfigFields({
     >
       <RuntimeSelectControl
         value={providerMode}
-        onValueChange={(next) => {
-          const nextMode = next as RuntimeProviderMode;
-          onProviderModeChange(nextMode);
-          if (nextMode !== "custom") {
-            onProviderApiUrlChange("");
-            onProviderApiKeyChange("");
-          }
-        }}
+        onValueChange={handleProviderModeChange}
         options={providerModeOptions}
         placeholder={formatMessage({ id: "agent.runtimeConfig.provider" })}
         portalContainer={selectPortalContainer}
@@ -1280,7 +1050,7 @@ export default function RuntimeConfigFields({
         <Input
           type="url"
           value={providerApiUrl}
-          onChange={(event) => onProviderApiUrlChange(event.target.value)}
+          onChange={handleProviderApiUrlChange}
           placeholder="https://gateway.example.com"
         />
       </Field>
@@ -1294,7 +1064,7 @@ export default function RuntimeConfigFields({
         <Input
           type="password"
           value={providerApiKey}
-          onChange={(event) => onProviderApiKeyChange(event.target.value)}
+          onChange={handleProviderApiKeyChange}
           placeholder="sk-ant-..."
           autoComplete="off"
         />
@@ -1305,13 +1075,7 @@ export default function RuntimeConfigFields({
     <Field label={formatMessage({ id: "agent.runtimeConfig.reasoning" })}>
       <RuntimeSelectControl
         value={reasoningEffort || DEFAULT_REASONING_EFFORT_SELECT_VALUE}
-        onValueChange={(value) => {
-          onReasoningEffortChange(
-            value === DEFAULT_REASONING_EFFORT_SELECT_VALUE
-              ? null
-              : value as ReasoningEffort,
-          );
-        }}
+        onValueChange={handleReasoningEffortChange}
         options={reasoningOptions}
         placeholder={formatMessage({ id: "agent.runtimeConfig.reasoning" })}
         portalContainer={selectPortalContainer}
@@ -1349,7 +1113,7 @@ export default function RuntimeConfigFields({
             <Checkbox
               size="md"
               checked={fastMode}
-              onCheckedChange={(checked) => onFastModeChange(checked === true)}
+              onCheckedChange={handleFastModeChange}
               aria-labelledby="runtime-fast-mode-title"
             />
           </CardLeading>
@@ -1423,6 +1187,7 @@ export default function RuntimeConfigFields({
             portalContainer={selectPortalContainer}
             onRetrySource={runtimeFormV2.state.retrySource}
             retryingSourceIds={runtimeFormV2.state.retryingSourceIds}
+            savedConnections={savedConnectionsForV2}
           />
         ) : (
           <p className="border border-line-muted bg-warning-soft p-3 text-sm font-bold text-warning-strong theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-soft-signal theme-brutal:text-black" data-testid="schema-runtime-unavailable">
@@ -1440,7 +1205,7 @@ export default function RuntimeConfigFields({
           <SchemaDrivenRuntimeFields
             definition={formDefinition}
             providerId={builtInProviderMode}
-            onProviderChange={(value) => onBuiltInProviderModeChange(value as BuiltInProviderMode)}
+            onProviderChange={handleSchemaProviderChange}
             apiKey={builtInProviderApiKey}
             onApiKeyChange={onBuiltInProviderApiKeyChange}
             baseUrl={builtInProviderBaseUrl}
@@ -1494,7 +1259,7 @@ export default function RuntimeConfigFields({
                 type="button"
                 variant="ghost"
                 size="icon-xs"
-                onClick={() => onEditProviderConnection(selectedProviderConnection)}
+                onClick={handleEditProviderConnection}
                 aria-label={formatMessage({ id: "agent.runtimeConfig.editSavedProvider" })}
                 title={formatMessage({ id: "agent.runtimeConfig.editSavedProvider" })}
                 data-testid="runtime-edit-provider-connection"
@@ -1510,18 +1275,7 @@ export default function RuntimeConfigFields({
               value={providerConnectionId
                 ? providerConnectionSelectValue(providerConnectionId)
                 : effectiveBuiltInProviderMode}
-              onValueChange={(next) => {
-                const connectionId = providerConnectionIdFromSelectValue(next);
-                if (connectionId) {
-                  const connection = providerConnections.find((candidate) => candidate.id === connectionId);
-                  if (!connection || !connection.enabled || !connection.hasCredential) return;
-                  onProviderConnectionChange(connection);
-                  return;
-                }
-                onProviderConnectionChange(null);
-                onBuiltInProviderModeChange(next as BuiltInProviderMode);
-                onBuiltInProviderSupportsImageInputChange(false);
-              }}
+              onValueChange={handleBuiltInProviderChange}
               options={unifiedBuiltInProviderSelectOptions}
               placeholder={formatMessage({ id: "agent.runtimeConfig.provider" })}
               portalContainer={selectPortalContainer}
@@ -1552,7 +1306,7 @@ export default function RuntimeConfigFields({
             <Input
               type="password"
               value={managedConnectionActive ? "" : builtInProviderApiKey}
-              onChange={(event) => onBuiltInProviderApiKeyChange(event.target.value)}
+              onChange={handleBuiltInProviderApiKeyChange}
               placeholder={managedConnectionActive
                 ? formatMessage(
                     { id: "agent.runtimeConfig.credentialFromSavedProvider" },
@@ -1578,7 +1332,7 @@ export default function RuntimeConfigFields({
                   value={managedConnectionActive
                     ? selectedProviderConnection?.endpointUrl ?? ""
                     : builtInProviderBaseUrl}
-                  onChange={(event) => onBuiltInProviderBaseUrlChange(event.target.value)}
+                  onChange={handleBuiltInProviderBaseUrlChange}
                   placeholder={effectiveBuiltInProviderMode === "anthropic-compatible" ? "https://gateway.example.com/anthropic" : "https://gateway.example.com/v1"}
                   disabled={managedConnectionActive}
                 />
@@ -1596,7 +1350,7 @@ export default function RuntimeConfigFields({
                         checked={managedConnectionActive
                           ? selectedProviderConnection?.supportsImageInput === true
                           : builtInProviderSupportsImageInput}
-                        onCheckedChange={(checked) => onBuiltInProviderSupportsImageInputChange(checked === true)}
+                        onCheckedChange={handleBuiltInProviderSupportsImageInputChange}
                         disabled={managedConnectionActive}
                         aria-labelledby="gateway-image-input-title"
                     data-testid="runtime-supports-image-input"
@@ -1618,13 +1372,7 @@ export default function RuntimeConfigFields({
         >
           <RuntimeSelectControl
             value={piProviderMode}
-            onValueChange={(nextValue) => {
-              const next = nextValue as PiProviderMode;
-              onPiProviderModeChange(next);
-              if (next === PI_PROVIDER_CONFIGURED) {
-                onPiProviderApiKeyChange("");
-              }
-            }}
+            onValueChange={handlePiProviderModeChange}
             options={piProviderOptions}
             placeholder={formatMessage({ id: "agent.runtimeConfig.provider" })}
             portalContainer={selectPortalContainer}
@@ -1646,7 +1394,7 @@ export default function RuntimeConfigFields({
           <Input
             type="password"
             value={piProviderApiKey}
-            onChange={(event) => onPiProviderApiKeyChange(event.target.value)}
+            onChange={handlePiProviderApiKeyChange}
             placeholder="sk-..."
             autoComplete="off"
           />
@@ -1707,43 +1455,36 @@ export default function RuntimeConfigFields({
           )}
         </>}
       >
+        {/* One searchable box: pick a listed model, or (where the runtime takes
+            any model id) type one and use it as typed. The stored value is the
+            model id; the list shows names. */}
         {builtInGatewayProvider ? null : (
-          <RuntimeSelectControl
-            value={customModelMode ? CUSTOM_MODEL_SELECT_VALUE : model}
-            onValueChange={(next) => {
-              if (next === CUSTOM_MODEL_SELECT_VALUE) {
-                onCustomModelModeChange(true);
-                onModelChange("");
-                return;
-              }
-              onCustomModelModeChange(false);
-              onModelChange(next);
-            }}
-            options={modelSelectOptions}
-            placeholder={formatMessage({ id: "agent.runtimeConfig.model" })}
+          <RuntimeChoiceCombobox
+            options={modelChoiceOptions}
+            value={model}
+            onValueChange={handleModelChoiceChange}
+            allowCustom={modelAllowsCustom}
+            customValue={customModelMode}
+            placeholder={formatMessage({
+              id: customModelMode
+                ? runtime === "claude" ? "agent.runtimeConfig.customModelName" : "agent.runtimeConfig.customModelId"
+                : "agent.runtimeConfig.model",
+            })}
             portalContainer={selectPortalContainer}
+            testId="runtime-model-combobox"
           />
         )}
-        {customModelSupported && customModelInputMode && (
-          /* `data-field-adopt` and no wrapping <div>: this Input is the field's
-             VALUE control, and the Select beside it only picks the mode. Wrapped
-             in a div it was not even a adoption candidate, so the field adopted
-             the Select and marked THAT invalid while this box — the one the error
-             is about — announced itself as fine (@Dozy, review of H=b396d486).
-             The spacing moves onto the Input; a wrapper is not needed for it. */
+        {customModelSupported && builtInGatewayProvider && (
+          /* `data-field-adopt` and no wrapping <div>: a gateway provider has no
+             model list, so this Input is the field's only control. Wrapped in a
+             div it was not even an adoption candidate and the field failed
+             closed as misconfigured (@Dozy, review of H=b396d486). */
           <Input
             data-field-adopt
-            className="mt-2"
             type="text"
             value={model}
-            onChange={(event) => onModelChange(event.target.value)}
-            placeholder={formatMessage({
-              id: builtInGatewayProvider
-                ? "agent.runtimeConfig.gatewayModelId"
-                : runtime === "claude"
-                  ? "agent.runtimeConfig.customModelName"
-                  : "agent.runtimeConfig.customModelId",
-            })}
+            onChange={handleCustomModelChange}
+            placeholder={formatMessage({ id: "agent.runtimeConfig.gatewayModelId" })}
           />
         )}
       </Field>
@@ -1793,25 +1534,6 @@ export default function RuntimeConfigFields({
   );
 }
 
-const RUNTIME_FORM_V2_EMPTY_CHOICE = "__runtime_form_v2_default__";
-const RUNTIME_FORM_V2_CUSTOM_CHOICE = "__runtime_form_v2_custom__";
-
-/** `option_source.status` reasons → copy; an unknown reason gets the generic line. */
-const RUNTIME_FORM_V2_SOURCE_REASON_MESSAGE = {
-  probe_timeout: "agent.runtimeFormV2.sourceStatus.probeTimeout",
-  probe_failed: "agent.runtimeFormV2.sourceStatus.probeFailed",
-  missing_config: "agent.runtimeFormV2.sourceStatus.missingConfig",
-  no_models: "agent.runtimeFormV2.sourceStatus.noModels",
-  unsupported: "agent.runtimeFormV2.sourceStatus.unsupported",
-  machine_offline: "agent.runtimeFormV2.sourceStatus.machineOffline",
-} as const;
-
-const toRuntimeOption = (option: RuntimeFormV2ChoiceOption): RuntimeOption => ({
-  value: option.value,
-  label: option.label,
-  ...(option.description ? { description: option.description } : {}),
-});
-
 /**
  * Protocol v2 form: rendered by field kind from the server's description, with
  * no field or runtime names in this component. State rules (defaults, cascade,
@@ -1828,7 +1550,8 @@ export function RuntimeFormV2Fields({
   editing = false,
   portalContainer,
   onRetrySource,
-  retryingSourceIds = [],
+  retryingSourceIds = NO_SOURCE_IDS,
+  savedConnections,
 }: {
   form: ParsedRuntimeFormV2;
   sources: RuntimeFormV2Sources;
@@ -1843,12 +1566,20 @@ export function RuntimeFormV2Fields({
   /** `option_source.status`: re-request a source (`?refresh=1`). */
   onRetrySource?: (sourceId: string) => void;
   retryingSourceIds?: readonly string[];
+  /**
+   * `provider.saved_connection`: pencil action for the selected saved
+   * connection. Present only for callers whose operator may edit provider
+   * connections (the same authority gate as the v1 picker).
+   */
+  savedConnections?: { onEdit: (connectionId: string) => void };
 }) {
   const { formatMessage } = useIntl();
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const errors = validateRuntimeFormV2(form, sources, values, { editing });
   const errorText = (key: string): string | undefined => {
     if (serverErrors?.[key]) return serverErrors[key];
+    // Save is disabled while this holds, so it shows without a submit attempt.
+    if (errors[key] === "secret_reentry_required") return formatMessage({ id: "agent.runtimeFormV2.secretReentryRequired" });
     if (!showValidationErrors || !errors[key]) return undefined;
     switch (errors[key]) {
       case "invalid_url": return formatMessage({ id: "agent.runtimeConfig.baseUrlInvalid" });
@@ -1856,143 +1587,50 @@ export function RuntimeFormV2Fields({
       case "unsupported_required": return formatMessage({ id: "agent.runtimeFormV2.updateToEdit" });
       // The field's source status line already says why, with its retry.
       case "source_unavailable": return undefined;
+      // A bound-but-unavailable saved connection: visible, never silently rewritten.
+      case "connection_unavailable": return formatMessage({ id: "agent.runtimeConfig.savedProviderUnavailable" });
       default: return formatMessage({ id: "agent.runtimeFormV2.required" });
     }
   };
 
-  /** A non-live source (`option_source.status`): why, and a retry when the server says it may help. */
-  const sourceStatusLine = (field: RuntimeFormV2Field, testId: string): ReactNode => {
-    const status = runtimeFormV2SourceStatus(field, sources);
-    if (!status || !field.optionSourceId) return null;
-    const sourceId = field.optionSourceId;
-    const reasonId = status.reason && status.reason in RUNTIME_FORM_V2_SOURCE_REASON_MESSAGE
-      ? RUNTIME_FORM_V2_SOURCE_REASON_MESSAGE[status.reason as keyof typeof RUNTIME_FORM_V2_SOURCE_REASON_MESSAGE]
-      : "agent.runtimeFormV2.sourceStatus.unknown";
-    const retrying = retryingSourceIds.includes(sourceId);
-    return (
-      <div className="mt-2 border-l-2 border-line-muted pl-2 text-xs text-foreground-muted" data-testid={`${testId}-status`} data-source-status={status.status}>
-        <p>
-          {formatMessage({ id: reasonId })}
-          {status.status === "fallback" ? <>{" "}{formatMessage({ id: "agent.runtimeFormV2.sourceStatus.fallback" })}</> : null}
-          {status.retryable && onRetrySource ? (
-            <>
-              {" "}
-              <FieldAction
-                tone="link"
-                type="button"
-                onClick={() => onRetrySource(sourceId)}
-                disabled={retrying}
-                className="font-bold text-foreground-strong underline underline-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
-                data-testid={`${testId}-retry`}
-              >
-                {formatMessage({ id: "agent.runtimeFormV2.retry" })}
-              </FieldAction>
-            </>
-          ) : null}
-        </p>
-      </div>
-    );
-  };
+  // Saved provider connections (`provider.saved_connection`): while any field
+  // holds a connection selection, the fields it owns are the connection's, not
+  // the user's — disabled, placeholder, never submitted (the shared
+  // runtimeFormV2Submission rules). Per-field rendering lives in
+  // RuntimeFormV2FieldControl; the parent computes the form-wide state once.
+  const connectionActive = runtimeFormV2ConnectionActive(form, sources, values);
+  const selectedConnectionOption = connectionActive
+    ? form.fields
+        .map((candidate) => runtimeFormV2SelectedConnection(candidate, sources, values))
+        .find((option): option is NonNullable<typeof option> => option !== undefined)
+    : undefined;
+  const managedPlaceholder = formatMessage(
+    { id: "agent.runtimeConfig.credentialFromSavedProvider" },
+    { connection: selectedConnectionOption?.label ?? formatMessage({ id: "agent.runtimeConfig.savedProviderUnavailable" }) },
+  );
 
-  const renderField = (field: RuntimeFormV2Field) => {
+  const renderField = (field: RuntimeFormV2Field) => (
     // An optional field whose source is unavailable is hidden (option_source.status).
-    if (!isRuntimeFormV2FieldVisible(field, values, sources)) return null;
-    const choices = runtimeFormV2Choices(field, sources, values);
-    const value = values[field.key];
-    const text = typeof value === "string" ? value : "";
-    const secretKept = editing && field.kind === "secret";
-    const common = {
-      label: field.label,
-      hint: secretKept ? formatMessage({ id: "agent.runtimeFormV2.secretKept" }) : field.hint,
-      required: field.required && !secretKept,
-      error: errorText(field.key),
-    };
-    const testId = `runtime-form-v2-${field.key}`;
-    switch (field.kind) {
-      case "unsupported":
-        return field.required ? (
-          <Field key={field.key} {...common} adopt={false}>
-            <p className="text-sm text-foreground-muted" data-testid={testId}>
-              {formatMessage({ id: "agent.runtimeFormV2.updateToEdit" })}
-            </p>
-          </Field>
-        ) : null;
-      case "boolean":
-        return (
-          <Field key={field.key} {...common} label={undefined} adopt={false}>
-            <Card variant="option" render={<label />}>
-              <CardHeader>
-                <CardLeading>
-                  <Checkbox size="md" checked={value === true} onCheckedChange={(checked) => onChange(field.key, checked === true)} data-testid={testId} />
-                </CardLeading>
-                <CardTitle>{field.label}</CardTitle>
-                {field.hint && <CardDescription>{field.hint}</CardDescription>}
-              </CardHeader>
-            </Card>
-          </Field>
-        );
-      case "string_map":
-        return (
-          <RuntimeFormV2StringMapField
-            key={field.key}
-            value={value && typeof value === "object" ? value : {}}
-            hint={field.hint}
-            onChange={(next) => onChange(field.key, next)}
-          />
-        );
-      default: {
-        const statusLine = sourceStatusLine(field, testId);
-        if (choices?.kind === "select") {
-          // A derived list with nothing to offer (e.g. a model without an effort menu) is not shown.
-          if (field.kind === "derived_select" && choices.options.length === 0) return null;
-          if (choices.allowCustom) {
-            return (
-              <RuntimeFormV2ComboboxField
-                key={field.key}
-                common={common}
-                options={choices.options.map(toRuntimeOption)}
-                value={text}
-                onChange={(next) => onChange(field.key, next)}
-                placeholder={field.placeholder ?? field.label}
-                portalContainer={portalContainer}
-                testId={testId}
-                belowControl={statusLine}
-              />
-            );
-          }
-          const options: RuntimeOption[] = [
-            ...(choices.allowEmpty ? [{ value: RUNTIME_FORM_V2_EMPTY_CHOICE, label: formatMessage({ id: "agent.runtimeConfig.default" }) }] : []),
-            ...choices.options.map(toRuntimeOption),
-            ...(text && !choices.options.some((option) => option.value === text) ? [{ value: text, label: text, disabled: true }] : []),
-          ];
-          return (
-            <Field key={field.key} {...common} belowControl={statusLine}>
-              <RuntimeSelectControl
-                value={text || (choices.allowEmpty ? RUNTIME_FORM_V2_EMPTY_CHOICE : "")}
-                onValueChange={(next) => onChange(field.key, next === RUNTIME_FORM_V2_EMPTY_CHOICE ? "" : next)}
-                options={options}
-                placeholder={field.placeholder ?? field.label}
-                portalContainer={portalContainer}
-                testId={testId}
-              />
-            </Field>
-          );
-        }
-        return (
-          <Field key={field.key} {...common}>
-            <Input
-              type={field.kind === "secret" ? "password" : field.kind === "url" ? "url" : "text"}
-              value={text}
-              onChange={(event) => onChange(field.key, event.target.value)}
-              placeholder={field.placeholder}
-              autoComplete={field.kind === "secret" ? "off" : undefined}
-              data-testid={testId}
-            />
-          </Field>
-        );
-      }
-    }
-  };
+    isRuntimeFormV2FieldVisible(field, values, sources) ? (
+      <RuntimeFormV2FieldControl
+        key={field.key}
+        field={field}
+        sources={sources}
+        values={values}
+        onChange={onChange}
+        error={errorText(field.key)}
+        // A secret that cannot keep the stored value is edited like on create:
+        // required, without the "leave blank to keep" hint.
+        editing={editing && errors[field.key] !== "secret_reentry_required"}
+        portalContainer={portalContainer}
+        onRetrySource={onRetrySource}
+        retryingSourceIds={retryingSourceIds}
+        connectionActive={connectionActive}
+        managedPlaceholder={connectionActive ? managedPlaceholder : undefined}
+        savedConnections={savedConnections}
+      />
+    ) : null
+  );
 
   const main = form.fields.filter((field) => !field.advanced);
   const advanced = form.fields.filter((field) => field.advanced);
@@ -2021,69 +1659,8 @@ export function RuntimeFormV2Fields({
   );
 }
 
-/**
- * `select.custom_value`: pick a listed option, or choose Custom and type a
- * value, the same shape as the legacy custom model field. A value that is not
- * listed (a stored custom model on edit) opens in the typed mode.
- */
-function RuntimeFormV2ComboboxField({
-  common,
-  options,
-  value,
-  onChange,
-  placeholder,
-  portalContainer,
-  testId,
-  belowControl,
-}: {
-  common: { label: string; hint?: string; required: boolean; error?: string };
-  options: RuntimeOption[];
-  value: string;
-  onChange: (next: string) => void;
-  placeholder: string;
-  portalContainer?: RefObject<HTMLElement | null>;
-  testId: string;
-  belowControl?: ReactNode;
-}) {
-  const { formatMessage } = useIntl();
-  const listed = options.some((option) => option.value === value);
-  const [typing, setTyping] = useState(() => value !== "" && !listed);
-  const custom = typing || (value !== "" && !listed);
-  return (
-    <Field {...common} belowControl={belowControl}>
-      <RuntimeSelectControl
-        value={custom ? RUNTIME_FORM_V2_CUSTOM_CHOICE : value}
-        onValueChange={(next) => {
-          if (next === RUNTIME_FORM_V2_CUSTOM_CHOICE) {
-            setTyping(true);
-            if (listed) onChange("");
-            return;
-          }
-          setTyping(false);
-          onChange(next);
-        }}
-        options={[...options, { value: RUNTIME_FORM_V2_CUSTOM_CHOICE, label: formatMessage({ id: "agent.runtimeConfig.custom" }) }]}
-        placeholder={placeholder}
-        portalContainer={portalContainer}
-        testId={testId}
-      />
-      {custom && (
-        <Input
-          data-field-adopt
-          className="mt-2"
-          type="text"
-          value={value}
-          onChange={(event) => onChange(event.target.value)}
-          placeholder={formatMessage({ id: "agent.runtimeFormV2.customValuePlaceholder" })}
-          data-testid={`${testId}-custom`}
-        />
-      )}
-    </Field>
-  );
-}
-
 /** Key/value editor over a string map; keeps half-typed rows locally until they have a key. */
-function RuntimeFormV2StringMapField({
+export function RuntimeFormV2StringMapField({
   value,
   hint,
   onChange,
@@ -2093,16 +1670,17 @@ function RuntimeFormV2StringMapField({
   onChange: (next: Record<string, string>) => void;
 }) {
   const [entries, setEntries] = useState<EnvVarEntry[]>(() => Object.entries(value).map(([key, item]) => ({ key, value: item })));
+  const handleChange = useCallback((next: EnvVarEntry[]) => {
+    setEntries(next);
+    const map: Record<string, string> = {};
+    for (const entry of next) if (entry.key.trim()) map[entry.key.trim()] = entry.value;
+    onChange(map);
+  }, [onChange]);
   return (
     <RuntimeEnvVarsField
       entries={entries}
       hint={hint}
-      onChange={(next) => {
-        setEntries(next);
-        const map: Record<string, string> = {};
-        for (const entry of next) if (entry.key.trim()) map[entry.key.trim()] = entry.value;
-        onChange(map);
-      }}
+      onChange={handleChange}
     />
   );
 }

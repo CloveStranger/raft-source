@@ -3,6 +3,7 @@ import { routeFamilyForPath } from "./agentCredentialProxy";
 
 export type DaemonProxyFailureReason =
   | "local_daemon_state_invalid"
+  | "local_post_response"
   | "dns"
   | "tcp"
   | "tls"
@@ -13,6 +14,7 @@ export type DaemonProxyFailureReason =
 
 function failureReason(input: AgentProxyFailure): DaemonProxyFailureReason {
   if (input.lifecycleInvalidContext) return "local_daemon_state_invalid";
+  if (input.failureClass === "post_response_local") return "local_post_response";
   const causeCode = (input.causeCode ?? "").toUpperCase();
   const text = `${input.errorCause ?? ""} ${input.errorMessage}`.toLowerCase();
   if (/enotfound|eai_again|\bdns\b/.test(text)) return "dns";
@@ -41,6 +43,7 @@ function boundedMethod(value: string): string {
 function cannedExcerpt(reason: DaemonProxyFailureReason): string {
   switch (reason) {
     case "local_daemon_state_invalid": return "Local daemon lifecycle state rejected the proxy request";
+    case "local_post_response": return "Local daemon failed after the upstream response completed";
     case "dns": return "Upstream DNS resolution failed";
     case "tcp": return "Upstream TCP connection failed";
     case "tls": return "Upstream TLS negotiation failed";
@@ -72,6 +75,9 @@ export function daemonProxyFailureTraceAttrs(input: AgentProxyFailure): Record<s
 export function daemonTransportErrorExcerpt(input: AgentProxyTransportNormalizedError): string {
   if (input.normalizedCode === "local_daemon_state_invalid") {
     return "Local daemon lifecycle state rejected the proxy request";
+  }
+  if (input.normalizedCode === "local_post_response_failure") {
+    return "Local daemon failed after the upstream response completed";
   }
   if (input.normalizedCode === "server_5xx") return "Upstream server returned a 5xx response";
   switch (input.upstreamLayer) {

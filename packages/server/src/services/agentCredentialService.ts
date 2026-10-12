@@ -73,6 +73,18 @@ export const DEFAULT_EXTERNAL_AGENT_CAPABILITIES: readonly AgentCapability[] = [
   "tasks",
 ];
 
+/**
+ * A hosted runtime's credential (Antiproton) carries what a managed agent's
+ * runner credential carries: whatever an internal agent can do, a hosted one
+ * can too (tygg, #raft-antiproton:9a4fe245). Role checks still run live on
+ * every call, so `server` lets an admin agent edit the server, not a member.
+ */
+export const HOSTED_RUNTIME_AGENT_CAPABILITIES: readonly AgentCapability[] = [
+  ...DEFAULT_EXTERNAL_AGENT_CAPABILITIES,
+  "server",
+  "mcp",
+];
+
 export type RequestedAgentCapabilities =
   | { ok: true; scopes: AgentCapability[] }
   | { ok: false; code: "scopes_invalid" | "scopes_empty"; error: string };
@@ -249,12 +261,14 @@ export async function findAgentCredentialByApiKey(
 /**
  * Minimum interval between two `last_used_at` writes for the same credential
  * in this process. `last_used_at` doubles as the external-agent presence
- * signal ("seen in the last 120 s" → online), so 30 s keeps it well inside
- * that window while collapsing a chatty agent's per-request writes into at
- * most one write per credential per 30 s. The map is per process: with N
- * replicas a credential is written at most N times per window, which is fine.
+ * signal ("seen in the last 120 s" → online), so the window must stay well
+ * under 120 s: 60 s (half of it) means a wake-hints stream ticking every 25 s
+ * is written every 2-3 ticks, at most ~85 s apart, instead of every other
+ * tick. The map is per process: with N replicas a credential is written at
+ * most N times per window, which is fine. Cutting writes further needs
+ * presence split from last_used_at (#proj-o11y task #6), not a longer window.
  */
-export const AGENT_CREDENTIAL_USE_WRITE_THROTTLE_MS = 30_000;
+export const AGENT_CREDENTIAL_USE_WRITE_THROTTLE_MS = 60_000;
 const MAX_TRACKED_CREDENTIAL_WRITES = 10_000;
 const lastCredentialUseWriteMs = new Map<string, number>();
 let credentialUseWriteThrottleMs = AGENT_CREDENTIAL_USE_WRITE_THROTTLE_MS;

@@ -1328,6 +1328,47 @@ test("proxy diagnostics class fixture mid_response_transport", async () => {
   });
 });
 
+test("proxy diagnostics class fixture post_response_local", async () => {
+  if (shouldSkipProxyDiagnosticFixture("post_response_local")) return;
+  // Task #369: the upstream answers in full, then the local visible-delivery
+  // ledger throws (gzj, daemon 1.0.37: "AgentVisibleDeliveryLedger target
+  // mismatch"). That is a local daemon fault, not upstream transport.
+  await withUpstream((_req, res) => {
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ messages: [{ id: "m1", seq: 7, content: "hi" }] }));
+  }, async (serverUrl) => {
+    const handle = await registerAgentCredentialProxy({
+      agentId: "agent-post-response",
+      launchId: "launch-post-response",
+      serverUrl,
+      apiKey: "sk_agent_server_side",
+      activeCapabilities: "read,tasks",
+      inboxCoordinator: {
+        getBoundary: () => undefined,
+        getPendingMessages: () => [],
+        consumeVisibleMessages: () => {
+          throw new Error("AgentVisibleDeliveryLedger target mismatch");
+        },
+      },
+    });
+    const res = await fetch(`${handle.proxyUrl}/internal/agent-api/history?channel=%23proj-runtime`, {
+      headers: { Authorization: `Bearer ${handle.proxyToken}` },
+    });
+    assert.equal(res.status, 502);
+    const body = await res.json() as { proxy?: Record<string, unknown> };
+    recordProxyDiagnosticFixtureWitness("post_response_local");
+    assert.match(String(body.proxy?.correlation_id ?? ""), /^[0-9a-f]{16}$/);
+    assert.equal(body.proxy?.failure_class, "post_response_local");
+    assert.equal(body.proxy?.response_started, true);
+    assert.equal(body.proxy?.response_complete, true);
+    assert.equal(body.proxy?.cause_code, "LOCAL_POST_RESPONSE_FAILURE");
+    assert.equal(body.proxy?.upstream, "local_daemon");
+    assert.equal(body.proxy?.layer, "local_daemon");
+    assert.equal(body.proxy?.target_host_class, "local_daemon");
+    assert.doesNotMatch(JSON.stringify(body.proxy), /127\.0\.0\.1|proj-runtime|sk_agent|\/internal\/agent-api/);
+  });
+});
+
 test("proxy diagnostics class fixture upstream_http_response", async () => {
   if (shouldSkipProxyDiagnosticFixture("upstream_http_response")) return;
   await withUpstream((_req, res) => {
@@ -1694,6 +1735,61 @@ test("agent credential proxy classifies api.slock.ai proxy connect transport fai
     downstreamCaller: "cli",
     upstream: "server",
   });
+});
+
+test("agent credential proxy classifies a throw after a complete upstream response as a local fault (task #369)", () => {
+  const event = __transportNormalizedErrorForErrorForTest(
+    new URL("https://api.raft.build/internal/agent-api/events"),
+    new Error("AgentVisibleDeliveryLedger target mismatch"),
+    "launch-post-response",
+    { responseStarted: true, responseComplete: true },
+  );
+
+  assert.deepEqual(event, {
+    normalizedCode: "local_post_response_failure",
+    routeFamily: "agent-api/events",
+    failureClass: "post_response_local",
+    responseStarted: true,
+    responseComplete: true,
+    causeCode: "LOCAL_POST_RESPONSE_FAILURE",
+    upstreamLayer: "unknown",
+    originalMessage: "AgentVisibleDeliveryLedger target mismatch",
+    launchId: "launch-post-response",
+    targetHostClass: "local_daemon",
+    downstreamCaller: "cli",
+    upstream: "local_daemon",
+  });
+});
+
+test("agent credential proxy keeps a truncated body as mid_response_transport (task #369 boundary)", () => {
+  const event = __transportNormalizedErrorForErrorForTest(
+    new URL("https://api.raft.build/internal/agent-api/events"),
+    Object.assign(new Error("other side closed"), { code: "UND_ERR_SOCKET" }),
+    "launch-mid-response",
+    { responseStarted: true, responseComplete: false },
+  );
+
+  assert.equal(event.failureClass, "mid_response_transport");
+  assert.equal(event.normalizedCode, "transport_failure");
+  assert.equal(event.upstream, "server");
+});
+
+test("agent credential proxy keeps lifecycle-invalid ahead of post-response classification (task #369)", () => {
+  const event = __transportNormalizedErrorForErrorForTest(
+    new URL("https://api.raft.build/internal/agent-api/history"),
+    new Error([
+      "Agent no-process residency invariant violation after visible-consume:",
+      "fingerprint fence without running process, idle retry config, or terminal failure",
+      "for d2bf1e2c-3648-4590-a0e2-46c6998b2c38",
+    ].join(" ")),
+    "launch-local-invariant",
+    { responseStarted: true, responseComplete: true },
+  );
+
+  assert.equal(event.failureClass, "post_response_local");
+  assert.equal(event.normalizedCode, "local_daemon_state_invalid");
+  assert.equal(event.causeCode, "LOCAL_DAEMON_STATE_INVALID");
+  assert.equal(event.upstream, "local_daemon");
 });
 
 test("agent credential proxy classifies api.raft.build as the Raft API host", () => {

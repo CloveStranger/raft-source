@@ -1,12 +1,12 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 
 import { currentDate } from "@botiverse/raft-shared";
 
 import type { AgentContext } from "../../auth/env";
 import type { AgentManifestActionV1 } from "./manifestV1";
+import { resolveRaftHome } from "../../state/raftHome";
 
 export type InvocationTerminalStateV1 =
   | "dispatching"
@@ -76,9 +76,7 @@ const IDEMPOTENCY_MODES = new Set<AgentManifestActionV1["idempotency"]["mode"]>(
 ]);
 
 function resolveStateRoot(env: NodeJS.ProcessEnv): string {
-  const configured = env.RAFT_HOME?.trim() || env.SLOCK_HOME?.trim();
-  if (configured) return configured;
-  return path.join(env.HOME ?? os.homedir(), ".slock");
+  return resolveRaftHome(env);
 }
 
 function invocationRoot(input: {

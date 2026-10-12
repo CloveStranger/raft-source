@@ -174,12 +174,16 @@ providerConnectionRouter.patch("/:connectionId", requireCapability("manageExtern
         return;
       }
     }
-    res.json(await updateProviderConnection({
+    const updated = await updateProviderConnection({
       serverId: req.serverId!,
       userId: req.userId!,
       connectionId: connectionId(req),
       ...input,
-    }));
+    });
+    if (input.apiKey !== undefined || input.endpointUrl !== undefined || input.enabled !== undefined) {
+      await liftWakeBlocksForConnection(req);
+    }
+    res.json(updated);
   } catch (error) {
     sendError(error, res, next);
   }
@@ -188,14 +192,16 @@ providerConnectionRouter.patch("/:connectionId", requireCapability("manageExtern
 providerConnectionRouter.post("/:connectionId/credentials/rotate", requireCapability("rotateServerSecrets"), async (req, res, next) => {
   try {
     const input = exactBody(req, ["apiKey", "endpointUrl", "supportsImageInput"]);
-    res.json(await rotateProviderConnectionCredential({
+    const rotated = await rotateProviderConnectionCredential({
       serverId: req.serverId!,
       userId: req.userId!,
       connectionId: connectionId(req),
       apiKey: input.apiKey,
       endpointUrl: input.endpointUrl,
       supportsImageInput: input.supportsImageInput,
-    }));
+    });
+    await liftWakeBlocksForConnection(req);
+    res.json(rotated);
   } catch (error) {
     sendError(error, res, next);
   }
@@ -244,6 +250,24 @@ function sendProbeError(error: unknown, res: Response, next: NextFunction) {
             : 409;
   if (status === 429 && error.retryAfterSeconds) res.set("Retry-After", String(error.retryAfterSeconds));
   res.status(status).json({ error: error.message, code: error.code });
+}
+
+/**
+ * A new key or endpoint may fix what paused automatic restarts of the agents
+ * on this connection (task #1221 start-failure block); lift it for each, as an
+ * agent's own model/key edit does. Best effort: the edit itself has landed.
+ */
+async function liftWakeBlocksForConnection(req: Request): Promise<void> {
+  const orchestrator = (req.app.get("agentOrchestrator") ?? null) as AgentOrchestrator | null;
+  if (!orchestrator) return;
+  try {
+    const { agents } = await listProviderConnectionAssignedAgents({ serverId: req.serverId!, connectionId: connectionId(req) });
+    for (const agent of agents) {
+      if (!agent.deleted) await orchestrator.liftWakeBlockForConfigChange(agent.id, { runtimeValuesChanged: true });
+    }
+  } catch (error) {
+    console.warn(`[ProviderConnections] lifting paused restarts after a connection edit failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
 }
 
 /**

@@ -121,6 +121,8 @@ test("initial install closes the approved future-scope reauthorization gap", () 
     "chat:write.customize",
     "groups:history",
     "groups:read",
+    "usergroups:read",
+    "usergroups:write",
     "users:read",
   ], "preauthorization must not silently expand the executable capability manifest");
   const partition = [

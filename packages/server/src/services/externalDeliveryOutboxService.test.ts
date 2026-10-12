@@ -52,6 +52,7 @@ import {
   type ProviderNeutralOutboundRuntimeFact,
   type SlackBridgeRenderSnapshot,
 } from "./externalDeliveryOutboxService";
+import { withChannelDelivery } from "../test/orchestratorStub";
 
 
 const ELIGIBLE_ORDINARY_DECISION = {
@@ -59,7 +60,7 @@ const ELIGIBLE_ORDINARY_DECISION = {
   reason: "ordinary_chat",
 } as const;
 
-const noopOrchestrator = { deliverMessage: async () => undefined } as any;
+const noopOrchestrator = withChannelDelivery({ deliverMessage: async () => undefined }) as any;
 const ORIGINAL_CDN_BASE_URL = process.env.CDN_BASE_URL;
 
 function createIo() {
@@ -375,6 +376,34 @@ test("Agent avatars freeze only owned immutable CDN artifacts", async () => {
   assert.equal(
     (fallback.delivery.renderSnapshot as unknown as SlackBridgeRenderSnapshot)
       .authorPresentation.avatar,
+    null,
+  );
+});
+
+test("External host avatars (lh3.googleusercontent.com) freeze their URL with a URL-derived digest", async () => {
+  const fixture = await seedOutboundFixture();
+  const googleAvatarUrl = "https://lh3.googleusercontent.com/a/ACg8ocLW_-Y_0CjmhrgN-Lj2tdT1-sR3Oh8AKTZ_vc-3gH935ZgjNQ=s96-c";
+  await getDb().update(users).set({ avatarUrl: googleAvatarUrl }).where(eq(users.id, fixture.owner.id));
+
+  const committed = await getDb().transaction(async (executor) => {
+    const message = await insertSourceMessage(executor, fixture, "google avatar");
+    const result = await enqueueSlackBridgeOutboundDelivery(enqueueInput(executor, fixture, message));
+    return { message, result };
+  });
+
+  const snapshot = committed.result.delivery.renderSnapshot as unknown as SlackBridgeRenderSnapshot;
+  assert.equal(snapshot.authorPresentation.avatar?.publicUrl, googleAvatarUrl);
+  assert.match(snapshot.authorPresentation.avatar?.contentDigest ?? "", /^[0-9a-f]{32}$/u);
+
+  // Non-allowed external hosts must still fall through to null.
+  await getDb().update(users).set({ avatarUrl: "https://evil.example.com/avatar.png" }).where(eq(users.id, fixture.owner.id));
+  const denied = await getDb().transaction(async (executor) => {
+    const message = await insertSourceMessage(executor, fixture, "non-allowed host");
+    const result = await enqueueSlackBridgeOutboundDelivery(enqueueInput(executor, fixture, message));
+    return { message, result };
+  });
+  assert.equal(
+    (denied.result.delivery.renderSnapshot as unknown as SlackBridgeRenderSnapshot).authorPresentation.avatar,
     null,
   );
 });

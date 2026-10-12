@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useIntl } from "react-intl";
 import { SLACK_BRIDGE_FEATURE_FLAG_KEYS } from "@botiverse/raft-shared";
 import {
@@ -83,10 +83,10 @@ export function useChannelSlackBridgeEditor(input: {
     selectedSlackChannelId: string;
   }>({ snapshot: null, selectedSlackChannelId: "" });
   const { snapshot, selectedSlackChannelId } = state;
-  const setSelectedSlackChannelId = (value: string) => setState((current) => ({
+  const setSelectedSlackChannelId = useCallback((value: string) => setState((current) => ({
     ...current,
     selectedSlackChannelId: value,
-  }));
+  })), []);
 
   useEffect(() => {
     let active = true;
@@ -113,7 +113,7 @@ export function useChannelSlackBridgeEditor(input: {
   const available = launchEnabled
     && isChannelSlackBridgeSelectionAvailable(snapshot?.stage ?? null);
 
-  const apply = async (channelId: string) => {
+  const apply = useCallback(async (channelId: string) => {
     if (!launchEnabled || !snapshot || !available) return;
     const fresh = await slackBridgeProvisioningProvider.load();
     const currentSnapshot = await applyChannelSlackBridgeSelection({
@@ -123,9 +123,12 @@ export function useChannelSlackBridgeEditor(input: {
       selectedSlackChannelId,
     });
     setState((current) => ({ ...current, snapshot: currentSnapshot }));
-  };
+  }, [launchEnabled, snapshot, available, selectedSlackChannelId]);
 
-  return { snapshot, selectedSlackChannelId, setSelectedSlackChannelId, available, apply };
+  return useMemo(
+    () => ({ snapshot, selectedSlackChannelId, setSelectedSlackChannelId, available, apply }),
+    [snapshot, selectedSlackChannelId, setSelectedSlackChannelId, available, apply],
+  );
 }
 
 export function ChannelSlackBridgeField({
@@ -168,6 +171,13 @@ export function ChannelSlackBridgeField({
     }),
   ], [editor.selectedSlackChannelId, formatMessage, options, pairedBySlackId]);
 
+  const { setSelectedSlackChannelId } = editor;
+  const handleValueChange = useCallback((value: string | null) => {
+    if (value != null) {
+      setSelectedSlackChannelId(value === NOT_CONNECTED_VALUE ? "" : value);
+    }
+  }, [setSelectedSlackChannelId]);
+
   if (!editor.available) return null;
 
   return (
@@ -185,11 +195,7 @@ export function ChannelSlackBridgeField({
         <Select
           value={editor.selectedSlackChannelId || NOT_CONNECTED_VALUE}
           disabled={disabled}
-          onValueChange={(value) => {
-            if (value != null) {
-              editor.setSelectedSlackChannelId(value === NOT_CONNECTED_VALUE ? "" : value);
-            }
-          }}
+          onValueChange={handleValueChange}
           items={selectOptions}
         >
           <SelectTrigger className="w-full" aria-label={formatMessage({ id: "channel.bridge.slackChannel" })}>

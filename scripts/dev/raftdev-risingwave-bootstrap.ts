@@ -236,10 +236,10 @@ export const RISINGWAVE_ARTIFACT_CDC_TABLES = [
  * join on the Activity page) and the CDC integrity checker's windowed tables.
  */
 export const RISINGWAVE_SERVER_READ_RELATIONS = [
-  "rw_inbox_serving_v6",
-  "rw_activity_totals_v4",
-  "rw_agent_inbox_v5",
-  "rw_conversation_unread_v2",
+  "rw_inbox_serving_v8",
+  "rw_activity_totals_v6",
+  "rw_agent_inbox_v6",
+  "rw_conversation_unread_v3",
   "rw_followed_threads_v5",
   "rw_target_latest_v4",
   "rw_target_eligible_v1",
@@ -270,7 +270,9 @@ export interface RisingWaveBootstrapArtifact {
  * Deliberately NOT applied, because every relation in them is superseded and no
  * server path reads it: 063-agent-inbox.sql (rw_agent_inbox_v1),
  * 064-agent-inbox-v3.sql (rw_agent_inbox_v3), 065-agent-inbox-v4.sql
- * (rw_agent_inbox_v4); all replaced by rw_agent_inbox_v5 in 068.
+ * (rw_agent_inbox_v4); all replaced by rw_agent_inbox_v5 in 068. Nor
+ * 068-chain-mention-v6-consumers.sql: its generation (items v10, serving v6,
+ * totals v4, agent inbox v5, conversation unread v2) is superseded by 076.
  */
 export const RISINGWAVE_BOOTSTRAP_ARTIFACTS: readonly RisingWaveBootstrapArtifact[] = [
   {
@@ -294,8 +296,8 @@ export const RISINGWAVE_BOOTSTRAP_ARTIFACTS: readonly RisingWaveBootstrapArtifac
     ],
   },
   {
-    // v4 chain base. The v4 mention/watermark/items/serving/totals are superseded
-    // by 063-chain-v5 + 067 + 068.
+    // v4 chain base. rw_inbox_normal_v4 is superseded by v5 (075); the v4
+    // mention/watermark/items/serving/totals by 063-chain-v5 + 067 + 076.
     file: "infra/risingwave/sql/063-unified-inbox-chain.sql",
     relations: [
       "rw_message_target_v3",
@@ -303,32 +305,47 @@ export const RISINGWAVE_BOOTSTRAP_ARTIFACTS: readonly RisingWaveBootstrapArtifac
       "rw_target_eligible_v1",
       "rw_receiver_cursors_v1",
       "rw_subs_v2",
-      "rw_inbox_normal_v4",
     ],
   },
   {
-    // Mute-at-admission arms and the per-(receiver, server) watermark. Items v9,
-    // serving v5, totals v3 and agent inbox v2 are superseded by 068.
+    // Muted subscriptions. The per-(receiver, server) watermark v5 is superseded
+    // by v6 (077); the muted prefix arm v1 by v2 (075); items v9, serving v5,
+    // totals v3 and agent inbox v2 by 076.
     file: "infra/risingwave/sql/063-chain-v5.sql",
-    relations: ["rw_muted_subs_v1", "rw_inbox_muted_prefix_v1", "rw_activity_watermark_v5"],
+    relations: ["rw_muted_subs_v1"],
   },
   {
-    // rw_conversation_unread_v1 is superseded by v2 in 068.
-    file: "infra/risingwave/sql/066-conversation-unread-v1.sql",
-    relations: ["rw_inbox_muted_full_v1"],
+    // The cursor-decoupled arms: the read cursor is a join condition, not a
+    // grouping key. Supersede rw_inbox_normal_v4 (063), rw_inbox_muted_prefix_v1
+    // (063-chain-v5) and rw_inbox_muted_full_v1 (066, whose file is no longer
+    // applied: rw_conversation_unread_v1 there is superseded too).
+    file: "infra/risingwave/sql/075-inbox-cursor-decouple.sql",
+    relations: ["rw_inbox_normal_v5", "rw_inbox_muted_full_v2", "rw_inbox_muted_prefix_v2"],
   },
   {
     file: "infra/risingwave/sql/067-mention-v6.sql",
     relations: ["rw_inbox_mention_v6"],
   },
   {
-    file: "infra/risingwave/sql/068-chain-mention-v6-consumers.sql",
+    // 068's consumers on the 075 arms (same definitions, source names advanced).
+    // Its serving v7 and totals v5 are superseded by 077; items v11 stays as the
+    // base 077's items v12 filters.
+    file: "infra/risingwave/sql/076-cursor-decouple-consumers.sql",
     relations: [
-      "rw_inbox_items_v10",
-      "rw_inbox_serving_v6",
-      "rw_activity_totals_v4",
-      "rw_agent_inbox_v5",
-      "rw_conversation_unread_v2",
+      "rw_inbox_items_v11",
+      "rw_agent_inbox_v6",
+      "rw_conversation_unread_v3",
+    ],
+  },
+  {
+    // Threads below a deleted parent leave the human Activity: the watermark,
+    // items, serving and totals generation that filters them (task #333).
+    file: "infra/risingwave/sql/077-deleted-parent-threads.sql",
+    relations: [
+      "rw_activity_watermark_v6",
+      "rw_inbox_items_v12",
+      "rw_inbox_serving_v8",
+      "rw_activity_totals_v6",
     ],
   },
   {

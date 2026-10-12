@@ -118,8 +118,8 @@ test("uploads closed trace files with server-signed metadata", async () => {
       },
     });
 
-    assert.deepEqual(await uploader.uploadOnce(), { attempted: 1, uploaded: 1 });
-    assert.deepEqual(await uploader.uploadOnce(), { attempted: 0, uploaded: 0 });
+    assert.deepEqual(await uploader.uploadOnce(), { attempted: 1, uploaded: 1, deferred: 0 });
+    assert.deepEqual(await uploader.uploadOnce(), { attempted: 0, uploaded: 0, deferred: 0 });
 
     assert.deepEqual(calls.map((call) => call.url), [
       "https://server.test/internal/machine/scope-attestation",

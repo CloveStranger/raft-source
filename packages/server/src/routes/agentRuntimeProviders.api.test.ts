@@ -250,6 +250,8 @@ test("turning the flag off rejects the hosted-runtime routes but existing rows k
         ["GET", `/agents/${created.id}/hosted-runtime`],
         ["POST", `/agents/${created.id}/hosted-runtime/retry`],
         ["GET", `/agents/${created.id}/hosted-runtime/usage`],
+        ["GET", `/agents/${created.id}/hosted-runtime/model`],
+        ["PUT", `/agents/${created.id}/hosted-runtime/model`],
         ["GET", `/agents/${created.id}/workspace-files`],
         ["GET", `/agents/${created.id}/workspace-files/read?path=state%2Fa.md`],
       ] as const) {
@@ -658,6 +660,99 @@ test("hosted workspace files and usage are proxied to the provider by its agent 
         fake.requests.at(-1)!.path,
         `${providerBase}/usage?raftServerId=${a.server.id}&from=2026-09-01T00%3A00%3A00.000Z&to=2026-09-02T00%3A00%3A00.000Z&bucket=1h`,
       );
+    } finally {
+      await fake.close();
+    }
+  });
+});
+
+test("a hosted agent's model is read and picked through the provider, by Raft agent id", async ({ app }) => {
+  await withEnv(async () => {
+    const fake = await startFakeProvider();
+    try {
+      const a = await setupServer(app.baseUrl, "provider-model");
+      await configure(fake, a);
+      const created = await createHosted(a.owner, "model-agent");
+      const route = `/agents/${created.id}/hosted-runtime/model`;
+      const modelPath = `/provision/agents/by-raft-agent/${created.id}/model?raftServerId=${a.server.id}`;
+      const modelsPath = `/provision/models?raftServerId=${a.server.id}`;
+      const errorOf = async (res: Response) => ({ status: res.status, code: (await res.json() as { code?: string }).code });
+      const catalog = {
+        models: [
+          { id: "deepseek-flash", label: "DeepSeek Flash", provider: "deepseek" },
+          { id: "gpt-5.6-luna", label: "GPT-5.6 Luna", provider: "openai", extra: 1 },
+        ],
+        default: "deepseek-flash",
+        defaultLabel: "DeepSeek Flash",
+        locked: false,
+      };
+      // The two provider calls run in parallel; answer each by its path.
+      const answer = (agentReply: Reply) => (request: Recorded): Reply =>
+        request.path === modelsPath ? { status: 200, body: catalog } : agentReply;
+
+      // Not active yet: nothing is called.
+      const before = fake.requests.length;
+      assert.deepEqual(await errorOf(await a.owner.get(route)), { status: 409, code: "hosted_runtime_model_not_ready" });
+      assert.equal(fake.requests.length, before);
+      await drainAgentRuntimeProvisions();
+
+      assert.equal((await a.member.get(route)).status, 403, "editAgents or creator only");
+      assert.equal((await a.member.send("PUT", route, { model: "gpt-5.6-luna" })).status, 403);
+
+      const reading = answer({ status: 200, body: { model: "deepseek-flash", label: "DeepSeek Flash", source: "default", locked: false } });
+      fake.next(reading); fake.next(reading);
+      const read = await a.owner.get(route);
+      assert.equal(read.status, 200);
+      assert.equal(read.headers.get("cache-control"), "no-store");
+      assert.deepEqual(await read.json(), {
+        models: [
+          { id: "deepseek-flash", label: "DeepSeek Flash", provider: "deepseek" },
+          { id: "gpt-5.6-luna", label: "GPT-5.6 Luna", provider: "openai" },
+        ],
+        default: "deepseek-flash",
+        defaultLabel: "DeepSeek Flash",
+        model: "deepseek-flash",
+        label: "DeepSeek Flash",
+        source: "default",
+        locked: false,
+      });
+      const readCalls = fake.requests.slice(-2).map((request) => `${request.method} ${request.path}`).sort();
+      assert.deepEqual(readCalls, [`GET ${modelPath}`, `GET ${modelsPath}`].sort());
+      assert.ok(fake.requests.slice(-2).every((request) => request.headers.authorization === `Bearer ${PROVIDER_TOKEN}`));
+
+      // Pick a model.
+      const picking = answer({ status: 200, body: { model: "gpt-5.6-luna", label: "GPT-5.6 Luna", source: "chosen", locked: false } });
+      fake.next(picking); fake.next(picking);
+      const picked = await a.owner.send("PUT", route, { model: "gpt-5.6-luna" });
+      assert.equal(picked.status, 200);
+      assert.equal((await picked.json() as { source: string; model: string }).source, "chosen");
+      const put = fake.requests.slice(-2).find((request) => request.method === "PUT")!;
+      assert.equal(put.path, modelPath);
+      assert.deepEqual(JSON.parse(put.body), { model: "gpt-5.6-luna" });
+
+      // Back to the default.
+      const resetting = answer({ status: 200, body: { model: "deepseek-flash", label: "DeepSeek Flash", source: "default", locked: false } });
+      fake.next(resetting); fake.next(resetting);
+      assert.equal((await a.owner.send("PUT", route, { model: null })).status, 200);
+      assert.deepEqual(JSON.parse(fake.requests.slice(-2).find((request) => request.method === "PUT")!.body), { model: null });
+
+      // Refusals keep their meaning.
+      const unknown = answer({ status: 422, body: { error: { code: "unknown_model", message: "not offered", param: "model" } } });
+      fake.next(unknown); fake.next(unknown);
+      assert.deepEqual(await errorOf(await a.owner.send("PUT", route, { model: "retired-model" })), { status: 422, code: "hosted_runtime_model_not_offered" });
+      const locked = answer({ status: 409, body: { error: { code: "model_locked", message: "locked", param: "model" } } });
+      fake.next(locked); fake.next(locked);
+      assert.deepEqual(await errorOf(await a.owner.send("PUT", route, { model: "gpt-5.6-luna" })), { status: 409, code: "hosted_runtime_model_locked" });
+      const down = answer("lose-response");
+      fake.next(down); fake.next(down);
+      assert.deepEqual(await errorOf(await a.owner.get(route)), { status: 502, code: "hosted_runtime_model_unavailable" });
+
+      // Bad bodies never reach the provider.
+      const beforeInvalid = fake.requests.length;
+      for (const body of [{}, { model: "" }, { model: 3 }, { model: "x".repeat(201) }]) {
+        assert.deepEqual(await errorOf(await a.owner.send("PUT", route, body)), { status: 400, code: "hosted_runtime_model_invalid" }, JSON.stringify(body));
+      }
+      assert.equal(fake.requests.length, beforeInvalid);
     } finally {
       await fake.close();
     }

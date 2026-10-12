@@ -10,9 +10,21 @@ const m = (id: string): RuntimeModelInfo => ({ id, label: id } as RuntimeModelIn
 
 const LIVE_CODEX = ["gpt-5.5", "gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex-spark"].map(m);
 
-test("codex default becomes gpt-6-astra even when the machine reports gpt-5.5", () => {
+test("codex default stays the machine default when the live catalog has no GPT-6.1 Sol", () => {
+  // The bundled default is only preferred when the machine surfaced it; Raft
+  // never adds an unverified static suggestion to the live list.
   const out = canonicalizeCodexPresentation("codex", LIVE_CODEX, "gpt-5.5");
-  assert.equal(out.default, "gpt-6-astra");
+  assert.equal(out.default, "gpt-5.5");
+  assert.ok(!out.models.some((x) => x.id === "gpt-6.1-sol"));
+});
+
+test("live catalog with GPT-6.1 Sol: it is ordered first and becomes the default", () => {
+  const live = [...LIVE_CODEX, m("gpt-6-luna"), m("gpt-6.1-sol"), m("gpt-6-sol")];
+  const out = canonicalizeCodexPresentation("codex", live, "gpt-5.5");
+  assert.equal(out.default, "gpt-6.1-sol");
+  assert.deepEqual(out.models.slice(0, 7).map((x) => x.id), [
+    "gpt-6.1-sol", "gpt-6-astra", "gpt-6-sol", "gpt-6-luna", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna",
+  ]);
 });
 
 test("Astra and the three GPT-5.6 variants are ordered before gpt-5.5", () => {
@@ -31,13 +43,13 @@ test("live-only models (not in static RUNTIME_MODELS) retain their relative orde
   assert.ok(ids.indexOf("gpt-5.4") < ids.indexOf("gpt-5.4-mini"));
 });
 
-test("falls back to the machine default when Astra is absent", () => {
+test("falls back to the machine default when GPT-6.1 Sol is absent", () => {
   const noAstra = ["gpt-5.5", "gpt-5.6-sol", "gpt-5.4"].map(m);
   const out = canonicalizeCodexPresentation("codex", noAstra, "gpt-5.5");
   assert.equal(out.default, "gpt-5.5");
 });
 
-test("falls back to the first ordered model when neither Astra nor the machine default is present", () => {
+test("falls back to the first ordered model when neither GPT-6.1 Sol nor the machine default is present", () => {
   const noAstra = ["gpt-5.4", "gpt-5.6-sol", "gpt-5.4-mini"].map(m);
   const out = canonicalizeCodexPresentation("codex", noAstra, "gpt-5.5");
   assert.equal(out.default, "gpt-5.6-sol");

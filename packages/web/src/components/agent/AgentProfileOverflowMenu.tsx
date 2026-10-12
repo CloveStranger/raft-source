@@ -24,6 +24,13 @@ interface AgentProfileOverflowMenuProps {
   responsive?: boolean;
 }
 
+// The profile action strip sits flush against the top edge of its panel.
+// RUI's tooltip defaults to `side="top"`; at this edge collision shifting
+// can keep the popup inside the viewport by moving it back over the
+// trigger. Use the documented panel-header direction so the label always
+// clears the action button instead of occluding it.
+const PROFILE_TOOLTIP_CONTENT_PROPS = { side: "bottom" as const };
+
 /**
  * Immediate Agent Profile commands belong in the same lightweight command
  * menu as Thread topbar actions. Structural navigation (Back / Close) stays
@@ -49,20 +56,13 @@ export default function AgentProfileOverflowMenu({
 
   if (!canMessageAgent && !canControlAgentRuntime) return null;
 
-  // The profile action strip sits flush against the top edge of its panel.
-  // RUI's tooltip defaults to `side="top"`; at this edge collision shifting
-  // can keep the popup inside the viewport by moving it back over the
-  // trigger. Use the documented panel-header direction so the label always
-  // clears the action button instead of occluding it.
-  const profileTooltipContentProps = { side: "bottom" as const };
-
   const inlineActions = (
     <div
       className="agent-profile-inline-actions hidden items-center gap-1.5"
       data-testid="agent-profile-inline-actions"
     >
       {canMessageAgent && (
-        <Tooltip content={messageLabel} contentProps={profileTooltipContentProps}>
+        <Tooltip content={messageLabel} contentProps={PROFILE_TOOLTIP_CONTENT_PROPS}>
           <Button
             size="icon-sm"
             variant="outline"
@@ -76,7 +76,7 @@ export default function AgentProfileOverflowMenu({
       )}
       {canControlAgentRuntime && (
         <>
-          <Tooltip content={startStopLabel} contentProps={profileTooltipContentProps}>
+          <Tooltip content={startStopLabel} contentProps={PROFILE_TOOLTIP_CONTENT_PROPS}>
             <Button
               size="icon-sm"
               variant="outline"
@@ -87,7 +87,7 @@ export default function AgentProfileOverflowMenu({
               {isOnline ? <Square size={14} /> : <Play size={14} />}
             </Button>
           </Tooltip>
-          <Tooltip content={restartResetLabel} contentProps={profileTooltipContentProps}>
+          <Tooltip content={restartResetLabel} contentProps={PROFILE_TOOLTIP_CONTENT_PROPS}>
             <Button
               size="icon-sm"
               variant="outline"
@@ -106,7 +106,7 @@ export default function AgentProfileOverflowMenu({
   const overflowMenu = (
     <div className={responsive ? "agent-profile-overflow-actions" : undefined}>
       <DropdownMenu>
-        <Tooltip content={menuLabel} contentProps={profileTooltipContentProps}>
+        <Tooltip content={menuLabel} contentProps={PROFILE_TOOLTIP_CONTENT_PROPS}>
           <DropdownMenuTrigger
             render={(
               <Button

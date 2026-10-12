@@ -1,5 +1,6 @@
 import { and, eq, inArray, isNull, or, sql } from "drizzle-orm";
 
+import { recordAssistantDoorbells } from "./assistantService";
 import { getDb, type DatabaseExecutor } from "../db/index";
 import { chunkForBindParameters, insertParametersPerRow } from "../db/bindParameterBudget";
 import {
@@ -449,5 +450,7 @@ export async function recordInboxNotificationFacts(
   }
 
   await enqueueMobilePushForInboxFacts(filteredFacts, executor);
+  // RFC 074 §2: ring the owner's assistant (if any) in this same transaction.
+  await recordAssistantDoorbells(filteredFacts, executor);
   return filteredFacts.length;
 }

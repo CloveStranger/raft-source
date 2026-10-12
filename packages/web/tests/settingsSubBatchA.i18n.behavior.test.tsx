@@ -8,7 +8,6 @@ import { LocaleProvider } from "../src/i18n/LocaleProvider";
 import { IntlProviderWrapper } from "../src/i18n/IntlProviderWrapper";
 import { DISPLAY_LOCALE_STORAGE_KEY } from "../src/i18n/locale";
 import SettingsPanel, { AccountSection } from "../src/components/settings/SettingsPanel";
-import SettingsNavList from "../src/components/settings/SettingsNavList";
 import { useAuthStore } from "../src/store/authStore";
 import { useServerStore } from "../src/store/serverStore";
 import { useAppearanceStore } from "../src/store/appearanceStore";
@@ -21,19 +20,9 @@ import { useAppearanceStore } from "../src/store/appearanceStore";
 // and is the regression backstop that the migrated `settings.tabs.*`,
 // `settings.common.*`, `settings.account.*`, `settings.language.*`, and
 // `settings.appearance.*` ids are actually wired to their call sites (not left
-// as hardcoded English). Two DISTINCT nav maps are covered by two distinct teeth:
-// the SettingsPanel panel-header title (`SETTINGS_TAB_TITLE_ID`) via the section
-// tests below, and the desktop sidebar nav (`SETTINGS_TAB_NAV_LABEL_ID`) via a
-// dedicated `SettingsNavList` render — they are not the same map, so the header
-// test does NOT stand in for nav coverage.
-//
-// The desktop nav lives inside WorkspaceSettingsModal, which also renders the
-// full SettingsPanel (whose account tab reads the Vite-only `import.meta.env.DEV`
-// graph the node harness cannot shim). So the nav is extracted into the pure
-// `SettingsNavList` and rendered directly here — same production
-// `SETTINGS_TAB_NAV_LABEL_ID` + formatMessage, no test-only path. The Account
-// section is likewise rendered via the exported `AccountSection` for the same
-// import.meta reason.
+// as hardcoded English). The SettingsPanel panel-header title
+// (`SETTINGS_TAB_TITLE_ID`) is covered via the section tests below. The Account
+// section is rendered via the exported `AccountSection`.
 
 afterEach(() => {
   cleanup();
@@ -129,20 +118,4 @@ test("the Account section renders migrated Chinese copy", () => {
   assert.ok(screen.getByText("已验证"), "verified badge");
   assert.ok(screen.getByText("保存资料"), "save profile button");
   assert.ok(screen.getByText("修改密码"), "change password toggle");
-});
-
-test("the desktop settings sidebar nav (SETTINGS_TAB_NAV_LABEL_ID) renders migrated Chinese labels", () => {
-  // Real nav runtime evidence: render the pure SettingsNavList (the exact
-  // sidebar WorkspaceSettingsModal mounts), which consumes the production
-  // SETTINGS_TAB_NAV_LABEL_ID map + formatMessage — NOT the panel-header title
-  // map. Distinct from the section tests above.
-  renderInZh(<SettingsNavList activeTab="account" onSelect={() => {}} />);
-  const nav = screen.getByTestId("workspace-settings-navigation");
-  // Migrated in sub-batch H1: this is a zh render test, so the nav's accessible
-  // name must now be Chinese too — it previously asserted the un-migrated English.
-  assert.equal(nav.getAttribute("aria-label"), "设置分区");
-  // Item labels resolve via SETTINGS_TAB_NAV_LABEL_ID → settings.tabs.* (zh-cn).
-  for (const zh of ["账户", "语言与区域", "外观", "通知", "服务器资料", "账单", "管理", "应用", "MCP 服务器"]) {
-    assert.ok(within(nav).getByText(zh), `nav label ${zh}`);
-  }
 });

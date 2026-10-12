@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import { chmodSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import type { ChildProcess } from "node:child_process";
+import type { ChildProcess, execFileSync } from "node:child_process";
+import { RuntimeExecutableNotFoundError } from "../spawnFailureErrors";
+import { classifySpawnFailure, startFailureActivity } from "../spawnFailureClassification";
 import type { AgentConfig } from "@botiverse/raft-shared";
 import {
   detectGrokModelsFromAcp,
@@ -858,9 +860,16 @@ test("Grok auth capabilities without a catalog are not proof of missing authenti
       env: { ...process.env, PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`, SCRIPTED_GROK_SCENARIO: "detect_no_models" },
       cwd: root,
     }), { kind: "no_models" });
+    // task #1242: the locator's own "not found" (which exits 1) is the confirmed-missing
+    // verdict, carried on the outcome. A PATH without any locator is a failed lookup instead.
+    const whichNotFound = (() => { throw Object.assign(new Error("which exited 1"), { status: 1 }); }) as unknown as typeof execFileSync;
     assert.deepEqual(await detectGrokModelsFromAcp({
       env: { PATH: path.join(root, "missing-bin") }, cwd: root,
-    }), { kind: "error", retryable: true, code: "runtime_not_found" });
+      deps: { platform: "linux", execFileSyncFn: whichNotFound, homeDir: path.join(root, "no-home") },
+    }), { kind: "error", retryable: true, code: "runtime_not_found", reason: "not_installed" });
+    assert.deepEqual(await detectGrokModelsFromAcp({
+      env: { PATH: path.join(root, "missing-bin") }, cwd: root, deps: { platform: "linux", homeDir: path.join(root, "no-home") },
+    }), { kind: "error", retryable: true, code: "runtime_not_found", reason: "probe_failed" }, "no `which` on PATH: the lookup failed, grok is not proven missing");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -899,6 +908,128 @@ test("grok probe and home resolution use the installed CLI and explicit GROK_HOM
       path.join(root, "relative-grok"),
     );
     assert.equal(resolveGrokHomeFromEnv({}, { homeDir: root }), path.join(root, ".grok"));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("probeGrok reports not_installed only when the CLI is absent; installed-but-failing probes keep a failure reason", () => {
+  const missing = probeGrok({
+    platform: "linux",
+    homeDir: "/nonexistent-home",
+    existsSyncFn: () => false,
+    execFileSyncFn: (() => {
+      throw Object.assign(new Error("which: no grok"), { status: 1 });
+    }) as unknown as typeof import("node:child_process").execFileSync,
+  });
+  assert.equal(missing.available, false);
+  assert.equal(missing.unavailableReason, "not_installed");
+  assert.equal(missing.diagnostic, "No Grok Build CLI was found on PATH.");
+
+  const probeWith = (failure: Error) => probeGrok({
+    platform: "linux",
+    execFileSyncFn: ((command: string) => {
+      if (command === "which") return Buffer.from("/opt/grok/bin/grok\n");
+      throw failure;
+    }) as unknown as typeof import("node:child_process").execFileSync,
+  });
+  const cases: Array<[Error, string]> = [
+    [Object.assign(new Error("exit 1"), { status: 1 }), "probe_failed"],
+    [Object.assign(new Error("spawnSync /opt/grok/bin/grok ETIMEDOUT"), { code: "ETIMEDOUT", signal: "SIGTERM" }), "probe_timeout"],
+    [Object.assign(new Error("spawnSync /opt/grok/bin/grok EACCES"), { code: "EACCES" }), "permission_denied"],
+    // A resolved command whose exec reports ENOENT (e.g. a missing shebang
+    // interpreter) is a broken install, not a missing one.
+    [Object.assign(new Error("spawnSync /opt/grok/bin/grok ENOENT"), { code: "ENOENT" }), "probe_failed"],
+  ];
+  for (const [failure, reason] of cases) {
+    const result = probeWith(failure);
+    assert.equal(result.available, false);
+    assert.equal(result.unavailableReason, reason, failure.message);
+  }
+
+  // A PATH lookup that cannot decide (Windows Get-Command timeout) is not a miss.
+  const lookupTimeout = probeGrok({
+    platform: "win32",
+    env: { PATH: "C:\\Windows\\System32" },
+    windowsEnvironmentReaderFn: () => null,
+    execFileSyncFn: (() => {
+      throw Object.assign(new Error("probe timed out"), { code: "ETIMEDOUT" });
+    }) as unknown as typeof import("node:child_process").execFileSync,
+  });
+  assert.equal(lookupTimeout.available, false);
+  assert.equal(lookupTimeout.unavailableReason, "probe_timeout");
+});
+
+test("only the locator's own not-found status counts as not_installed; a failed or empty lookup does not", () => {
+  type Exec = typeof import("node:child_process").execFileSync;
+  const posix = (impl: () => unknown) => probeGrok({ platform: "linux", homeDir: "/nonexistent-home", existsSyncFn: () => false, execFileSyncFn: impl as unknown as Exec });
+  const windows = (impl: () => unknown) => probeGrok({ platform: "win32", env: { PATH: "C:\\Windows\\System32" }, windowsEnvironmentReaderFn: () => null, existsSyncFn: () => false, execFileSyncFn: impl as unknown as Exec });
+  const fail = (status: number) => () => { throw Object.assign(new Error(`exit ${status}`), { status }); };
+  // POSIX `which`: 1 = not found; anything else is the locator failing.
+  assert.equal(posix(fail(1)).unavailableReason, "not_installed");
+  assert.equal(posix(fail(2)).unavailableReason, "probe_failed");
+  assert.equal(posix(fail(127)).unavailableReason, "probe_failed");
+  assert.equal(posix(() => Buffer.from("")).unavailableReason, "probe_failed");
+  // Windows: only the script's reserved CommandNotFound exit (3) is a miss.
+  assert.equal(windows(fail(3)).unavailableReason, "not_installed");
+  assert.equal(windows(fail(1)).unavailableReason, "probe_failed");
+  assert.equal(windows(() => Buffer.from("\r\n")).unavailableReason, "probe_failed");
+});
+
+test("task #1242: a runtime_not_found detection carries the verdict of the lookup that failed, from that one lookup only", async () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "grok-detect-lookup-reason-"));
+  try {
+    const cases: Array<{ failure: NodeJS.ErrnoException | { status: number }; reason: string; message: RegExp }> = [
+      { failure: Object.assign(new Error("spawnSync which ETIMEDOUT"), { code: "ETIMEDOUT" }), reason: "probe_timeout", message: /did not finish within its budget/ },
+      { failure: Object.assign(new Error("spawnSync which EACCES"), { code: "EACCES" }), reason: "permission_denied", message: /denied permission/ },
+      { failure: Object.assign(new Error("which exited 2"), { status: 2 }), reason: "probe_failed", message: /did not produce a usable result/ },
+    ];
+    for (const { failure, reason, message } of cases) {
+      let lookups = 0;
+      const execFileSyncFn = ((): Buffer => {
+        lookups += 1;
+        // The first lookup fails as described; any later lookup would find grok.
+        // The outcome must carry the first verdict, so a later lookup must never run.
+        if (lookups === 1) throw failure;
+        return Buffer.from(path.join(root, "later", "grok") + "\n");
+      }) as unknown as typeof execFileSync;
+      const outcome = await detectGrokModelsFromAcp({
+        env: { PATH: path.join(root, "missing-bin") }, cwd: root,
+        deps: { platform: "linux", execFileSyncFn, homeDir: path.join(root, "no-home") },
+      });
+      assert.deepEqual(outcome, { kind: "error", retryable: true, code: "runtime_not_found", reason }, reason);
+      assert.equal(lookups, 1, `${reason}: exactly one lookup decided this detection`);
+      // The same lookup verdict decides the resolver's message: never "install it" for an undecided lookup.
+      assert.throws(() => resolveGrokSpawn(["agent", "stdio"], { platform: "linux", env: { PATH: path.join(root, "missing-bin") }, execFileSyncFn: (() => { throw failure; }) as unknown as typeof execFileSync, homeDir: path.join(root, "no-home") }), (error: unknown) => {
+        assert.ok(error instanceof RuntimeExecutableNotFoundError);
+        assert.equal(error.reason, reason);
+        assert.match(error.message, message);
+        assert.doesNotMatch(error.message, /Install/);
+        return true;
+      });
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("task #1242: a Grok launch whose PATH lookup timed out reaches the start carrier as lookup_timed_out with the resolver's own detail", () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "grok-launch-lookup-reason-"));
+  try {
+    const timedOut = (() => { throw Object.assign(new Error("spawnSync which ETIMEDOUT"), { code: "ETIMEDOUT" }); }) as unknown as typeof execFileSync;
+    let thrown: unknown;
+    try {
+      resolveGrokSpawn(["agent", "stdio"], { platform: "linux", env: { PATH: path.join(root, "missing-bin") }, execFileSyncFn: timedOut, homeDir: path.join(root, "no-home") });
+    } catch (error) {
+      thrown = error;
+    }
+    assert.ok(thrown instanceof RuntimeExecutableNotFoundError);
+    // The real start path wraps the resolver error; the classifier reads the cause.
+    const wrapped = Object.assign(new Error(`Runtime session failed to start: runtime_error (${thrown.message})`), { code: "runtime_not_found", cause: thrown });
+    const activity = startFailureActivity(classifySpawnFailure(wrapped), "grok-4");
+    assert.deepEqual(activity.spawnFailure, { reason: "runtime_not_found", lookupReason: "lookup_timed_out" });
+    assert.equal(activity.detail, thrown.message);
+    assert.doesNotMatch(activity.detail, /Install/);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

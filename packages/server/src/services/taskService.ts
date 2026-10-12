@@ -723,11 +723,17 @@ export async function listTasksAssignedToAgent(
   // Keep authorization inputs, namespace equivalence and the response surface
   // in one SQL snapshot. The first caller-supplied id is the local surface;
   // canonical ids are never discovered by inspecting unauthorized Task rows.
+  // Each supplied id is expanded to its storage-equivalent ids once, then
+  // joined on channel_id, so the planner reads tasks through the channel
+  // index. Testing equivalence per task and id instead cost ~1.9 ms a pair
+  // and hit the statement timeout for agents in 100+ channels.
   const readSurface = db.select({
     channelId: sql<string>`requested.id`.as("read_channel_id"),
-  }).from(sql`unnest(ARRAY[${sql.join(visibleChannelIds.map(id => sql`${id}::uuid`), sql`, `)}]) WITH ORDINALITY AS requested(id, position)`)
-    .where(conversionReadChannelPredicate(tasks.channelId, sql`requested.id`))
-    .orderBy(sql`requested.position`).limit(1).as("authorized_task_surface");
+    position: sql<number>`requested.position`.as("read_position"),
+    storageChannelId: sql<string>`storage.id`.as("storage_channel_id"),
+  }).from(sql`unnest(ARRAY[${sql.join(visibleChannelIds.map(id => sql`${id}::uuid`), sql`, `)}]) WITH ORDINALITY AS requested(id, position)
+    CROSS JOIN LATERAL (${conversionReadChannelIdsQuery(sql`requested.id`)}) AS storage`)
+    .as("authorized_task_surface");
   const conditions: SQL[] = [
     eq(tasks.claimedByType, "agent"),
     eq(tasks.claimedById, agentId),
@@ -739,11 +745,11 @@ export async function listTasksAssignedToAgent(
   }
 
   const rows = await db
-    .select({ task: tasks, readChannelId: readSurface.channelId })
+    .selectDistinctOn([tasks.channelId, tasks.taskNumber, tasks.id], { task: tasks, readChannelId: readSurface.channelId })
     .from(tasks)
-    .innerJoinLateral(readSurface, sql`true`)
+    .innerJoin(readSurface, eq(tasks.channelId, readSurface.storageChannelId))
     .where(and(...conditions))
-    .orderBy(asc(tasks.channelId), asc(tasks.taskNumber), asc(tasks.id));
+    .orderBy(asc(tasks.channelId), asc(tasks.taskNumber), asc(tasks.id), asc(readSurface.position));
   const enriched = await enrichTaskRows(rows.map(row => row.task));
   const surfaceByTask = new Map(rows.map(row => [row.task.id, row.readChannelId]));
   return enriched.map(task => ({ ...task, channelId: surfaceByTask.get(task.id)! }));

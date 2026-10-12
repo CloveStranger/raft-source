@@ -60,9 +60,10 @@ class SocketStubOrchestrator extends AgentOrchestrator {
   /** The machine went offline during the cycle: the ack-retry entry stays in the map, parked. */
   parkCycle(agentId: string): void {
     const pendingAcks = (this as any).pendingAgentDeliveryAcks as Map<string, { msg: { agentId: string } }>;
-    const entries = [...pendingAcks.values()].filter((pending) => pending.msg.agentId === agentId);
+    const entries = [...pendingAcks.entries()].filter(([, pending]) => pending.msg.agentId === agentId);
     assert.equal(entries.length, 1, "precondition: exactly one ack-retry entry to park");
-    (this as any).parkPendingAgentDeliveryAck(entries[0], "machine_offline");
+    const [key, pending] = entries[0]!;
+    (this as any).parkPendingAgentDeliveryAck(key, pending, "machine_offline");
   }
 
   /** The ack-retry cycle ended without an ACK (24 attempts exhausted): its in-memory entry is gone. */

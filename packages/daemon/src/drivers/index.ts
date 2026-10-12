@@ -55,6 +55,8 @@ const driverFactories: Record<string, () => RuntimeDriver> = {
   // Deprecated: retain for existing agents to run/resume. Shared availability
   // and server admission prohibit creating agents or switching into this runtime.
   antigravity: () => new AntigravityDriver(),
+  // Deprecated: retain for existing agents to run/resume. Shared availability
+  // and server admission prohibit creating agents or switching into this runtime.
   copilot: () => new CopilotDriver(),
   cursor: () => new CursorDriver(),
   gemini: () => new GeminiDriver(),

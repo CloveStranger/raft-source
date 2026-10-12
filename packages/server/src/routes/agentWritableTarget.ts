@@ -1,4 +1,5 @@
 import { parseDmPeerRef } from "@botiverse/raft-shared";
+import * as assistantService from "../services/assistantService";
 import { DmTargetResolutionError } from "../services/dmTargetResolutionError";
 import { and, eq, gte, isNotNull, isNull, lt } from "drizzle-orm";
 import { getDb } from "../db/index";
@@ -210,6 +211,10 @@ export async function resolveWritableAgentTarget(
     if (peerKind === null && targetUserId && targetAgentId && targetAgentId !== agentId) {
       throw DmTargetResolutionError.ambiguous(bareName);
     }
+
+    // RFC 074 §2: an assistant may open a DM only with its owner.
+    const assistantOwnerUserId = await assistantService.getAssistantOwnerUserId(agentId);
+    if (assistantOwnerUserId && targetUserId !== assistantOwnerUserId) return "forbidden";
 
     if (targetUserId) {
       const dmChannel = await channelService.findOrCreateDM(serverId, targetUserId, agentId);

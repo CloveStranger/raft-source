@@ -198,12 +198,7 @@ export default function CollapsibleMessageContent({
   }, [measure, measureBeforePaint, disabled]);
   // Stryker restore ArrayDeclaration
 
-  if (disabled) {
-    return <>{children}</>;
-  }
-
-  const collapsed = (!measurementCompleteRef.current || overflows) && !expanded;
-  const toggleExpanded = () => {
+  const toggleExpanded = useCallback(() => {
     const next = !expanded;
     if (next) {
       preserveTimelineViewport?.();
@@ -213,7 +208,17 @@ export default function CollapsibleMessageContent({
       forgetExpandedMessage(messageId);
     }
     setExpanded(next);
-  };
+  }, [expanded, preserveTimelineViewport, keepTimelineMessageVisible, messageId]);
+  const handleToggleClick = useCallback((event: React.MouseEvent) => {
+    event.stopPropagation();
+    toggleExpanded();
+  }, [toggleExpanded]);
+
+  if (disabled) {
+    return <>{children}</>;
+  }
+
+  const collapsed = (!measurementCompleteRef.current || overflows) && !expanded;
 
   return (
     <div
@@ -254,10 +259,7 @@ export default function CollapsibleMessageContent({
           aria-controls={contentDomId}
           aria-expanded={expanded}
           messageId={messageId}
-          onClick={(event) => {
-            event.stopPropagation();
-            toggleExpanded();
-          }}
+          onClick={handleToggleClick}
         />
       ) : reserveToggleSpace ? (
         <MessageContentTogglePlaceholder />

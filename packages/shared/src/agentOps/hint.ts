@@ -47,7 +47,7 @@ export function raftToolNameFor(name: string): string {
   return name.replace(/\./g, "_").replace(/([a-z0-9])([A-Z])/g, "$1_$2").toLowerCase();
 }
 
-/** Tool-form wording for a CLI command that has no operation (channel / server admin writes). */
+/** Tool-form wording for a CLI command that has no operation. */
 export const RAFT_NO_TOOL_WORDING = "ask a human via an action card (`actions_prepare`)";
 
 const ELLIPSIS = "…";
@@ -195,9 +195,14 @@ export const RAFT_HINTS = {
   channelMuteName: (): RaftHint => hint(["channel", "mute"], { name: "channels.mute", args: {} }, ["target"]),
   channelUnmuteName: (): RaftHint => hint(["channel", "unmute"], { name: "channels.unmute", args: {} }, ["target"]),
   threadUnfollowName: (): RaftHint => hint(["thread", "unfollow"], { name: "threads.unfollow", args: {} }, ["target"]),
-  /** Channel / server admin writes: no operation by policy (a human acts through an action card). */
-  channelCreateName: (): RaftHint => hint(["channel", "create"]),
-  serverUpdateName: (): RaftHint => hint(["server", "update"]),
+  /** Channel / server admin writes by name (prose). The Server checks the agent's role on each call. */
+  channelCreateName: (): RaftHint => hint(["channel", "create"], { name: "channels.create", args: {} }, ["name"]),
+  channelUpdateName: (): RaftHint => hint(["channel", "update"], { name: "channels.update", args: {} }, ["target"]),
+  channelArchiveName: (): RaftHint => hint(["channel", "archive"], { name: "channels.archive", args: {} }, ["target"]),
+  channelUnarchiveName: (): RaftHint => hint(["channel", "unarchive"], { name: "channels.unarchive", args: {} }, ["target"]),
+  channelAddMemberName: (): RaftHint => hint(["channel", "add-member"], { name: "channels.addMember", args: {} }, ["target"]),
+  channelRemoveMemberName: (): RaftHint => hint(["channel", "remove-member"], { name: "channels.removeMember", args: {} }, ["target"]),
+  serverUpdateName: (): RaftHint => hint(["server", "update"], { name: "server.update", args: {} }),
   taskClaim: ({ target, taskNumber }: { target: string; taskNumber: number }): RaftHint => hint(
     ["task", "claim", "--target", q(target), "--number", String(taskNumber)],
     { name: "tasks.claim", args: { target, taskNumbers: [taskNumber] } },

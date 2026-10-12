@@ -34,6 +34,7 @@ import type {
   ProviderNeutralOutboundBindingAuthority,
   SlackBridgeRenderSnapshot,
 } from "./externalDeliveryOutboxService";
+import { EXTERNAL_AVATAR_ALLOWED_HOSTS } from "./externalDeliveryOutboxService";
 import { finalizeAcceptedOutboundAttachmentFacts } from "./externalOutboundAttachmentCoordinator";
 
 const LEASE_DURATION_MS = 60_000;
@@ -352,7 +353,7 @@ function parseFrozenSnapshot(delivery: Delivery): SlackBridgeRenderSnapshot | nu
         && !url.search
         && !url.hash
         && /^[0-9a-f]{32}$/u.test(digest)
-        && url.pathname.endsWith(`/${digest}.webp`);
+        && (url.pathname.endsWith(`/${digest}.webp`) || EXTERNAL_AVATAR_ALLOWED_HOSTS.has(url.hostname));
     } catch {
       authorAvatarValid = false;
     }

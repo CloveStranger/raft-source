@@ -105,9 +105,9 @@ const ConversationPreviewCard = forwardRef<HTMLButtonElement, ConversationPrevie
               ) : (
                 <AvatarSlot context="preview-mini" type="human" humanAvatarUrl={author.avatarUrl ?? null} gravatarHash={author.gravatarHash ?? null} />
               )}
-              <span className="truncate">{author.name}</span>
+              <span className="min-w-0 truncate">{author.name}</span>
               {author.subtitle ? (
-                <span className="font-mono text-[10px] text-foreground-hint">{author.subtitle}</span>
+                <span className="min-w-0 flex-1 max-w-fit truncate font-mono text-[10px] text-foreground-hint">{author.subtitle}</span>
               ) : null}
             </span>
           ) : null}

@@ -67,7 +67,10 @@ test("limit and joint-channel paywalls route users to billing", () => {
     /<Banner status="warning"[\s\S]*?agent\.create\.capacityReached/,
   );
 
-  const inviteDialog = read("src/components/member/InviteHumanDialog.tsx");
+  const inviteDialog = [
+    read("src/components/member/InviteHumanDialog.tsx"),
+    read("src/components/member/InviteeRow.tsx"),
+  ].join("\n");
   assert.match(inviteDialog, /isBillingGateError/);
   assert.match(inviteDialog, /getBillingCapacityLimitState/);
   assert.match(inviteDialog, /formatBillingCapacityLimitMessage/);
@@ -143,7 +146,10 @@ test("limit and joint-channel paywalls route users to billing", () => {
   assert.doesNotMatch(serversRoute, /requireTeamBillingFeature\(getDb\(\), req\.params\.id, "Pre-join agreements"\)/);
   assert.doesNotMatch(serversRoute, /requireTeamBillingFeature\(getDb\(\), req\.params\.id, "Admin roles"\)/);
 
-  const humanDetail = read("src/components/member/HumanDetailPanel.tsx");
+  const humanDetail = [
+    read("src/components/member/HumanDetailPanel.tsx"),
+    read("src/components/member/CreatedAgentRow.tsx"),
+  ].join("\n");
   assert.doesNotMatch(humanDetail, /function isBillingGateError/);
   assert.doesNotMatch(humanDetail, /nav\.toSettings\("billing"\)[\s\S]*roleError/);
 

@@ -1,3 +1,4 @@
+import { useUIStore } from "./uiStore";
 import { create } from "zustand";
 import type { ExternalMessageAuthorProjection } from "@botiverse/raft-shared";
 
@@ -12,6 +13,11 @@ interface ProfileState {
   externalProfile: ExternalMessageAuthorProjection | null;
   /** Channel anchor needed to restore an external identity from browser history. */
   externalProfileChannelId: string | null;
+  /** Whether the current external profile was opened from a mention click
+   *  (projection-id keyed) rather than a message author's avatar
+   *  (message-id keyed). Drives the URL write so refresh/back restores the
+   *  right shape. */
+  externalProfileIsMention: boolean;
   /** Timestamp when the profile was last opened, used to decide view-stack ordering */
   openedAt: number;
   /** Surface that opened the overlay, used only for reversible shell layout. */
@@ -42,7 +48,7 @@ interface ProfileState {
   openExternalProfile: (
     id: string,
     profile: ExternalMessageAuthorProjection,
-    options: { channelId: string; openSource?: "channel" | "thread" },
+    options: { channelId: string; openSource?: "channel" | "thread"; isMention?: boolean },
   ) => void;
   /** Clear the one-shot agent tab intent after URL sync has consumed it */
   clearDefaultAgentTabIntent: () => void;
@@ -55,16 +61,19 @@ export const useProfileStore = create<ProfileState>((set) => ({
   profileId: null,
   externalProfile: null,
   externalProfileChannelId: null,
+  externalProfileIsMention: false,
   openedAt: 0,
   openSource: null,
   defaultAgentTabIntent: null,
 
   openProfile: (type, id, options) => {
+    useUIStore.getState().restoreThreadLayout();
     set((state) => ({
       profileType: type,
       profileId: id,
       externalProfile: null,
       externalProfileChannelId: null,
+      externalProfileIsMention: false,
       openedAt: Date.now(),
       // Nested profile navigation stays in the same shell surface unless a
       // conversation entry explicitly supplies a new source.
@@ -74,11 +83,13 @@ export const useProfileStore = create<ProfileState>((set) => ({
   },
 
   openExternalProfile: (id, profile, options) => {
+    useUIStore.getState().restoreThreadLayout();
     set((state) => ({
       profileType: "external",
       profileId: id,
       externalProfile: profile,
       externalProfileChannelId: options.channelId,
+      externalProfileIsMention: options.isMention ?? false,
       openedAt: Date.now(),
       openSource: options?.openSource ?? state.openSource,
       defaultAgentTabIntent: null,

@@ -4969,6 +4969,42 @@
         "ignoreAntialiasing": true
       },
       "notes": "task #9: the Pi provider API key is gated on runtime === \"pi\", which no earlier case offered. react-only for the same reason as the built-in provider case."
+    },
+    {
+      "id": "components.settings.integrations.permission-review",
+      "title": "Settings Integrations Permission Review",
+      "surface": "settings",
+      "baselineStatus": "pending",
+      "viewport": {
+        "width": 390,
+        "height": 844,
+        "density": 3
+      },
+      "theme": "light",
+      "locale": "en",
+      "variants": [
+        {
+          "id": "permission-review",
+          "name": "Permission review",
+          "props": {
+            "tab": "integrations"
+          },
+          "interactions": [
+            {
+              "type": "click",
+              "target": "button:has-text('Slack Bridge')"
+            },
+            {
+              "type": "wait",
+              "ms": 400
+            }
+          ]
+        }
+      ],
+      "capture": {
+        "contract": "component-bounds"
+      },
+      "reactPathHint": "packages/web/src/components/settings/SettingsPanel.tsx#IntegrationsSection"
     }
   ],
   "componentMatrix": [

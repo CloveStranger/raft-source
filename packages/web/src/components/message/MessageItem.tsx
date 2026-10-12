@@ -14,11 +14,6 @@ import {
   MessageAttachmentGroup,
   MessageAttachmentMetaStart,
   MessageImageGallery,
-  MessageImageGalleryAction,
-  MessageImageGalleryItem,
-  MessageImageGalleryOverlay,
-  MessageImageGalleryPreview,
-  MessageImageGalleryRow,
   MessageItem,
   MessageItemAvatarSlot,
   MessageItemBody,
@@ -64,9 +59,14 @@ import {
   ThreadIcon,
   toast,
   buildMessageImageGalleryRows,
+  MessageImageGalleryRow,
 } from "raft-ui";
 import rehypeRaw from "rehype-raw";
 import rehypeSanitize from "rehype-sanitize";
+import type { Components, Options } from "react-markdown";
+
+// Shared across renders — never created inside a component (task #709).
+const MESSAGE_MARKDOWN_REHYPE_PLUGINS: NonNullable<Options["rehypePlugins"]> = [rehypeRaw, [rehypeSanitize, messageMarkdownSanitizeSchema]];
 import { useStore } from "zustand";
 import {
   createRaftBareTaskRefRegex,
@@ -84,10 +84,12 @@ import {
   parseRaftPermalink,
   parseRaftRefTarget,
   replaceOutsideMarkdownCode,
+  resolveRaftMentionHandle,
 } from "@botiverse/raft-shared";
 import type {
   ActionCardMetadata,
   ExternalActorKind,
+  ExternalMessageAuthorProjection,
   RaftRefTarget,
   ReactionActorRef,
   SyncScopeKey,
@@ -95,12 +97,13 @@ import type {
 import { useMessageStore } from "../../store/messageStore";
 import type { Message, MessageAttachment, MessageMention } from "../../store/messageStore";
 import { ActionCard } from "../actions/ActionCard";
+import { toRuiTaskStatus } from "../task/taskStatusUi";
 import { useAuthStore } from "../../store/authStore";
 import type { Channel } from "../../store/channelStore";
 import { useAgentDisplayState, useAgentStore } from "../../store/agentStore";
 import type { Agent } from "../../store/agentStore";
 import type { ServerMember } from "../../store/serverStore";
-import type { ChannelHuman } from "../../hooks/useChannelMembers";
+import type { ChannelExternalMember, ChannelHuman } from "../../hooks/useChannelMembers";
 import { useChannelStore } from "../../store/channelStore";
 import { useMachineStore } from "../../store/machineStore";
 
@@ -123,6 +126,8 @@ import { useLegacyTaskPanelStore } from "../../store/legacyTaskPanelStore";
 import {
   getMessageBodyFontSizeClass,
   getMessageBodyFontSizeStyle,
+  getMessageMetaSizeClass,
+  getMessageNameSizeClass,
   useAppearanceStore,
 } from "../../store/appearanceStore";
 import api from "../../api/client";
@@ -134,7 +139,8 @@ import {
   matchesUnavailableQuotedPermalink,
 } from "./quotedMessagePermalink";
 import MentionLink from "./MentionLink";
-import { ReferenceChip } from "./ReferenceChip";
+import { GalleryImageItem } from "./GalleryImageItem";
+import { PermalinkReferenceChip } from "./PermalinkReferenceChip";
 import ProfilePreviewCardContent from "./ProfilePreviewCardContent";
 import ExternalIdentityPreviewCard from "./ExternalIdentityPreviewCard";
 import { useTimeFormatter } from "../../hooks/useTimeFormatter";
@@ -150,7 +156,8 @@ import MenuItem from "../ui/MenuItem";
 import DismissBackdrop from "../ui/DismissBackdrop";
 import { isAudioPreviewAttachment, isDiffPatchAttachment, isDocumentPreviewAttachment, isVideoPreviewAttachment } from "./attachmentPreview";
 import type { DiffAttachmentPreview, DocumentAttachmentPreview } from "./attachmentPreview";
-import MarkdownContent, {MarkdownCode} from "../markdown/MarkdownContent";
+import MarkdownContent, {MarkdownCode, MarkdownLink} from "../markdown/MarkdownContent";
+import { isCustomProtocolHref } from "../markdown/CustomProtocolLink";
 import { MessageReadReceiptScopeProvider } from "./messageReadReceiptScope";
 import type { MessageReadReceiptScope } from "./messageReadReceiptScope";
 import { projectReadReceipt } from "../../store/readReceiptDomain";
@@ -166,26 +173,17 @@ import { parseTimestampLabel, setPendingVideoSeek } from "./attachmentCommentAnc
 import { useAttachmentCommentsEnabled } from "./useAttachmentCommentsEnabled";
 import {
   READ_RECEIPTS_FEATURE_FLAG_KEY,
-  SYNC_CORE_MESSAGES_FLAG_KEY,
   useServerFeatureFlag,
 } from "../../store/serverFeatureFlags";
 import {
-  isCanonicalMessageReaction,
   isLegacyMessageReaction,
   messageReactionParentScopeKey,
-  applyMessageReactionsForV2Ingress,
-  isMessageV2IngressSoleApplyEligible,
 } from "../../store/normalizedMessageReactions";
 import {
   reactionReadModelStore,
   selectReactionActors,
-  selectReactionViewerOverlay,
 } from "../../store/reactionReadModels";
 import { setMessageReaction } from "../../store/reactionCommandFacade";
-import {
-  applyReactionViewerSnapshotForCurrentPrincipal,
-  hydrateReactionViewerSnapshot,
-} from "../../store/reactionViewerReadModel";
 import { AttachmentCommentRefChip } from "./AttachmentCommentRefChip";
 import { shouldShowGroupedMessageHeader } from "./messageGrouping";
 import type { MessageGroupState } from "./messageGrouping";
@@ -236,8 +234,6 @@ import { dispatchSenderMentionInsert } from "./senderMentionInsert";
 import { dismissLayerProps } from "../ui/dismissLayer";
 
 // raft-ui's task status ids are kebab-case; slock's are snake_case.
-const toRuiTaskStatus = (status: Task["status"]) =>
-  status === "in_progress" ? "in-progress" : status === "in_review" ? "in-review" : status;
 
 const REACTION_PICKER_EVENT = "raft:message-reaction-picker-open";
 const REACTION_PICKER_WIDTH = 224;
@@ -355,33 +351,6 @@ function buildOptimisticReactionMessage(
   };
 }
 
-function buildOptimisticNormalizedReactionMessage(
-  message: Message,
-  emoji: string,
-  alreadyReacted: boolean,
-): Message {
-  const reactions = message.reactions ?? [];
-  if (!reactions.every(isCanonicalMessageReaction)) return message;
-  const existingIndex = reactions.findIndex((reaction) => reaction.emoji === emoji);
-
-  if (existingIndex < 0) {
-    if (alreadyReacted) return message;
-    return {
-      ...message,
-      reactions: [...reactions, { emoji, count: 1, previewK: [] }],
-    };
-  }
-
-  const existing = reactions[existingIndex]!;
-  const nextCount = Math.max(0, existing.count + (alreadyReacted ? -1 : 1));
-  return {
-    ...message,
-    reactions: reactions.map((reaction, index) => (
-      index === existingIndex ? { ...reaction, count: nextCount } : reaction
-    )),
-  };
-}
-
 function replaceReactionForEmoji(
   message: Message,
   source: Message,
@@ -446,7 +415,8 @@ function ReactionCount({ count }: { count: number }) {
 
 export interface MentionEntry {
   displayName: string;
-  type: "agent" | "user";
+  /** `external` = linked provider member — never linkable, renders as text. */
+  type: "agent" | "user" | "external";
   id: string;
   agent?: Agent;
 }
@@ -592,6 +562,83 @@ function restoreRaftRefPlaceholders(source: string, placeholders: string[]): str
   return source.replace(/\x00RAFTREF(\d+)\x00/g, (_match, idx) => placeholders[Number(idx)] ?? "");
 }
 
+function protectMarkdownInlineLinks(source: string, placeholders: string[]): string {
+  const parts: string[] = [];
+  let cursor = 0;
+  while (cursor < source.length) {
+    const labelStart = source.indexOf("[", cursor);
+    if (labelStart === -1) {
+      parts.push(source.slice(cursor));
+      break;
+    }
+
+    parts.push(source.slice(cursor, labelStart));
+    let labelEnd = labelStart + 1;
+    while (labelEnd < source.length) {
+      if (source[labelEnd] === "\\") {
+        labelEnd += 2;
+        continue;
+      }
+      if (source[labelEnd] === "]") break;
+      labelEnd += 1;
+    }
+
+    if (labelEnd >= source.length || source[labelEnd + 1] !== "(") {
+      parts.push(source[labelStart]);
+      cursor = labelStart + 1;
+      continue;
+    }
+
+    let destinationEnd = labelEnd + 2;
+    let depth = 1;
+    while (destinationEnd < source.length) {
+      const char = source[destinationEnd];
+      if (char === "\\") {
+        destinationEnd += 2;
+        continue;
+      }
+      if (char === "(") {
+        depth += 1;
+      } else if (char === ")") {
+        depth -= 1;
+        if (depth === 0) break;
+      }
+      destinationEnd += 1;
+    }
+
+    if (depth !== 0) {
+      parts.push(source[labelStart]);
+      cursor = labelStart + 1;
+      continue;
+    }
+
+    const linkStart = labelStart > 0 && source[labelStart - 1] === "!" ? labelStart - 1 : labelStart;
+    if (linkStart < labelStart) {
+      const previous = parts.pop() ?? "";
+      parts.push(previous.slice(0, -1));
+    }
+    const index = placeholders.length;
+    placeholders.push(source.slice(linkStart, destinationEnd + 1));
+    parts.push(`\x00LINK${index}\x00`);
+    cursor = destinationEnd + 1;
+  }
+  return parts.join("");
+}
+
+function protectMessageMarkdownLinks(source: string, placeholders: string[]): string {
+  const withMarkdownLinks = protectMarkdownInlineLinks(source, placeholders);
+  return withMarkdownLinks.replace(/https?:\/\/[^\s<>()]+(?:\([^\s<>()]*\)[^\s<>()]*)*/giu, (match) => {
+    const index = placeholders.length;
+    placeholders.push(match);
+    return `\x00LINK${index}\x00`;
+  });
+}
+
+function restoreMessageMarkdownLinkPlaceholders(source: string, placeholders: string[]): string {
+  // oxlint-disable-next-line no-control-regex -- NUL (\u0000) is an intentional private sentinel wrapping placeholder tokens; it never appears in user markdown, so matching it is safe and deliberate
+  return source.replace(/\x00LINK(\d+)\x00/g, (_match, idx) => placeholders[Number(idx)] ?? "");
+}
+
 function getRaftRefProp(node: any, prop: string): string | undefined {
   const value = node?.properties?.[prop] ?? node?.properties?.[`data-${prop.replace(/[A-Z]/g, (c) => `-${c.toLowerCase()}`)}`];
   return typeof value === "string" ? value : undefined;
@@ -615,8 +662,10 @@ function normalizeGeneratedStrongClosingWhitespace(source: string): string {
   );
 }
 
-/** Render message content as Markdown with @mention and #channel highlighting */
-function renderContent(
+/** Render message content as Markdown with @mention and #channel highlighting.
+    Hook-named: it memoizes the markdown components map and handlers (task #709),
+    and is called exactly once, unconditionally, inside MessageMarkdownBody. */
+function useRenderMessageMarkdown(
   content: string,
   channels: Channel[],
   mentionMap: Map<string, MentionEntry>,
@@ -625,6 +674,7 @@ function renderContent(
   onNavigateDm: (channel: Channel) => void,
   onNavigateAgent: (agentId: string) => void,
   onNavigateHuman: (userId: string) => void,
+  onNavigateExternal: ((profile: ExternalMessageAuthorProjection) => void) | undefined,
   onNavigateComputer: (machineId: string) => void,
   onOpenThread?: (intent: ThreadRefIntent) => void | Promise<void>,
   resolvingThreadRefKey?: string | null,
@@ -641,11 +691,14 @@ function renderContent(
   formatMessage?: IntlShape["formatMessage"],
   channelParticipantAgentsById?: ReadonlyMap<string, Agent>,
   channelParticipantMembersById?: ReadonlyMap<string, ServerMember>,
+  channelParticipantExternalsById?: ReadonlyMap<string, ChannelExternalMember>,
   unavailableQuotedPermalinkUrl?: string | null,
 ) {
-  // Inline task refs render rui's inline TaskChip when the referenced task is
-  // loaded in the client store, so they follow the same body-size, body-
-  // baseline rule as every other chip in the sentence (#proj-rui task #84).
+  // Inline task refs render rui's inline `TaskChip` when the referenced task is
+  // loaded in the client store. The chip is designed for running text —
+  // borderless and body-sized — so a mixed line (#mention-mix) keeps its
+  // baseline; it reads the same `task-status-*` tokens as every other surface,
+  // so the status colour still matches (task-status unification).
   // Unknown tasks keep a neutral badge so the chip never claims a status it
   // does not know.
   //
@@ -659,7 +712,7 @@ function renderContent(
   // base-ui trigger with an auto-generated id, and the evidence contract in
   // tests/taskRefChannelScope.evidence.test.tsx requires the rendered ref
   // markup to be byte-identical across renders of the same number.
-  const renderTaskBadge = (taskNumber: number) => {
+  const renderTaskBadge = useCallback((taskNumber: number) => {
     const task = taskByNumber?.get(taskNumber);
     if (!task) return null;
     return (
@@ -684,9 +737,9 @@ function renderContent(
         }
       />
     );
-  };
+  }, [taskByNumber, onOpenTaskRef]);
   let mentionIdentityMap: Map<string, MentionEntry> | null = null;
-  const resolveMentionByIdentity = (type: "agent" | "user", id: string) => {
+  const resolveMentionByIdentity = (type: "agent" | "user" | "external", id: string) => {
     mentionIdentityMap ??= buildMentionIdentityMap(mentionMap);
     return mentionIdentityMap.get(`${type}:${id}`);
   };
@@ -729,6 +782,8 @@ function renderContent(
   const raftRefPlaceholders: string[] = [];
   processed = replaceRaftRefMarkdownWithPlaceholders(processed, raftRefPlaceholders);
   processed = escapeUserRawHtmlForMessageMarkdown(processed);
+  const markdownLinkPlaceholders: string[] = [];
+  processed = protectMessageMarkdownLinks(processed, markdownLinkPlaceholders);
 
   // Pre-process thread references: #channel:shortId or dm:@peer:shortId.
   // These MUST run before the mention passes: `dm:@peer(:shortId)?` contains
@@ -815,8 +870,8 @@ function renderContent(
 
   // A selected mention is an identity-backed entity, not a fresh username
   // guess. Keep it mentionable after left-boundary edits such as
-  // `草案@Mona`; the exact right boundary still prevents a stale `@Mona`
-  // entity from claiming the longer text `@Mona继续`.
+  // `草案@Mona` and before CJK suffixes such as `@Mona的`; a Latin right
+  // boundary still prevents a stale `@Mona` entity from claiming `@Monica`.
   for (const [name, entry] of structuredMentionMap) {
     const selectedMentionRegex = createRaftStructuredUserRefRegex(name);
     if (!selectedMentionRegex) continue;
@@ -826,10 +881,16 @@ function renderContent(
   // Free text still uses the conservative grammar so emails/package-like
   // strings never become notifications merely because a directory name
   // happens to match.
-  processed = processed.replace(createRaftUserRefRegex(), (match, prefix: string, name: string) => {
+  processed = processed.replace(createRaftUserRefRegex(), (match, prefix: string, token: string) => {
+    const resolved = resolveRaftMentionHandle(
+      token,
+      (name) => structuredMentionMap.has(name) || mentionMap.has(name),
+    );
+    if (!resolved) return match; // Not a known name — keep as plain text
+    const { handle: name, suffix } = resolved;
     const entry = structuredMentionMap.get(name) ?? mentionMap.get(name);
-    if (!entry) return match; // Not a known name — keep as plain text
-    return `${prefix}${storeMentionPlaceholder(name, entry)}`;
+    if (!entry) return match;
+    return `${prefix}${storeMentionPlaceholder(name, entry)}${suffix}`;
   });
 
   // Pre-process task references: "task #205" always links; bare "#205" only if it's a known task
@@ -859,6 +920,7 @@ function renderContent(
   // oxlint-disable-next-line no-control-regex -- NUL is an internal placeholder delimiter removed before rendering
   processed = processed.replace(/\x00MENTION(\d+)\x00/g, (_m, idx) => mentionPlaceholders[Number(idx)] ?? "");
   processed = highlightThreadSearchMarkdownFragments(processed, threadSearchHighlightQuery ?? "");
+  processed = restoreMessageMarkdownLinkPlaceholders(processed, markdownLinkPlaceholders);
   processed = restoreCode(processed);
 
   // Chat body shares its visual styling (code blocks, lists, headings, table,
@@ -867,22 +929,16 @@ function renderContent(
   // behavior — `a` (mentions / channel refs / task refs / thread refs /
   // raft permalinks) and `span` (reminder receipts).
   // stdrc 2026-05-08 #proj-uiux:6110c1ce (task #137).
-  return (
-    <MarkdownContent
-      source={processed}
-      density="compact"
-      enableMermaid
-      rehypePlugins={[rehypeRaw, [rehypeSanitize, messageMarkdownSanitizeSchema]]}
-      components={{
-        code: ({ children, className }) => (
-          <MarkdownCode className={className}>
-            {className
-              ? children
-              : highlightThreadSearchInlineCode(children, threadSearchHighlightQuery)}
-          </MarkdownCode>
-        ),
-        // Links — handle @mention, #channel, and regular URLs
-        a: ({ href, children, node }) => {
+  const markdownComponents = useMemo(() => ({
+    code: ({ children, className }) => (
+      <MarkdownCode className={className}>
+        {className
+          ? children
+          : highlightThreadSearchInlineCode(children, threadSearchHighlightQuery)}
+      </MarkdownCode>
+    ),
+    // Links — handle @mention, #channel, and regular URLs
+    a: ({ href, children, node }) => {
           const raftRefTarget = getRaftRefProp(node, "dataRaftRefTarget");
           if (raftRefTarget) {
             const target = parseRaftRefTarget(raftRefTarget);
@@ -898,9 +954,10 @@ function renderContent(
                   fallbackLabel={target.name}
                   fallbackAgent={entry.type === "agent" ? channelParticipantAgentsById?.get(entry.id) : undefined}
                   fallbackMember={entry.type === "user" ? channelParticipantMembersById?.get(entry.id) : undefined}
-                  onNavigate={() =>
-                    entry.type === "agent" ? onNavigateAgent(entry.id) : onNavigateHuman(entry.id)
-                  }
+                  fallbackExternal={entry.type === "external" ? channelParticipantExternalsById?.get(entry.id) : undefined}
+                  onNavigateAgent={onNavigateAgent}
+                  onNavigateHuman={onNavigateHuman}
+                  onNavigateExternal={onNavigateExternal}
                 >
                   {children}
                 </MentionLink>
@@ -1129,7 +1186,7 @@ function renderContent(
             const mentionType = node?.properties?.dataMentionType as string | undefined;
             const mentionId = node?.properties?.dataMentionId as string | undefined;
 
-            if (!mentionId || (mentionType !== "agent" && mentionType !== "user")) {
+            if (!mentionId || (mentionType !== "agent" && mentionType !== "user" && mentionType !== "external")) {
               return (
                 <span className="font-bold text-foreground-strong underline decoration-line-muted decoration-2 underline-offset-2 select-text theme-brutal:text-black theme-brutal:decoration-black/30">
                   {children}
@@ -1144,9 +1201,10 @@ function renderContent(
                 fallbackLabel={mentionName}
                 fallbackAgent={mentionType === "agent" ? channelParticipantAgentsById?.get(mentionId) : undefined}
                 fallbackMember={mentionType === "user" ? channelParticipantMembersById?.get(mentionId) : undefined}
-                onNavigate={() =>
-                  mentionType === "agent" ? onNavigateAgent(mentionId) : onNavigateHuman(mentionId)
-                }
+                fallbackExternal={mentionType === "external" ? channelParticipantExternalsById?.get(mentionId) : undefined}
+                onNavigateAgent={onNavigateAgent}
+                onNavigateHuman={onNavigateHuman}
+                onNavigateExternal={onNavigateExternal}
               >
                 {children}
               </MentionLink>
@@ -1289,22 +1347,19 @@ function renderContent(
                 ? formatMessage({ id: "message.messageItem.linkedMessageFallback" })
                 : "linked message");
             return (
-              <ReferenceChip
-                as={quotedMessageUnavailable ? "span" : "a"}
-                href={quotedMessageUnavailable ? undefined : href}
-                onClick={quotedMessageUnavailable ? undefined : (e) => {
-                  e.preventDefault();
-                  onOpenPermalink?.(href);
-                }}
-                title={quotedMessageUnavailable ? undefined : href}
-                icon={Link}
-                variant="link"
-                label={channelLabel}
-                trailing={quotedMessageUnavailable ? undefined : (
-                  <span className="text-[10px] font-normal leading-none text-foreground-placeholder theme-brutal:text-black/50">msg</span>
-                )}
+              <PermalinkReferenceChip
+                href={href}
+                quotedMessageUnavailable={quotedMessageUnavailable}
+                channelLabel={channelLabel}
+                onOpenPermalink={onOpenPermalink}
               />
             );
+          }
+          // Custom-protocol links (obsidian:// and friends, per the sanitize
+          // href allowlist) delegate to the canonical MarkdownLink, which
+          // confirms before handing off to the OS (task #734).
+          if (isCustomProtocolHref(href)) {
+            return <MarkdownLink href={href}>{children}</MarkdownLink>;
           }
           return (
             <a
@@ -1342,7 +1397,22 @@ function renderContent(
         mark: ({ children }) => (
           <ThreadSearchFragmentHighlight>{children}</ThreadSearchFragmentHighlight>
         ),
-      }}
+      } as Components), [
+      threadSearchHighlightQuery, structuredMentionMap, mentionMap,
+      channelParticipantAgentsById, channelParticipantMembersById, channelParticipantExternalsById,
+      onNavigateAgent, onNavigateHuman, onNavigateExternal, onNavigateComputer, onNavigateChannel,
+      onNavigateDm, onOpenThread, onOpenMessageRef, onOpenTaskRef, onOpenPermalink,
+      formatMessage, channels, refAuthorityServerSlug, currentServerSlug,
+      threadRefAuthorityUnavailable, resolvingThreadRefKey, renderTaskBadge,
+      timeFormatOptions, unavailableQuotedPermalinkUrl,
+    ]);
+  return (
+    <MarkdownContent
+      source={processed}
+      density="compact"
+      enableMermaid
+      rehypePlugins={MESSAGE_MARKDOWN_REHYPE_PLUGINS}
+      components={markdownComponents}
     />
   );
 }
@@ -1495,6 +1565,11 @@ function DocumentPreviewSummaryLine({ preview }: { preview: DocumentAttachmentPr
 // Locale-aware document-preview label for attachment card metadata. The modal
 // header intentionally shows only the filename and actions.
 
+/** Popover click shield — module scope so it is never recreated (task #709). */
+const stopClickPropagation = (event: React.MouseEvent) => {
+  event.stopPropagation();
+};
+
 function AttachmentCard({
   attachment,
   isOptimistic,
@@ -1513,10 +1588,18 @@ function AttachmentCard({
   isVideo: boolean;
   isAudio: boolean;
   isHtmlLoading: boolean;
-  onClick: () => void;
-  onDownload: () => void;
+  onClick: (attachment: NonNullable<Message["attachments"]>[number]) => void;
+  onDownload: (attachment: NonNullable<Message["attachments"]>[number]) => void | Promise<void>;
 }) {
   const { formatMessage } = useIntl();
+  const handleClick = useCallback(() => onClick(attachment), [onClick, attachment]);
+  const handleDownload = useCallback(() => {
+    void onDownload(attachment);
+  }, [onDownload, attachment]);
+
+  const audioSecondaryDownload = useMemo(() => isAudio
+    ? { onClick: handleDownload, label: formatMessage({ id: "message.messageItem.downloadFile" }, { filename: attachment.filename }), affordanceName: "audio-download" }
+    : undefined, [isAudio, handleDownload, formatMessage, attachment.filename]);
   const [diffPreview, setDiffPreview] = useState<DiffAttachmentPreview | null>(null);
   const [documentPreview, setDocumentPreview] = useState<DocumentAttachmentPreviewState | null>(null);
   const isDiffPatch = isDiffPatchAttachment(attachment);
@@ -1568,7 +1651,7 @@ function AttachmentCard({
         attachment={attachment}
         variant="compact"
         isOptimistic={isOptimistic}
-        onClick={onDownload}
+        onClick={handleDownload}
         affordance="download"
         meta={<AttachmentMetaText label={attachment.mimeType || formatMessage({ id: "message.messageItem.metaPatch" })} sizeBytes={attachment.sizeBytes} />}
         summary={<DiffPatchStatsLine preview={diffPreview} />}
@@ -1584,7 +1667,7 @@ function AttachmentCard({
         isOptimistic={isOptimistic}
         loading={isHtmlLoading}
         loadingLabel={formatMessage({ id: "message.messageItem.openingPreview" })}
-        onClick={onClick}
+        onClick={handleClick}
         affordance="preview"
         affordanceName="document-preview"
         meta={<AttachmentMetaText label={documentPreview ? formatMessage({ id: DOCUMENT_PREVIEW_LABEL_ID[documentPreview.preview.kind] }) : attachment.mimeType || formatMessage({ id: "message.messageItem.metaDocument" })} sizeBytes={attachment.sizeBytes} />}
@@ -1596,7 +1679,7 @@ function AttachmentCard({
   // Stryker disable next-line ConditionalExpression,LogicalOperator: shared card branch matrix predates audio; this PR's audio branch is covered by audioAttachmentPreview.behavior.test.tsx.
   const primaryIsPreview = isImage || isHtml || isVideo || isAudio;
   // Stryker disable next-line ConditionalExpression: audio/non-preview click behavior is covered by audioAttachmentPreview.behavior.test.tsx; legacy image/html/video branches are covered elsewhere.
-  const primaryOnClick = primaryIsPreview ? onClick : onDownload;
+  const primaryOnClick = primaryIsPreview ? handleClick : handleDownload;
   // Stryker disable next-line ConditionalExpression,StringLiteral: visual affordance labels for legacy branches are source-pinned; audio/file behavior is covered by DOM tests.
   const primaryAffordance = primaryIsPreview ? "preview" : "download";
   // Stryker disable next-line ConditionalExpression,StringLiteral: data-affordance names are source/query contracts; audio/file names are additionally covered by DOM tests.
@@ -1616,7 +1699,7 @@ function AttachmentCard({
       affordanceName={primaryAffordanceName}
       icon={isVideo ? <Play size={16} className="text-foreground-muted" /> : isAudio ? <Music size={16} className="text-foreground-muted" /> : undefined}
       meta={<AttachmentMetaText label={primaryMetaLabel} sizeBytes={attachment.sizeBytes} />}
-      secondaryDownload={isAudio ? { onClick: onDownload, label: formatMessage({ id: "message.messageItem.downloadFile" }, { filename: attachment.filename }), affordanceName: "audio-download" } : undefined}
+      secondaryDownload={audioSecondaryDownload}
     />
   );
 }
@@ -1629,8 +1712,8 @@ function InlineVideoAttachmentCard({
 }: {
   attachment: NonNullable<Message["attachments"]>[number];
   isOptimistic: boolean;
-  onOpenPreview: () => void;
-  onDownload: () => void;
+  onOpenPreview: (attachment: NonNullable<Message["attachments"]>[number]) => void | Promise<void>;
+  onDownload: (attachment: NonNullable<Message["attachments"]>[number]) => void | Promise<void>;
 }) {
   const { formatMessage } = useIntl();
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -1641,6 +1724,13 @@ function InlineVideoAttachmentCard({
   const [loadingUrl, setLoadingUrl] = useState(false);
   const [loadFailed, setLoadFailed] = useState(false);
   const inlineUrl = attachment.localPreviewUrl ?? fetchedUrl;
+
+  const handleOpenPreview = useCallback(() => {
+    if (!isOptimistic) void onOpenPreview(attachment);
+  }, [onOpenPreview, attachment, isOptimistic]);
+  const handleDownload = useCallback(() => {
+    void onDownload(attachment);
+  }, [onDownload, attachment]);
 
   const loadInlineVideoUrl = useCallback(() => {
     if (inlineUrl || isOptimistic || requestRef.current) return;
@@ -1727,7 +1817,7 @@ function InlineVideoAttachmentCard({
               </MessageVideoPreviewFailureIcon>
               <MessageVideoPreviewFailureTitle>{formatMessage({ id: "message.messageItem.codecWarning" })}</MessageVideoPreviewFailureTitle>
               <MessageVideoPreviewFailureAction
-                onClick={onDownload}
+                onClick={handleDownload}
                 aria-label={formatMessage({ id: "message.messageItem.downloadFile" }, { filename: attachment.filename })}
               >
                 <Download size={13} />
@@ -1742,7 +1832,7 @@ function InlineVideoAttachmentCard({
       {!isOptimistic && (
         <Tooltip content={formatMessage({ id: "message.messageItem.openInPreview" }, { filename: attachment.filename })}>
         <MessageVideoPreviewAction
-          onClick={onOpenPreview}
+          onClick={handleOpenPreview}
           aria-label={formatMessage({ id: "message.messageItem.openInPreview" }, { filename: attachment.filename })}
           data-message-affordance="inline-video-expand"
         >
@@ -1928,7 +2018,7 @@ function InlineAudioAttachmentCard({
 }: {
   attachment: NonNullable<Message["attachments"]>[number];
   isOptimistic: boolean;
-  onDownload: () => void;
+  onDownload: (attachment: NonNullable<Message["attachments"]>[number]) => void | Promise<void>;
 }) {
   const { formatMessage } = useIntl();
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -1938,6 +2028,11 @@ function InlineAudioAttachmentCard({
   const [loadingUrl, setLoadingUrl] = useState(false);
   const [loadFailed, setLoadFailed] = useState(false);
   const inlineUrl = attachment.localPreviewUrl ?? fetchedUrl;
+
+  const handleAudioLoadError = useCallback(() => setLoadFailed(true), []);
+  const handleDownload = useCallback(() => {
+    void onDownload(attachment);
+  }, [onDownload, attachment]);
 
   const loadInlineAudioUrl = useCallback(() => {
     if (inlineUrl || isOptimistic || requestRef.current) return;
@@ -2003,7 +2098,7 @@ function InlineAudioAttachmentCard({
       onClick={(event) => {
         event.preventDefault();
         event.stopPropagation();
-        onDownload();
+        handleDownload();
       }}
     >
       <Download size={14} />
@@ -2035,7 +2130,7 @@ function InlineAudioAttachmentCard({
             key={inlineUrl}
             filename={attachment.filename}
             url={inlineUrl}
-            onError={() => setLoadFailed(true)}
+            onError={handleAudioLoadError}
           />
         </div>
       ) : (
@@ -2055,7 +2150,7 @@ function InlineAudioAttachmentCard({
           <button
             type="button"
             className={`flex h-10 w-full items-center justify-center border border-line-muted bg-layer-inset text-xs font-bold text-foreground-muted theme-brutal:border-black theme-brutal:bg-brutal-cream theme-brutal:text-black/70 ${loadFailed ? "hover:bg-primary-soft hover:text-foreground-strong theme-brutal:hover:bg-soft-signal theme-brutal:hover:text-black" : "cursor-default"}`}
-            onClick={loadFailed ? onDownload : undefined}
+            onClick={loadFailed ? handleDownload : undefined}
             aria-label={loadFailed ? formatMessage({ id: "message.messageItem.downloadFile" }, { filename: attachment.filename }) : formatMessage({ id: "message.messageItem.loadingFile" }, { filename: attachment.filename })}
           >
             {isOptimistic || loadingUrl ? (
@@ -2078,18 +2173,9 @@ function InlineAudioAttachmentCard({
   );
 }
 
-
-
 // Lets renderer-specific layers inside the preview (e.g. the HTML comment
 // overlay) see the shell's comment mode and push captured anchors into the
 // composer without the generic shell knowing any renderer internals.
-
-
-
-
-
-
-
 
 // Per-attachment host-message context handed to the image lightbox so its
 // comments panel can resolve the review conversation (F10, task #10).
@@ -2129,6 +2215,7 @@ interface MessageItemProps {
   previewSenderMember?: ServerMember;
   channelParticipantAgentsById?: ReadonlyMap<string, Agent>;
   channelParticipantMembersById?: ReadonlyMap<string, ServerMember>;
+  channelParticipantExternalsById?: ReadonlyMap<string, ChannelExternalMember>;
   threadSummary?: ThreadSummary;
   parentChannelId?: string;
   parentMessageId?: string;
@@ -2149,6 +2236,9 @@ interface MessageItemProps {
   canReact?: boolean;
   /** Render the canonical message row for a narrow, anonymous/read-only DTO. */
   readOnlyProjection?: boolean;
+  /** Extra classes for the row root — per-theme alignment offsets (e.g. the
+   *  avatar/header-icon-column correction) live at the callsite. */
+  className?: string;
   /** Display-only identity from a narrow public DTO. It never grants profile
    * navigation, mention authority, or access to a member/agent store row. */
   readOnlySender?: ReadOnlySenderProjection;
@@ -2165,6 +2255,16 @@ interface MessageItemProps {
    * (thread / DM panels) omit it and keep the full header.
    */
   groupState?: MessageGroupState;
+  /**
+   * Rhythm marker (messageGrouping.followedByFor): the kind of row that
+   * follows this one. The root carries it as `data-followed-by` and the recipe
+   * collapses this row's bottom padding so group interiors read 16 apart while
+   * group breaks stay 24.
+   */
+  followedBy?: "compact" | "group";
+  /** Rhythm marker (messageGrouping.followsSystemFor): this row directly
+   * follows a system note, whose 12/12 rhythm the row completes. */
+  followsSystem?: boolean;
 }
 
 // Isolated subscriber — only re-renders when this agent's activity changes.
@@ -2257,10 +2357,10 @@ function MessageSenderAvatar({
   };
   // Same close-before-navigate rule as onClickAgent above: the hover card must
   // be dismissed before we move, or it stays floating over the destination.
-  const onOpenAgentActivity = (agentId: string) => {
+  const onOpenAgentActivity = useCallback((agentId: string) => {
     previewActionsRef.current?.close();
     onNavigateAgentActivity(agentId);
-  };
+  }, [onNavigateAgentActivity]);
   const onClickHuman = () => {
     if (longPressFiredRef.current) {
       longPressFiredRef.current = false;
@@ -2401,7 +2501,7 @@ function MessageSenderAvatar({
               className={`relative mt-0.5 shrink-0 self-start transition-[filter,transform] duration-75 hover:brightness-90 ${avatarPressed ? "scale-90 brightness-75" : ""}`}
             >
               <AvatarSlot
-                context="panel-header"
+                context="message-row"
                 type="agent"
                 agentAvatarUrl={agentAvatarUrl}
                 badge={!isDeactivatedAgent ? (
@@ -2448,7 +2548,7 @@ function MessageSenderAvatar({
             className={`mt-0.5 shrink-0 self-start transition-[filter,transform] duration-75 hover:brightness-90 ${avatarPressed ? "scale-90 brightness-75" : ""}`}
           >
             <AvatarSlot
-              context="panel-header"
+              context="message-row"
               type="human"
               humanAvatarUrl={avatarUrl}
               gravatarHash={gravatarHash}
@@ -2554,6 +2654,9 @@ interface MessageMarkdownBodyProps {
   onNavigateDm: (channel: Channel) => void;
   onNavigateAgent: (agentId: string) => void;
   onNavigateHuman: (userId: string) => void;
+  /** Click handler for `type:"external"` mentions — opens the
+   *  external-identity panel via `openExternalProfile`. */
+  onNavigateExternal: (profile: ExternalMessageAuthorProjection) => void;
   onNavigateComputer: (machineId: string) => void;
   onOpenThread?: (intent: ThreadRefIntent) => void | Promise<void>;
   resolvingThreadRefKey?: string | null;
@@ -2577,6 +2680,7 @@ interface MessageMarkdownBodyProps {
   readReceiptEnabled: boolean;
   channelParticipantAgentsById?: ReadonlyMap<string, Agent>;
   channelParticipantMembersById?: ReadonlyMap<string, ServerMember>;
+  channelParticipantExternalsById?: ReadonlyMap<string, ChannelExternalMember>;
   unavailableQuotedPermalinkUrl?: string | null;
 }
 
@@ -2594,7 +2698,7 @@ const MessageMarkdownBody = memo(function MessageMarkdownBody(props: MessageMark
     messageSeq: props.readReceiptMessageSeq,
     enabled: props.readReceiptEnabled,
   }), [props.readReceiptChannelId, props.readReceiptMessageSeq, props.readReceiptEnabled]);
-  const body = renderContent(
+  const body = useRenderMessageMarkdown(
     props.content,
     props.channels,
     props.mentionMap,
@@ -2603,6 +2707,7 @@ const MessageMarkdownBody = memo(function MessageMarkdownBody(props: MessageMark
     props.onNavigateDm,
     props.onNavigateAgent,
     props.onNavigateHuman,
+    props.onNavigateExternal,
     props.onNavigateComputer,
     props.onOpenThread,
     props.resolvingThreadRefKey,
@@ -2619,6 +2724,7 @@ const MessageMarkdownBody = memo(function MessageMarkdownBody(props: MessageMark
     formatMessage,
     props.channelParticipantAgentsById,
     props.channelParticipantMembersById,
+    props.channelParticipantExternalsById,
     props.unavailableQuotedPermalinkUrl,
   );
   return (
@@ -2651,7 +2757,7 @@ function taskAssigneeHandle(claimedByName: string) {
 
 const ignoreReadOnlyProjectionNavigation = () => undefined;
 
-const ConnectedMessageItem = memo(function ConnectedMessageItem({ message, mentionMap, channels, previewSenderAgent, previewSenderMember, channelParticipantAgentsById, channelParticipantMembersById, threadSummary, parentChannelId, parentMessageId, hideThreadActions, showThreadFollowAction, linkedTask, senderAvatarTestId, mentionComposerChannelId, reactionParentScopeKey, canReact = true, readOnlyProjection = false, readOnlySender, onReadOnlyNavigateChannel, onBeforeOpenThread, onOpenThread, onOpenProfile, threadSearchHighlightQuery, threadSearchActive, groupState }: MessageItemProps) {
+const ConnectedMessageItem = memo(function ConnectedMessageItem({ message, mentionMap, channels, previewSenderAgent, previewSenderMember, channelParticipantAgentsById, channelParticipantMembersById, channelParticipantExternalsById, threadSummary, parentChannelId, parentMessageId, hideThreadActions, showThreadFollowAction, linkedTask, senderAvatarTestId, mentionComposerChannelId, reactionParentScopeKey, canReact = true, readOnlyProjection = false, readOnlySender, onReadOnlyNavigateChannel, onBeforeOpenThread, onOpenThread, onOpenProfile, threadSearchHighlightQuery, threadSearchActive, groupState, followedBy, followsSystem, className }: MessageItemProps) {
   // Feature flag gate: outside enabled scope, NO comment
   // affordance renders — preview comments context, re: chips, chip counts.
   const commentsEnabled = useAttachmentCommentsEnabled(!readOnlyProjection);
@@ -2728,20 +2834,7 @@ const ConnectedMessageItem = memo(function ConnectedMessageItem({ message, menti
   const isDeactivatedAgent = isAgent && !!senderAgent?.deletedAt;
   const viewerUserId = viewer?.id ?? null;
   const serverId = useServerStore((s) => s.current?.id ?? null);
-  const normalizedMessageV2FlagEnabled = useServerFeatureFlag(
-    SYNC_CORE_MESSAGES_FLAG_KEY,
-    { prefetch: false },
-  ).enabled;
-  const normalizedMessageV2Enabled = normalizedMessageV2FlagEnabled
-    && isMessageV2IngressSoleApplyEligible(message);
-  const reactionViewerOverlay = useStore(
-    reactionReadModelStore,
-    (state) => state.viewerOverlay,
-  );
-  const reactionViewerCompleteMessages = useStore(
-    reactionReadModelStore,
-    (state) => state.viewerCompleteMessages,
-  );
+
   const reactionActorCache = useStore(
     reactionReadModelStore,
     (state) => state.actorCache,
@@ -2835,6 +2928,21 @@ const ConnectedMessageItem = memo(function ConnectedMessageItem({ message, menti
   const setTranslationShowOriginal = useTranslationStore((s) => s.setShowOriginal);
   const messageBodyFontSize = useAppearanceStore((s) => s.messageBodyFontSize);
   const messageBodyFontSizeClass = getMessageBodyFontSizeClass(messageBodyFontSize);
+  const messageNameSizeClass = getMessageNameSizeClass(messageBodyFontSize);
+  const messageMetaSizeClass = getMessageMetaSizeClass(messageBodyFontSize);
+  const messageBodyFontSizeStyle = useMemo(() => ({
+    ...getMessageBodyFontSizeStyle(messageBodyFontSize),
+    userSelect: "text" as const,
+    WebkitUserSelect: "text" as const,
+  }), [messageBodyFontSize]);
+  const imagePreviewAttachments = useMemo(
+    () => (message.attachments ?? []).filter((att) => isPreviewableImageAttachment(att)),
+    [message.attachments],
+  );
+  const lightboxImages = useMemo(
+    () => imagePreviewAttachments.filter((att) => !isOptimisticAttachment(att)),
+    [imagePreviewAttachments],
+  );
   const actionMetadata = message.actionMetadata as { kind?: string } | null | undefined;
   const isActionCardMessage = actionMetadata?.kind === "action-card";
   const translationTargetLanguage = translationSettings.available && translationSettings.preferredTranslationMode !== "off"
@@ -2869,6 +2977,16 @@ const ConnectedMessageItem = memo(function ConnectedMessageItem({ message, menti
         : translationSettings.preferredTranslationDisplay
       : translationSettings.preferredTranslationDisplay;
   const activeTranslationShowOriginal = activeTranslationDisplay === "original";
+  const handleToggleTranslationOriginal = useCallback(() => {
+    setTranslationShowOriginal(message.id, !activeTranslationShowOriginal);
+  }, [setTranslationShowOriginal, message.id, activeTranslationShowOriginal]);
+  const handleRetryTranslation = useCallback(() => {
+    if (!translationTargetLanguage) return;
+    void retryTranslation(message, { targetLanguage: translationTargetLanguage, viewerUserId });
+  }, [translationTargetLanguage, retryTranslation, message, viewerUserId]);
+  const handleUpgradePlan = useCallback(() => {
+    nav.toSettings("server");
+  }, [nav]);
   const isTranslationPending =
     translationEligible &&
     translationSettings.preferredTranslationMode === "auto" &&
@@ -2955,6 +3073,18 @@ const ConnectedMessageItem = memo(function ConnectedMessageItem({ message, menti
       openSource: parentMessageId ? "thread" : "channel",
     });
   }, [message.channelId, message.externalAuthor, message.id, parentMessageId]);
+
+  const handleNavigateExternalMention = useCallback((profile: ExternalMessageAuthorProjection) => {
+    // Thread panels pass the thread's channelId, but the Slack binding lives
+    // on the parent channel — use the same parent-first lookup the avatar
+    // path uses so refresh/back restores the right channel.
+    const channelId = parentChannelId || message.channelId;
+    useProfileStore.getState().openExternalProfile(profile.projectionId, profile, {
+      channelId,
+      openSource: parentMessageId ? "thread" : "channel",
+      isMention: true,
+    });
+  }, [message.channelId, parentChannelId, parentMessageId]);
 
   const handleNavigateComputer = useCallback((machineId: string) => {
     const computer = useMachineStore.getState().machines.find((machine) => machine.id === machineId && machine.isComputer);
@@ -3440,6 +3570,11 @@ const ConnectedMessageItem = memo(function ConnectedMessageItem({ message, menti
     }
   }, [isSaved, message.id]);
 
+  const handleSavedIndicatorClick = useCallback((event: React.MouseEvent) => {
+    event.stopPropagation();
+    handleToggleSave();
+  }, [handleToggleSave]);
+
   // Context menu for "Convert to task"
   const [ctxMenu, setCtxMenu] = useState<{ anchorX: number; anchorY: number; x: number; y: number; source: "pointer" | "touch" } | null>(null);
   const ctxMenuRef = useRef<HTMLDivElement | null>(null);
@@ -3502,7 +3637,6 @@ const ConnectedMessageItem = memo(function ConnectedMessageItem({ message, menti
   const updateTaskStatus = useTaskStore((s) => s.updateTaskStatus);
   const [converting, setConverting] = useState(false);
   const pendingReactionEmojisRef = useRef<Set<string>>(new Set());
-  const pendingReactionTargetsRef = useRef<Map<string, boolean>>(new Map());
   const reactionFailureFlashTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [reactionFailureEmoji, setReactionFailureEmoji] = useState<string | null>(null);
   const [reactionPicker, setReactionPicker] = useState<{ x: number; y: number } | null>(null);
@@ -3520,7 +3654,7 @@ const ConnectedMessageItem = memo(function ConnectedMessageItem({ message, menti
       y: e.clientY,
     });
   };
-  const closeSenderCtxMenu = setSenderCtxMenu.bind(null, null);
+  const closeSenderCtxMenu = useCallback(() => setSenderCtxMenu(null), []);
 
   const handleOpenThreadFromContextMenu = useCallback(() => {
     setCtxMenu(null);
@@ -3755,60 +3889,15 @@ const ConnectedMessageItem = memo(function ConnectedMessageItem({ message, menti
 
   const hasCurrentUserReaction = useCallback((emoji: string) => {
     if (!viewerUserId) return false;
-    if (normalizedMessageV2Enabled && serverId) {
-      const overlay = selectReactionViewerOverlay(
-        reactionViewerOverlay,
-        reactionViewerCompleteMessages,
-        viewerUserId,
-        serverId,
-        message.id,
-        emoji,
-      );
-      return overlay.status === "loaded" && overlay.reactedByMe;
-    }
+
     return reactions.some((reaction) => (
       reaction.emoji === emoji
       && isLegacyMessageReaction(reaction)
       && reaction.reactorIds.includes(viewerUserId)
     ));
   }, [
-    message.id,
-    normalizedMessageV2Enabled,
-    reactionViewerCompleteMessages,
-    reactionViewerOverlay,
     reactions,
-    serverId,
     viewerUserId,
-  ]);
-
-  useEffect(() => {
-    if (!normalizedMessageV2Enabled || !serverId || !viewerUserId) return;
-    const needsHydrate = visibleReactions.some((reaction) => (
-      selectReactionViewerOverlay(
-        reactionViewerOverlay,
-        reactionViewerCompleteMessages,
-        viewerUserId,
-        serverId,
-        message.id,
-        reaction.emoji,
-      ).status === "unknown"
-    ));
-    if (!needsHydrate) return;
-    void hydrateReactionViewerSnapshot({
-      principalId: viewerUserId,
-      serverId,
-      messageId: message.id,
-    }).catch((error) => {
-      console.error("Failed to hydrate reaction viewer state:", error);
-    });
-  }, [
-    message.id,
-    normalizedMessageV2Enabled,
-    reactionViewerCompleteMessages,
-    reactionViewerOverlay,
-    serverId,
-    viewerUserId,
-    visibleReactions,
   ]);
 
   const handleToggleReaction = useCallback(async (emoji: string) => {
@@ -3820,109 +3909,43 @@ const ConnectedMessageItem = memo(function ConnectedMessageItem({ message, menti
       || pendingReactionEmojisRef.current.has(emoji)
     ) return;
     const alreadyReacted = hasCurrentUserReaction(emoji);
-    const nextReacted = !alreadyReacted;
     const previousMessage = message;
-    const previousOverlay = normalizedMessageV2Enabled
-      ? reactionReadModelStore.getState().readViewerOverlay(
-          viewerUserId,
-          serverId,
-          message.id,
-          emoji,
-        )
-      : null;
     const getCurrentMessage = () => (
       useMessageStore.getState().channelMessages[message.channelId]?.find((cached) => cached.id === message.id)
       ?? message
     );
-    const optimisticMessage = normalizedMessageV2Enabled
-      ? buildOptimisticNormalizedReactionMessage(message, emoji, alreadyReacted)
-      : buildOptimisticReactionMessage(
-          message,
-          emoji,
-          alreadyReacted,
-          viewerUserId,
-          viewerReactionName,
-          formatMessage({ id: "message.author.unknown" }),
-        );
+    const optimisticMessage = buildOptimisticReactionMessage(
+      message,
+      emoji,
+      alreadyReacted,
+      viewerUserId,
+      viewerReactionName,
+      formatMessage({ id: "message.author.unknown" }),
+    );
     pendingReactionEmojisRef.current.add(emoji);
-    pendingReactionTargetsRef.current.set(emoji, nextReacted);
-    if (normalizedMessageV2Enabled) {
-      reactionReadModelStore.getState().applyViewerReactionPatch(
-        viewerUserId,
-        serverId,
-        message.id,
-        emoji,
-        nextReacted,
-      );
-    }
+
     useMessageStore.getState().updateMessage(optimisticMessage);
     try {
       const response = await setMessageReaction({
         serverId,
         messageId: message.id,
         emoji,
-        active: nextReacted,
+        active: !alreadyReacted,
       });
       pendingReactionEmojisRef.current.delete(emoji);
-      pendingReactionTargetsRef.current.delete(emoji);
       const currentMessage = getCurrentMessage();
-      const { reactionViewer, ...normalizedAckMessage } = response;
-      if (normalizedMessageV2FlagEnabled && reactionViewer) {
-        applyReactionViewerSnapshotForCurrentPrincipal(reactionViewer, viewerUserId);
-      }
-      const projectedAckMessage = normalizedMessageV2FlagEnabled
-        ? applyMessageReactionsForV2Ingress(normalizedAckMessage, {
-            serverId,
-            principalId: viewerUserId,
-            source: "receiver-private",
-            viewerUserId,
-          })
-        : response;
-      const normalizedResponseMessage = normalizedMessageV2Enabled
-        && !isMessageV2IngressSoleApplyEligible(projectedAckMessage)
-        ? currentMessage
-        : projectedAckMessage;
-      if (normalizedMessageV2FlagEnabled) {
-        for (const [pendingEmoji, pendingActive] of pendingReactionTargetsRef.current) {
-          reactionReadModelStore.getState().applyViewerReactionPatch(
-            viewerUserId,
-            serverId,
-            message.id,
-            pendingEmoji,
-            pendingActive,
-          );
-        }
-      }
       const reconciledMessage = mergeReactionResponsePreservingPending(
         currentMessage,
-        normalizedResponseMessage,
+        response,
         pendingReactionEmojisRef.current,
       );
       useMessageStore.getState().updateMessage(reconciledMessage);
     } catch (err) {
       console.error("Failed to toggle reaction:", err);
       pendingReactionEmojisRef.current.delete(emoji);
-      pendingReactionTargetsRef.current.delete(emoji);
       const currentMessage = getCurrentMessage();
       useMessageStore.getState().updateMessage(replaceReactionForEmoji(currentMessage, previousMessage, emoji));
-      if (normalizedMessageV2Enabled) {
-        if (previousOverlay?.status === "loaded") {
-          reactionReadModelStore.getState().applyViewerReactionPatch(
-            viewerUserId,
-            serverId,
-            message.id,
-            emoji,
-            previousOverlay.reactedByMe,
-          );
-        } else {
-          reactionReadModelStore.getState().clearViewerReactionPatch(
-            viewerUserId,
-            serverId,
-            message.id,
-            emoji,
-          );
-        }
-      }
+
       setReactionFailureEmoji(emoji);
       if (reactionFailureFlashTimerRef.current) {
         clearTimeout(reactionFailureFlashTimerRef.current);
@@ -3933,7 +3956,6 @@ const ConnectedMessageItem = memo(function ConnectedMessageItem({ message, menti
       }, 400);
     } finally {
       pendingReactionEmojisRef.current.delete(emoji);
-      pendingReactionTargetsRef.current.delete(emoji);
     }
   }, [
     formatMessage,
@@ -3941,8 +3963,6 @@ const ConnectedMessageItem = memo(function ConnectedMessageItem({ message, menti
     hasCurrentUserReaction,
     isSystem,
     message,
-    normalizedMessageV2Enabled,
-    normalizedMessageV2FlagEnabled,
     serverId,
     viewerReactionName,
     viewerUserId,
@@ -3983,6 +4003,16 @@ const ConnectedMessageItem = memo(function ConnectedMessageItem({ message, menti
   const openReactionPicker = useCallback((target: HTMLElement) => {
     positionReactionPickerFromRect(target.getBoundingClientRect());
   }, [positionReactionPickerFromRect]);
+
+  const handleReactionClick = useCallback((e: React.MouseEvent) => {
+    e.stopPropagation();
+    setCtxMenu(null);
+    if (reactionPicker) {
+      closeReactionPicker();
+    } else {
+      openReactionPicker(e.currentTarget as HTMLElement);
+    }
+  }, [reactionPicker, closeReactionPicker, openReactionPicker]);
 
   const handleQuickReactionClick = useCallback((emoji: string) => {
     closeReactionPicker();
@@ -4237,6 +4267,29 @@ const ConnectedMessageItem = memo(function ConnectedMessageItem({ message, menti
     });
   }, [handleDownloadAttachment, message.id, message.channelId, message.senderId, message.senderType]);
 
+  // Single stable open handler for the "other attachments" cards — the
+  // image/html/video/document branching used to live in per-item closures.
+  const handleOpenAttachmentCard = useCallback((att: NonNullable<Message["attachments"]>[number]) => {
+    const isOptimistic = isOptimisticAttachment(att);
+    if (isPreviewableImageAttachment(att) && !isOptimistic) {
+      const imageIndex = lightboxImages.findIndex((img) => img.id === att.id);
+      // No comment contexts: image comments descoped (cindyz 6/11).
+      useImageLightboxStore.getState().open(lightboxImages, imageIndex >= 0 ? imageIndex : 0);
+      return;
+    }
+    if (isPreviewableHtmlAttachment(att) && !isOptimistic) {
+      void handleOpenHtmlPreview(att);
+      return;
+    }
+    if (isPreviewableVideoAttachment(att) && !isOptimistic) {
+      void handleOpenVideoPreview(att);
+      return;
+    }
+    if (isPreviewableDocumentAttachment(att) && !isOptimistic) {
+      void handleOpenDocumentPreview(att);
+    }
+  }, [lightboxImages, handleOpenHtmlPreview, handleOpenVideoPreview, handleOpenDocumentPreview]);
+
   const handleOpenForwardedAttachment = useCallback((snapshot: ForwardedBundleAttachmentSnapshot) => {
     if (!snapshot.id) return;
     const attachment: NonNullable<Message["attachments"]>[number] = {
@@ -4263,7 +4316,6 @@ const ConnectedMessageItem = memo(function ConnectedMessageItem({ message, menti
     }
   }, [handleDownloadAttachment, handleOpenAudioPreview, handleOpenDocumentPreview, handleOpenHtmlPreview, handleOpenVideoPreview]);
 
-
   // Close context menu on click outside
   const handleCloseCtx = useCallback(() => {
     setCtxMenu(null);
@@ -4274,6 +4326,59 @@ const ConnectedMessageItem = memo(function ConnectedMessageItem({ message, menti
       ctxMenuShieldTimerRef.current = null;
     }
   }, [closeReactionPicker]);
+
+  const reactionPickerPopupStyle = useMemo(() => reactionPicker
+    ? { left: reactionPicker.x, top: reactionPicker.y }
+    : undefined, [reactionPicker]);
+  const reactionPopoverPopupStyle = useMemo(() => reactionPopover
+    ? { left: reactionPopover.x, top: reactionPopover.y }
+    : undefined, [reactionPopover]);
+  const ctxMenuPopupStyle = useMemo(() => ctxMenu
+    ? { left: ctxMenu.x, top: ctxMenu.y, maxHeight: "calc(100dvh - 16px)", overflowY: "auto" as const }
+    : undefined, [ctxMenu]);
+  const senderCtxMenuPopupStyle = useMemo(() => senderCtxMenu
+    ? { left: senderCtxMenu.x, top: senderCtxMenu.y }
+    : undefined, [senderCtxMenu]);
+  const handleSaveFromMenu = useCallback(() => {
+    handleToggleSave();
+    setCtxMenu(null);
+  }, [handleToggleSave]);
+  const handleCopySenderDisplayName = useCallback(() => {
+    void navigator.clipboard.writeText(senderDisplayName);
+    setSenderCtxMenu(null);
+  }, [senderDisplayName]);
+  const handleCopySenderHandle = useCallback(() => {
+    if (!senderHandleText) return;
+    void navigator.clipboard.writeText(senderHandleText);
+    setSenderCtxMenu(null);
+  }, [senderHandleText]);
+  const handleCopyMarkdown = useCallback(() => {
+    void navigator.clipboard.writeText(message.content).then(() => setCtxMenu(null));
+  }, [message.content]);
+  // "Select Message" (image-share) — the three entry modes (channel timeline,
+  // thread reply row, thread parent in ThreadPanel) select only what is
+  // mounted; the contract stays "what you see is what you share".
+  const handleSelectShare = useCallback(() => {
+    setCtxMenu(null);
+    if (parentMessageId) {
+      // Thread reply row → thread mode, clicked reply only.
+      const threadCh = message.channelId; // replies live in the thread channel
+      enterThreadSelection(
+        threadCh,
+        parentMessageId,
+        parentChannelId || message.channelId,
+        [message.id],
+      );
+      return;
+    }
+    if (hideThreadActions && message.threadId) {
+      enterThreadSelection(message.threadId, message.id, message.channelId, [message.id]);
+      return;
+    }
+    // Channel timeline: just this message. To share a thread the user opens
+    // the panel and triggers select from there.
+    enterSelection(message.channelId, [message.id]);
+  }, [parentMessageId, parentChannelId, message.channelId, message.threadId, message.id, hideThreadActions, enterThreadSelection, enterSelection]);
 
   useEffect(() => {
     if (!ctxMenu) return;
@@ -4348,14 +4453,16 @@ const ConnectedMessageItem = memo(function ConnectedMessageItem({ message, menti
       data-selected={isSelectedAsThreadParent || isSelected ? "true" : undefined}
       data-selection-active={selectionScopedHere ? "true" : undefined}
       data-highlighted={isHighlighted ? "true" : undefined}
-      className={isHighlighted
+      data-followed-by={followedBy}
+      data-follows-system={followsSystem ? "true" : undefined}
+      className={`${isHighlighted
  ? "bg-info/10 ring-1 ring-inset ring-info/50 theme-brutal:bg-brutal-cyan/25 theme-brutal:shadow-brutal"
  : ctxMenu || reactionPicker
  // Brutal keeps its framed "menu open" card. Elegant has no frame here: rui's
  // data-popup-open state tints the row the same way hover does (task #694 —
  // a strong border drew a black box around the message).
  ? "theme-brutal:border-black theme-brutal:bg-white theme-brutal:shadow-brutal-sm"
- : undefined}
+ : ""} ${messageBodyFontSize === "lg" ? "[--mi-avatar:2.125rem]" : ""} ${className ?? ""}`.trim()}
     >
       {selectionScopedHere && (
         <MessageMultiSelectCheckbox
@@ -4381,15 +4488,7 @@ const ConnectedMessageItem = memo(function ConnectedMessageItem({ message, menti
         isSystem={isSystem}
         canReact={canReact}
         onReplyInThread={handleReplyInThread}
-        onReactionClick={(e) => {
-          e.stopPropagation();
-          setCtxMenu(null);
-          if (reactionPicker) {
-            closeReactionPicker();
-          } else {
-            openReactionPicker(e.currentTarget);
-          }
-        }}
+        onReactionClick={handleReactionClick}
         onToggleSave={handleToggleSave}
       /> : null}
       {showSelectedGroupedHeader ? (
@@ -4447,9 +4546,20 @@ const ConnectedMessageItem = memo(function ConnectedMessageItem({ message, menti
       <MessageItemContent>
         {groupState?.showName === false && !showSelectedGroupedHeader ? null : (
           <MessageItemHeader>
+          {/* Left cluster: name · [model · badges · description]. Space is
+              given up in this order: description, then model, then name
+              (Artea, task #743). The name never shrinks while the tail has
+              room; it only truncates at max-w-full when it alone is wider than
+              the cluster. The tail is a nested flex box so the name gets NO
+              share of the shrink — a weighted shrink (shrink vs shrink-[999])
+              still shaves a sub-pixel off the name and shows "C…". The time
+              and status stay OUTSIDE the cluster, so a narrow panel can never
+              clip them. */}
+          <span className="flex min-w-0 items-center gap-2 overflow-hidden in-data-[theme=elegant]:gap-1.5">
           {senderMention ? (
             <Tooltip content={formatMessage({ id: "message.messageItem.mentionSender" }, { name: senderMention.name })}>
             <MessageItemSenderButton
+              className={`max-w-full shrink-0 ${messageNameSizeClass} in-data-[theme=elegant]:leading-none`}
               onClick={handleSenderNameMention}
               onContextMenu={readOnlyProjection ? undefined : handleSenderContextMenu}
               data-testid={`message-sender-mention-${message.id}`}
@@ -4459,16 +4569,18 @@ const ConnectedMessageItem = memo(function ConnectedMessageItem({ message, menti
             </Tooltip>
           ) : (
             <MessageItemSender
+              className={`max-w-full shrink-0 ${messageNameSizeClass} in-data-[theme=elegant]:leading-none`}
               onContextMenu={readOnlyProjection ? undefined : handleSenderContextMenu}
             >
               {senderDisplayName}
             </MessageItemSender>
           )}
+          <span data-testid={`message-sender-tail-${message.id}`} className="flex min-w-0 items-center gap-2 overflow-hidden in-data-[theme=elegant]:gap-1.5">
           {agentModelLabelText && (
             <Tooltip content={agentModelLabelText}>
             <MessageItemMeta
               render={<span />}
-              className="shrink-0 whitespace-nowrap text-[11px]"
+              className={`min-w-0 max-w-full shrink-0 truncate ${messageMetaSizeClass} in-data-[theme=elegant]:leading-none`}
               data-testid={`message-sender-model-${message.id}`}
             >
               {agentModelLabelText}
@@ -4489,13 +4601,15 @@ const ConnectedMessageItem = memo(function ConnectedMessageItem({ message, menti
             <Tooltip content={senderSubtitle}>
             <MessageItemMeta
               render={<span />}
-              className="min-w-0 truncate"
+              className={`min-w-0 shrink truncate ${messageMetaSizeClass} in-data-[theme=elegant]:leading-none`}
             >
               {senderSubtitle}
             </MessageItemMeta>
             </Tooltip>
           )}
-          <MessageItemTime render={<span />} className="shrink-0 whitespace-nowrap">{time}</MessageItemTime>
+          </span>
+          </span>
+          <MessageItemTime render={<span />} className={`shrink-0 whitespace-nowrap ${messageMetaSizeClass} in-data-[theme=elegant]:leading-none`}>{time}</MessageItemTime>
           {converting && (
             <MessageItemInlineStatus render={<span />}>
               {formatMessage({ id: "message.messageItem.converting" })}
@@ -4522,12 +4636,8 @@ const ConnectedMessageItem = memo(function ConnectedMessageItem({ message, menti
           data-message-id={message.id}
           data-quote-channel-id={quoteComposerChannelId}
           data-message-font-size={messageBodyFontSize}
-          className={messageBodyFontSizeClass}
-          style={{
-            ...getMessageBodyFontSizeStyle(messageBodyFontSize),
-            userSelect: "text",
-            WebkitUserSelect: "text",
-          }}
+          className={`${messageBodyFontSizeClass}${followedBy && !inlineReplySurfaceReplacesBadge ? " group-data-[followed-by]/message:mb-0 group-data-[followed-by]/message:[&>:last-child]:mb-0 group-data-[followed-by]/message:[&>:last-child>:last-child]:mb-0 group-data-[followed-by]/message:[&>:last-child>:last-child_li:last-child]:mb-0 group-data-[followed-by]/message:[&>:last-child>:last-child:has(pre)]:mb-px" : ""}`}
+          style={messageBodyFontSizeStyle}
         >
           {(() => {
             // Operation card (B-mode): the message body IS the card. Skip
@@ -4562,11 +4672,13 @@ const ConnectedMessageItem = memo(function ConnectedMessageItem({ message, menti
                 structuredMentionMap={effectiveStructuredMentionMap}
                 channelParticipantAgentsById={channelParticipantAgentsById}
                 channelParticipantMembersById={channelParticipantMembersById}
+                channelParticipantExternalsById={channelParticipantExternalsById}
                 unavailableQuotedPermalinkUrl={unavailableQuotedPermalinkUrl}
                 onNavigateChannel={readOnlyProjection ? onReadOnlyNavigateChannel ?? ignoreReadOnlyProjectionNavigation : handleNavigateChannel}
                 onNavigateDm={readOnlyProjection ? ignoreReadOnlyProjectionNavigation : handleNavigateDm}
                 onNavigateAgent={readOnlyProjection ? ignoreReadOnlyProjectionNavigation : handleNavigateAgent}
                 onNavigateHuman={readOnlyProjection ? ignoreReadOnlyProjectionNavigation : handleNavigateHuman}
+                onNavigateExternal={readOnlyProjection ? ignoreReadOnlyProjectionNavigation : handleNavigateExternalMention}
                 onNavigateComputer={readOnlyProjection ? ignoreReadOnlyProjectionNavigation : handleNavigateComputer}
                 onOpenThread={readOnlyProjection ? undefined : handleOpenThreadRef}
                 resolvingThreadRefKey={resolvingThreadRefKey}
@@ -4606,11 +4718,13 @@ const ConnectedMessageItem = memo(function ConnectedMessageItem({ message, menti
                 structuredMentionMap={effectiveStructuredMentionMap}
                 channelParticipantAgentsById={channelParticipantAgentsById}
                 channelParticipantMembersById={channelParticipantMembersById}
+                channelParticipantExternalsById={channelParticipantExternalsById}
                 unavailableQuotedPermalinkUrl={unavailableQuotedPermalinkUrl}
                 onNavigateChannel={readOnlyProjection ? onReadOnlyNavigateChannel ?? ignoreReadOnlyProjectionNavigation : handleNavigateChannel}
                 onNavigateDm={readOnlyProjection ? ignoreReadOnlyProjectionNavigation : handleNavigateDm}
                 onNavigateAgent={readOnlyProjection ? ignoreReadOnlyProjectionNavigation : handleNavigateAgent}
                 onNavigateHuman={readOnlyProjection ? ignoreReadOnlyProjectionNavigation : handleNavigateHuman}
+                onNavigateExternal={readOnlyProjection ? ignoreReadOnlyProjectionNavigation : handleNavigateExternalMention}
                 onNavigateComputer={readOnlyProjection ? ignoreReadOnlyProjectionNavigation : handleNavigateComputer}
                 onOpenThread={readOnlyProjection ? undefined : handleOpenThreadRef}
                 resolvingThreadRefKey={resolvingThreadRefKey}
@@ -4653,9 +4767,7 @@ const ConnectedMessageItem = memo(function ConnectedMessageItem({ message, menti
           return renderWithImageInlineFallback(imageFallbackKey, (imageFallbackUrls) => {
             // Stryker disable all: pre-existing attachment classification moved under the fallback seam.
             if (!message.attachments) return null;
-            const imageAttachments = message.attachments.filter((att) => isPreviewableImageAttachment(att));
-            const lightboxImages = imageAttachments.filter((att) => !isOptimisticAttachment(att));
-            const renderedImages = imageAttachments.filter((att) => !!getImageGalleryPreviewSrc(att, imageFallbackUrls));
+            const renderedImages = imagePreviewAttachments.filter((att) => !!getImageGalleryPreviewSrc(att, imageFallbackUrls));
             const imageRows = buildMessageImageGalleryRows(renderedImages);
             const videoAttachments = message.attachments.filter((att) => isPreviewableVideoAttachment(att));
             const audioAttachments = message.attachments.filter((att) => isPreviewableAudioAttachment(att));
@@ -4667,8 +4779,10 @@ const ConnectedMessageItem = memo(function ConnectedMessageItem({ message, menti
 
           return (
             <div className="mt-1 space-y-2">
+              {/* Josh's ending matrix: image-terminated rows sit 1px short of
+                  the rhythm; same one-pixel knife as the reply card (#9444). */}
               {imageRows.length > 0 && (
-                <MessageImageGallery>
+                <MessageImageGallery className="group-data-[followed-by]/message:mb-px">
                   {imageRows.map((row, rowIndex) => (
                     <MessageImageGalleryRow
                       key={`${row.items.map((item) => renderedImages[item.index].id).join("-")}-${rowIndex}`}
@@ -4678,62 +4792,17 @@ const ConnectedMessageItem = memo(function ConnectedMessageItem({ message, menti
                         const att = renderedImages[item.index];
                         const previewSrc = getImageGalleryPreviewSrc(att, imageFallbackUrls);
                         if (!previewSrc) return null;
-                        const isOptimistic = isOptimisticAttachment(att);
-                        const imageIndex = lightboxImages.findIndex((img) => img.id === att.id);
-                        const handleOpenImage = () => {
-                          if (!isOptimistic && imageIndex >= 0) {
-                            // Image comments are descoped for now (cindyz
-                            // 6/11): no comment contexts → the lightbox
-                            // renders no comment affordance. Re-enable by
-                            // passing buildLightboxCommentContexts(...) when
-                            // image region anchors get designed.
-                            useImageLightboxStore.getState().open(lightboxImages, imageIndex);
-                          }
-                        };
-                        const handleDownloadImage = (event: MouseEvent<HTMLButtonElement>) => {
-                          event.preventDefault();
-                          event.stopPropagation();
-                          void handleDownloadAttachment(att);
-                        };
                         return (
-                          <Tooltip key={att.id} content={att.filename}>
-                          <MessageImageGalleryItem
-                            className="bg-brutal-cream/60"
+                          <GalleryImageItem
+                            key={att.id}
+                            att={att}
+                            previewSrc={previewSrc}
+                            isOptimistic={isOptimisticAttachment(att)}
+                            imageIndex={lightboxImages.findIndex((img) => img.id === att.id)}
+                            lightboxImages={lightboxImages}
                             layout={item}
-                          >
-                            <img
-                              src={previewSrc}
-                              alt={att.filename}
-                              data-select-screenshot-attachment-id={att.id}
-                              data-select-screenshot-attachment-width={att.width ?? undefined}
-                              data-select-screenshot-attachment-height={att.height ?? undefined}
-                              width={att.width ?? undefined}
-                              height={att.height ?? undefined}
-                              loading="lazy"
-                            />
-                            {isOptimistic && (
-                              <MessageImageGalleryOverlay>
-                                <Spinner size="md" variant="inverse" aria-label={formatMessage({ id: "common.loadingLabel" })} />
-                              </MessageImageGalleryOverlay>
-                            )}
-                            {!isOptimistic && (
-                              <MessageImageGalleryPreview
-                                onClick={handleOpenImage}
-                                aria-label={formatMessage({ id: "message.messageItem.previewFile" }, { filename: att.filename })}
-                              />
-                            )}
-                            {!isOptimistic && (
-                              <MessageImageGalleryAction
-                                onClick={handleDownloadImage}
-                                data-message-affordance="image-download"
-                                aria-label={formatMessage({ id: "message.messageItem.downloadFile" }, { filename: att.filename })}
-                              >
-                                <Download size={12} />
-                              </MessageImageGalleryAction>
-                            )}
-
-                          </MessageImageGalleryItem>
-                          </Tooltip>
+                            onDownload={handleDownloadAttachment}
+                          />
                         );
                       })}
                     </MessageImageGalleryRow>
@@ -4741,21 +4810,16 @@ const ConnectedMessageItem = memo(function ConnectedMessageItem({ message, menti
                 </MessageImageGallery>
               )}
               {videoAttachments.length > 0 && (
-                <div className="space-y-2">
+                <div className="space-y-2 group-data-[followed-by]/message:mb-px">
                   {videoAttachments.map((att) => {
                     const isOptimistic = isOptimisticAttachment(att);
-                    const handleDownload = async () => {
-                      await handleDownloadAttachment(att);
-                    };
                     return (
                       <InlineVideoAttachmentCard
                         key={att.id}
                         attachment={att}
                         isOptimistic={isOptimistic}
-                        onOpenPreview={() => {
-                          if (!isOptimistic) void handleOpenVideoPreview(att);
-                        }}
-                        onDownload={handleDownload}
+                        onOpenPreview={handleOpenVideoPreview}
+                        onDownload={handleDownloadAttachment}
                       />
                     );
                   })}
@@ -4765,48 +4829,25 @@ const ConnectedMessageItem = memo(function ConnectedMessageItem({ message, menti
                 <div className="space-y-2">
                   {audioAttachments.map((att) => {
                     const isOptimistic = isOptimisticAttachment(att);
-                    const handleDownload = async () => {
-                      await handleDownloadAttachment(att);
-                    };
                     return (
                       <InlineAudioAttachmentCard
                         key={att.id}
                         attachment={att}
                         isOptimistic={isOptimistic}
-                        onDownload={handleDownload}
+                        onDownload={handleDownloadAttachment}
                       />
                     );
                   })}
                 </div>
               )}
               {otherAttachments.length > 0 && (
-                <MessageAttachmentGroup className="max-w-[22.5rem]">
+                <MessageAttachmentGroup className="max-w-[22.5rem] group-data-[followed-by]/message:mb-px">
                   {otherAttachments.map((att) => {
                     const isImage = isPreviewableImageAttachment(att);
                     const isHtml = isPreviewableHtmlAttachment(att);
                     const isVideo = isPreviewableVideoAttachment(att);
-                    const isDocument = isPreviewableDocumentAttachment(att);
                     const isOptimistic = isOptimisticAttachment(att);
                     const isHtmlLoading = htmlPreviewLoadingId === att.id || videoPreviewLoadingId === att.id || documentPreviewLoadingId === att.id;
-                    const handleClick = () => {
-                      if (isImage && !isOptimistic) {
-                        const imageIndex = lightboxImages.findIndex((img) => img.id === att.id);
-                        // No comment contexts: image comments descoped (cindyz 6/11).
-                        useImageLightboxStore.getState().open(lightboxImages, imageIndex >= 0 ? imageIndex : 0);
-                      } else if (isHtml && !isOptimistic) {
-                        void handleOpenHtmlPreview(att);
-                      } else if (isVideo && !isOptimistic) {
-                        void handleOpenVideoPreview(att);
-                      } else {
-                        // Stryker disable next-line ConditionalExpression,LogicalOperator,BooleanLiteral,BlockStatement: unchanged document-preview branch is covered by document preview contracts.
-                        if (isDocument && !isOptimistic) {
-                          void handleOpenDocumentPreview(att);
-                        }
-                      }
-                    };
-                    const handleDownload = async () => {
-                      await handleDownloadAttachment(att);
-                    };
                     return (
                       <AttachmentCard
                         key={att.id}
@@ -4817,8 +4858,8 @@ const ConnectedMessageItem = memo(function ConnectedMessageItem({ message, menti
                         isVideo={isVideo}
                         isAudio={false}
                         isHtmlLoading={isHtmlLoading}
-                        onClick={handleClick}
-                        onDownload={handleDownload}
+                        onClick={handleOpenAttachmentCard}
+                        onDownload={handleDownloadAttachment}
                       />
                     );
                   })}
@@ -4833,12 +4874,9 @@ const ConnectedMessageItem = memo(function ConnectedMessageItem({ message, menti
 	            <TranslationIndicator
 	              entry={activeTranslationEntry}
 	              showOriginal={activeTranslationShowOriginal}
-	              onToggleOriginal={() => setTranslationShowOriginal(message.id, !activeTranslationShowOriginal)}
-	              onRetry={() => {
-	                if (!translationTargetLanguage) return;
-	                void retryTranslation(message, { targetLanguage: translationTargetLanguage, viewerUserId });
-	              }}
-	              onUpgrade={() => nav.toSettings("server")}
+	              onToggleOriginal={handleToggleTranslationOriginal}
+	              onRetry={handleRetryTranslation}
+	              onUpgrade={handleUpgradePlan}
 	            />
 	          </div>
 	        ) : null}
@@ -4852,13 +4890,18 @@ const ConnectedMessageItem = memo(function ConnectedMessageItem({ message, menti
           hasThreadFooterMetadata
           // Stryker restore all
         ) ? (
-          <MessageItemFooter className="mt-1.5 flex flex-wrap items-center gap-1.5">
+          // The footer can end a message (saved marker, reactions) — same
+          // one-pixel knife as the other short endings (Josh's matrix).
+          <MessageItemFooter className="mt-1.5 flex flex-wrap items-center gap-1.5 group-data-[followed-by]/message:mb-px">
             {linkedTask && (() => {
               const fullLabel = linkedTask.claimedByName ? `task #${linkedTask.taskNumber} @${linkedTask.claimedByName}` : `task #${linkedTask.taskNumber}`;
               const assignee = linkedTask.claimedByName
                 ? taskAssigneeHandle(linkedTask.claimedByName)
                 : null;
-              // Source of truth: STATUS_BADGE_CONFIG in taskStatusUi.ts.
+              // Source of truth: rui's task-status appearance (the legacy
+              // inline STATUS_BADGE_CONFIG was removed — the footer chip is rui's
+              // `TaskChip`, coloured from the same `task-status-*` tokens as
+              // every other surface).
               // Before this dedup, the below-content variant had its own
               // inline 4-entry config (no `closed`) and silently fell
               // through to todo styling for closed tasks — see
@@ -4907,10 +4950,7 @@ const ConnectedMessageItem = memo(function ConnectedMessageItem({ message, menti
                 render={<button type="button" />}
                 data-message-affordance="saved-badge"
                 aria-label={formatMessage({ id: "message.messageItem.removeFromSaved" })}
-                onClick={(event) => {
-                  event.stopPropagation();
-                  handleToggleSave();
-                }}
+                onClick={handleSavedIndicatorClick}
               >
                 <Bookmark size={10} fill="currentColor" className="shrink-0" />
                 <span className="shrink-0">{formatMessage({ id: "message.messageItem.saved" })}</span>
@@ -5048,13 +5088,10 @@ const ConnectedMessageItem = memo(function ConnectedMessageItem({ message, menti
         className="fixed z-[80] min-w-0 flex items-center gap-0.5 px-1.5 py-1"
         data-message-affordance="reaction-picker"
         {...dismissLayerProps}
-        style={{
-          left: reactionPicker.x,
-          top: reactionPicker.y,
-        }}
+        style={reactionPickerPopupStyle}
         onMouseEnter={handleReactionPickerBoundaryEnter}
         onMouseLeave={handleReactionPickerBoundaryLeave}
-        onClick={(e) => e.stopPropagation()}
+        onClick={stopClickPropagation}
       >
         {QUICK_REACTION_EMOJIS.map((emoji) => (
           <Tooltip key={emoji} content={formatMessage({ id: "message.messageItem.reactWith" }, { emoji })}>
@@ -5075,10 +5112,7 @@ const ConnectedMessageItem = memo(function ConnectedMessageItem({ message, menti
         role="tooltip"
         data-message-affordance="reaction-reactors-popover"
         className="pointer-events-none fixed z-[80] min-w-0 max-w-[280px] px-2 py-1.5 text-xs font-bold text-foreground-strong theme-brutal:text-black"
-        style={{
-          left: reactionPopover.x,
-          top: reactionPopover.y,
-        }}
+        style={reactionPopoverPopupStyle}
       >
         {reactionPopover.visibleNames.length > 0 ? (
           <div className="flex max-w-60 flex-wrap items-center gap-y-0.5">
@@ -5113,7 +5147,7 @@ const ConnectedMessageItem = memo(function ConnectedMessageItem({ message, menti
           className="fixed z-[60] select-none"
           role="menu"
           aria-label={formatMessage({ id: "message.messageItem.messageContextMenu" })}
-          style={{ left: ctxMenu.x, top: ctxMenu.y, maxHeight: "calc(100dvh - 16px)", overflowY: "auto" }}
+          style={ctxMenuPopupStyle}
         >
           <>
           {/* Reaction quick row — shown on both desktop right-click ("pointer")
@@ -5160,7 +5194,7 @@ const ConnectedMessageItem = memo(function ConnectedMessageItem({ message, menti
           </MenuItem>
           <MenuItem
             icon={<Copy size={14} />}
-            onClick={() => { navigator.clipboard.writeText(message.content).then(() => setCtxMenu(null)); }}
+            onClick={handleCopyMarkdown}
           >
             {formatMessage({ id: "message.messageItem.copyMarkdown" })}
           </MenuItem>
@@ -5204,27 +5238,6 @@ const ConnectedMessageItem = memo(function ConnectedMessageItem({ message, menti
             //     (`hideThreadActions` plus a non-empty `threadId` on the
             //     parent) → thread mode, anchored at this message, with only
             //     the parent selected.
-            const onSelectShare = () => {
-              setCtxMenu(null);
-              if (parentMessageId) {
-                // Thread reply row → thread mode, clicked reply only.
-                const threadCh = message.channelId; // replies live in the thread channel
-                enterThreadSelection(
-                  threadCh,
-                  parentMessageId,
-                  parentChannelId || message.channelId,
-                  [message.id],
-                );
-                return;
-              }
-              if (hideThreadActions && message.threadId) {
-                enterThreadSelection(message.threadId, message.id, message.channelId, [message.id]);
-                return;
-              }
-              // Channel timeline: just this message. To share a thread the
-              // user opens the panel and triggers select from there.
-              enterSelection(message.channelId, [message.id]);
-            };
             // System messages cannot be selected. Guests also cannot enter
             // the image-share flow because it persists a public artifact;
             // their server-side role check remains the authoritative guard.
@@ -5232,7 +5245,7 @@ const ConnectedMessageItem = memo(function ConnectedMessageItem({ message, menti
             return (
               <MenuItem
                 icon={<CheckCircle size={14} />}
-                onClick={onSelectShare}
+                onClick={handleSelectShare}
               >
                 {formatMessage({ id: "message.messageItem.selectMessage" })}
               </MenuItem>
@@ -5249,7 +5262,7 @@ const ConnectedMessageItem = memo(function ConnectedMessageItem({ message, menti
           )}
           <MenuItem
             icon={isSaved ? <BookmarkMinus size={14} /> : <Bookmark size={14} />}
-            onClick={() => { handleToggleSave(); setCtxMenu(null); }}
+            onClick={handleSaveFromMenu}
           >
             {isSaved ? formatMessage({ id: "message.messageItem.removeFromSaved" }) : formatMessage({ id: "message.messageItem.saveMessage" })}
           </MenuItem>
@@ -5295,24 +5308,18 @@ const ConnectedMessageItem = memo(function ConnectedMessageItem({ message, menti
           className="fixed z-[60] select-none"
           role="menu"
           aria-label={formatMessage({ id: "message.messageItem.senderContextMenu" })}
-          style={{ left: senderCtxMenu.x, top: senderCtxMenu.y }}
+          style={senderCtxMenuPopupStyle}
         >
           <MenuItem
             icon={<Copy size={14} />}
-            onClick={() => {
-              void navigator.clipboard.writeText(senderDisplayName);
-              setSenderCtxMenu(null);
-            }}
+            onClick={handleCopySenderDisplayName}
           >
             {formatMessage({ id: "message.messageItem.copyName" })}
           </MenuItem>
           {senderHandleText ? (
             <MenuItem
               icon={<Copy size={14} />}
-              onClick={() => {
-                void navigator.clipboard.writeText(senderHandleText);
-                setSenderCtxMenu(null);
-              }}
+              onClick={handleCopySenderHandle}
             >
               {formatMessage({ id: "message.messageItem.copyHandle" })}
             </MenuItem>

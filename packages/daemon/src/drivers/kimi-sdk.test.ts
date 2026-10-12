@@ -2038,3 +2038,59 @@ test("a resume failure that is not a session problem surfaces instead of silentl
   assert.match((ioError as Error).message, /EIO/);
   assert.equal(ioCreated, 0, "no fresh session for an unknown resume error");
 });
+
+test("task #365: a launch that turns stale while the kimi factory prepares never resumes or creates an SDK session", async () => {
+  for (const sessionId of [null, "existing-session"]) {
+    const { ctx: base, home } = makeTempCtx({ sessionId });
+    const { harness, createCalls, resumeCalls } = makeCapturingHarness();
+    const deps = makeFakeDeps(home, harness);
+    const prepare = deps.prepareTransport as unknown as (...args: unknown[]) => Promise<unknown>;
+    let release!: () => void;
+    const preparing = new Promise<void>((resolve) => { release = resolve; });
+    deps.prepareTransport = (async (...args: unknown[]) => {
+      await preparing;
+      return prepare(...args);
+    }) as never;
+    let stale = false;
+    const refused = new Error("launch claimed against an earlier connection");
+    const ctx: SpawnContext = { ...base, assertLaunchCurrent: () => { if (stale) throw refused; } };
+
+    const pending = createKimiAgentSessionForContext(ctx, "sess-stale", deps);
+    stale = true; // the connection changes while the factory prepares
+    release();
+    await assert.rejects(pending, (err) => err === refused, `sessionId=${sessionId}: the typed stale error reaches the caller`);
+    assert.deepEqual([createCalls.length, resumeCalls.length], [0, 0], `sessionId=${sessionId}: no SDK session`);
+
+    // Positive control: the same factory creates or resumes while the launch is current.
+    stale = false;
+    const ok = await createKimiAgentSessionForContext({ ...base, assertLaunchCurrent: () => {} }, "sess-ok", makeFakeDeps(home, harness));
+    assert.ok(ok.session);
+    assert.equal(createCalls.length + resumeCalls.length, 1, `sessionId=${sessionId}: control reached the SDK`);
+  }
+});
+
+test("task #365: a launch that turns stale during a failed kimi resume does not fall through to a fresh SDK session", async () => {
+  for (const turnsStale of [true, false]) {
+    const { ctx: base, home } = makeTempCtx({ sessionId: "resume-missing" });
+    let stale = false;
+    let created = 0;
+    const refused = new Error("launch claimed against an earlier connection");
+    const harness = {
+      createSession: async () => { created += 1; return { id: "fresh", setModel: async () => {} }; },
+      resumeSession: async () => {
+        // The connection changes while the resume is in flight; the resume then fails as recoverable.
+        if (turnsStale) stale = true;
+        throw new KimiError("session.not_found", 'Session "resume-missing" was not found');
+      },
+    } as unknown as KimiHarness;
+    const ctx: SpawnContext = { ...base, assertLaunchCurrent: () => { if (stale) throw refused; } };
+    const result = createKimiAgentSessionForContext(ctx, "resume-missing", makeFakeDeps(home, harness));
+    if (turnsStale) {
+      await assert.rejects(result, (err) => err === refused, "the typed stale error, not a Kimi start error");
+      assert.equal(created, 0, "no fresh session after the launch turned stale");
+    } else {
+      await result;
+      assert.equal(created, 1, "control: a current launch falls back to a fresh session");
+    }
+  }
+});

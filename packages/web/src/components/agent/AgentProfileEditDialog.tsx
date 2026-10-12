@@ -1,4 +1,4 @@
-import { useEffect, useId, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { useIntl } from "react-intl";
 import { Upload, X } from "lucide-react";
 import {
@@ -108,11 +108,36 @@ export default function AgentProfileEditDialog({ agent, open, field, onClose, ro
   const dirty = nameChanged || descriptionChanged || roleChanged || avatarChanged;
   const descriptionTooLong = field === "description" && trimmedDescription.length > MAX_AGENT_DESCRIPTION_LENGTH;
 
-  const requestClose = () => {
+  const requestClose = useCallback(() => {
     if (saving) return;
     if (dirty) setConfirmDiscard(true);
     else onClose();
-  };
+  }, [saving, dirty, onClose]);
+
+  const handleDialogOpenChange = useCallback((next: boolean) => {
+    if (!next) requestClose();
+  }, [requestClose]);
+
+  const handleDisplayNameChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    setDisplayName(e.target.value.replace(/[\r\n]+/g, " "));
+  }, []);
+
+  const handleDescriptionChange = useCallback((e: React.ChangeEvent<HTMLTextAreaElement>) => {
+    setDescription(e.target.value);
+  }, []);
+
+  const handleRoleChange = useCallback((next: string) => {
+    if (next === "admin" || next === "member") setRole(next);
+  }, []);
+
+  const handleConfirmDiscardChange = useCallback((next: boolean) => {
+    if (!next) setConfirmDiscard(false);
+  }, []);
+
+  const handleDiscardClick = useCallback(() => {
+    setConfirmDiscard(false);
+    onClose();
+  }, [onClose]);
 
   const previewAvatarUrl = useMemo(() => {
     if (avatar.kind === "preset") return `pixel:${avatar.key}`;
@@ -137,7 +162,7 @@ export default function AgentProfileEditDialog({ agent, open, field, onClose, ro
     stageAvatar({ kind: "upload", file, previewUrl: URL.createObjectURL(file) });
   };
 
-  const save = async () => {
+  const save = useCallback(async () => {
     if (!dirty || descriptionTooLong) return;
     setSaving(true);
     setError("");
@@ -173,7 +198,11 @@ export default function AgentProfileEditDialog({ agent, open, field, onClose, ro
     } finally {
       setSaving(false);
     }
-  };
+  }, [agent.id, avatar, descriptionChanged, descriptionTooLong, dirty, formatMessage, nameChanged, onClose, role, roleChanged, trimmedDescription, trimmedName, updateAgent]);
+
+  const handleSaveClick = useCallback(() => {
+    void save();
+  }, [save]);
 
   const presetButtonClass = (selected: boolean) =>
     `flex size-10 items-center justify-center overflow-hidden rounded-md border transition-colors theme-brutal:rounded-none theme-brutal:border-2 ${
@@ -184,7 +213,7 @@ export default function AgentProfileEditDialog({ agent, open, field, onClose, ro
 
   return (
     <>
-      <Dialog open={open} onOpenChange={(next) => { if (!next) requestClose(); }}>
+      <Dialog open={open} onOpenChange={handleDialogOpenChange}>
         <DialogContent aria-labelledby={ids.title} className="max-w-lg" data-testid="agent-profile-edit-dialog">
           <DialogHeader>
             <DialogTitle id={ids.title}>{formatMessage({ id: TITLE_ID[field] })}</DialogTitle>
@@ -207,7 +236,7 @@ export default function AgentProfileEditDialog({ agent, open, field, onClose, ro
                 value={displayName}
                 autoFocus={field === "displayName"}
                 placeholder={agent.name}
-                onChange={(e) => setDisplayName(e.target.value.replace(/[\r\n]+/g, " "))}
+                onChange={handleDisplayNameChange}
                 data-testid="agent-profile-edit-display-name"
               />
             </FormField>
@@ -227,7 +256,7 @@ export default function AgentProfileEditDialog({ agent, open, field, onClose, ro
                 rows={3}
                 autoFocus={field === "description"}
                 placeholder={formatMessage({ id: "agent.detail.describeAgentPlaceholder" })}
-                onChange={(e) => setDescription(e.target.value)}
+                onChange={handleDescriptionChange}
                 data-testid="agent-profile-edit-description"
               />
             </FormField>
@@ -236,7 +265,7 @@ export default function AgentProfileEditDialog({ agent, open, field, onClose, ro
               <RadioGroup
                 aria-label={formatMessage({ id: "agent.detail.role" })}
                 value={role}
-                onValueChange={(next) => { if (next === "admin" || next === "member") setRole(next); }}
+                onValueChange={handleRoleChange}
                 className="grid gap-3"
                 data-testid="agent-profile-edit-role"
               >
@@ -307,7 +336,7 @@ export default function AgentProfileEditDialog({ agent, open, field, onClose, ro
               size="sm"
               loading={saving}
               disabled={!dirty || descriptionTooLong}
-              onClick={() => void save()}
+              onClick={handleSaveClick}
               data-testid="agent-profile-edit-save"
             >
               {formatMessage({ id: "machine.detail.save" })}
@@ -316,7 +345,7 @@ export default function AgentProfileEditDialog({ agent, open, field, onClose, ro
         </DialogContent>
       </Dialog>
 
-      <AlertDialog open={confirmDiscard} onOpenChange={(next) => { if (!next) setConfirmDiscard(false); }}>
+      <AlertDialog open={confirmDiscard} onOpenChange={handleConfirmDiscardChange}>
         <AlertDialogContent data-testid="agent-profile-edit-discard">
           <AlertDialogHeader>
             <AlertDialogTitle>{formatMessage({ id: "message.chatPanel.overflow.unsavedTitle" })}</AlertDialogTitle>
@@ -327,7 +356,7 @@ export default function AgentProfileEditDialog({ agent, open, field, onClose, ro
             <AlertDialogAction
               variant="danger"
               size="sm"
-              onClick={() => { setConfirmDiscard(false); onClose(); }}
+              onClick={handleDiscardClick}
             >
               {formatMessage({ id: "message.chatPanel.overflow.discardChanges" })}
             </AlertDialogAction>

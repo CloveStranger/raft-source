@@ -12,6 +12,7 @@ import type { CommandRuntimeOptions } from "../../core/context";
 import { CliError, type CliErrorCode } from "../../core/errors";
 import { writeText, NL } from "../../core/renderer";
 import { formatMessages } from "./_format";
+import { elideSeenSenders } from "./_senderElision";
 
 interface ResolveMessageData {
   message?: {
@@ -91,11 +92,13 @@ export const messageResolveCommand = defineCommand(
         message: "Missing message in resolve response",
       });
     }
-    writeText(ctx.io, formatMessages([{
+    const senders = elideSeenSenders([{
       ...message,
       parent_channel_type: message.parent_channel_type ?? undefined,
       parent_channel_name: message.parent_channel_name ?? undefined,
-    }]), NL);
+    }], agentContext.agentId);
+    writeText(ctx.io, formatMessages(senders.messages), NL);
+    await senders.settle(ctx.io);
   },
 );
 

@@ -1,4 +1,5 @@
 import "./helpers/domSetup";
+import { comboboxText } from "./helpers/combobox";
 
 import assert from "node:assert/strict";
 import { createIntl } from "react-intl";
@@ -183,7 +184,7 @@ test("mounted CreateAgentDialog surfaces Chinese generic-create fallback after a
   );
 
   await waitFor(() => {
-    const selected = screen.getAllByRole("combobox").map((el) => el.textContent ?? "");
+    const selected = screen.getAllByRole("combobox").map((el) => comboboxText(el));
     assert.ok(selected.some((text) => text.includes("Claude Code")), selected.join(" | "));
     assert.ok(selected.some((text) => text.includes("Claude Sonnet")), selected.join(" | "));
   });

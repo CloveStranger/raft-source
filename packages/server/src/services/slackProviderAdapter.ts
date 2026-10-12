@@ -736,7 +736,6 @@ export type SlackOAuthExchangeTransportResult =
       providerTeamId: string;
       providerEnterpriseId: string | null;
       providerUserId: string;
-      installerIsWorkspaceAdmin: true;
       botUserId: string;
       providerBotId: string | null;
       workspaceName: string | null;
@@ -1054,6 +1053,10 @@ export type SlackOAuthExchangeOutcome =
   | {
       kind: "deterministic_failure";
       reason: "provider_rejected" | "scope_mismatch";
+      /** Diagnostic detail: Slack's error string on provider_rejected;
+       * the actual scope diff (missing/extra) on scope_mismatch. Neither
+       * carries credential material. */
+      providerError?: string;
     }
   | {
       kind: "identity_conflict";
@@ -1329,11 +1332,11 @@ export function createSlackOAuthHttpTransport(
           return { kind: "transport_failure", phase: "after_send" };
         }
 
-        // A shared workspace credential can authorize channel partitions for
-        // multiple Raft servers. The installer must therefore be a current
-        // workspace administrator, not merely a member who can see one
-        // channel. Verify the exact OAuth human with the newly issued bot
-        // token before persisting or rotating the shared credential.
+        // Verify the exact OAuth human with the newly issued bot token before
+        // persisting or rotating the shared credential: a real, current,
+        // non-bot member of the workspace. Who may install the app at all is
+        // Slack's own policy (its app-approval settings); Raft does not add a
+        // workspace-admin requirement on top (yezizp, #wg-slack-bridge:54ae7275).
         const userInfoResponse = await fetchImpl(userInfoEndpoint, {
           method: "POST",
           headers: {
@@ -1369,14 +1372,6 @@ export function createSlackOAuthHttpTransport(
         ) {
           return { kind: "transport_failure", phase: "after_send" };
         }
-        if (
-          installer.is_admin !== true
-          && installer.is_owner !== true
-          && installer.is_primary_owner !== true
-        ) {
-          return { kind: "rejected", error: "installer_not_workspace_admin" };
-        }
-
         let sealedCredential: SealedExternalCredential;
         try {
           sealedCredential = await dependencies.credentialSealer.seal({
@@ -1404,7 +1399,6 @@ export function createSlackOAuthHttpTransport(
           providerTeamId,
           providerEnterpriseId: slackOAuthString(enterprise?.id),
           providerUserId,
-          installerIsWorkspaceAdmin: true,
           botUserId,
           providerBotId: authBotId,
           workspaceName: slackOAuthString(team?.name),
@@ -1461,13 +1455,15 @@ export function normalizeSlackOAuthExchangeResult(input: {
     }
     return AMBIGUOUS_PROVIDER_ERRORS.has(input.result.error)
       ? { kind: "outcome_unknown" }
-      : { kind: "deterministic_failure", reason: "provider_rejected" };
+      : {
+          kind: "deterministic_failure",
+          reason: "provider_rejected",
+          providerError: input.result.error,
+        };
   }
+  const authorizedResult = input.result;
   if (input.result.providerAppId !== input.request.expectedProviderAppId) {
     return { kind: "identity_conflict", reason: "app" };
-  }
-  if (input.result.installerIsWorkspaceAdmin !== true) {
-    return { kind: "deterministic_failure", reason: "provider_rejected" };
   }
   if (input.result.providerEnterpriseId !== null) {
     return { kind: "identity_conflict", reason: "enterprise" };
@@ -1475,11 +1471,15 @@ export function normalizeSlackOAuthExchangeResult(input: {
   if (!input.result.providerTeamId.trim()) {
     return { kind: "identity_conflict", reason: "team" };
   }
-  if (!exactStrings(
-    input.result.installedScopes,
-    input.request.expectedScopes,
-  )) {
-    return { kind: "deterministic_failure", reason: "scope_mismatch" };
+  const missingScopes = input.request.expectedScopes.filter(
+    (s) => !authorizedResult.installedScopes.includes(s),
+  );
+  if (missingScopes.length) {
+    return {
+      kind: "deterministic_failure",
+      reason: "scope_mismatch",
+      providerError: `missing:${missingScopes.join(",")}`,
+    };
   }
   if (
     !input.result.providerUserId.trim()

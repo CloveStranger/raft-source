@@ -17,16 +17,35 @@ import {
   users,
 } from "../db/schema";
 import { SLACK_BRIDGE_REQUIRED_BOT_SCOPES } from "../routes/slackBridge";
+import { SLACK_BRIDGE_CORE_BOT_SCOPES } from "./slackBridgeProductionAppContract";
 import { createServer } from "./serverService";
 import {
   refreshSlackBridgeInstallGrantReceipts,
+  slackBridgeGrantScopesSupportRuntime,
   slackBridgeInstallGrantHash,
 } from "./slackBridgeInstallGrantService";
 import type { SlackBridgeProvisioningProvider } from "./slackBridgeProvisioningControlPlane";
 
 
 const NOW = new Date("2026-08-12T08:00:00.000Z");
-const SCOPES = [...SLACK_BRIDGE_REQUIRED_BOT_SCOPES];
+// Legacy pre-Agent-mention installs carry the 11-scope core grant; the
+// provider may observe the 13-scope set (usergroups:* added) after a Slack
+// app update, which is the drift case these tests exercise.
+const SCOPES = [...SLACK_BRIDGE_CORE_BOT_SCOPES];
+
+test("legacy core Slack grants keep message sync while Agent mention scopes roll out", () => {
+  assert.equal(slackBridgeGrantScopesSupportRuntime([...SLACK_BRIDGE_CORE_BOT_SCOPES]), true);
+  assert.equal(slackBridgeGrantScopesSupportRuntime([...SLACK_BRIDGE_REQUIRED_BOT_SCOPES]), true);
+  assert.equal(slackBridgeGrantScopesSupportRuntime(
+    SLACK_BRIDGE_CORE_BOT_SCOPES.filter((scope) => scope !== "chat:write"),
+  ), false);
+  // Extra scopes are tolerated — matching the #9179/#9185 contract that a
+  // broader grant is not a mismatch.
+  assert.equal(slackBridgeGrantScopesSupportRuntime([
+    ...SLACK_BRIDGE_REQUIRED_BOT_SCOPES,
+    "admin",
+  ]), true);
+});
 
 afterEach(async () => {
   await closeTestDatabase();
@@ -173,6 +192,109 @@ test("fresh provider read renews once while concurrent writers cannot duplicate 
   assert.deepEqual(receipts.map((receipt) => receipt.receiptRevision).sort(), [1, 2]);
   assert.equal(receipts.at(-1)?.observedAt.getTime(), NOW.getTime());
   assert.equal(reads, 1, "the install lease must admit exactly one provider read");
+});
+
+test("install with extra granted scopes still matches the contract grant", async () => {
+  const { db, install } = await fixture();
+  // x-oauth-scopes on the Slack token carries usergroups:* beyond the
+  // 11-scope contract (as staging currently does). Install and grant
+  // both store the actual scopes; the contract check is required ⊆ granted.
+  const SUPERSET = [...SCOPES, "usergroups:read", "usergroups:write"];
+  await db.update(externalAppInstalls).set({ installedScopes: SUPERSET })
+    .where(eq(externalAppInstalls.id, install.id));
+
+  const grantProvider = provider(async () => ({
+    kind: "fact",
+    fact: { ...FACT, grantedScopes: SUPERSET },
+  }));
+  await refreshSlackBridgeInstallGrantReceipts({ db, provider: grantProvider, now: NOW });
+
+  const receipts = await db.select().from(externalAppInstallGrantReceipts)
+    .where(eq(externalAppInstallGrantReceipts.installId, install.id));
+  assert.ok(receipts.length >= 1, "grant receipt must be issued for a superset install");
+});
+
+test("provider-observed scope drift reconciles installed_scopes and renews under the new revision", async () => {
+  const { db, install } = await fixture();
+  // Staging 2026-09-25: Slack app gained usergroups:* via User Token Scopes;
+  // auth.test's x-oauth-scopes carries them, but installed_scopes still
+  // records the install-time 11. Renewal must repair the record, not fail.
+  const DRIFTED = [...SCOPES, "usergroups:read", "usergroups:write"];
+  const driftEvents: Array<{ source: string; previousScopes: readonly string[]; observedScopes: readonly string[] }> = [];
+  const grantProvider = provider(async () => ({
+    kind: "fact",
+    fact: { ...FACT, grantedScopes: DRIFTED },
+  }));
+
+  const result = await refreshSlackBridgeInstallGrantReceipts({
+    db,
+    provider: grantProvider,
+    now: NOW,
+    onScopeDrift: (event) => { driftEvents.push(event); },
+  });
+
+  assert.equal(result.renewed, 1);
+  assert.equal(driftEvents.length, 1);
+  assert.equal(driftEvents[0]!.source, "renewal");
+  assert.deepEqual(driftEvents[0]!.previousScopes, SCOPES);
+  assert.deepEqual([...driftEvents[0]!.observedScopes].sort(), [...DRIFTED].sort());
+
+  const [reconciled] = await db.select().from(externalAppInstalls)
+    .where(eq(externalAppInstalls.id, install.id));
+  assert.equal(reconciled!.scopeRevision, 2);
+  assert.deepEqual([...reconciled!.installedScopes].sort(), [...DRIFTED].sort());
+
+  const receipts = await db.select().from(externalAppInstallGrantReceipts)
+    .where(eq(externalAppInstallGrantReceipts.installId, install.id));
+  const latest = receipts.sort((left, right) => right.receiptRevision - left.receiptRevision)[0]!;
+  assert.equal(latest.scopeRevision, 2, "receipt is written against the reconciled revision");
+  assert.deepEqual([...latest.grantedScopes].sort(), [...DRIFTED].sort());
+});
+
+test("the next renewal on a shared install self-converges after scope drift repair", async () => {
+  const { db, install } = await fixture();
+  const DRIFTED = [...SCOPES, "usergroups:read", "usergroups:write"];
+  const grantProvider = provider(async () => ({
+    kind: "fact",
+    fact: { ...FACT, grantedScopes: DRIFTED },
+  }));
+
+  // First renewal repairs the record; a second server observing the same
+  // token scopes then finds installed_scopes already reconciled and renews
+  // normally — proof a shared install does not get stuck after drift repair.
+  const first = await refreshSlackBridgeInstallGrantReceipts({ db, provider: grantProvider, now: NOW });
+  const second = await refreshSlackBridgeInstallGrantReceipts({
+    db,
+    provider: grantProvider,
+    now: new Date(NOW.getTime() + 60_000),
+  });
+  assert.equal(first.renewed, 1);
+  assert.equal(second.renewed, 0);
+  assert.equal(second.skipped, 1, "post-repair install has a current receipt and skips");
+});
+
+test("granted scopes that lose the required contract are a mismatch, not a drift update", async () => {
+  const { db, install } = await fixture();
+  const MISSING = SCOPES.filter((scope) => scope !== "chat:write");
+  const grantProvider = provider(async () => ({
+    kind: "fact",
+    fact: { ...FACT, grantedScopes: MISSING },
+  }));
+
+  const result = await refreshSlackBridgeInstallGrantReceipts({
+    db,
+    provider: grantProvider,
+    now: NOW,
+  });
+
+  assert.equal(result.failed, 1);
+  const [unchanged] = await db.select().from(externalAppInstalls)
+    .where(eq(externalAppInstalls.id, install.id));
+  assert.equal(unchanged!.scopeRevision, 1);
+  assert.deepEqual([...unchanged!.installedScopes].sort(), SCOPES);
+  const receipts = await db.select().from(externalAppInstallGrantReceipts)
+    .where(eq(externalAppInstallGrantReceipts.installId, install.id));
+  assert.equal(receipts.length, 1, "no new receipt may be written for a mismatched grant");
 });
 
 test("fresh provider read repairs a prior receipt whose hash contradicts its bound grant", async () => {

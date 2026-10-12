@@ -38,7 +38,10 @@ export const RUNTIMES: RuntimeInfo[] = [
   // with existing `runtime=kimi` agents but is labelled deprecated.
   { id: "kimi-sdk", displayName: "Kimi Code", abbreviation: "KC", binary: "", supported: true },
   { id: "kimi", displayName: "Kimi CLI", abbreviation: "KL", binary: "kimi", supported: true, deprecated: true },
-  { id: "copilot", displayName: "Copilot CLI", abbreviation: "CP", binary: "copilot", supported: true },
+  // Copilot CLI: deprecated for new agents. Kept for backward compat with
+  // existing `runtime=copilot` agents (they keep launching and stay editable)
+  // but hidden from create/switch/setup selectors and detection display.
+  { id: "copilot", displayName: "Copilot CLI", abbreviation: "CP", binary: "copilot", supported: true, deprecated: true },
   { id: "cursor", displayName: "Cursor CLI", abbreviation: "CU", binary: "cursor-agent", supported: true },
   // Gemini CLI: deprecated — no longer maintained upstream, replaced by
   // Antigravity CLI (`antigravity` → "Antigravity CLI"). Kept for backward

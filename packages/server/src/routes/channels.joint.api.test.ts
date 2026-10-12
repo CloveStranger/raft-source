@@ -226,6 +226,103 @@ test("ordinary add-member API lands a joint add on the addressed projection with
 });
 
 
+test("joint rosters list every server a person participates through, viewed server first (RFC 075 phase 1)", async ({ app }) => {
+  const db = getDb();
+  const suffix = randomUUID().slice(0, 8);
+  const mangoOwner = await seedUser(`badges-mango-${suffix}@slock.test`, `badges-mango-${suffix}`);
+  const kiwiOwner = await seedUser(`badges-kiwi-${suffix}@slock.test`, `badges-kiwi-${suffix}`);
+  const appleOwner = await seedUser(`badges-apple-${suffix}@slock.test`, `badges-apple-${suffix}`);
+  const dual = await seedUser(`badges-dual-${suffix}@slock.test`, `badges-dual-${suffix}`);
+  const triple = await seedUser(`badges-triple-${suffix}@slock.test`, `badges-triple-${suffix}`);
+  // Server names are chosen so name order (Apple < Kiwi < Mango) differs
+  // from creation order: peers after the viewed server are ordered by name.
+  const mango = await createServer("Badges Mango", `badges-mango-${suffix}`, mangoOwner.id);
+  const kiwi = await createServer("Badges Kiwi", `badges-kiwi-${suffix}`, kiwiOwner.id);
+  const apple = await createServer("Badges Apple", `badges-apple-${suffix}`, appleOwner.id);
+  await db.insert(serverMembers).values([
+    { serverId: mango.id, userId: dual.id, role: "member" },
+    { serverId: kiwi.id, userId: dual.id, role: "admin" },
+    { serverId: mango.id, userId: triple.id, role: "member" },
+    { serverId: kiwi.id, userId: triple.id, role: "member" },
+    { serverId: apple.id, userId: triple.id, role: "member" },
+  ]);
+  const canonical = await createChannel(mango.id, `badges-storage-${suffix}`);
+  const mangoProjection = await createChannel(mango.id, `badges-mango-${suffix}`, undefined, "joint");
+  const kiwiProjection = await createChannel(kiwi.id, `badges-kiwi-${suffix}`, undefined, "joint");
+  const appleProjection = await createChannel(apple.id, `badges-apple-${suffix}`, undefined, "joint");
+  await addHuman(mangoProjection.id, mangoOwner.id);
+  await addHuman(kiwiProjection.id, kiwiOwner.id);
+  await addHuman(appleProjection.id, appleOwner.id);
+  await addHuman(mangoProjection.id, dual.id);
+  await addHuman(kiwiProjection.id, dual.id);
+  await addHuman(mangoProjection.id, triple.id);
+  await addHuman(kiwiProjection.id, triple.id);
+  await addHuman(appleProjection.id, triple.id);
+  const [joint] = await db.insert(jointChannels).values({
+    canonicalChannelId: canonical.id,
+    createdByServerId: mango.id,
+    createdByUserId: mangoOwner.id,
+  }).returning();
+  await db.insert(jointChannelServers).values([
+    { jointChannelId: joint!.id, serverId: mango.id, localChannelId: mangoProjection.id, role: "host", joinedByUserId: mangoOwner.id },
+    { jointChannelId: joint!.id, serverId: kiwi.id, localChannelId: kiwiProjection.id, role: "participant", joinedByUserId: kiwiOwner.id },
+    { jointChannelId: joint!.id, serverId: apple.id, localChannelId: appleProjection.id, role: "participant", joinedByUserId: appleOwner.id },
+  ]);
+
+  type RosterHuman = {
+    id: string;
+    serverId?: string;
+    serverName?: string;
+    serverSlug?: string;
+    role?: string;
+    servers?: Array<{ id: string; name: string; slug: string }>;
+  };
+  const roster = async (channelId: string, viewerEmail: string, serverId: string) => {
+    const response = await fetch(`${app.baseUrl}/api/channels/${channelId}/members`, {
+      headers: headers(await tokenForHuman(viewerEmail), serverId),
+    });
+    assert.equal(response.status, 200);
+    const body = await response.json() as { humans: RosterHuman[] };
+    return new Map(body.humans.map((human) => [human.id, human]));
+  };
+  const ref = (server: { id: string; name: string; slug: string }) => ({ id: server.id, name: server.name, slug: server.slug });
+
+  const fromMango = await roster(mangoProjection.id, mangoOwner.email, mango.id);
+  const fromKiwi = await roster(kiwiProjection.id, kiwiOwner.email, kiwi.id);
+
+  // (a) A person on two projections lists both, the viewed server first; the
+  // legacy single-valued fields still come from the viewed projection.
+  assert.deepEqual(fromMango.get(dual.id)?.servers, [ref(mango), ref(kiwi)]);
+  assert.equal(fromMango.get(dual.id)?.serverId, mango.id);
+  assert.equal(fromMango.get(dual.id)?.serverName, mango.name);
+  assert.equal(fromMango.get(dual.id)?.serverSlug, mango.slug);
+  assert.equal(fromMango.get(dual.id)?.role, "member");
+  assert.deepEqual(fromKiwi.get(dual.id)?.servers, [ref(kiwi), ref(mango)]);
+  assert.equal(fromKiwi.get(dual.id)?.serverId, kiwi.id);
+  assert.equal(fromKiwi.get(dual.id)?.serverSlug, kiwi.slug);
+  assert.equal(fromKiwi.get(dual.id)?.role, "admin");
+
+  // Peers after the viewed server are ordered by server name.
+  assert.deepEqual(fromKiwi.get(triple.id)?.servers, [ref(kiwi), ref(apple), ref(mango)]);
+  assert.deepEqual(fromMango.get(triple.id)?.servers, [ref(mango), ref(apple), ref(kiwi)]);
+
+  // (b) A person on one projection lists just that server, whichever side views.
+  assert.deepEqual(fromMango.get(mangoOwner.id)?.servers, [ref(mango)]);
+  assert.deepEqual(fromKiwi.get(mangoOwner.id)?.servers, [ref(mango)]);
+  assert.equal(fromKiwi.get(mangoOwner.id)?.serverId, mango.id);
+  assert.deepEqual(fromMango.get(appleOwner.id)?.servers, [ref(apple)]);
+
+  // (c) Non-joint channels are unchanged: no `servers`, the channel's server.
+  const regular = await createChannel(mango.id, `badges-regular-${suffix}`);
+  await addHuman(regular.id, mangoOwner.id);
+  await addHuman(regular.id, dual.id);
+  const regularRoster = await roster(regular.id, mangoOwner.email, mango.id);
+  assert.equal(regularRoster.get(dual.id)?.serverId, mango.id);
+  assert.equal(regularRoster.get(dual.id)?.servers, undefined);
+  assert.equal(regularRoster.get(mangoOwner.id)?.servers, undefined);
+});
+
+
 test("POST /channels/inbox/done requires storage identity and fixes the incident-shaped joint split", async ({ app }) => {
   const f = await seedThreadFixture(app.baseUrl);
   const db = getDb();
@@ -3030,10 +3127,11 @@ test("joint channel create rejects missing target invitees before writing joint 
     }),
   });
   assert.equal(createRes.status, 400);
-  const body = await createRes.json() as { error: string; code?: string; targetServerSlug?: string; inviteeIndex?: number };
+  const body = await createRes.json() as { error: string; code?: string; targetServerSlug?: string; invitee?: string; inviteeIndex?: number };
   assert.equal(body.code, "joint_invitee_not_found");
   assert.match(body.error, /Invited person not found/);
   assert.equal(body.targetServerSlug, targetServer.slug);
+  assert.equal(body.invitee, "wrong-email@slock.test");
   assert.equal(body.inviteeIndex, 0);
   assert.equal(
     (await db.select({ id: channels.id }).from(channels).where(and(
@@ -3054,6 +3152,38 @@ test("joint channel create rejects missing target invitees before writing joint 
     0,
     "validation failure must not create pending invite rows",
   );
+});
+
+
+test("joint channel invitee errors carry the invitee itself, independent of the deduped index", async ({ app }) => {
+  const hostOwner = await seedUser("joint-invitee-field-host@slock.test", "joint-invitee-field-host");
+  const targetOwner = await seedUser("joint-invitee-field-target@slock.test", "joint-invitee-field-target");
+  const dupeAdmin = await seedUser("dupe@slock.test", "dupe");
+  const hostServer = await createServer("Joint Invitee Field Host", "joint-invitee-field-host", hostOwner.id);
+  const targetServer = await createServer("Joint Invitee Field Target", "joint-invitee-field-target", targetOwner.id);
+  await addMember(targetServer.id, dupeAdmin.id, "admin");
+  const hostToken = await tokenForHuman(hostOwner.email);
+
+  // The server dedupes case-insensitively, so "DUPE@slock.test" merges into
+  // "dupe@slock.test" and the failure lands at index 1 of the deduped list —
+  // index 2 of what the client submitted. `invitee` names the rejected person
+  // regardless, which is why clients must read it instead of the index.
+  const createRes = await fetch(`${app.baseUrl}/api/channels`, {
+    method: "POST",
+    headers: headers(hostToken, hostServer.id),
+    body: JSON.stringify({
+      name: "invitee-field-blocked",
+      visibility: "joint",
+      targetServerSlug: targetServer.slug,
+      invitedPeople: ["dupe@slock.test", "DUPE@slock.test", "ghost@slock.test"],
+    }),
+  });
+  assert.equal(createRes.status, 400);
+  const body = await createRes.json() as { error: string; code?: string; targetServerSlug?: string; invitee?: string; inviteeIndex?: number };
+  assert.equal(body.code, "joint_invitee_not_found");
+  assert.equal(body.targetServerSlug, targetServer.slug);
+  assert.equal(body.invitee, "ghost@slock.test");
+  assert.equal(body.inviteeIndex, 1, "index refers to the server's deduplicated list, not the submitted one");
 });
 
 
@@ -3078,10 +3208,11 @@ test("joint channel create only allows target server admins as invited people", 
     }),
   });
   assert.equal(createRes.status, 400);
-  const body = await createRes.json() as { error: string; code?: string; targetServerSlug?: string; inviteeIndex?: number };
+  const body = await createRes.json() as { error: string; code?: string; targetServerSlug?: string; invitee?: string; inviteeIndex?: number };
   assert.equal(body.code, "joint_invitee_not_admin");
   assert.match(body.error, /target server admin/);
   assert.equal(body.targetServerSlug, targetServer.slug);
+  assert.equal(body.invitee, targetMember.email);
   assert.equal(body.inviteeIndex, 0);
   assert.equal(
     (await db.select({ id: channels.id }).from(channels).where(and(
@@ -3475,4 +3606,73 @@ test("every route that changes a joint channel notifies every active participant
   } finally {
     onJointLimitStateChanged(null);
   }
+});
+
+test("GET /api/channels/:id/threads resolves joint thread projections in one read, not one per thread", async ({ app }) => {
+  type PgliteLike = { query: (...args: unknown[]) => Promise<unknown> };
+  const tag = randomUUID().slice(0, 8);
+  const hostOwner = await seedUser(`joint-batch-host-${tag}@slock.test`, `joint-batch-host-${tag}`);
+  const targetOwner = await seedUser(`joint-batch-target-${tag}@slock.test`, `joint-batch-target-${tag}`);
+  const hostServer = await createServer("Joint Batch Host", `joint-batch-host-${tag}`, hostOwner.id);
+  const targetServer = await createServer("Joint Batch Target", `joint-batch-target-${tag}`, targetOwner.id);
+  const hostToken = await tokenForHuman(hostOwner.email);
+  const targetToken = await tokenForHuman(targetOwner.email);
+  const createRes = await fetch(`${app.baseUrl}/api/channels`, {
+    method: "POST",
+    headers: headers(hostToken, hostServer.id),
+    body: JSON.stringify({ name: `joint-batch-${tag}`, visibility: "joint", targetServerSlug: targetServer.slug, invitedPeople: [`@${targetOwner.name}`] }),
+  });
+  assert.equal(createRes.status, 200);
+  const hostProjection = await createRes.json() as { id: string; jointInvite: { id: string } };
+  const acceptRes = await fetch(`${app.baseUrl}/api/channels/joint-invites/${hostProjection.jointInvite.id}/accept`, {
+    method: "POST",
+    headers: headers(targetToken, targetServer.id),
+  });
+  assert.equal(acceptRes.status, 200);
+  const targetProjection = await acceptRes.json() as { id: string };
+
+  const addThreads = async (size: number) => {
+    for (let i = 0; i < size; i += 1) {
+      const parentRes = await fetch(`${app.baseUrl}/api/messages`, {
+        method: "POST",
+        headers: headers(hostToken, hostServer.id),
+        body: JSON.stringify({ channelId: hostProjection.id, content: `joint batch parent ${i}` }),
+      });
+      assert.equal(parentRes.status, 200);
+      const parent = await parentRes.json() as { id: string };
+      const threadRes = await fetch(`${app.baseUrl}/api/channels/${hostProjection.id}/threads`, {
+        method: "POST",
+        headers: headers(hostToken, hostServer.id),
+        body: JSON.stringify({ parentMessageId: parent.id, content: `joint batch reply ${i}` }),
+        signal: AbortSignal.timeout(15_000),
+      });
+      assert.equal(threadRes.status, 200);
+    }
+  };
+  // The per-thread projection lookup filtered on the canonical thread id.
+  const projectionLookup = /"joint_thread_parent_projection"/;
+  const countSummaries = async () => {
+    const pg = (getDb() as unknown as { $client: PgliteLike }).$client;
+    const originalQuery = pg.query.bind(pg);
+    let lookups = 0;
+    pg.query = ((...args: unknown[]) => {
+      if (typeof args[0] === "string" && projectionLookup.test(args[0])) lookups += 1;
+      return originalQuery(...args);
+    }) as PgliteLike["query"];
+    try {
+      const res = await fetch(`${app.baseUrl}/api/channels/${targetProjection.id}/threads`, { headers: headers(targetToken, targetServer.id) });
+      assert.equal(res.status, 200);
+      return { lookups, summaries: Object.keys(await res.json() as Record<string, unknown>).length };
+    } finally {
+      pg.query = originalQuery;
+    }
+  };
+
+  await addThreads(2);
+  const few = await countSummaries();
+  await addThreads(6);
+  const many = await countSummaries();
+  assert.equal(few.summaries, 2);
+  assert.equal(many.summaries, 8);
+  assert.equal(many.lookups, few.lookups, `projection lookups: 2 threads ${few.lookups}, 8 threads ${many.lookups}`);
 });

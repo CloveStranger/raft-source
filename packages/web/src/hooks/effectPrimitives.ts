@@ -23,8 +23,27 @@ export function useDomMeasureEffect(
   measure: () => void | (() => void),
   deps: readonly unknown[],
 ): void {
-  // oxlint-disable-next-line react-hooks/exhaustive-deps -- deps are the caller's contract
-  useLayoutEffect(measure, deps as unknown[]);
+  // `deps` are the caller's contract, so they cannot be a literal list here. The
+  // comparison React does for a deps array is done by hand instead: the layout effect
+  // runs after every commit, but only cleans up and re-measures when `deps` differ
+  // (Object.is, element by element) from the last committed ones.
+  const committedDepsRef = useRef<readonly unknown[] | null>(null);
+  const cleanupRef = useRef<void | (() => void)>(undefined);
+  useLayoutEffect(() => {
+    if (committedDepsRef.current && !depsChanged(committedDepsRef.current, deps)) return;
+    cleanupRef.current?.();
+    committedDepsRef.current = deps;
+    cleanupRef.current = measure();
+  });
+  useLayoutEffect(() => () => {
+    cleanupRef.current?.();
+    cleanupRef.current = undefined;
+    committedDepsRef.current = null;
+  }, []);
+}
+
+function depsChanged(previous: readonly unknown[], next: readonly unknown[]): boolean {
+  return previous.length !== next.length || previous.some((value, index) => !Object.is(value, next[index]));
 }
 
 /**

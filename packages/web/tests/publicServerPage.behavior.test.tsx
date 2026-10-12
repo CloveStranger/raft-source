@@ -263,6 +263,23 @@ test("logged-out public page shows only the read surface and its sign-in banner"
   assert.match(screen.getByTestId("public-server-bottom-action-copy").className, /(?:^|\s)text-sm(?:\s|$)/);
   assert.ok(screen.getByTestId("public-server-app-shell"));
   assert.ok(screen.getByTestId("workspace-left-rail"));
+  // Same rui shell as the signed-in layout: the root is what gives every header
+  // row its per-theme height, so each column has to sit in a shell slot under it.
+  const shellRoot = screen.getByTestId("public-server-page");
+  assert.equal(shellRoot.getAttribute("data-slot"), "app-shell-root", "the page root is the rui shell root");
+  assert.ok(
+    screen.getByTestId("workspace-left-rail").closest('[data-slot="app-shell-rail-slot"]'),
+    "the rail sits in the shell's rail slot",
+  );
+  const channelSidebar = screen.getByTestId("public-server-channel-sidebar");
+  assert.equal(channelSidebar.getAttribute("data-slot"), "app-shell-sidebar-slot", "the channel column is the shell's sidebar slot");
+  assert.equal(channelSidebar.tagName, "NAV", "the channel column stays a navigation landmark");
+  assert.ok(channelSidebar.classList.contains("flex"), "the channel column stays visible on phones, where the slot hides by default");
+  assert.equal(
+    screen.getByTestId("public-server-channel-panel").getAttribute("data-slot"),
+    "app-shell-main-slot",
+    "the message column is the shell's main slot",
+  );
   fireEvent.click(screen.getByTestId("public-server-switcher-trigger"));
   const notice = screen.getByTestId("public-server-selection-notice");
   assert.ok(notice.matches('[data-slot="banner"]'), "anonymous server selection notice rides the info banner primitive");
@@ -298,9 +315,28 @@ test("logged-out public page shows only the read surface and its sign-in banner"
   assert.match(screen.getByTestId("public-server-page").textContent ?? "", /Sign in to join Open Team and be part of the discussion/);
   assert.equal(screen.queryByRole("textbox"), null, "read-only page must not render a composer");
 
+  // The channel column is built from the same rui Sidebar parts as the
+  // signed-in Sidebar: one SidebarRoot, one accent SidebarItem per channel, and
+  // the open channel marked through the item's own `data-active`.
+  const channelColumn = screen.getByTestId("public-server-channel-sidebar");
+  assert.ok(channelColumn.querySelector('[data-slot="sidebar-root"]'), "the channel column renders a rui SidebarRoot");
+  const channelRows = [...channelColumn.querySelectorAll<HTMLElement>("[data-public-channel-id]")];
+  assert.ok(channelRows.length >= 2, "every public channel gets a row");
+  for (const row of channelRows) {
+    assert.equal(row.getAttribute("data-slot"), "sidebar-item", "channel rows are rui SidebarItems");
+    assert.equal(row.getAttribute("data-variant"), "accent", "channel rows use the accent variant, like the signed-in rows");
+  }
+  const activeRowIds = () => channelRows.filter((row) => row.hasAttribute("data-active")).map((row) => row.getAttribute("data-public-channel-id"));
+  assert.deepEqual(activeRowIds(), [channelRows[0]!.getAttribute("data-public-channel-id")], "only the open channel is marked active");
+
   fireEvent.click(screen.getByRole("button", { name: /questions/ }));
   await waitFor(() => assert.ok(reads.includes("/public/servers/open-team/channels/channel-2/messages")));
-  assert.ok(await screen.findByText("No messages have been posted here yet."));
+  assert.deepEqual(activeRowIds(), ["channel-2"], "selecting a channel moves the active mark to its row");
+  const emptyMessages = await screen.findByText("No messages have been posted here yet.");
+  assert.ok(
+    emptyMessages.closest('[data-slot="empty-state"]'),
+    "an empty public channel uses the shared EmptyState, like the signed-in chat panel",
+  );
 
   const currentBottomAction = screen.getByTestId("public-server-bottom-action");
   fireEvent.click(within(currentBottomAction).getByRole("button", { name: "Sign in" }));
@@ -422,6 +458,11 @@ test("public read reuses canonical message/thread display, server avatar, and ic
   assert.ok(
     screen.getByTestId("public-server-columns").contains(screen.getByTestId("public-server-thread-panel")),
     "the thread panel must be scoped to the columns row",
+  );
+  assert.equal(
+    screen.getByTestId("public-server-thread-panel").getAttribute("data-slot"),
+    "app-shell-panel-slot",
+    "the thread column is the shell's panel slot",
   );
   assert.ok(
     !screen.getByTestId("public-server-thread-panel").contains(screen.getByTestId("public-server-bottom-action")),
@@ -607,8 +648,18 @@ test("an older-page response cannot bleed into a channel selected while it was i
   renderPublicPage(
     <PublicServerPage slug="race" onSignIn={() => {}} onRegister={() => {}} onUnavailable={() => {}} />,
   );
-  const loadOlder = await screen.findByRole("button", { name: "Load older messages" });
-  fireEvent.click(loadOlder);
+  // Older pages load when the shared timeline's top sentinel comes into view;
+  // there is no "load older" button any more.
+  const scroller = await screen.findByTestId("public-server-message-timeline");
+  await waitFor(() => assert.ok(screen.getByText("first-100")));
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+  const observer = intersectionObservers.find((candidate) => candidate.root === scroller && candidate.targets.size === 2);
+  assert.ok(observer, "the main list uses the shared timeline, which owns a top pagination sentinel");
+  const topSentinel = [...observer.targets][0];
+  assert.ok(topSentinel);
+  await act(async () => { observer.trigger(topSentinel); });
+  await waitFor(() => assert.equal(typeof resolveOlder, "function", "the older page was requested"));
+  assert.ok(screen.queryByRole("button", { name: "Load older messages" }) === null);
   fireEvent.click(screen.getByRole("button", { name: "second" }));
   assert.ok(await screen.findByText("second-channel-only"));
 

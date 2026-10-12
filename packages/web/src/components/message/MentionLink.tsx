@@ -1,33 +1,62 @@
-import { useContext, useRef } from "react";
+import { useContext, useRef, useCallback } from "react";
 import type { ReactNode } from "react";
 import { IntlContext } from "react-intl";
 import { MessageReferenceText, PreviewCard, PreviewCardContent, PreviewCardTrigger } from "raft-ui";
+import type { ExternalMessageAuthorProjection } from "@botiverse/raft-shared";
 import { en } from "../../i18n/messages/en";
 import { useAuthStore } from "../../store/authStore";
 import type { Agent } from "../../store/agentStore";
 import { useReadReceiptStore } from "../../store/readReceiptStore";
 import { projectAgentReadReceipt } from "../../store/readReceiptDomain";
 import type { ServerMember } from "../../store/serverStore";
+import type { ChannelExternalMember } from "../../hooks/useChannelMembers";
 import ProfilePreviewCardContent from "./ProfilePreviewCardContent";
+import { ExternalIdentityPreviewBody } from "./ExternalIdentityPreviewCard";
 import Tooltip from "../ui/Tooltip";
 import { useMessageReadReceiptScope } from "./messageReadReceiptScope";
 
 interface MentionLinkProps {
-  mentionType: "agent" | "user";
+  mentionType: "agent" | "user" | "external";
   mentionId: string;
-  onNavigate: () => void;
+  /** Zero-arg legacy navigation. Prefer the typed pair below so callers can
+   *  pass stable references instead of per-item closures. */
+  onNavigate?: () => void;
+  /** Typed navigation pair — used (by mentionType) when `onNavigate` is absent. */
+  onNavigateAgent?: (agentId: string) => void;
+  onNavigateHuman?: (userId: string) => void;
   children: ReactNode;
   /** Handle from the mention token, so the hover card can render a graceful
    *  non-empty state when the entity is not in the local store. */
   fallbackLabel?: string;
   fallbackAgent?: Agent | null;
   fallbackMember?: ServerMember | null;
+  /** Linked-provider member (Slack) for `type:"external"` mentions. */
+  fallbackExternal?: ChannelExternalMember | null;
+  /** Click handler for external mentions — opens the external-identity
+   *  panel via `useProfileStore.openExternalProfile` (same flow a Slack-
+   *  authored message avatar uses). */
+  onNavigateExternal?: (profile: ExternalMessageAuthorProjection) => void;
 }
 
-export default function MentionLink({ mentionType, mentionId, onNavigate, children, fallbackLabel, fallbackAgent, fallbackMember }: MentionLinkProps) {
+export default function MentionLink({ mentionType, mentionId, onNavigate, onNavigateAgent, onNavigateHuman, onNavigateExternal, children, fallbackLabel, fallbackAgent, fallbackMember, fallbackExternal }: MentionLinkProps) {
   const viewerUserId = useAuthStore((s) => s.user?.id ?? null);
   const isSelfMention = mentionType === "user" && viewerUserId === mentionId;
   const previewActionsRef = useRef<{ close: () => void; unmount: () => void } | null>(null);
+  const handleNavigate = useCallback(() => {
+    if (onNavigate) {
+      onNavigate();
+      return;
+    }
+    if (mentionType === "agent") onNavigateAgent?.(mentionId);
+    else if (mentionType === "user") onNavigateHuman?.(mentionId);
+    // `external` has no Raft principal — render as plain text, no navigation.
+  }, [onNavigate, onNavigateAgent, onNavigateHuman, mentionType, mentionId]);
+  const handleTriggerClick = useCallback((event: React.MouseEvent) => {
+    event.preventDefault();
+    previewActionsRef.current?.close();
+    handleNavigate();
+  }, [handleNavigate]);
+
   // MentionLink is mounted standalone by some seams (e.g. mentionFirstPaint)
   // with no IntlProvider, so an unconditional useIntl() throws there. Same
   // context+catalog fallback CollapsibleMessageContent uses.
@@ -74,6 +103,61 @@ export default function MentionLink({ mentionType, mentionId, onNavigate, childr
       </Tooltip>
     );
 
+  // External (provider-side) mentions carry no Raft principal, but hover and
+  // click follow the same affordances as @human/@agent (yezizp): hover shows
+  // the shared ExternalIdentityPreviewBody, click opens the external-identity
+  // panel via `onNavigateExternal` (same flow a Slack-authored avatar uses).
+  const handleExternalClick = useCallback((event: React.MouseEvent) => {
+    event.preventDefault();
+    previewActionsRef.current?.close();
+    if (!fallbackExternal) return;
+    onNavigateExternal?.({
+      projectionId: fallbackExternal.id,
+      provider: fallbackExternal.provider,
+      appRegistrationId: "", // members endpoint intentionally omits provider-side ids
+      installId: "",
+      workspaceId: "",
+      externalActorId: "",
+      workspaceName: fallbackExternal.workspaceName,
+      externalConversationId: "",
+      externalMessageId: "",
+      displayName: fallbackExternal.displayName,
+      actorKind: fallbackExternal.actorKind,
+      avatarUrl: fallbackExternal.avatarUrl,
+      avatarDigest: null,
+      actorProjectionRevision: 0,
+    });
+  }, [fallbackExternal, onNavigateExternal]);
+
+  if (mentionType === "external") {
+    return (
+      <PreviewCard actionsRef={previewActionsRef}>
+        <PreviewCardTrigger
+          delay={200}
+          closeDelay={120}
+          render={(
+            <MessageReferenceText
+              variant="secondary"
+              render={<a href="#">{children}</a>}
+            />
+          )}
+          onClick={handleExternalClick}
+        >
+          {children}
+        </PreviewCardTrigger>
+        <PreviewCardContent sideOffset={6} collisionPadding={6} className="w-[280px]">
+          <ExternalIdentityPreviewBody
+            displayName={fallbackExternal?.displayName ?? fallbackLabel ?? ""}
+            provider={fallbackExternal?.provider}
+            workspaceName={fallbackExternal?.workspaceName}
+            actorKind={fallbackExternal?.actorKind}
+            avatarUrl={fallbackExternal?.avatarUrl}
+          />
+        </PreviewCardContent>
+      </PreviewCard>
+    );
+  }
+
   const trigger = (
     <PreviewCard actionsRef={previewActionsRef}>
       <PreviewCardTrigger
@@ -86,11 +170,7 @@ export default function MentionLink({ mentionType, mentionId, onNavigate, childr
             render={<a href="#">{children}</a>}
           />
         )}
-        onClick={(e) => {
-          e.preventDefault();
-          previewActionsRef.current?.close();
-          onNavigate();
-        }}
+        onClick={handleTriggerClick}
       >
         {children}
       </PreviewCardTrigger>

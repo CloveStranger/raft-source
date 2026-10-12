@@ -9,7 +9,10 @@ import {
   externalAppInstalls,
   externalAppRegistrations,
 } from "../db/schema";
-import { SLACK_BRIDGE_REQUIRED_BOT_SCOPES } from "../routes/slackBridge";
+import {
+  SLACK_BRIDGE_CORE_BOT_SCOPES,
+  SLACK_BRIDGE_REQUIRED_BOT_SCOPES,
+} from "./slackBridgeProductionAppContract";
 import type {
   SlackBridgeProvisioningInstallGrant,
   SlackBridgeProvisioningProvider,
@@ -38,6 +41,19 @@ function exactScopes(left: readonly string[], right: readonly string[]): boolean
   return a.length === b.length && a.every((value, index) => value === b[index]);
 }
 
+/**
+ * A granted scope set supports the runtime when the core contract is covered.
+ * Extra scopes (e.g. usergroups:* observed after a Slack-side app change, or
+ * any future Slack-granted scope) are tolerated — matching the #9179/#9185
+ * contract that a broader grant is not a mismatch.
+ */
+export function slackBridgeGrantScopesSupportRuntime(values: readonly string[]): boolean {
+  const scopes = canonicalSlackInstallGrantScopes(values);
+  return SLACK_BRIDGE_CORE_BOT_SCOPES.every((scope) => scopes.includes(scope));
+}
+
+
+
 export function slackBridgeInstallGrantHash(input: {
   providerAppId: string;
   providerAuthorityId: string;
@@ -65,8 +81,106 @@ export function slackBridgeInstallGrantMatchesInstall(
     && grant.botUserId === install.botUserId
     && grant.providerBotId.trim().length > 0
     && (install.providerBotId === null || grant.providerBotId === install.providerBotId)
+    // grant.grantedScopes and install.installedScopes are both the actual
+    // token scopes (x-oauth-scopes from auth.test); extras like usergroups:*
+    // appear in both. The contract check is: exact set match against the
+    // recorded install plus core ⊆ granted ⊆ allowed — a granted-but-different
+    // set is classified as scope_drift by the caller, not a match.
     && exactScopes(grant.grantedScopes, install.installedScopes)
-    && exactScopes(grant.grantedScopes, SLACK_BRIDGE_REQUIRED_BOT_SCOPES);
+    && slackBridgeGrantScopesSupportRuntime(grant.grantedScopes);
+}
+
+export type SlackInstallGrantClassification = "match" | "scope_drift" | "mismatch";
+
+/**
+ * Classifies a live auth.test install-grant fact against the stored install.
+ *
+ * "scope_drift": identity fields all match and the granted set still covers
+ * the required contract, but the granted scope set differs from the recorded
+ * install.installedScopes. This happens when Slack-side app scopes change
+ * without a Raft re-OAuth (e.g. usergroups:* added to the app on 2026-09-25
+ * rotated the token's scope set, but the install row still recorded the
+ * install-time 11 scopes). The install record is stale, not the grant — the
+ * caller should update installed_scopes + bump scope_revision in the same
+ * transaction as the new receipt so every server sharing the install converges.
+ *
+ * "mismatch": any identity field differs, or the granted set no longer
+ * covers the required bot scopes. A real authority conflict — do not write.
+ */
+export function classifySlackInstallGrantObservation(
+  install: Install,
+  grant: SlackBridgeProvisioningInstallGrant,
+): SlackInstallGrantClassification {
+  if (slackBridgeInstallGrantMatchesInstall(install, grant)) return "match";
+  const identityMatches = grant.providerAppId === install.providerAppId
+    && grant.providerAuthorityId === install.providerAuthorityId
+    && grant.botUserId === install.botUserId
+    && grant.providerBotId.trim().length > 0
+    && (install.providerBotId === null || grant.providerBotId === install.providerBotId)
+    && slackBridgeGrantScopesSupportRuntime(grant.grantedScopes);
+  return identityMatches ? "scope_drift" : "mismatch";
+}
+
+interface InstallGrantScopeDriftLogger {
+  (event: {
+    source: "renewal" | "enable";
+    installId: string;
+    previousScopes: readonly string[];
+    observedScopes: readonly string[];
+  }): void;
+}
+
+const defaultScopeDriftLogger: InstallGrantScopeDriftLogger = (event) => {
+  console.warn("[Slock] Slack Bridge install scope drift reconciled", JSON.stringify({
+    source: event.source,
+    installId: event.installId,
+    previousScopes: event.previousScopes,
+    observedScopes: event.observedScopes,
+  }));
+};
+
+/**
+ * Applies a scope_drift reconciliation against the locked install row: the
+ * recorded installed_scopes and scopeRevision are brought in line with the
+ * observed token fact. Callers must hold the install row lock inside the
+ * same transaction that writes the resulting receipt — bumping
+ * scope_revision invalidates every existing receipt on this shared install,
+ * and each server's next renewal writes a fresh one. Returns null when the
+ * install row changed under the lock (a concurrent OAuth or drift repair);
+ * the caller should then fall back to its authority-changed path instead of
+ * writing a receipt against stale epochs.
+ */
+export async function applySlackInstallGrantScopeDrift(input: {
+  tx: Pick<Database, "update">;
+  install: Install;
+  grant: SlackBridgeProvisioningInstallGrant;
+  now: Date;
+  source: "renewal" | "enable";
+  log?: InstallGrantScopeDriftLogger;
+}): Promise<number | null> {
+  const nextScopeRevision = input.install.scopeRevision + 1;
+  const installedScopes = canonicalSlackInstallGrantScopes(input.grant.grantedScopes);
+  const updated = await input.tx.update(externalAppInstalls).set({
+    installedScopes,
+    scopeRevision: nextScopeRevision,
+    providerBotId: input.grant.providerBotId,
+    lastVerifiedAt: input.now,
+    updatedAt: input.now,
+  }).where(and(
+    eq(externalAppInstalls.id, input.install.id),
+    eq(externalAppInstalls.state, "active"),
+    eq(externalAppInstalls.connectionEpoch, input.install.connectionEpoch),
+    eq(externalAppInstalls.scopeRevision, input.install.scopeRevision),
+    eq(externalAppInstalls.credentialRevision, input.install.credentialRevision),
+  )).returning({ id: externalAppInstalls.id });
+  if (updated.length !== 1) return null;
+  (input.log ?? defaultScopeDriftLogger)({
+    source: input.source,
+    installId: input.install.id,
+    previousScopes: input.install.installedScopes,
+    observedScopes: installedScopes,
+  });
+  return nextScopeRevision;
 }
 
 function deterministicJitterMs(installId: string): number {
@@ -116,6 +230,12 @@ export async function refreshSlackBridgeInstallGrantReceipts(input: {
   provider: SlackBridgeProvisioningProvider;
   now: Date;
   onError?(error: unknown): void;
+  onScopeDrift?(event: {
+    source: "renewal" | "enable";
+    installId: string;
+    previousScopes: readonly string[];
+    observedScopes: readonly string[];
+  }): void;
 }): Promise<SlackBridgeInstallGrantRefreshResult> {
   const db = input.db ?? getDb();
   const result: SlackBridgeInstallGrantRefreshResult = {
@@ -206,7 +326,7 @@ export async function refreshSlackBridgeInstallGrantReceipts(input: {
       });
       if (
         observation.kind !== "fact"
-        || !slackBridgeInstallGrantMatchesInstall(candidate.install, observation.fact)
+        || classifySlackInstallGrantObservation(candidate.install, observation.fact) === "mismatch"
       ) {
         result.failed += 1;
         await db.update(externalAppInstalls).set({
@@ -224,7 +344,7 @@ export async function refreshSlackBridgeInstallGrantReceipts(input: {
       }
       const grantHash = slackBridgeInstallGrantHash(observation.fact);
       const renewed = await db.transaction(async (tx) => {
-        const [install] = await tx.select().from(externalAppInstalls).where(and(
+        const [lockedInstall] = await tx.select().from(externalAppInstalls).where(and(
           eq(externalAppInstalls.id, candidate.install.id),
           eq(externalAppInstalls.state, "active"),
           eq(externalAppInstalls.connectionEpoch, candidate.install.connectionEpoch),
@@ -243,19 +363,33 @@ export async function refreshSlackBridgeInstallGrantReceipts(input: {
           eq(externalAppCredentials.credentialRevision, candidate.install.credentialRevision),
           or(isNull(externalAppCredentials.expiresAt), gt(externalAppCredentials.expiresAt, input.now)),
         )).for("update").limit(1);
-        const currentServerAuthority = install && registration
+        const currentServerAuthority = lockedInstall && registration
           ? await findAnyCurrentExternalInstallServerGrantAuthority(tx, {
-              installId: install.id,
+              installId: lockedInstall.id,
               registrationId: registration.id,
             }, { lock: true })
           : null;
         if (
-          !install
+          !lockedInstall
           || !registration
           || !credential
           || !currentServerAuthority
-          || !slackBridgeInstallGrantMatchesInstall(install, observation.fact)
         ) return false;
+        const classification = classifySlackInstallGrantObservation(lockedInstall, observation.fact);
+        let install = lockedInstall;
+        if (classification === "mismatch") return false;
+        if (classification === "scope_drift") {
+          const nextScopeRevision = await applySlackInstallGrantScopeDrift({
+            tx,
+            install: lockedInstall,
+            grant: observation.fact,
+            now: input.now,
+            source: "renewal",
+            log: input.onScopeDrift,
+          });
+          if (nextScopeRevision === null) return false;
+          install = { ...lockedInstall, installedScopes: canonicalSlackInstallGrantScopes(observation.fact.grantedScopes), scopeRevision: nextScopeRevision };
+        }
 
         const receipts = await tx.select().from(externalAppInstallGrantReceipts).where(and(
           eq(externalAppInstallGrantReceipts.registrationId, registration.id),

@@ -15,9 +15,31 @@ const rootLockfileDockerfiles = [
   "packages/web/Dockerfile",
 ];
 
+// pnpm 11+ reads its settings from pnpm-workspace.yaml and ignores the `pnpm`
+// field in package.json, so patches are declared there. The block is read
+// line by line (the server package has no YAML parser) and anything it cannot
+// read fails the test rather than counting as "no patches".
 function declaredDependencyPatches(): string[] {
   const rootPkg = JSON.parse(readFileSync(resolve(repoRoot, "package.json"), "utf8"));
-  return Object.values(rootPkg.pnpm?.patchedDependencies ?? {}) as string[];
+  assert.equal(
+    rootPkg.pnpm,
+    undefined,
+    "package.json has a `pnpm` field; pnpm 11+ ignores it, move the settings to pnpm-workspace.yaml",
+  );
+  const lines = readFileSync(resolve(repoRoot, "pnpm-workspace.yaml"), "utf8").split("\n");
+  const blocks = lines.flatMap((line, index) => (/^patchedDependencies\s*:/.test(line) ? [index] : []));
+  if (!blocks.length) return [];
+  assert.equal(blocks.length, 1, "pnpm-workspace.yaml declares patchedDependencies more than once");
+  assert.match(lines[blocks[0]], /^patchedDependencies:\s*(#.*)?$/, "patchedDependencies must be a block mapping");
+  const patches: string[] = [];
+  for (const line of lines.slice(blocks[0] + 1)) {
+    if (/^\s*(#.*)?$/.test(line)) continue;
+    if (!/^\s/.test(line)) break;
+    const entry = /^\s+(?:"[^"]+"|'[^']+'|[^\s:"'#]+):\s+(?:"([^"]+)"|'([^']+)'|([^\s"'#]+))\s*(#.*)?$/.exec(line);
+    assert.ok(entry, `unreadable patchedDependencies entry: ${line}`);
+    patches.push(entry[1] ?? entry[2] ?? entry[3]);
+  }
+  return patches;
 }
 
 /**

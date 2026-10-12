@@ -31,6 +31,7 @@ import type { CommandContext, CommandRuntimeOptions } from "../../core/context";
 import { incrementMetaCounter } from "../../state/agentLedger";
 import { CliError, cliError } from "../../core/errors";
 import { adoptCliReplyText, writeDiagnostic, writeJson, writeText, NL, type CliReplyText } from "../../core/renderer";
+import { elideSeenSenders } from "./_senderElision";
 import {
   formatFreshnessHoldOutput,
   redactFreshnessHoldForReviewerIsolation,
@@ -55,13 +56,16 @@ import {
   LOCAL_DRAFT_TTL_MINUTES,
   lookupSavedDraft,
   setSavedDraft,
+  type SavedDraft,
 } from "./_continueDraftState";
 import {
   SEND_DRAFT_STDIN_OBSERVATION_MS,
+  formatDraftReplacedSuccess,
   formatDraftReplacedWarning,
   formatMessages,
   formatSendDraftStdinDeadlineDiagnostic,
 } from "./_format";
+import { archiveReplacedDraft } from "./_replacedDraftHistory";
 
 // Re-exports for existing imports; canonical home is message/_format.ts.
 export {
@@ -678,6 +682,29 @@ async function handleMessageSend(
   }
 
   const agentContext = ctx.loadAgentContext();
+  let previousDraftToReplace: SavedDraft | null = null;
+  let replacementArchiveAttempted = false;
+  let replacementRecoveryFilePath: string | null = null;
+  const archiveDraftBeingReplaced = (): void => {
+    if (!previousDraftToReplace || replacementArchiveAttempted) return;
+    replacementArchiveAttempted = true;
+    try {
+      replacementRecoveryFilePath = archiveReplacedDraft(
+        agentContext.agentId,
+        target,
+        previousDraftToReplace.content,
+      );
+    } catch {
+      // Local recovery is deliberately best-effort. A storage failure must
+      // never block the send that replaces the one-slot draft.
+      replacementRecoveryFilePath = null;
+    }
+    writeDiagnostic(
+      ctx.io,
+      formatDraftReplacedWarning(target, previousDraftToReplace.content, replacementRecoveryFilePath),
+      NL,
+    );
+  };
   if (opts.sendDraft) {
     const draftLookup = lookupSavedDraft(agentContext.agentId, target);
     if (draftLookup.status === "expired") {
@@ -753,8 +780,8 @@ async function handleMessageSend(
     if (previousDraft && previousDraft.content.trim().length > 0) {
       // Keyed on "a draft with a body exists", NOT on draftReplacedExisting
       // below: that flag is `reholdCount > 0`, so a draft held exactly once
-      // reports false while still being destroyed here.
-      writeDiagnostic(ctx.io, formatDraftReplacedWarning(target, previousDraft.content), NL);
+      // reports false while still being replaced here.
+      previousDraftToReplace = previousDraft;
     }
   }
 
@@ -770,6 +797,7 @@ async function handleMessageSend(
   if (!opts.sendDraft && !opts.targetConfirmed) {
     const confirmation = detectThreadContextParentSend(agentContext.agentId, target);
     if (confirmation) {
+      archiveDraftBeingReplaced();
       setSavedDraft(agentContext.agentId, target, {
         content: outgoingContent,
         attachmentIds: outgoingAttachmentIds,
@@ -847,6 +875,7 @@ async function handleMessageSend(
     // The pre-send copy only exists to survive a failed send. The ledger is
     // loss-tolerant: if it cannot be written, send anyway and report honestly
     // that no draft was kept, rather than refusing to send at all.
+    archiveDraftBeingReplaced();
     try {
       setSavedDraft(agentContext.agentId, target, {
         content: outgoingContent,
@@ -1044,14 +1073,27 @@ async function handleMessageSend(
   if (outcome.kind === "committed") {
     const data = outcome.data;
     if (opts.json) {
-      writeJson(ctx.io, data);
+      writeJson(ctx.io, replacementArchiveAttempted
+        ? {
+            ...data,
+            replacedDraft: {
+              replaced: true,
+              recoverySaved: replacementRecoveryFilePath !== null,
+              recoveryFile: replacementRecoveryFilePath,
+            },
+          }
+        : data);
       return;
     }
+    const replacementSection = replacementArchiveAttempted
+      ? `\n${formatDraftReplacedSuccess(replacementRecoveryFilePath)}`
+      : "";
     writeText(
       ctx.io,
       adoptCliReplyText(
         `Message commit confirmed for ${target}. Message ID: ${data.messageId}\n`
-        + "The original response was lost, so delivery-side receipt details (including mention delivery warnings and recent unread context) are unavailable; no message was replayed.",
+        + "The original response was lost, so delivery-side receipt details (including mention delivery warnings and recent unread context) are unavailable; no message was replayed."
+        + replacementSection,
       ),
       NL,
     );
@@ -1064,8 +1106,11 @@ async function handleMessageSend(
     : "";
 
   let unreadSection = "";
+  let settleSenders: (io: typeof ctx.io) => Promise<void> = async () => {};
   if (data.recentUnread && data.recentUnread.length > 0) {
-    unreadSection = `\n\n--- New messages you may have missed ---\n${formatMessages(data.recentUnread)}`;
+    const senders = elideSeenSenders(data.recentUnread, agentContext.agentId);
+    settleSenders = senders.settle;
+    unreadSection = `\n\n--- New messages you may have missed ---\n${formatMessages(senders.messages)}`;
   }
 
   const pendingMentionActions = normalizePendingMentionActions(data);
@@ -1127,12 +1172,31 @@ async function handleMessageSend(
     : null;
   if (opts.json) {
     if (mentionDeliveryError) throw mentionDeliveryError;
-    writeJson(ctx.io, data);
+    writeJson(ctx.io, replacementArchiveAttempted
+      ? {
+          ...data,
+          replacedDraft: {
+            replaced: true,
+            recoverySaved: replacementRecoveryFilePath !== null,
+            recoveryFile: replacementRecoveryFilePath,
+          },
+        }
+      : data);
     return;
   }
 
   const partialSection = mentionSection ? `${mentionSection}\n\n` : "";
-  writeText(ctx.io, adoptCliReplyText(`${partialSection}${sentStatusLine}${replyHint}${driveBySection}${unreadSection}`), NL);
+  const replacementSection = replacementArchiveAttempted
+    ? `\n${formatDraftReplacedSuccess(replacementRecoveryFilePath)}`
+    : "";
+  writeText(
+    ctx.io,
+    adoptCliReplyText(
+      `${partialSection}${sentStatusLine}${replyHint}${replacementSection}${driveBySection}${unreadSection}`,
+    ),
+    NL,
+  );
+  await settleSenders(ctx.io);
   if (mentionDeliveryError) throw mentionDeliveryError;
 }
 

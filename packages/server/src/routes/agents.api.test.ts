@@ -1,3 +1,4 @@
+import { PROVIDER_CONNECTIONS_FEATURE_FLAG_KEY } from "@botiverse/raft-shared";
 import { tokenForHuman, fixturePasswordHash } from "../test/integration/credentials";
 import { createApiTest } from "../test/integration/apiTest";
 import assert from "node:assert/strict";
@@ -26,7 +27,7 @@ import { openTestApp } from "../test/integration/app";
 import { createHangingStorageTestHarness } from "../test/hangingStorageTestHarness";
 import { beginArrivingTestAgentMigration, beginTestAgentMigration } from "../test/agentMigrationFixture";
 import { getDb } from "../db/index";
-import { agentMigrations, agents, featureFlagRules, inboxTargetMuteStates, machines, users, serverMembers, servers, subscriptions } from "../db/schema";
+import { agentMigrations, agents, featureFlagRules, inboxTargetMuteStates, machines, messages, users, serverMembers, servers, subscriptions } from "../db/schema";
 import {
   AgentOrchestrator,
   KimiReasoningEffortUpgradeRequiredError,
@@ -1084,6 +1085,20 @@ test("agent profile PATCH updates agent server role with human role-transition p
     const ownerDemoteBody = await ownerDemote.json() as { serverRole: string | null };
     assert.equal(ownerDemoteBody.serverRole, "member");
     assert.equal(await getAgentMemberRole(server.id, ownerManagedAgent.id), "member");
+
+    // Each real role change tells the agent in its DM with the human who made it;
+    // refused and no-op requests post nothing.
+    const ownerDm = await findOrCreateDM(server.id, owner.id, ownerManagedAgent.id);
+    assert.ok(ownerDm);
+    const roleNotices = await db
+      .select({ content: messages.content, subtype: messages.systemSubtype })
+      .from(messages)
+      .where(and(eq(messages.channelId, ownerDm.id), eq(messages.messageType, "system")))
+      .orderBy(messages.seq);
+    assert.equal(roleNotices.length, 2);
+    assert.match(roleNotices[0]!.content, /changed @owner-managed-agent-role's server role from member to admin\.$/);
+    assert.match(roleNotices[1]!.content, /changed @owner-managed-agent-role's server role from admin to member\.$/);
+    assert.ok(roleNotices.every((notice) => notice.subtype === "agent.server_role_changed"));
 });
 
 test("external agent rejects managed runtime mutation, lifecycle, and machine assignment", async ({ app }) => {
@@ -3806,7 +3821,7 @@ test("grok_runtime_v0 gates new Grok selections while preserving existing Grok a
 
     const getRuntimeOptions = async (agentId: string) => {
       const res = await fetch(`${app.baseUrl}/api/agents/${agentId}/runtime-options`, {
-        headers: authHeaders(ownerToken, server.id),
+        headers: { ...authHeaders(ownerToken, server.id), "X-Raft-Runtime-Form-V2": "1" },
       });
       assert.equal(res.status, 200);
       return await res.json() as {
@@ -5470,11 +5485,11 @@ test("agent skills returns a closed machine-affinity error when non-local owner 
       headers: authHeaders(ownerToken, server.id),
     });
 
-    assert.equal(res.status, 503);
+    assert.equal(res.status, 409);
     const body = await res.json() as { code: string; machineAffinityRoute: string; error: string };
-    assert.equal(body.code, "machine_affinity_unavailable");
+    assert.equal(body.code, "machine_offline");
     assert.equal(body.machineAffinityRoute, "owner_missing");
-    assert.match(body.error, /Machine is not connected/);
+    assert.match(body.error, /Machine is offline/);
 });
 
 test("agent start rejects unassigned machines and classifies daemon-offline failures", async ({ app }) => {
@@ -5653,7 +5668,7 @@ test("agent skills failures return typed statuses and record classified sanitize
     assert.equal(daemonTraceJson.includes("private-skill"), false);
 });
 
-test("agent skills machine-affinity 503 does not record the 500-catch trace event", async ({ app }) => {
+test("agent skills on an offline machine (owner_missing, 409) does not record the 500-catch trace event", async ({ app }) => {
     const sink = new MemoryTraceSink();
     const tracer = new BasicTracer({
       sink,
@@ -5696,7 +5711,7 @@ test("agent skills machine-affinity 503 does not record the 500-catch trace even
       headers: authHeaders(ownerToken, server.id),
     });
 
-    assert.equal(res.status, 503);
+    assert.equal(res.status, 409);
     assert.equal(listedSkills, false);
     const failedEvents = sink
       .getAllSpans()
@@ -5886,55 +5901,6 @@ test("GET /agents records restore-path trace phases with batched creator enrichm
     assert.equal(readyEvent.attrs?.env_vars_stripped, false);
 });
 
-test("GET /agents resolves agent activity with at most 8 lookups in flight", async ({ app }) => {
-  const db = getDb();
-  const owner = await seedUser("agents-concurrency-owner@slock.test", "agents-concurrency-owner");
-  const server = await createServer("Agents Concurrency Server", "agents-concurrency-server", owner.id);
-  await db.insert(serverMembers).values({ serverId: server.id, userId: owner.id, role: "owner" }).onConflictDoNothing();
-  const created = [];
-  for (let i = 0; i < 20; i += 1) {
-    created.push(await createAgent(server.id, `concurrency-agent-${i}`, {
-      runtime: "codex",
-      creatorType: "user",
-      creatorId: owner.id,
-    }));
-  }
-
-  // Each activity lookup may borrow pool connections (cache / Redis miss):
-  // a large server must not resolve them all at once.
-  const orchestrator = app.app.get("agentOrchestrator") as { getActivity: (...args: unknown[]) => Promise<unknown> };
-  const originalGetActivity = orchestrator.getActivity.bind(orchestrator);
-  let inFlight = 0;
-  let peak = 0;
-  let calls = 0;
-  orchestrator.getActivity = async (...args: unknown[]) => {
-    inFlight += 1;
-    calls += 1;
-    peak = Math.max(peak, inFlight);
-    try {
-      await new Promise((resolve) => setTimeout(resolve, 5));
-      return await originalGetActivity(...args);
-    } finally {
-      inFlight -= 1;
-    }
-  };
-  try {
-    const ownerToken = await tokenForHuman(owner.email);
-    const res = await fetch(`${app.baseUrl}/api/agents`, {
-      headers: authHeaders(ownerToken, server.id),
-    });
-    assert.equal(res.status, 200);
-    const body = await res.json() as Array<{ id: string; activity: string }>;
-    assert.deepEqual(new Set(body.map((agent) => agent.id)), new Set(created.map((agent) => agent.id)));
-    assert.ok(body.every((agent) => typeof agent.activity === "string"));
-    assert.equal(calls, 20);
-    assert.ok(peak <= 8, `peak ${peak} concurrent activity lookups`);
-    assert.ok(peak > 1, "lookups still overlap");
-  } finally {
-    orchestrator.getActivity = originalGetActivity;
-  }
-});
-
 test("agent-to-agent DM channels are not readable through ordinary human message routes", async ({ app }) => {
     const db = getDb();
 
@@ -6056,6 +6022,118 @@ test("Antigravity permits existing-agent edits but rejects new agents and runtim
     assert.equal((await edit.json() as { runtime: string }).runtime, "antigravity");
   }
   assert.equal((await getAgent(other.id))?.runtime, "codex");
+});
+
+test("Copilot permits existing-agent model and env edits but rejects new agents and runtime transitions", async ({ app }) => {
+  const owner = await seedUser("copilot-existing@slock.test", "copilot-existing");
+  const server = await createServer("Copilot Existing", "copilot-existing", owner.id);
+  const ownerToken = await tokenForHuman(owner.email);
+  const [machine] = await getDb().insert(machines).values({
+    serverId: server.id, userId: owner.id, name: "copilot-existing-machine",
+    apiKeyHash: "copilot-existing", runtimes: ["copilot", "codex"],
+  }).returning();
+  const existing = await createAgent(server.id, "existing-copilot", { runtime: "copilot", model: "gpt-5.4", machineId: machine.id });
+  const other = await createAgent(server.id, "existing-codex", { runtime: "codex", model: "gpt-5", machineId: machine.id });
+  const headers = { ...authHeaders(ownerToken, server.id), "Content-Type": "application/json" };
+  const deprecatedError = "Runtime is deprecated and cannot be selected: copilot";
+
+  for (const fields of [
+    { runtime: "copilot", model: "gpt-5.4" },
+    { runtimeConfig: { version: 1, runtime: "copilot", model: { kind: "preset", id: "gpt-5.4" } } },
+  ]) {
+    for (const request of [
+      { method: "POST", url: `${app.baseUrl}/api/agents`, body: { name: "new-copilot", machineId: machine.id, ...fields } },
+      { method: "PATCH", url: `${app.baseUrl}/api/agents/${other.id}`, body: fields },
+    ]) {
+      const response = await fetch(request.url, { method: request.method, headers, body: JSON.stringify(request.body) });
+      assert.equal(response.status, 400, `${request.method} ${JSON.stringify(fields)}`);
+      assert.equal((await response.json() as { error: string }).error, deprecatedError);
+    }
+  }
+
+  // Protocol v2 create (web/mobile form path) is refused the same way.
+  const v2Create = await fetch(`${app.baseUrl}/api/agents`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ name: "v2-copilot", machineId: machine.id, formDefinitionRef: { protocolVersion: 2, runtimeId: "copilot" }, formValues: { model: "gpt-5.4" } }),
+  });
+  assert.equal(v2Create.status, 400);
+  assert.deepEqual(await v2Create.json(), { error: deprecatedError });
+
+  // The existing Copilot agent keeps its runtime and can change model, effort and env.
+  const edit = await fetch(`${app.baseUrl}/api/agents/${existing.id}`, {
+    method: "PATCH",
+    headers,
+    body: JSON.stringify({
+      description: "still editable",
+      runtimeConfig: {
+        version: 1,
+        runtime: "copilot",
+        model: { kind: "custom", name: "vendor/copilot-custom" },
+        reasoningEffort: "high",
+        envVars: { COPILOT_FLAG: "1" },
+      },
+    }),
+  });
+  assert.equal(edit.status, 200, await edit.clone().text());
+  const edited = await edit.json() as { runtime: string; description: string; runtimeConfig: { model: unknown; envVars: unknown; reasoningEffort: unknown } };
+  assert.equal(edited.runtime, "copilot");
+  assert.equal(edited.description, "still editable");
+  assert.deepEqual(edited.runtimeConfig.model, { kind: "custom", name: "vendor/copilot-custom" });
+  assert.deepEqual(edited.runtimeConfig.envVars, { COPILOT_FLAG: "1" });
+  assert.equal(edited.runtimeConfig.reasoningEffort, "high");
+
+  // A legacy field-level model edit on the existing agent is also allowed.
+  const legacyEdit = await fetch(`${app.baseUrl}/api/agents/${existing.id}`, {
+    method: "PATCH", headers, body: JSON.stringify({ runtime: "copilot", model: "gpt-5.2" }),
+  });
+  assert.equal(legacyEdit.status, 200, await legacyEdit.clone().text());
+  assert.equal((await legacyEdit.json() as { runtime: string }).runtime, "copilot");
+
+  assert.equal((await getAgent(other.id))?.runtime, "codex");
+  assert.equal((await getAgent(existing.id))?.runtime, "copilot");
+
+  // Protocol v2 edit (web v2 form, native mobile): the existing agent's form is
+  // still served, now labelled edit-only, and a save round-trips.
+  const formRes = await fetch(`${app.baseUrl}/api/agents/${existing.id}/runtime-form`, { headers });
+  assert.equal(formRes.status, 200);
+  const form = await formRes.json() as { runtimeId: string; schemaVersion: string; values: Record<string, unknown> };
+  assert.equal(form.runtimeId, "copilot");
+  assert.equal(form.schemaVersion, "copilot.edit.v1");
+  const v2Edit = await fetch(`${app.baseUrl}/api/agents/${existing.id}`, {
+    method: "PATCH",
+    headers,
+    body: JSON.stringify({
+      formDefinitionRef: { protocolVersion: 2, runtimeId: "copilot" },
+      formValues: { ...form.values, model: "gpt-5.4", reasoningEffort: "low", envVars: { NEW: "2" } },
+    }),
+  });
+  assert.equal(v2Edit.status, 200, await v2Edit.clone().text());
+  const afterV2 = hydrateRuntimeConfig((await getAgent(existing.id))!);
+  assert.equal(afterV2.runtime, "copilot");
+  assert.deepEqual(afterV2.model, { kind: "preset", id: "gpt-5.4" });
+  assert.equal(afterV2.reasoningEffort, "low");
+  assert.deepEqual(afterV2.envVars, { NEW: "2" });
+
+  // Server-served runtime lists (web and native mobile read these): new-agent
+  // options omit Copilot; the existing agent's options keep it as grandfathered.
+  const newOptions = await fetch(`${app.baseUrl}/api/servers/${server.id}/machines/${machine.id}/runtime-options`, { headers });
+  assert.equal(newOptions.status, 200);
+  const newIds = (await newOptions.json() as { options: { runtimeId: string }[] }).options.map((option) => option.runtimeId);
+  assert.equal(newIds.includes("copilot"), false);
+  assert.equal(newIds.includes("codex"), true);
+  for (const [agentId, expectCopilot] of [[existing.id, true], [other.id, false]] as const) {
+    const existingOptions = await fetch(`${app.baseUrl}/api/agents/${agentId}/runtime-options`, { headers });
+    assert.equal(existingOptions.status, 200);
+    const copilot = (await existingOptions.json() as { options: { runtimeId: string; admissionReason: string | null; canSelectInThisContext: boolean }[] })
+      .options.find((option) => option.runtimeId === "copilot");
+    if (expectCopilot) {
+      assert.equal(copilot?.admissionReason, "deprecated");
+      assert.equal(copilot?.canSelectInThisContext, true);
+    } else {
+      assert.equal(copilot, undefined);
+    }
+  }
 });
 
 // artin 2026-09-27: installed mobile clients could not save a model — every
@@ -6396,6 +6474,73 @@ test("batch 3b v2 edit: Claude's custom-provider API key never comes back throug
   assert.deepEqual((await storedProvider()).provider, { kind: "default" });
 });
 
+test("v2 edit: a Claude agent whose custom provider lives in the launch mirrors keeps its key on a blank save, and a changed URL or provider still asks for one", async ({ app }) => {
+  const owner = await seedUser("v2-claude-mirror-key@slock.test", "v2-claude-mirror-key");
+  const server = await createServer("V2 Claude Mirror Key", "v2-claude-mirror-key", owner.id);
+  const headers = { ...authHeaders(await tokenForHuman(owner.email), server.id), "Content-Type": "application/json" };
+  const SECRET = "sk-claude-mirror-secret";
+  // Historical shape (hydrateLegacyRuntimeConfigWithTrace): the structured
+  // provider lost its URL and key, which survive only in the agent's envVars
+  // launch mirrors. Read and launch paths hydrate it to the custom provider.
+  const stripped = {
+    version: 1,
+    runtime: "claude",
+    provider: { kind: "custom", apiUrl: "", apiKey: "" },
+    model: { kind: "custom", name: "claude-opus-5-5" },
+    mode: { kind: "default" },
+    reasoningEffort: null,
+    envVars: null,
+  } as unknown as RuntimeConfig;
+  const mirrors = { ANTHROPIC_BASE_URL: "https://llm-gateway.example.com", ANTHROPIC_API_KEY: SECRET, ANTHROPIC_CUSTOM_MODEL_OPTION: "claude-opus-5-5" };
+  const agent = await createAgent(server.id, "v2-claude-mirror", { runtime: "claude", model: "claude-opus-5-5", runtimeConfig: stripped, envVars: mirrors });
+  const storedProvider = async (id: string) => ((await getAgent(id))?.runtimeConfig as unknown as { provider: Record<string, unknown> }).provider;
+  const patch = (id: string, formValues: Record<string, unknown>) => fetch(`${app.baseUrl}/api/agents/${id}`, {
+    method: "PATCH",
+    headers,
+    body: JSON.stringify({ formDefinitionRef: { protocolVersion: 2, runtimeId: "claude" }, formValues, restartMode: "restart" }),
+  });
+
+  // The edit read shows the provider the agent actually launches with, never the key.
+  const formRes = await fetch(`${app.baseUrl}/api/agents/${agent.id}/runtime-form`, { headers });
+  assert.equal(formRes.status, 200);
+  const formText = await formRes.text();
+  assert.equal(formText.includes(SECRET), false, "the stored API key is not in the v2 edit response");
+  const form = JSON.parse(formText) as { values: Record<string, unknown> };
+  assert.equal(form.values.provider, "custom");
+  assert.equal(form.values.apiUrl, "https://llm-gateway.example.com");
+
+  const exact = { provider: "custom", apiUrl: "https://llm-gateway.example.com/", apiKey: "", model: "claude-opus-5-5", reasoningEffort: null, fastMode: false, command: "", envVars: {} };
+  // A changed endpoint never inherits the key; nothing is saved.
+  const moved = await patch(agent.id, { ...exact, apiUrl: "https://other.example.test/" });
+  assert.equal(moved.status, 400);
+  assert.deepEqual((await moved.json() as { issues: unknown }).issues, [{ code: "api_key_required", pointer: "/formValues/apiKey" }]);
+  assert.deepEqual(await storedProvider(agent.id), stripped.provider);
+
+  // The production request: blank key, same endpoint (trailing slash aside) → keeps the key.
+  const saved = await patch(agent.id, exact);
+  assert.equal(saved.status, 200, await saved.clone().text());
+  assert.deepEqual(await storedProvider(agent.id), { kind: "custom", apiUrl: "https://llm-gateway.example.com/", apiKey: SECRET });
+
+  // Provider switch: an agent on Default has no key to keep.
+  const onDefault = await createAgent(server.id, "v2-claude-default", {
+    runtime: "claude",
+    model: "sonnet",
+    runtimeConfig: { ...stripped, provider: { kind: "default" }, model: { kind: "preset", id: "sonnet" } } as unknown as RuntimeConfig,
+  });
+  const switched = await patch(onDefault.id, exact);
+  assert.equal(switched.status, 400);
+  assert.deepEqual((await switched.json() as { issues: unknown }).issues, [{ code: "api_key_required", pointer: "/formValues/apiKey" }]);
+  assert.deepEqual(await storedProvider(onDefault.id), { kind: "default" });
+
+  // Stripped provider with no mirrors: the key is gone, so the read shows Default and a blank custom save is refused.
+  const lost = await createAgent(server.id, "v2-claude-lost-key", { runtime: "claude", model: "claude-opus-5-5", runtimeConfig: stripped });
+  const lostForm = await (await fetch(`${app.baseUrl}/api/agents/${lost.id}/runtime-form`, { headers })).json() as { values: Record<string, unknown> };
+  assert.equal(lostForm.values.provider, "default");
+  const lostSave = await patch(lost.id, exact);
+  assert.equal(lostSave.status, 400);
+  assert.deepEqual((await lostSave.json() as { issues: unknown }).issues, [{ code: "api_key_required", pointer: "/formValues/apiKey" }]);
+});
+
 test("batch 4 v2 create and edit: Pi stores the legacy runtimeConfig, its built-in provider key is write-only in v2, and legacy saves are unchanged", async ({ app }) => {
   const owner = await seedUser("v2-batch4-pi@slock.test", "v2-batch4-pi");
   const server = await createServer("V2 Batch4 Pi", "v2-batch4-pi", owner.id);
@@ -6546,6 +6691,18 @@ test("protocol v2 create points issues found after assembly at the submitted fie
   for (const issue of body.issues ?? []) {
     assert.equal(issue.pointer, "/formValues/model", "a v2 client can only act on /formValues pointers");
   }
+});
+
+// Review follow-up: untrusted form ID must be rejected before UUID DB lookup.
+test("review: v2 malformed connection id returns 400", async ({ app }) => {
+  const owner = await seedUser("review-v2-id@slock.test", "review-v2-id");
+  const server = await createServer("Review Connection Id", "review-connection-id", owner.id);
+  await getDb().insert(featureFlagRules).values({ id: randomUUID(), flagKey: PROVIDER_CONNECTIONS_FEATURE_FLAG_KEY, stage: "server", priority: 0, decision: "allow", values: [server.id] });
+  const token = await tokenForHuman(owner.email);
+  const absent = await fetch(`${app.baseUrl}/api/agents`, { method: "POST", headers: { ...authHeaders(token, server.id), "Content-Type": "application/json" }, body: JSON.stringify({ name: "review-absent", formDefinitionRef: { protocolVersion: 2, runtimeId: "builtin" }, formValues: { providerId: "connection:11111111-1111-4111-8111-111111111111", model: "deepseek/deepseek-v4-pro" } }) });
+  assert.equal(absent.status, 409, await absent.clone().text());
+  const res = await fetch(`${app.baseUrl}/api/agents`, { method: "POST", headers: { ...authHeaders(token, server.id), "Content-Type": "application/json" }, body: JSON.stringify({ name: "review-malformed", formDefinitionRef: { protocolVersion: 2, runtimeId: "builtin" }, formValues: { providerId: "connection:not-a-uuid", model: "deepseek/deepseek-v4-pro" } }) });
+  assert.equal(res.status, 400, await res.clone().text());
 });
 
 test("RFC 071 §5: Start and Reset are explicit human controls; PATCH lifts the terminal breaker only on a real runtime value change", async ({ app }) => {

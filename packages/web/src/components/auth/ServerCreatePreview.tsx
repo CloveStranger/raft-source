@@ -1,5 +1,5 @@
 import { ChevronRight, Hash, LockKeyhole } from "lucide-react";
-import { useState } from "react";
+import { useCallback, useState } from "react";
 import type { ReactNode } from "react";
 import { useIntl } from "react-intl";
 import { RAFT_APP_SERVER_PATH_PREFIX } from "../../brand/constants";
@@ -157,6 +157,12 @@ export default function ServerCreatePreview({
   const hasCustomSlug = previewSlug !== DEFAULT_SERVER_SLUG;
   const [channelsExpanded, setChannelsExpanded] = useState(true);
   const [agentsExpanded, setAgentsExpanded] = useState(true);
+  const handleToggleChannels = useCallback(() => {
+    setChannelsExpanded((expanded) => !expanded);
+  }, []);
+  const handleToggleAgents = useCallback(() => {
+    setAgentsExpanded((expanded) => !expanded);
+  }, []);
 
   return (
     <div
@@ -200,7 +206,7 @@ export default function ServerCreatePreview({
             testId="server-preview-section-channels"
             expanded={channelsExpanded}
             controls="server-preview-channel-rows"
-            onToggle={() => setChannelsExpanded((expanded) => !expanded)}
+            onToggle={handleToggleChannels}
           />
           {channelsExpanded ? (
             <div className="flex flex-col gap-1 px-2" id="server-preview-channel-rows">
@@ -216,7 +222,7 @@ export default function ServerCreatePreview({
             testId="server-preview-section-dms"
             expanded={agentsExpanded}
             controls="server-preview-dm-rows"
-            onToggle={() => setAgentsExpanded((expanded) => !expanded)}
+            onToggle={handleToggleAgents}
           />
           {agentsExpanded ? (
             <div className="flex flex-col gap-1 px-2" id="server-preview-dm-rows">

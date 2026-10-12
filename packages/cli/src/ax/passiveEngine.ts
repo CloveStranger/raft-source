@@ -13,9 +13,10 @@ import {
   PASSIVE_RESOURCES,
   type PassiveResourceSpec,
   type PassiveResourceType,
+  type SenderClaim,
 } from "@botiverse/raft-shared";
 
-import { probeLedgerWritable, readObservation, recordObservation } from "../state/agentLedger";
+import { claimObservation, probeLedgerWritable, readObservation, recordObservation, releaseObservation } from "../state/agentLedger";
 
 export interface PassiveTouch {
   type: PassiveResourceType;
@@ -118,6 +119,9 @@ export function decidePassiveDelivery(
       if (!probeLedgerWritable(agentId, env)) return { deliver: "attach", reason: "ledger_unwritable" };
       return { deliver: "hold", contextId: signal.contextId };
     }
+    // "once" resources never gate an action; see `senderClaimForContext`.
+    case "once":
+      return { deliver: "pass" };
   }
 }
 
@@ -135,4 +139,26 @@ export function confirmPassiveDelivery(
 ): void {
   if (!agentId) return;
   recordObservation(agentId, touch.type, touch.id, touch.rev, contextId, env);
+}
+
+/**
+ * The claim for policy-"once" sender descriptions in this CLI's context, or
+ * `undefined` when every description must be shown in full: no agent, the
+ * feature gate off, or a runtime that compacts without telling the daemon
+ * (its contextId cannot bound "already shown"). A ledger error claims `true`.
+ */
+export function senderClaimForContext(
+  agentId: string | undefined,
+  env: NodeJS.ProcessEnv = process.env,
+): { claim: SenderClaim; release: (claimed: ReadonlyArray<{ id: string; rev: string }>) => void } | undefined {
+  if (!agentId || !isLocalStateAgentId(agentId)) return undefined;
+  const signal = enabledContextSignal(env);
+  if (!signal || !signal.compactionReported) return undefined;
+  const { contextId } = signal;
+  return {
+    claim: (id, rev) => claimObservation(agentId, "sender", id, rev, contextId, env) ?? true,
+    release: (claimed) => {
+      for (const { id, rev } of claimed) releaseObservation(agentId, "sender", id, rev, contextId, env);
+    },
+  };
 }

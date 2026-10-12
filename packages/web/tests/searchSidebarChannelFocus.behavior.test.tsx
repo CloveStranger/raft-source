@@ -36,7 +36,6 @@ import { DEFAULT_SIDEBAR_ORDER } from "../src/store/events/serverEvents";
 import { useServerStore } from "../src/store/serverStore";
 import { useThreadStore } from "../src/store/threadStore";
 import { useUIStore } from "../src/store/uiStore";
-import { useWorkspaceGridNavigationStore } from "../src/components/workspace/workspaceGridNavigationStore";
 import { TestIntlProvider } from "./helpers/intl";
 
 const TARGET_CHANNEL_ID = "channel-target";
@@ -288,11 +287,6 @@ function seedStores() {
     openParentChannelId: null,
   });
   useUIStore.setState({ sidebarOpen: true });
-  useWorkspaceGridNavigationStore.setState({
-    active: false,
-    enabled: false,
-    railMode: null,
-  });
 }
 
 function LocationProbe() {

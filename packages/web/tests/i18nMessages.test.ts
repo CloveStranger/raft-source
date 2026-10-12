@@ -131,9 +131,17 @@ test("Activity and notification batch messages parse and keep placeholder parity
   // 100 after the Computer low-disk warning added
   // `layout.systemNotifications.machineDiskLowTitle` / `machineDiskLowBody`
   // for the person who added the Computer.
+  // 101 after the start-failure pause added `activity.status.autoRestartPaused`
+  // (automatic restarts paused after a start failure, and how to lift it).
+  // 103 after the Activity DMs view (#wg-dms-view:5aaf5090) added
+  // `activity.current.emptyDms` / `emptyDmsDescription`.
+  // 104 after task #10 added `activity.status.sessionNeedsReset` (a session
+  // stuck on context compaction points to Reset Session).
+  // 107 after task #1284 added the usage-limit attention title/body/action
+  // messages to the existing notification center.
   // An intentional id removal/addition updates this count with the reason;
   // silent drift still goes red.
-  assert.equal(ids.length, 100, "current i18n batch should cover exactly the known 100 message ids");
+  assert.equal(ids.length, 107, "current i18n batch should cover exactly the known 107 message ids");
 
   for (const id of ids) {
     assert.deepEqual(

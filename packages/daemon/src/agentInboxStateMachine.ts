@@ -22,9 +22,11 @@ export type AgentInboxStateMachineMessage = {
   sender_type?: string;
   sender_name?: string;
   sender_description?: string | null;
+  sender_timezone?: string | null;
   senderType?: string;
   senderName?: string;
   senderDescription?: string | null;
+  senderTimezone?: string | null;
   content?: string;
   timestamp?: string;
   createdAt?: string;
@@ -282,6 +284,7 @@ export function normalizeInboxVisibleMessage(
     sender_type: message.sender_type ?? message.senderType,
     sender_name: message.sender_name ?? message.senderName,
     sender_description: message.sender_description ?? message.senderDescription ?? null,
+    sender_timezone: message.sender_timezone ?? message.senderTimezone ?? null,
   };
   const senderId = messageSenderId(message);
   if (senderId) normalized.sender_id = senderId;

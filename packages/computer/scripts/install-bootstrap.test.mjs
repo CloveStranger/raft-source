@@ -115,7 +115,9 @@ test('sh/ps1 pin forwarding stays in lockstep (static cross-check)', () => {
 });
 
 test('sh/ps1 show the executable download instead of silencing both transfers', () => {
-  assert.match(scriptText, /dl_progress\(\) \{ curl -fL --progress-bar/,
+  // Installer #31 filters curl's stderr down to the bar's own updates (so curl
+  // error text stays out of the terminal) and prints them on stderr.
+  assert.match(scriptText, /dl_progress\(\) \{[^}]*?curl -fL [^\n]*--progress-bar[^\n]*\| *\n *awk [^\n]*%[^\n]*>&2\n/,
     'install.sh lost the visible curl progress bar');
   assert.match(scriptText, /dl_progress "\$binary_url" "\$tmp\/installer"/,
     'install.sh no longer uses the visible path for the executable');

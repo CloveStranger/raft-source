@@ -6,6 +6,7 @@ import {
   resolvePreflightConfig,
   classifyAdmission,
   pgSqlState,
+  readManifest,
   type ManifestEntry,
 } from "./migrationPreflight";
 
@@ -88,6 +89,60 @@ test("tooth 4: ahead / diverged / malformed / empty -> REJECT", () => {
 test("behind + effective missing/non-numeric -> still ADMIT (timeout is informational now)", () => {
   assert.equal(classifyAdmission(MANIFEST, { hash: h("a"), createdAt: 1000 }, null, REQUIRED).code, "BEHIND_MIGRATE");
   assert.equal(classifyAdmission(MANIFEST, { hash: h("a"), createdAt: 1000 }, "1min", REQUIRED).code, "BEHIND_MIGRATE");
+});
+
+// ---- behind, with a pending entry drizzle would skip (PENDING_NOT_NEWER_THAN_HEAD) ----
+// drizzle's migrator applies an entry only when folderMillis > the db head's
+// created_at. A late-merged migration generated before the head would be skipped
+// silently while the deploy reports success, so the preflight refuses it.
+
+test("behind with a late entry older than the head -> REJECT naming it", () => {
+  const manifest: ManifestEntry[] = [
+    { hash: h("a"), folderMillis: 1000, tag: "0001_a" },
+    { hash: h("b"), folderMillis: 3000, tag: "0002_b" }, // db head
+    { hash: h("c"), folderMillis: 2000, tag: "0003_generated_earlier" }, // would be skipped
+    { hash: h("d"), folderMillis: 4000, tag: "0004_d" },
+  ];
+  const v = classifyAdmission(manifest, { hash: h("b"), createdAt: "3000" }, "60000", REQUIRED);
+  assert.equal(v.admit, false);
+  assert.equal(v.code, "PENDING_NOT_NEWER_THAN_HEAD");
+  assert.match(v.detail ?? "", /pending=0003_generated_earlier head_created_at=3000/);
+  assert.doesNotMatch(v.detail ?? "", /0004_d/);
+});
+
+test("behind with a pending entry at exactly the head's created_at -> REJECT (drizzle needs strictly newer)", () => {
+  const manifest: ManifestEntry[] = [
+    { hash: h("a"), folderMillis: 1000 },
+    { hash: h("b"), folderMillis: 1000 },
+  ];
+  const v = classifyAdmission(manifest, { hash: h("a"), createdAt: 1000 }, "60000", REQUIRED);
+  assert.equal(v.code, "PENDING_NOT_NEWER_THAN_HEAD");
+  assert.match(v.detail ?? "", new RegExp(`pending=${h("b").slice(0, 12)}`));
+});
+
+test("behind with every pending entry newer than the head -> still ADMIT", () => {
+  const v = classifyAdmission(MANIFEST, { hash: h("a"), createdAt: 1000 }, "60000", REQUIRED);
+  assert.equal(v.code, "BEHIND_MIGRATE");
+});
+
+test("fresh db applies every entry regardless of order -> ADMIT", () => {
+  const manifest: ManifestEntry[] = [
+    { hash: h("a"), folderMillis: 3000 },
+    { hash: h("b"), folderMillis: 2000 },
+  ];
+  assert.equal(classifyAdmission(manifest, null, "60000", REQUIRED).code, "BEHIND_MIGRATE");
+});
+
+test("the repository journal's timestamps strictly increase, so no deploy can hit PENDING_NOT_NEWER_THAN_HEAD", () => {
+  const manifest = readManifest(path.join(serverRoot, "drizzle"));
+  for (let i = 1; i < manifest.length; i++) {
+    assert.ok(
+      manifest[i].folderMillis > manifest[i - 1].folderMillis,
+      `${manifest[i].tag} (when=${manifest[i].folderMillis}) is not newer than ${manifest[i - 1].tag} ` +
+        `(when=${manifest[i - 1].folderMillis}); regenerate it so its journal "when" is the latest`,
+    );
+  }
+  assert.ok(manifest.every((m) => typeof m.tag === "string" && /^[0-9]{4}_/.test(m.tag)), "readManifest attaches journal tags");
 });
 
 test("pgSqlState seam", () => {

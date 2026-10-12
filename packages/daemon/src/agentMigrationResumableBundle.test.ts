@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash, randomBytes } from "node:crypto";
 import { unlinkSync } from "node:fs";
-import { chmod, mkdir, mkdtemp, open, readFile, readlink, rename, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, open, readdir, readFile, readlink, rename, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { PassThrough, Readable } from "node:stream";
@@ -965,6 +965,52 @@ test("a large file deleted after it was listed is skipped, like a small one", as
     assert.ok(deleted);
     assert.equal(streamed.control.archive.entryCount, 2);
     assert.equal(streamed.control.archive.expandedBytes, 4);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a chunk stream that breaks mid-body leaves no partial file; a digest mismatch keeps its partial", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "migration-resumable-partial-"));
+  const workspace = path.join(root, "source", "agents", "agent-1");
+  const chunksDirectory = path.join(root, "chunks");
+  try {
+    await mkdir(workspace, { recursive: true });
+    await writeFile(path.join(workspace, "payload.bin"), randomBytes(1_500_000));
+    const built = await buildBundle({ workspacePath: workspace, chunkSizeBytes: 1024 * 1024 });
+    const listPartials = async () => (await readdir(chunksDirectory)).filter((name) => name.includes(".partial-"));
+
+    // The connection drops after some bytes: the caller retries this chunk, so
+    // each failed attempt must not leave its partial behind.
+    const dropped = new PassThrough();
+    dropped.write(randomBytes(4096));
+    setTimeout(() => dropped.destroy(new Error("socket hang up")), 10);
+    await assert.rejects(
+      verifyAndStoreAgentMigrationChunk({ control: built.control, chunkIndex: 0, chunk: dropped, chunksDirectory }),
+      /socket hang up/,
+    );
+    assert.deepEqual(await listPartials(), []);
+
+    // Wrong bytes of the right length are corrupt, not a network blip: keep them.
+    const expected = built.control.bundle.chunks[0]!;
+    await assert.rejects(
+      verifyAndStoreAgentMigrationChunk({
+        control: built.control,
+        chunkIndex: 0,
+        chunk: Readable.from([Buffer.alloc(expected.sizeBytes)]),
+        chunksDirectory,
+      }),
+      AgentMigrationChunkDigestMismatchError,
+    );
+    assert.equal((await listPartials()).length, 1);
+
+    const stored = await verifyAndStoreAgentMigrationChunk({
+      control: built.control,
+      chunkIndex: 0,
+      chunk: built.openChunk(0),
+      chunksDirectory,
+    });
+    assert.equal(stored.outcome, "stored");
   } finally {
     await rm(root, { recursive: true, force: true });
   }

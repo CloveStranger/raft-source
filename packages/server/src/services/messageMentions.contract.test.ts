@@ -16,6 +16,7 @@ import {
 } from "./messageService";
 import { getInboxItems, markRead } from "./channelService";
 import { eq, and } from "drizzle-orm";
+import { withChannelDelivery } from "../test/orchestratorStub";
 
 
 let previousFixtureDb: ReturnType<typeof getDb> | null = null;
@@ -47,7 +48,7 @@ function createIo() {
   } as any;
 }
 
-const noopOrchestrator = { deliverMessage: async () => undefined } as any;
+const noopOrchestrator = withChannelDelivery({ deliverMessage: async () => undefined }) as any;
 
 async function seedPublicChannel() {
   const db = getDb();
@@ -796,6 +797,60 @@ test("mention write: identity-backed mention survives a CJK left-boundary edit",
   const rows = await db.select().from(messageMentions).where(eq(messageMentions.channelId, channel.id));
   assert.equal(rows.length, 1);
   assert.equal(rows[0].targetType, "agent");
+  assert.equal(rows[0].targetId, agent.id);
+  assert.equal(rows[0].handleAtSendTime, "TestBot");
+});
+
+test("mention write v2: free-text handle splits only where Latin meets CJK", async ({ db: database }) => {
+
+  const { db, user, user2, agent, channel, server } = await seedPublicChannel();
+  setupDepsForIntegration(server.id);
+
+  const content = "@TestBot的方案 @Bob와 @TestBotteam";
+  const sent = await broadcastAndDeliver(createIo(), noopOrchestrator, {
+    channelId: channel.id,
+    senderType: "user",
+    senderId: user.id,
+    senderName: "Alice",
+    content,
+    mentionContract: "v2",
+  });
+
+  assert.equal(sent.content, content, "the CJK suffix stays in the persisted body");
+  assert.deepEqual(
+    getSenderUnresolvedMentionHandles(sent),
+    ["@TestBotteam"],
+    "a same-script continuation is never guessed as a prefix mention",
+  );
+  const rows = await db.select().from(messageMentions).where(eq(messageMentions.channelId, channel.id));
+  assert.deepEqual(
+    rows.map((row) => [row.targetType, row.targetId, row.handleAtSendTime]).sort(),
+    [["agent", agent.id, "TestBot"], ["user", user2.id, "Bob"]].sort(),
+  );
+});
+
+test("mention write: identity-backed mention survives a glued CJK suffix", async ({ db: database }) => {
+
+  const { db, user, agent, channel, server } = await seedPublicChannel();
+  setupDepsForIntegration(server.id);
+
+  const content = "@TestBotさん 확인";
+  const sent = await broadcastAndDeliver(createIo(), noopOrchestrator, {
+    channelId: channel.id,
+    senderType: "user",
+    senderId: user.id,
+    senderName: "Alice",
+    content,
+    randomId: "structured-mention-cjk-suffix",
+    mentions: [{ type: "agent", id: agent.id, name: "TestBot" }],
+    mentionContract: "v2",
+  });
+
+  assert.equal(sent.content, content);
+  assert.deepEqual(sent.mentions, [{ type: "agent", id: agent.id, name: "TestBot" }]);
+  assert.deepEqual(getSenderUnresolvedMentionHandles(sent), []);
+  const rows = await db.select().from(messageMentions).where(eq(messageMentions.channelId, channel.id));
+  assert.equal(rows.length, 1);
   assert.equal(rows[0].targetId, agent.id);
   assert.equal(rows[0].handleAtSendTime, "TestBot");
 });

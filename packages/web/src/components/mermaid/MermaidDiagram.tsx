@@ -182,6 +182,10 @@ export function MermaidDiagram({ code }: { code: string }) {
     minScale: MERMAID_MIN_SCALE,
     scaleMode: "layout",
   });
+  const openFullscreen = useCallback(() => setFullscreen(true), []);
+  const handleFullscreenOpenChange = useCallback((open: boolean) => {
+    if (!open) setFullscreen(false);
+  }, []);
 
   return (
     <div ref={rootRef} className="r-mermaid-diagram" data-mermaid-status={state.status}>
@@ -191,7 +195,7 @@ export function MermaidDiagram({ code }: { code: string }) {
         onViewChange={changeView}
         result={result}
         zoom={inlineZoom}
-        onFullscreen={() => setFullscreen(true)}
+        onFullscreen={openFullscreen}
         onExportError={setExportError}
       />
       {view === "code" ? (
@@ -218,9 +222,7 @@ export function MermaidDiagram({ code }: { code: string }) {
       {fullscreen && result ? (
         <Lightbox
           open
-          onOpenChange={(open) => {
-            if (!open) setFullscreen(false);
-          }}
+          onOpenChange={handleFullscreenOpenChange}
         >
           <LightboxContent
             data-testid="mermaid-fullscreen"

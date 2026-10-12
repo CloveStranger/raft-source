@@ -44,13 +44,22 @@ export function reminderItemId(sourceRef: AgentInboxSourceRef): string | null {
   return `reminder:${sourceRef.id}:${sourceRef.revision}`;
 }
 
+/** Appended when a title is shortened to the preview bound (counts toward it). */
+export const REMINDER_INBOX_TITLE_TRUNCATION_MARKER = "\u2026";
+
 export function projectReminderInboxTitle(title: string): string | undefined {
   const singleLine = title
     .replace(/[\u0000-\u001f\u007f]+/g, " ")
     .replace(/\s+/g, " ")
-    .trim()
-    .slice(0, AGENT_INBOX_PREVIEW_MAX_CHARS);
-  return singleLine || undefined;
+    .trim();
+  if (singleLine.length <= AGENT_INBOX_PREVIEW_MAX_CHARS) return singleLine || undefined;
+  // A shortened title must read as incomplete. A silent cut yields a
+  // well-formed value (a version, id or count with its tail missing) that the
+  // reader cannot tell from the real one; the marker makes the cut visible.
+  let cut = AGENT_INBOX_PREVIEW_MAX_CHARS - REMINDER_INBOX_TITLE_TRUNCATION_MARKER.length;
+  const last = singleLine.charCodeAt(cut - 1);
+  if (last >= 0xd800 && last <= 0xdbff) cut -= 1; // never split a surrogate pair
+  return singleLine.slice(0, cut) + REMINDER_INBOX_TITLE_TRUNCATION_MARKER;
 }
 
 export function isReminderDueInboxItem(item: AgentInboxAppItem): boolean {

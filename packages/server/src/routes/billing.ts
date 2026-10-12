@@ -67,12 +67,43 @@ billingRouter.post("/checkout", async (req: Request, res: Response) => {
     const message = err?.message ?? "";
     if (message.includes("is not configured")) {
       res.status(503).json({ error: message });
+    } else if (message === "Referral discount unavailable") {
+      res.status(400).json({ error: "This referral code can't be applied." });
     } else if (message.includes("must be")) {
       res.status(400).json({ error: message });
     } else {
       sendJsonServerError(req, res, {
         error: "Failed to create checkout session",
         logPrefix: "[Billing] Checkout error:",
+        err,
+      });
+    }
+  }
+});
+
+billingRouter.post("/referral-discount/preview", async (req: Request, res: Response) => {
+  try {
+    if (!billingService.isStripeConfigured()) {
+      res.status(503).json({ error: "Billing is not configured" });
+      return;
+    }
+    const member = await getActorServerRoleInServer(req.serverId!, "user", req.userId!);
+    if (!canMutateBilling(member)) {
+      res.status(403).json({ error: "Only the server owner can manage billing" });
+      return;
+    }
+    const result = await billingService.previewReferralDiscount(req.serverId!, req.userId!, req.body);
+    res.json(result);
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : "";
+    if (message === "Referral discount unavailable") {
+      res.status(400).json({ error: "This referral code can't be applied." });
+    } else if (message.includes("is not configured")) {
+      res.status(503).json({ error: message });
+    } else {
+      sendJsonServerError(req, res, {
+        error: "Failed to preview referral discount",
+        logPrefix: "[Billing] Referral discount preview error:",
         err,
       });
     }

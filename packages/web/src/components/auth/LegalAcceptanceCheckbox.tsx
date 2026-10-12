@@ -1,5 +1,6 @@
 import { CURRENT_LEGAL_ACCEPTANCE } from "@botiverse/raft-shared";
 import { useIntl } from "react-intl";
+import { useCallback } from "react";
 import type { ReactNode } from "react";
 
 import { Checkbox } from "raft-ui";
@@ -14,13 +15,16 @@ export default function LegalAcceptanceCheckbox({
   disabled?: boolean;
 }) {
   const { formatMessage } = useIntl();
+  const handleCheckedChange = useCallback((event: boolean) => {
+    onChange(event);
+  }, [onChange]);
   return (
     <label className="flex items-start gap-2.5 text-sm">
       <Checkbox
         size="md"
         checked={checked}
         disabled={disabled}
-        onCheckedChange={(event) => onChange(event)}
+        onCheckedChange={handleCheckedChange}
         className="mt-0.5"
       />
       <span className="leading-5 text-foreground-muted">

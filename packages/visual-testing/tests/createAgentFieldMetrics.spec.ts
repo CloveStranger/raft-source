@@ -46,17 +46,11 @@ import { expect, test } from "@playwright/test";
 
 type Theme = "brutal" | "elegant";
 
-/**
- * 3 selects, one select-value each. Measured in both themes.
- *
- * This read 6 until the duplicate-control bug was fixed, and I had written a
- * plausible-sounding justification for it ("visible trigger text plus a hidden node
- * the component keeps for form state"). There was no such second node — it was the
- * adopted control being rendered twice. A denominator taken from broken state is
- * still a wrong denominator; what saved it was the count assertion failing loudly
- * when the structure changed, rather than silently measuring whatever remained.
- */
-const SELECT_VALUE_COUNT = 3;
+// Computer and Runtime remain selects; Model is now a searchable combobox.
+// Pin both counts so dropping either kind cannot silently shrink coverage.
+const SELECT_VALUE_COUNT = 2;
+const MODEL_INPUT = '[data-slot="combobox-input"]';
+const MODEL_INPUT_COUNT = 1;
 /**
  * The dialog's one free-text input (Name); Description is a textarea.
  *
@@ -136,14 +130,8 @@ async function expectFieldAxisApplied(
       };
     });
   }, selector);
-  // The DENOMINATOR, not just "more than zero". Asserting every match answers
-  // "are the ones present correct?" but not "are they all still there?" — if a
-  // select stops rendering, a >0 check keeps passing on the survivors. The count
-  // is measured, not guessed: the Create Agent dialog renders 3 selects, each
-  // emitting two select-value nodes (visible trigger text + the hidden node the
-  // component keeps for form state) = 6, identical in both themes.
-  // (@Bugen, same shape as the empty-scan bug in rui #6839: no denominator.)
-  expect(applied.length, `${theme}: ${what} — expected all 6 select-value nodes`).toBe(expectedCount);
+  // Pin each expected control, not merely a non-empty set.
+  expect(applied.length, `${theme}: ${what} — expected exactly ${expectedCount} text node(s)`).toBe(expectedCount);
   for (const a of applied) {
     expect(a.hasTextField, `${theme}: ${what} "${a.text}" must carry text-field — a correct number that does not come from the field axis is a coincidence, not a pass`).toBe(true);
     expect(a.hasFontField, `${theme}: ${what} "${a.text}" must carry font-field`).toBe(true);
@@ -162,7 +150,7 @@ function expectMatchesTokens(found: Metrics[], tokens: Metrics, what: string, th
 }
 
 for (const theme of ["brutal", "elegant"] as Theme[]) {
-  test(`${theme}: the text inside a select trigger obeys the field metrics, not the button's`, async ({ page }) => {
+  test(`${theme}: select and model-combobox text obey the field metrics`, async ({ page }) => {
     await page.goto(CASE("dialog", theme));
     await settle(page);
     const tokens = await fieldTokens(page);
@@ -173,6 +161,8 @@ for (const theme of ["brutal", "elegant"] as Theme[]) {
 
     expectMatchesTokens(await metrics(page, '[data-slot="select-value"]'), tokens, "select-value", theme, SELECT_VALUE_COUNT);
     await expectFieldAxisApplied(page, '[data-slot="select-value"]', "select trigger", theme, SELECT_VALUE_COUNT);
+    expectMatchesTokens(await metrics(page, MODEL_INPUT), tokens, "model combobox input", theme, MODEL_INPUT_COUNT);
+    await expectFieldAxisApplied(page, MODEL_INPUT, "model combobox input", theme, MODEL_INPUT_COUNT);
   });
 
   test(`${theme}: text inputs obey the field metrics`, async ({ page }) => {

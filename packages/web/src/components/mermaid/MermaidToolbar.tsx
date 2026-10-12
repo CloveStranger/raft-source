@@ -8,7 +8,8 @@ import {
   ZoomIn,
   ZoomOut,
 } from "lucide-react";
-import { useCallback } from "react";
+import { useCallback, useMemo } from "react";
+import type { MouseEvent } from "react";
 import { useIntl } from "react-intl";
 import {
   Button,
@@ -39,6 +40,11 @@ const MERMAID_TOOLTIP_DELAY_MS = 600;
 const MERMAID_TOOLTIP_CONTENT_CLASS = "r-mermaid-tooltip";
 const MERMAID_MOBILE_TOUCH_TARGET_CLASS = "r-mermaid-toolbar__touch-target";
 
+// Toolbar buttons must not steal focus from the diagram on mouse press.
+function preventFocusSteal(event: MouseEvent) {
+  event.preventDefault();
+}
+
 export function MermaidToolbar({
   code,
   view,
@@ -59,13 +65,13 @@ export function MermaidToolbar({
   const { formatMessage } = useIntl();
   const downloadBlob = useBlobDownload();
   const lightboxPortalContainer = useLightboxPortalContainer();
-  const tooltipContentProps = {
+  const tooltipContentProps = useMemo(() => ({
     className: MERMAID_TOOLTIP_CONTENT_CLASS,
     container: lightboxPortalContainer ?? undefined,
-  };
-  const floatingPortalProps = lightboxPortalContainer
+  }), [lightboxPortalContainer]);
+  const floatingPortalProps = useMemo(() => (lightboxPortalContainer
     ? { container: lightboxPortalContainer }
-    : undefined;
+    : undefined), [lightboxPortalContainer]);
 
   // The copy control is the same Button as the rest of the toolbar, so it
   // keeps the toolbar's register; the controller owns the clipboard write and
@@ -109,6 +115,19 @@ export function MermaidToolbar({
       );
     }
   }, [downloadBlob, formatMessage, onExportError, result]);
+
+  const zoomOut = useCallback(() => zoom.zoomBy(1 / ZOOM_FACTOR), [zoom]);
+  const zoomIn = useCallback(() => zoom.zoomBy(ZOOM_FACTOR), [zoom]);
+
+  const { copyText } = copyController;
+  const copySource = useCallback(() => {
+    onExportError(null);
+    // The controller rejects when the clipboard write failed; copy
+    // failures stay silent by the ruling that let the RUI action in
+    // (its foxact hook swallowed them), so swallow the rejection here
+    // rather than leaking an unhandled promise rejection.
+    void copyText(code).catch(() => {});
+  }, [code, copyText, onExportError]);
 
   // Diagram actions remain present but disabled when rendering has no result,
   // matching the stable toolbar in the error state. The code view still hides
@@ -216,8 +235,8 @@ export function MermaidToolbar({
         variant="outline"
                 size="icon-sm"
                 disabled={!result}
-                onMouseDown={(event) => event.preventDefault()}
-                onClick={() => zoom.zoomBy(1 / ZOOM_FACTOR)}
+                onMouseDown={preventFocusSteal}
+                onClick={zoomOut}
                 aria-label={formatMessage({ id: "message.mermaid.zoomOutAria" })}
               >
                 <ZoomOut size={14} />
@@ -231,8 +250,8 @@ export function MermaidToolbar({
         variant="outline"
                 size="icon-sm"
                 disabled={!result}
-                onMouseDown={(event) => event.preventDefault()}
-                onClick={() => zoom.zoomBy(ZOOM_FACTOR)}
+                onMouseDown={preventFocusSteal}
+                onClick={zoomIn}
                 aria-label={formatMessage({ id: "message.mermaid.zoomInAria" })}
               >
                 <ZoomIn size={14} />
@@ -245,15 +264,8 @@ export function MermaidToolbar({
           <Button
         variant="outline"
             size="icon-sm"
-            onMouseDown={(event) => event.preventDefault()}
-            onClick={() => {
-              onExportError(null);
-              // The controller rejects when the clipboard write failed; copy
-              // failures stay silent by the ruling that let the RUI action in
-              // (its foxact hook swallowed them), so swallow the rejection here
-              // rather than leaking an unhandled promise rejection.
-              void copyController.copyText(code).catch(() => {});
-            }}
+            onMouseDown={preventFocusSteal}
+            onClick={copySource}
             aria-label={copyFeedbackLabel}
           >
             {copyController.copied ? <Check size={14} /> : <Copy size={14} />}

@@ -10,6 +10,8 @@
 // through `redactSecrets()` so even a future bug that drops a credential
 // into a check `detail` cannot leak it.
 import { buildStatusReport } from "./status";
+import { describeDuplicateKeyHolder, findDuplicateKeyHolder } from "./duplicateKeyGuard";
+import { describeRaftHomeConflict, findRaftHomeConflictFor } from "./paths";
 import type { ServerStatusRow } from "./status";
 import {
   ComputerAttachClient,
@@ -51,6 +53,10 @@ export interface DoctorCheck {
 }
 
 interface DoctorDeps {
+  /** task #914 seam: another live service on this host holding the same machine key. */
+  findDuplicateKeyHolder?: typeof findDuplicateKeyHolder;
+  /** task #915 seam: both default homes hold Raft data and nothing picks one. */
+  findRaftHomeConflict?: typeof findRaftHomeConflictFor;
   detectMigration?: (
     slockHome: string,
     serverSlug: string,
@@ -134,6 +140,21 @@ export async function runDoctorChecks(
   const checks: DoctorCheck[] = [];
 
   checks.push({ name: "SLOCK_HOME", ok: true, detail: report.slockHome });
+
+  // task #915: the home above may be a guess between two that hold Raft data.
+  const homeConflict = (opts.findRaftHomeConflict ?? findRaftHomeConflictFor)(slockHome);
+  if (homeConflict) {
+    checks.push({ name: "Raft home", ok: false, detail: describeRaftHomeConflict(homeConflict) });
+  }
+
+  // task #914: two services on one key make the server send commands to
+  // either of them. Name the other holder so the owner can stop or re-bind.
+  const duplicateHolder = await (opts.findDuplicateKeyHolder ?? findDuplicateKeyHolder)(slockHome);
+  checks.push(
+    duplicateHolder
+      ? { name: "machine key holders", ok: false, detail: describeDuplicateKeyHolder(duplicateHolder) }
+      : { name: "machine key holders", ok: true, detail: "no other live Computer service on this host holds this machine key" },
+  );
 
   checks.push(
     report.userSessionError

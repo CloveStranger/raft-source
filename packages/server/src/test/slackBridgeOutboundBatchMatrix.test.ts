@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
 import { eq } from "drizzle-orm";
 
 import { getDb } from "../db/index";
@@ -92,7 +91,7 @@ export const SLACK_BRIDGE_OUTBOUND_BATCH_MATRIX: readonly BatchCase[] = [
 export const SLACK_BRIDGE_SANDBOX_ONE_SHOT_PLAN = [{
   step: 1,
   action: "read_only_preflight",
-  requires: "ordinary channel; zero joint rows; one active external binding; exact runtime build fingerprint; fresh authority",
+  requires: "ordinary channel; zero joint rows; one active external binding; fresh authority",
   stopOn: "any mismatch",
 }, {
   step: 2,
@@ -111,23 +110,12 @@ export const SLACK_BRIDGE_SANDBOX_ONE_SHOT_PLAN = [{
   stopOn: "always stop after receipt; no new randomId",
 }] as const;
 
-async function runtimeFingerprint(): Promise<string> {
-  const manifest = JSON.parse(await readFile(
-    new URL("./slackBridgeRuntimeBuildManifest.json", import.meta.url),
-    "utf8",
-  )) as { schema: string; fingerprint: string };
-  assert.equal(manifest.schema, "slack-bridge-runtime-build-manifest.v1");
-  assert.match(manifest.fingerprint, /^[0-9a-f]{64}$/);
-  return manifest.fingerprint;
-}
-
 test("batch matrix executes every claimed production-shaped scenario and asserts its receipt", async () => {
   assert.equal(new Set(SLACK_BRIDGE_OUTBOUND_BATCH_MATRIX.map((entry) => entry.id)).size, SLACK_BRIDGE_OUTBOUND_BATCH_MATRIX.length);
-  const fingerprint = await runtimeFingerprint();
   const executed: string[] = [];
 
   for (const entry of SLACK_BRIDGE_OUTBOUND_BATCH_MATRIX) {
-    const receipt = await runSlackBridgeExecutableBatchCase(entry, fingerprint);
+    const receipt = await runSlackBridgeExecutableBatchCase(entry);
     executed.push(receipt.id);
     assert.equal(receipt.topology, entry.topology, `${entry.id}: topology`);
     assert.equal(receipt.http, entry.http, `${entry.id}: HTTP`);
@@ -168,9 +156,8 @@ test("batch matrix is complete across topology, send mode, authority, frontend, 
 });
 
 test("expired authority cases derive topology and cardinality from their PGlite fixture", async () => {
-  const fingerprint = await runtimeFingerprint();
   const entry = expiredAuthorityCases[0]!;
-  const receipt = await runSlackBridgeExecutableBatchCase(entry, fingerprint, {
+  const receipt = await runSlackBridgeExecutableBatchCase(entry, {
     async onDatabaseReady({ channelId, ownerId }) {
       await getDb().insert(messages).values({
         channelId,
@@ -190,7 +177,7 @@ test("expired authority cases derive topology and cardinality from their PGlite 
   });
 
   await assert.rejects(
-    runSlackBridgeExecutableBatchCase(entry, fingerprint, {
+    runSlackBridgeExecutableBatchCase(entry, {
       async onDatabaseReady({ channelId }) {
         await getDb().update(channels).set({ type: "joint" }).where(eq(channels.id, channelId));
       },

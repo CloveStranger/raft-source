@@ -17,6 +17,8 @@
  *   POST   {base}/provision/agents                     Idempotency-Key: <raftAgentId>
  *   PATCH  {base}/provision/agents/:providerAgentId?raftServerId=  {name?, instructions?}
  *   GET|DELETE {base}/provision/agents/by-raft-agent/:raftAgentId?raftServerId=
+ *   GET    {base}/provision/models?raftServerId=
+ *   GET|PUT {base}/provision/agents/by-raft-agent/:raftAgentId/model?raftServerId=  {model: id | null}
  *          (Raft's delete and status path; DELETE idempotent, 404 if never created)
  *   POST|GET|DELETE {base}/provision/agents/by-raft-agent/:raftAgentId/connections/:provider?raftServerId=
  *   POST   {base}/provision/agents/by-raft-agent/:raftAgentId/connections/:provider/confirm?raftServerId=
@@ -361,6 +363,16 @@ export function providerAgentUsagePath(
  */
 export function providerAgentByRaftIdPath(raftAgentId: string, raftServerId: string): string {
   return `/provision/agents/by-raft-agent/${encodeURIComponent(raftAgentId)}${serverQuery(raftServerId)}`;
+}
+
+/** The models the provider offers this tenant, and its default. */
+export function providerModelsPath(raftServerId: string): string {
+  return `/provision/models${serverQuery(raftServerId)}`;
+}
+
+/** What a provisioned agent's next turn runs on (GET), or the pick for it (PUT). */
+export function providerAgentModelByRaftIdPath(raftAgentId: string, raftServerId: string): string {
+  return `/provision/agents/by-raft-agent/${encodeURIComponent(raftAgentId)}/model${serverQuery(raftServerId)}`;
 }
 
 /** Account connection (e.g. GitHub) of a provisioned agent; the provider owns the OAuth flow and token. */

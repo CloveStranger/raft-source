@@ -3,10 +3,15 @@ import { BadgeInfo, BookOpenText, FileText, Hash, Languages, LogIn, MessageSquar
 import { useIntl } from "react-intl";
 import api from "../api/client";
 import Banner from "../components/ui/Banner";
-import { Button } from "raft-ui";
+import { AppShellMainSlot, AppShellPanelSlot, AppShellRailSlot, AppShellRoot, AppShellSidebarSlot, Button, ConversationPanelContent, ConversationPanelRoot, Spinner } from "raft-ui";
 import PanelHeader from "../components/ui/PanelHeader";
-import MessageItem from "../components/message/MessageItem";
-import type { MentionEntry, ReadOnlySenderProjection } from "../components/message/MessageItem";
+import PanelResizeHandle from "../components/ui/PanelResizeHandle";
+import EmptyState from "../components/ui/EmptyState";
+import type { ReadOnlySenderProjection } from "../components/message/MessageItem";
+import type { OpenThreadRequest } from "../store/threadStore";
+import { PublicMessageRow } from "./PublicMessageRow";
+import MessageTimeline from "../components/message/MessageTimeline";
+import type { MessageTimelineSource } from "../components/message/MessageTimeline";
 import ThreadPanel from "../components/message/ThreadPanel";
 import type { ReadOnlyThreadData } from "../components/message/ThreadPanel";
 import { LeftRail } from "../components/layout/LeftRail";
@@ -15,6 +20,8 @@ import SettingsPanel from "../components/settings/SettingsPanel";
 import type { SettingsTabId } from "../components/settings/settingsNavigation";
 import ConfirmDialog from "../components/ConfirmDialog";
 import CommunityAgreementDialog from "../components/server/CommunityAgreementDialog";
+import PublicServerChannelSidebar from "../components/server/PublicServerChannelSidebar";
+import PublicServerSidebarFrame from "../components/server/PublicServerSidebarFrame";
 import type { CommunityAgreement } from "../components/server/CommunityAgreementDialog";
 import {
   getThreadPanelDynamicMax,
@@ -31,7 +38,11 @@ import { getServerSurfaceCapabilities } from "@botiverse/raft-shared";
 
 const PUBLIC_PANEL_RESIZE_QUERY = "(min-width: 640px)";
 
-const EMPTY_PUBLIC_MENTION_MAP = new Map<string, MentionEntry>();
+const CHANNEL_HEADER_CONTAINER_PROPS = { "data-testid": "public-server-channel-header" };
+const CHANNEL_SIDEBAR_NAV = <nav />;
+const noopLoadNewer = () => undefined;
+const SETTINGS_SIDEBAR_ASIDE = <aside />;
+const EMPTY_PUBLIC_CHANNELS: PublicChannel[] = [];
 const ReleaseNotesPanel = lazy(() => import("../components/settings/ReleaseNotesPanel"));
 type PublicSettingsView = SettingsTabId | "release-notes";
 
@@ -47,7 +58,7 @@ interface PublicServerReadback {
   canJoinAsGuest: boolean;
 }
 
-interface PublicMessage {
+export interface PublicMessage {
   id: string;
   senderType: "user" | "agent" | "external_projection";
   sender: ReadOnlySenderProjection;
@@ -265,7 +276,7 @@ export default function PublicServerPage({
     };
   }, [formatMessage, selectedChannelId, slug]);
 
-  const loadOlder = async () => {
+  const loadOlder = useCallback(async () => {
     if (!selectedChannelId || messages.length === 0) return;
     dispatch({ type: "loadMessages" });
     try {
@@ -280,9 +291,9 @@ export default function PublicServerPage({
         ? formatMessage({ id: "pages.publicServer.noLongerPublic" })
         : response?.error || formatMessage({ id: "pages.publicServer.failedMessages" }) });
     }
-  };
+  }, [formatMessage, messages, selectedChannelId, slug]);
 
-  const joinAsGuest = async (agreementId?: string) => {
+  const joinAsGuest = useCallback(async (agreementId?: string) => {
     setJoining(true);
     setJoinError("");
     try {
@@ -315,7 +326,11 @@ export default function PublicServerPage({
     } finally {
       setJoining(false);
     }
-  };
+  }, [formatMessage, onJoined, slug]);
+  const confirmJoinAsGuest = useCallback(() => joinAsGuest(), [joinAsGuest]);
+  const openJoinConfirm = useCallback(() => setJoinConfirmOpen(true), []);
+  const closeJoinConfirm = useCallback(() => setJoinConfirmOpen(false), []);
+  const closeAgreement = useCallback(() => setAgreement(null), []);
 
   const selected = readback?.channels.find((channel) => channel.id === selectedChannelId) ?? null;
   const displayChannels = useMemo<Channel[]>(() => (readback?.channels ?? []).map((channel) => ({
@@ -326,12 +341,16 @@ export default function PublicServerPage({
     joined: false,
     guestVisible: true,
   })), [readback?.channels, readback?.server.id]);
-  const selectPublicChannel = (channel: Channel) => {
+  const selectPublicChannel = useCallback((channel: Channel) => {
     dispatch({ type: "selectChannel", channelId: channel.id });
     setOpenThread(null);
     setSurfaceMode("chat");
-  };
-  const openPublicThread = async (request: OpenPublicThread) => {
+  }, []);
+  const selectPublicChannelById = useCallback((channelId: string) => {
+    const channel = displayChannels.find((item) => item.id === channelId);
+    if (channel) selectPublicChannel(channel);
+  }, [displayChannels, selectPublicChannel]);
+  const openPublicThread = useCallback(async (request: OpenPublicThread) => {
     const generation = ++threadRequestGeneration.current;
     setOpenThread(request);
     setThreadMessages([]);
@@ -354,7 +373,64 @@ export default function PublicServerPage({
     } finally {
       if (generation === threadRequestGeneration.current) setThreadLoading(false);
     }
-  };
+  }, [formatMessage, slug]);
+  const handleOpenThread = useCallback((request: OpenThreadRequest) => {
+    const threadChannelId = request.initialThreadChannelId ?? request.threadChannelId;
+    if (threadChannelId) {
+      void openPublicThread({
+        threadChannelId,
+        parentChannelId: request.parentChannelId,
+        parentMessageId: request.parentMessageId,
+      });
+    }
+  }, [openPublicThread]);
+  const closeThread = useCallback(() => {
+    threadRequestGeneration.current += 1;
+    setOpenThread(null);
+  }, []);
+  const selectSettingsTabFromRail = useCallback((tab: PublicSettingsView) => {
+    setSettingsTab(tab);
+    setSurfaceMode("settings");
+  }, []);
+  const showServerSelectionNotice = useCallback(() => setServerSelectionNotice(true), []);
+  const readbackServer = readback?.server;
+  const publicProjection = useMemo(() => (readbackServer ? {
+    server: readbackServer,
+    authenticated,
+    showHelp: surfaceCapabilities.showHelp,
+    activeMode: surfaceMode,
+    onSelectMode: setSurfaceMode,
+    onSelectSettingsTab: selectSettingsTabFromRail,
+    onAnonymousServerSelection: showServerSelectionNotice,
+  } : null), [
+    authenticated,
+    readbackServer,
+    selectSettingsTabFromRail,
+    showServerSelectionNotice,
+    surfaceCapabilities.showHelp,
+    surfaceMode,
+  ]);
+  // Column widths apply only where the columns sit side by side (sm and up).
+  const channelSidebarStyle = useMemo(
+    () => (isSmUp ? { width: channelSidebarWidth } : undefined),
+    [channelSidebarWidth, isSmUp],
+  );
+  const settingsLoadingFallback = useMemo(
+    () => (
+      <div className="flex justify-center p-6">
+        <Spinner size="md" aria-label={formatMessage({ id: "common.loadingLabel" })} />
+      </div>
+    ),
+    [formatMessage],
+  );
+  const settingsSidebarStyle = useMemo(
+    () => (isSmUp ? { width: settingsSidebarWidth } : undefined),
+    [isSmUp, settingsSidebarWidth],
+  );
+  const threadPanelStyle = useMemo(
+    () => (isSmUp ? { width: threadPanelWidth } : undefined),
+    [isSmUp, threadPanelWidth],
+  );
   const loadOlderThreadMessages = useCallback(async () => {
     if (!openThread || threadLoading || threadMessages.length === 0) return;
     const generation = threadRequestGeneration.current;
@@ -386,6 +462,36 @@ export default function PublicServerPage({
     () => new Map(messages.map((message) => [message.id, message.sender] as const)),
     [messages],
   );
+  const publicMessageById = useMemo(
+    () => new Map(messages.map((message) => [message.id, message])),
+    [messages],
+  );
+  // The same scroll and pagination primitive the signed-in ChatPanel and the
+  // read-only thread panel use. It takes plain data, so no member store is read.
+  const messageSource = useMemo<MessageTimelineSource>(() => ({
+    messages: adaptedMessages,
+    hasOlder,
+    hasNewer: false,
+    loading: loadingMessages,
+    loadOlder,
+    loadNewer: noopLoadNewer,
+  }), [adaptedMessages, hasOlder, loadOlder, loadingMessages]);
+  const selectedId = selected?.id ?? "";
+  const renderPublicMessage = useCallback((adaptedMessage: Message) => {
+    const message = publicMessageById.get(adaptedMessage.id);
+    if (!message) return null;
+    return (
+      <PublicMessageRow
+        message={message}
+        adaptedMessage={adaptedMessage}
+        channels={displayChannels}
+        parentChannelId={selectedId}
+        sender={publicSenderByMessageId.get(adaptedMessage.id)}
+        onNavigateChannel={selectPublicChannel}
+        onOpenThread={handleOpenThread}
+      />
+    );
+  }, [displayChannels, handleOpenThread, publicMessageById, publicSenderByMessageId, selectPublicChannel, selectedId]);
   const threadSenderByMessageId = useMemo(() => {
     const pairs = threadMessages.map((message) => [message.id, message.sender] as const);
     const parent = openThread ? messages.find((message) => message.id === openThread.parentMessageId) : null;
@@ -469,7 +575,7 @@ export default function PublicServerPage({
     data-testid="public-server-bottom-action"
     actions={authenticated ? (
       joinable ? (
-        <Button size="md" variant="accent" onClick={() => setJoinConfirmOpen(true)} disabled={joining} data-testid="public-server-join-guest">
+        <Button size="md" variant="accent" onClick={openJoinConfirm} disabled={joining} data-testid="public-server-join-guest">
           <UserPlus className="size-4" />{formatMessage({ id: "pages.publicServer.joinAsGuest" })}
         </Button>
       ) : null
@@ -492,162 +598,132 @@ export default function PublicServerPage({
   );
 
   if (!readback && !error) {
-    return <div className="flex min-h-screen items-center justify-center bg-layer-canvas-muted font-display font-bold text-foreground-strong theme-brutal:bg-brutal-cream">{formatMessage({ id: "common.loading" })}</div>;
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-layer-canvas-muted theme-brutal:bg-brutal-cream" data-testid="public-server-loading">
+        <Spinner size="lg" aria-label={formatMessage({ id: "common.loadingLabel" })} />
+      </div>
+    );
   }
 
   return (
-    <div className="flex h-dvh min-h-screen flex-col overflow-hidden bg-layer-canvas font-display text-foreground-strong theme-brutal:bg-white theme-brutal:text-black" data-testid="public-server-page">
+    // Same rui shell root as the signed-in MainLayout. It is what sets
+    // --shell-header-height (56px Elegant / 62px Brutal, 48px on short
+    // viewports), so every `h-panel-header` row below lines up with the shared
+    // PanelHeader and rail header instead of falling back to 62px in every theme.
+    // The slots default to `hidden md:flex`; this page keeps its channel column
+    // and full-screen thread overlay on phones, so those two opt back in.
+    <AppShellRoot className="h-dvh min-h-screen flex-col overflow-hidden font-display" data-testid="public-server-page">
       <div className="relative flex min-h-0 flex-1" data-testid="public-server-app-shell">
-        {readback ? (
-          <LeftRail
-            publicProjection={{
-              server: readback.server,
-              authenticated,
-              showHelp: surfaceCapabilities.showHelp,
-              activeMode: surfaceMode,
-              onSelectMode: setSurfaceMode,
-              onSelectSettingsTab: (tab) => {
-                setSettingsTab(tab);
-                setSurfaceMode("settings");
-              },
-              onAnonymousServerSelection: () => setServerSelectionNotice(true),
-            }}
-          />
+        {publicProjection ? (
+          <AppShellRailSlot>
+            <LeftRail publicProjection={publicProjection} />
+          </AppShellRailSlot>
         ) : null}
 
         <div className="relative flex min-w-0 flex-1 flex-col" data-testid="public-server-surface-stack">
         <div className="relative flex min-h-0 flex-1" data-testid="public-server-columns">
 
-        {surfaceMode === "chat" ? <nav className="relative flex w-36 shrink-0 flex-col border-r border-line-hairline bg-layer-inset sm:w-[240px] theme-brutal:border-r-2 theme-brutal:border-black theme-brutal:bg-brutal-cream" style={isSmUp ? { width: channelSidebarWidth } : undefined} aria-label={formatMessage({ id: "pages.publicServer.channelsLabel" })} data-testid="public-server-channel-sidebar">
-          <div
-            className="group absolute -right-1 top-0 bottom-0 z-20 hidden w-2 cursor-col-resize touch-none select-none sm:block"
+        {surfaceMode === "chat" ? <AppShellSidebarSlot render={CHANNEL_SIDEBAR_NAV} className="relative flex w-36 shrink-0 flex-col sm:w-[240px]" style={channelSidebarStyle} aria-label={formatMessage({ id: "pages.publicServer.channelsLabel" })} data-testid="public-server-channel-sidebar">
+          <PanelResizeHandle
+            side="right"
+            visibleFrom="sm"
             onPointerDown={handleChannelSidebarResizeStart}
             onPointerMove={handleChannelSidebarResizeMove}
             onPointerUp={handleChannelSidebarResizeEnd}
             onPointerCancel={handleChannelSidebarResizeEnd}
             data-testid="public-server-channel-sidebar-resize-handle"
-          >
-            <span className="pointer-events-none absolute bottom-0 left-1/2 top-0 w-px -translate-x-1/2 bg-foreground/25 group-hover:bg-foreground theme-brutal:bg-black/25 theme-brutal:group-hover:bg-black" />
-          </div>
+          />
           {/* The scroll lives INSIDE the column: an overflow container clips an absolutely positioned handle that
               straddles its edge, so the divider existed but could not be grabbed (caught in a real browser —
               elementFromPoint at the handle's own centre returned the nav). */}
-          <div className="min-h-0 flex-1 overflow-y-auto">
-          <div className="flex h-panel-header items-center border-b border-line-hairline px-4 theme-brutal:border-b-2 theme-brutal:border-black">
-            <h1 className="truncate text-base font-bold">{readback?.server.name}</h1>
-          </div>
-          <div className="p-3">
-            <p className="mb-2 px-2 text-[11px] font-bold uppercase tracking-wider text-foreground-hint">
-              {formatMessage({ id: "pages.publicServer.channelsLabel" })}
-            </p>
-            {readback?.channels.map((channel) => (
-              <button
-                key={channel.id}
-                type="button"
-                onClick={() => selectPublicChannel(displayChannels.find((item) => item.id === channel.id)!)}
-                className={`mb-1 flex w-full items-center gap-1.5 rounded-md border px-2 py-1 text-left text-sm font-medium theme-brutal:rounded-none theme-brutal:border-2 ${selectedChannelId === channel.id ? "border-line-strong bg-accent-soft font-bold text-accent-strong shadow-raft-sm theme-brutal:border-black theme-brutal:bg-brutal-pink theme-brutal:text-black theme-brutal:shadow-brutal-sm" : "border-transparent transition-colors hover:border-line-muted hover:bg-layer-panel hover:shadow-raft-sm theme-brutal:hover:border-black theme-brutal:hover:bg-white theme-brutal:hover:shadow-brutal-sm"}`}
-              >
-                <Hash size={15} className="shrink-0" />
-                <span className="min-w-0 truncate">{channel.name}</span>
-              </button>
-            ))}
-          </div>
-          </div>
-        </nav> : null}
+          <PublicServerChannelSidebar
+            serverName={readback?.server.name ?? ""}
+            channelsLabel={formatMessage({ id: "pages.publicServer.channelsLabel" })}
+            channels={readback?.channels ?? EMPTY_PUBLIC_CHANNELS}
+            selectedChannelId={selectedChannelId}
+            onSelectChannel={selectPublicChannelById}
+          />
+        </AppShellSidebarSlot> : null}
 
-        {surfaceMode === "chat" ? <main className="flex min-w-0 flex-1 flex-col bg-layer-canvas theme-brutal:bg-white" data-testid="public-server-channel-panel">
+        {surfaceMode === "chat" ? <AppShellMainSlot className="bg-layer-canvas theme-brutal:bg-white" data-testid="public-server-channel-panel">
           {selected ? (
-            <>
+            <ConversationPanelRoot edge="attached" className="relative border-l-0">
               <PanelHeader
                 title={selected.name}
                 subtitle={selected.description}
                 icon={<Hash size={18} />}
-                containerProps={{ "data-testid": "public-server-channel-header" }}
+                containerProps={CHANNEL_HEADER_CONTAINER_PROPS}
               />
+              <ConversationPanelContent>
               {error ? <Banner intent="warning" className="m-3 shrink-0">{error}</Banner> : null}
-              <div className="min-h-0 flex-1 overflow-y-auto" aria-live="polite" data-testid="public-server-message-timeline">
-                {hasOlder ? (
-                  <div className="py-3 text-center">
-                    <Button size="xs" variant="outline" disabled={loadingMessages} onClick={() => void loadOlder()}>
-                      {formatMessage({ id: "pages.publicServer.loadOlder" })}
-                    </Button>
-                  </div>
+              <div className="relative min-h-0 flex-1 overflow-hidden" aria-live="polite">
+                {messages.length > 0 ? (
+                  <MessageTimeline
+                    key={selected.id}
+                    source={messageSource}
+                    renderItem={renderPublicMessage}
+                    className="h-full"
+                    testId="public-server-message-timeline"
+                    persistKey={`public-channel:${selected.id}`}
+                    sparseAnchor="bottom"
+                  />
                 ) : null}
-                {messages.map((message, index) => (
-                  <div key={message.id} className="px-3" data-testid="public-server-message-row">
-                    <MessageItem
-                      message={adaptedMessages[index]!}
-                      mentionMap={EMPTY_PUBLIC_MENTION_MAP}
-                      channels={displayChannels}
-                      parentChannelId={selected.id}
-                      threadSummary={message.threadId && message.replyCount > 0 ? {
-                        threadChannelId: message.threadId,
-                        replyCount: message.replyCount,
-                        lastReplyAt: null,
-                        participantIds: [],
-                        unreadCount: 0,
-                        firstUnreadMessageId: null,
-                      } : undefined}
-                      canReact={false}
-                      readOnlyProjection
-                      readOnlySender={publicSenderByMessageId.get(message.id)}
-                      onReadOnlyNavigateChannel={selectPublicChannel}
-                      onOpenThread={(request) => {
-                        const threadChannelId = request.initialThreadChannelId ?? request.threadChannelId;
-                        if (threadChannelId) {
-                          void openPublicThread({
-                            threadChannelId,
-                            parentChannelId: request.parentChannelId,
-                            parentMessageId: request.parentMessageId,
-                          });
-                        }
-                      }}
-                    />
-                  </div>
-                ))}
                 {!loadingMessages && messages.length === 0 ? (
-                  <div className="flex h-full items-center justify-center p-6 text-center text-sm text-foreground-hint">
-                    {formatMessage({ id: "pages.publicServer.emptyMessages" })}
-                  </div>
+                  <EmptyState
+                    className="flex h-full flex-col items-center justify-center"
+                    icon={<MessageSquare size={36} />}
+                    title={formatMessage({ id: "pages.publicServer.emptyMessages" })}
+                    data-testid="public-server-empty-messages"
+                  />
                 ) : null}
                 {loadingMessages && messages.length === 0 ? (
-                  <div className="p-6 text-center text-sm font-bold">{formatMessage({ id: "common.loading" })}</div>
+                  <div className="flex justify-center p-6" data-testid="public-server-messages-loading">
+                    <Spinner size="md" aria-label={formatMessage({ id: "common.loadingLabel" })} />
+                  </div>
                 ) : null}
               </div>
-            </>
+              </ConversationPanelContent>
+            </ConversationPanelRoot>
           ) : (
-            <div className="flex h-full items-center justify-center p-8 text-center text-sm text-foreground-muted">
-              {formatMessage({ id: "pages.publicServer.emptyChannels" })}
-            </div>
+            <EmptyState
+              className="flex h-full flex-col items-center justify-center"
+              icon={<Hash size={36} />}
+              title={formatMessage({ id: "pages.publicServer.emptyChannels" })}
+              data-testid="public-server-empty-channels"
+            />
           )}
-        </main> : (
-          <main className="flex min-w-0 flex-1 bg-layer-canvas theme-brutal:bg-white" data-testid="public-server-settings-surface">
-            <aside className="relative flex w-36 shrink-0 flex-col border-r border-line-hairline bg-layer-inset sm:w-[240px] theme-brutal:border-r-2 theme-brutal:border-black theme-brutal:bg-brutal-cream" style={isSmUp ? { width: settingsSidebarWidth } : undefined} data-testid="public-server-settings-sidebar">
-              <div
-                className="group absolute -right-1 top-0 bottom-0 z-20 hidden w-2 cursor-col-resize touch-none select-none sm:block"
+        </AppShellMainSlot> : (
+          <>
+            <AppShellSidebarSlot render={SETTINGS_SIDEBAR_ASIDE} className="relative flex w-36 shrink-0 flex-col sm:w-[240px]" style={settingsSidebarStyle} data-testid="public-server-settings-sidebar">
+              <PanelResizeHandle
+                side="right"
+                visibleFrom="sm"
                 onPointerDown={handleSettingsSidebarResizeStart}
                 onPointerMove={handleSettingsSidebarResizeMove}
                 onPointerUp={handleSettingsSidebarResizeEnd}
                 onPointerCancel={handleSettingsSidebarResizeEnd}
                 data-testid="public-server-settings-sidebar-resize-handle"
+              />
+              <PublicServerSidebarFrame
+                title={formatMessage({ id: "layout.sidebar.headerSettings" })}
+                testIdPrefix="public-server-settings-sidebar"
+                scrollTestId="public-server-settings-list"
               >
-                <span className="pointer-events-none absolute bottom-0 left-1/2 top-0 w-px -translate-x-1/2 bg-foreground/25 group-hover:bg-foreground theme-brutal:bg-black/25 theme-brutal:group-hover:bg-black" />
+                <nav aria-label={formatMessage({ id: "settings.tabs.navAriaLabel" })}>
+                  <SettingsSidebarList groups={publicSettingsGroups} activeId={settingsTab} />
+                </nav>
+              </PublicServerSidebarFrame>
+            </AppShellSidebarSlot>
+            <AppShellMainSlot className="bg-layer-canvas theme-brutal:bg-white" data-testid="public-server-settings-surface">
+              <div className="min-h-0 min-w-0 flex-1 overflow-y-auto">
+                {settingsTab === "release-notes" ? (
+                  <Suspense fallback={settingsLoadingFallback}>
+                    <ReleaseNotesPanel />
+                  </Suspense>
+                ) : <SettingsPanel tab={settingsTab} showAboutWorkspace={false} />}
               </div>
-              <div className="flex h-panel-header shrink-0 items-center border-b border-line-hairline bg-layer-inset px-5 text-lg font-bold text-foreground-strong theme-brutal:border-b-2 theme-brutal:border-black theme-brutal:bg-brutal-cream">
-                {formatMessage({ id: "layout.sidebar.headerSettings" })}
-              </div>
-              <nav className="min-h-0 flex-1 overflow-y-auto px-2 py-3" aria-label={formatMessage({ id: "settings.tabs.navAriaLabel" })}>
-                <SettingsSidebarList groups={publicSettingsGroups} activeId={settingsTab} />
-              </nav>
-            </aside>
-            <div className="min-w-0 flex-1 overflow-y-auto">
-              {settingsTab === "release-notes" ? (
-                <Suspense fallback={<div className="p-5 font-bold">{formatMessage({ id: "common.loading" })}</div>}>
-                  <ReleaseNotesPanel />
-                </Suspense>
-              ) : <SettingsPanel tab={settingsTab} showAboutWorkspace={false} />}
-            </div>
-          </main>
+            </AppShellMainSlot>
+          </>
         )}
         {/* `sm:relative` (not `sm:static`) gives the resize handle below its positioning context. Side effect worth
             knowing: it also makes the `z-20` — previously mobile-only, when this panel was a full-screen overlay —
@@ -655,26 +731,22 @@ export default function PublicServerPage({
             needs, but a future floating element on the main column's right edge would collide here
             (@Bugen, review of PR #7983). */}
         {readOnlyThreadData ? (
-          <aside ref={threadPanelRef} className="absolute inset-0 z-20 flex min-w-0 flex-col bg-layer-canvas sm:relative sm:w-[380px] sm:border-l sm:border-line-hairline theme-brutal:bg-white theme-brutal:sm:border-l-2 theme-brutal:sm:border-black" style={isSmUp ? { width: threadPanelWidth } : undefined} data-testid="public-server-thread-panel">            <div
-              className="group absolute -left-1 top-0 bottom-0 z-20 hidden w-2 cursor-col-resize touch-none select-none sm:block"
+          <AppShellPanelSlot ref={threadPanelRef} className="absolute inset-0 z-20 flex bg-layer-canvas sm:relative sm:w-[380px] sm:border-l sm:border-line-hairline theme-brutal:bg-white theme-brutal:sm:border-l-2 theme-brutal:sm:border-black" style={threadPanelStyle} data-testid="public-server-thread-panel">            <PanelResizeHandle
+              side="left"
+              visibleFrom="sm"
               onPointerDown={handleThreadPanelResizeStart}
               onPointerMove={handleThreadPanelResizeMove}
               onPointerUp={handleThreadPanelResizeEnd}
               onPointerCancel={handleThreadPanelResizeEnd}
               data-testid="public-server-thread-panel-resize-handle"
-            >
-              <span className="pointer-events-none absolute bottom-0 left-1/2 top-0 w-px -translate-x-1/2 bg-foreground/25 group-hover:bg-foreground theme-brutal:bg-black/25 theme-brutal:group-hover:bg-black" />
-            </div>
+            />
             <ThreadPanel
               presentation="side"
-              onClose={() => {
-                threadRequestGeneration.current += 1;
-                setOpenThread(null);
-              }}
+              onClose={closeThread}
               showComposer={false}
               readOnlyData={readOnlyThreadData}
             />
-          </aside>
+          </AppShellPanelSlot>
         ) : null}
         </div>
         {bottomBanner}
@@ -695,17 +767,17 @@ export default function PublicServerPage({
           confirmLabel={formatMessage({ id: "pages.publicServer.joinAsGuest" })}
           loadingLabel={formatMessage({ id: "server.communityAgreement.joining" })}
           confirmColor="bg-brutal-pink"
-          onConfirm={() => joinAsGuest()}
-          onClose={() => setJoinConfirmOpen(false)}
+          onConfirm={confirmJoinAsGuest}
+          onClose={closeJoinConfirm}
         />
       ) : null}
       {agreement ? (
         <CommunityAgreementDialog
           agreement={agreement}
-          onAgree={(agreementId) => joinAsGuest(agreementId)}
-          onClose={() => setAgreement(null)}
+          onAgree={joinAsGuest}
+          onClose={closeAgreement}
         />
       ) : null}
-    </div>
+    </AppShellRoot>
   );
 }

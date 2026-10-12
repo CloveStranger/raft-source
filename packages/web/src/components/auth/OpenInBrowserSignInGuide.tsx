@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useCallback, useState } from "react";
 import { useIntl } from "react-intl";
 import type { MessageId } from "../../i18n/messages";
 import { CenteredCardBrandHeader } from "./CenteredCardFrame";
@@ -16,14 +16,18 @@ export default function OpenInBrowserSignInGuide({
   // any copy attempt — dropping it would silently remove that line.
   const [copyStatus, setCopyStatus] = useState<MessageId>("auth.openInBrowser.copyHint");
 
-  const copyLink = async () => {
+  const copyLink = useCallback(async () => {
     try {
       await navigator.clipboard.writeText(loginUrl);
       setCopyStatus("auth.openInBrowser.copied");
     } catch {
       setCopyStatus("auth.openInBrowser.copyFailed");
     }
-  };
+  }, [loginUrl]);
+
+  const handleCopyClick = useCallback(() => {
+    void copyLink();
+  }, [copyLink]);
 
   return (
     <div className="min-h-0 flex-1 overflow-y-auto bg-layer-canvas font-display safe-top safe-bottom">
@@ -50,7 +54,7 @@ export default function OpenInBrowserSignInGuide({
                 variant="outline"
                 size="lg"
                 className="w-full sm:w-auto"
-                onClick={() => void copyLink()}
+                onClick={handleCopyClick}
               >
                 {formatMessage({ id: "auth.openInBrowser.copyLink" })}
               </Button>

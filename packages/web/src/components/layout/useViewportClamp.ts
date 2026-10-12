@@ -1,5 +1,6 @@
 import {
   useEffect,
+  useEffectEvent,
   useLayoutEffect,
   useRef,
   useState,
@@ -183,7 +184,9 @@ export function useViewportClamp({
   // intrinsic height/width.
   const rafRef = useRef<number | null>(null);
 
-  const measure = () => {
+  // An effect event: the effects below stay keyed on `open` only, while each
+  // measurement still reads the latest placement and gutter.
+  const measure = useEffectEvent(() => {
     const trigger = triggerRef.current;
     const popover = popoverRef.current;
     if (!trigger || !popover) return;
@@ -203,7 +206,7 @@ export function useViewportClamp({
       placement,
       gutter,
     }));
-  };
+  });
 
   // Re-measure synchronously after the popover renders so users don't see a
   // jump on first frame.
@@ -220,7 +223,6 @@ export function useViewportClamp({
     return () => {
       if (rafRef.current !== null) cancelAnimationFrame(rafRef.current);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
   // Re-measure on viewport changes.
@@ -241,7 +243,6 @@ export function useViewportClamp({
         window.visualViewport.removeEventListener("scroll", onResize);
       }
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
   // Re-measure when popover content size changes while open. This matches the
@@ -254,8 +255,7 @@ export function useViewportClamp({
     const observer = new ResizeObserver(() => measure());
     observer.observe(popover);
     return () => observer.disconnect();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open]);
+  }, [open, popoverRef]);
 
   return { style };
 }

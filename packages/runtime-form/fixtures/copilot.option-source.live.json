@@ -1,7 +1,7 @@
 {
   "protocolVersion": 1,
   "runtimeId": "copilot",
-  "schemaVersion": "copilot.create.v1",
+  "schemaVersion": "copilot.edit.v1",
   "sourceId": "model",
   "kind": "select",
   "pointer": "/model",

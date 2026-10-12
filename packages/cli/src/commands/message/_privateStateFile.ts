@@ -3,7 +3,8 @@ import os from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 
-import { configuredRaftHome, isLocalStateAgentId, RAFT_HOME_DEFAULT_DIRNAME } from "@botiverse/raft-shared";
+import { isLocalStateAgentId } from "@botiverse/raft-shared";
+import { resolveRaftHome } from "../../state/raftHome";
 
 function privateDirectory(directory: string): void {
   fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
@@ -16,7 +17,7 @@ function privateDirectory(directory: string): void {
 
 export function privateStatePath(baseOverride: string | undefined, namespace: string, agentId: string, filename: string): string {
   if (!isLocalStateAgentId(agentId)) throw new Error("Invalid local state agent identity");
-  const base = baseOverride?.trim() || configuredRaftHome(process.env) || path.join(os.homedir(), RAFT_HOME_DEFAULT_DIRNAME);
+  const base = baseOverride?.trim() || resolveRaftHome(process.env);
   // The user-data root is shared with the daemon, Computer and profiles and may
   // be a symlink; only the namespaces this module owns are hardened.
   fs.mkdirSync(base, { recursive: true, mode: 0o700 });

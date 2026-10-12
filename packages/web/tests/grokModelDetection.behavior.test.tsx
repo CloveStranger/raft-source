@@ -1,4 +1,5 @@
 import "./helpers/domSetup";
+import { comboboxText, openCombobox } from "./helpers/combobox";
 import assert from "node:assert/strict";
 import { useState } from "react";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
@@ -43,20 +44,20 @@ test("Grok failure shows recovery, selectable fallback and successful retry", as
   render(<TestIntlProvider locale="en"><Fields /></TestIntlProvider>);
   await waitFor(() => assert.ok(screen.getByText(/grok login/)));
   assert.ok(screen.getByText(/not been verified/));
-  const modelSelect = screen.getAllByRole("combobox").find((element) => element.textContent?.includes("Grok 4.5"));
+  const modelSelect = screen.getAllByRole("combobox").find((element) => comboboxText(element).includes("Grok 4.5"));
   assert.ok(modelSelect);
-  fireEvent.click(modelSelect);
+  openCombobox(modelSelect);
   const option = await screen.findByRole("option", { name: "Grok 4.6" });
   fireEvent.pointerDown(option);
   fireEvent.click(option);
-  await waitFor(() => assert.match(modelSelect.textContent ?? "", /Grok 4.6/));
+  await waitFor(() => assert.match(comboboxText(modelSelect), /Grok 4.6/));
   fireEvent.click(screen.getByRole("button", { name: "Retry" }));
   // The login prompt clears as soon as the retry starts loading, before the
   // live catalog (and so the "Grok 4.6" label) arrives; wait for the settled state.
   await waitFor(() => {
     assert.equal(screen.queryByText(/grok login/), null);
     assert.equal(screen.queryByText(/not been verified/), null);
-    assert.match(modelSelect.textContent ?? "", /Grok 4.6/);
+    assert.match(comboboxText(modelSelect), /Grok 4.6/);
   });
   assert.equal(calls, 2);
 });

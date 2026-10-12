@@ -43,6 +43,7 @@ test("implementation still requires the channel-admin role for a member to remov
     isChannelMember: true,
     supportsChannelRoles: true,
     capability: "removeChannelMembers" as const,
+    channelType: "channel",
   };
   assert.equal(hasEffectiveChannelCapability(removeAsChannelAdmin), true);
   assert.equal(hasEffectiveChannelCapability({ ...removeAsChannelAdmin, channelRole: "member" }), false);
@@ -116,6 +117,7 @@ test("edit and archive are channel-admin capabilities, reachable without server 
         isChannelMember: true,
         supportsChannelRoles: true,
         capability,
+        channelType: "channel",
       }),
       true,
     );

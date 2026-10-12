@@ -1,6 +1,6 @@
 /**
- * Row shapes of the sidebar unread reader (rw_conversation_unread_v2, see
- * infra/risingwave/sql/068-chain-mention-v6-consumers.sql) and its test seam.
+ * Row shapes of the sidebar unread reader (rw_conversation_unread_v3, see
+ * infra/risingwave/sql/076-cursor-decouple-consumers.sql) and its test seam.
  *
  * This module is deliberately tiny and dependency-free so the server test setup
  * can install the Postgres reference (src/test/conversationUnreadReference.ts)

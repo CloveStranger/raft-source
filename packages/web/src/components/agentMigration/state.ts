@@ -5,11 +5,14 @@ export type AgentMigrationState = (typeof AGENT_MIGRATION_STATES)[number];
 // Steps follow what the owner can observe: the agent stops on the source,
 // the source packs the workspace (the slow part), the files move, and the
 // agent starts on the target. Transport setup is near-instant and not shown.
+// The last step is the outcome itself: it only finishes when the migration
+// completes, so a successful migration reads as its own step.
 export const MIGRATION_PROGRESS_STEPS = [
   "agent.detail.migrationStepStopAgent",
   "agent.detail.migrationStepPackWorkspace",
   "agent.detail.migrationStepTransfer",
   "agent.detail.migrationStepStartOnTarget",
+  "agent.detail.migrationStepComplete",
 ] as const;
 
 export type AgentMigrationPhase = "active" | "completed" | "failed" | "canceled";

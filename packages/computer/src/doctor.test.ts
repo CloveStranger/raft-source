@@ -932,3 +932,45 @@ test("doctor: clean baseline + --fix → 'No residue found' line", async () => {
     }
   });
 });
+
+test("task #914: doctor names another live service holding this machine key, and says so when there is none", async () => {
+  await withHome(async (home) => {
+    const holder = {
+      root: "/Users/someone/.slock",
+      servicePid: 777,
+      computerVersion: "1.0.25",
+      serverIds: ["server-a"],
+      fingerprints: ["0123456789abcdef"],
+    };
+    const withHolder = await runDoctorChecks(home, { findDuplicateKeyHolder: async () => holder });
+    const found = withHolder.find((c) => c.name === "machine key holders");
+    assert.ok(found);
+    assert.equal(found.ok, false);
+    assert.match(found.detail, /pid 777 \(Computer version 1\.0\.25\) under \/Users\/someone\/\.slock, server server-a \(key fingerprint 0123456789abcdef\)/);
+    assert.doesNotMatch(JSON.stringify(withHolder), /sk_machine/);
+
+    const clean = await runDoctorChecks(home, { findDuplicateKeyHolder: async () => null });
+    const none = clean.find((c) => c.name === "machine key holders");
+    assert.ok(none);
+    assert.equal(none.ok, true);
+  });
+});
+
+test("task #915: doctor reports both default homes holding Raft data, and stays silent otherwise", async () => {
+  await withHome(async (home) => {
+    const conflict = {
+      homes: [
+        { path: "/Users/alice/.slock", agentCount: 1 },
+        { path: "/Users/alice/.raft", agentCount: 2 },
+      ],
+    };
+    const withConflict = await runDoctorChecks(home, { findDuplicateKeyHolder: async () => null, findRaftHomeConflict: () => conflict });
+    const found = withConflict.find((c) => c.name === "Raft home");
+    assert.ok(found);
+    assert.equal(found.ok, false);
+    assert.match(found.detail, /RAFT_HOME=/);
+
+    const clean = await runDoctorChecks(home, { findDuplicateKeyHolder: async () => null, findRaftHomeConflict: () => null });
+    assert.equal(clean.find((c) => c.name === "Raft home"), undefined);
+  });
+});

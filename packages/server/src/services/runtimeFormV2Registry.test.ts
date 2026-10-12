@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { RUNTIME_CONFIG_VERSION, RUNTIMES, type RuntimeConfig } from "@botiverse/raft-shared";
+import { isRuntimeDeprecated, RUNTIME_CONFIG_VERSION, RUNTIMES, type RuntimeConfig } from "@botiverse/raft-shared";
 
 import {
   buildRuntimeConfigFromFormValues,
@@ -7,6 +7,7 @@ import {
   registerRuntimeFormV2EntryForTests,
   retainOmittedWriteOnlySecrets,
   runtimeFormV2RuntimeIds,
+  buildRuntimeFormV2,
   validateRuntimeFormV2SubmitRef,
   type RuntimeFormV2Entry,
 } from "./runtimeFormV2Registry";
@@ -17,6 +18,18 @@ test("the v2 registry holds exactly the runtimes that have a v2 form today", () 
 
 test("since batch 4 every runtime in the catalog has a v2 form", () => {
   assert.deepEqual(RUNTIMES.map((runtime) => runtime.id).filter((id) => !runtimeFormV2RuntimeIds().includes(id)), []);
+});
+
+test("deprecated runtimes keep a v2 form, labelled edit-only; the rest are create forms", () => {
+  const deprecated = RUNTIMES.filter((runtime) => runtime.deprecated).map((runtime) => runtime.id);
+  assert.deepEqual(deprecated, ["antigravity", "kimi", "copilot", "gemini"]);
+  for (const runtimeId of ["antigravity", "kimi", "copilot", "gemini"]) {
+    assert.equal(isRuntimeDeprecated(runtimeId), true, runtimeId);
+    assert.equal(buildRuntimeFormV2(runtimeId).schemaVersion, `${runtimeId}.edit.v1`, runtimeId);
+  }
+  for (const runtimeId of ["opencode", "codex", "grok", "claude", "cursor", "pi"]) {
+    assert.equal(buildRuntimeFormV2(runtimeId).schemaVersion, `${runtimeId}.create.v1`, runtimeId);
+  }
 });
 
 test("a v2 submit names a runtime in the v2 registry, or is rejected with unknown_form_runtime", () => {

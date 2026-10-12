@@ -22,6 +22,64 @@ interface ExternalIdentityPreviewCardProps {
   onNavigate: () => void;
 }
 
+interface ExternalIdentityPreviewBodyProps {
+  displayName: string;
+  provider?: string | null;
+  workspaceName?: string | null;
+  actorKind?: ExternalActorKind | null;
+  avatarUrl?: string | null;
+}
+
+/** Shared preview body — extracted so MentionLink (external @-mention) can
+ *  reuse the same card chrome the message author avatar uses. */
+export function ExternalIdentityPreviewBody({
+  displayName,
+  provider,
+  workspaceName,
+  actorKind,
+  avatarUrl,
+}: ExternalIdentityPreviewBodyProps) {
+  const { formatMessage } = useIntl();
+  const providerLabel = formatExternalProviderLabel(provider, formatMessage);
+  const actorKindLabel = formatMessage({
+    id: EXTERNAL_ACTOR_KIND_MESSAGE_IDS[actorKind ?? "unknown"],
+  });
+  return (
+    <div data-testid="external-identity-preview" className="flex items-start gap-3 px-3 py-3">
+      <AvatarSlot
+        context="mention-card"
+        type="app"
+        appAvatarUrl={avatarUrl}
+        appInitials={displayName}
+      />
+      <div className="min-w-0 flex-1">
+        <div className="truncate text-sm font-bold text-foreground-strong theme-brutal:text-black">
+          {displayName}
+        </div>
+        <div className="truncate font-mono text-xs text-foreground-muted theme-brutal:text-black/60">
+          {providerLabel
+            ? formatMessage(
+                { id: "message.externalIdentity.providerAndKind" },
+                { provider: providerLabel, kind: actorKindLabel },
+              )
+            : actorKindLabel}
+        </div>
+        {workspaceName ? (
+          <div className="mt-1 truncate text-xs text-foreground-muted theme-brutal:text-black/60">
+            {formatMessage(
+              { id: "message.externalIdentity.fromWorkspace" },
+              { workspace: workspaceName },
+            )}
+          </div>
+        ) : null}
+        <div className="mt-1 text-xs text-foreground-hint theme-brutal:text-black/50">
+          {formatMessage({ id: "message.externalIdentity.externalProjection" })}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function ExternalIdentityPreviewCard({
   displayName,
   provider,
@@ -33,10 +91,6 @@ export default function ExternalIdentityPreviewCard({
 }: ExternalIdentityPreviewCardProps) {
   const { formatMessage } = useIntl();
   const previewActionsRef = useRef<{ close: () => void; unmount: () => void } | null>(null);
-  const providerLabel = formatExternalProviderLabel(provider, formatMessage);
-  const actorKindLabel = formatMessage({
-    id: EXTERNAL_ACTOR_KIND_MESSAGE_IDS[actorKind ?? "unknown"],
-  });
   return (
     <PreviewCard actionsRef={previewActionsRef}>
       <PreviewCardTrigger
@@ -72,38 +126,13 @@ export default function ExternalIdentityPreviewCard({
         collisionPadding={6}
         className="w-[280px]"
       >
-        <div data-testid="external-identity-preview" className="flex items-start gap-3 px-3 py-3">
-          <AvatarSlot
-            context="mention-card"
-            type="app"
-            appAvatarUrl={avatarUrl}
-            appInitials={displayName}
-          />
-          <div className="min-w-0 flex-1">
-            <div className="truncate text-sm font-bold text-foreground-strong theme-brutal:text-black">
-              {displayName}
-            </div>
-            <div className="truncate font-mono text-xs text-foreground-muted theme-brutal:text-black/60">
-              {providerLabel
-                ? formatMessage(
-                    { id: "message.externalIdentity.providerAndKind" },
-                    { provider: providerLabel, kind: actorKindLabel },
-                  )
-                : actorKindLabel}
-            </div>
-            {workspaceName ? (
-              <div className="mt-1 truncate text-xs text-foreground-muted theme-brutal:text-black/60">
-                {formatMessage(
-                  { id: "message.externalIdentity.fromWorkspace" },
-                  { workspace: workspaceName },
-                )}
-              </div>
-            ) : null}
-            <div className="mt-1 text-xs text-foreground-hint theme-brutal:text-black/50">
-              {formatMessage({ id: "message.externalIdentity.externalProjection" })}
-            </div>
-          </div>
-        </div>
+        <ExternalIdentityPreviewBody
+          displayName={displayName}
+          provider={provider}
+          workspaceName={workspaceName}
+          actorKind={actorKind}
+          avatarUrl={avatarUrl}
+        />
       </PreviewCardContent>
     </PreviewCard>
   );

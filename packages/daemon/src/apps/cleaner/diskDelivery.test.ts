@@ -52,7 +52,7 @@ function productionRuntime(input: { memoryBytes: number }) {
   return { runtime, inboxes, delivered, traces };
 }
 
-test("low disk space is traced per owner but never reaches or wakes an agent", async () => {
+test("low disk space is traced per owner and reaches only an agent that finished work, as a workspace tip", async () => {
   vi.useFakeTimers();
   const { runtime, inboxes, delivered, traces } = productionRuntime({ memoryBytes: 1 });
   try {
@@ -71,22 +71,34 @@ test("low disk space is traced per owner but never reaches or wakes an agent", a
     for (const owner of ["owner-a", "owner-b"]) {
       assert.equal(inboxes.get(owner)?.list().length ?? 0, 0);
     }
+    runtime.onAgentWorkingToIdle("owner-a");
+    await vi.advanceTimersByTimeAsync(0);
+    assert.deepEqual(
+      delivered.map(({ owner, item, notice }) => [owner, item.notificationClass, notice]),
+      [["owner-a", "disk_space_hint", { startStoppedAgent: false, requireIdle: true }]],
+    );
+    assert.match(formatAgentInboxAppItems(inboxes.get("owner-a")!.list()), /summary=Disk is low \(36\.0 KiB free\)/);
+    assert.equal(inboxes.get("owner-b")?.list().length ?? 0, 0, "an agent that did not work is not asked");
   } finally {
     runtime.stop();
     vi.useRealTimers();
   }
 });
 
-test("the memory hint asks the production notice path never to start a stopped agent", async () => {
+test("the memory hint asks the production notice path never to start a stopped agent or interrupt a turn", async () => {
   vi.useFakeTimers();
   const { runtime, inboxes, delivered } = productionRuntime({ memoryBytes: 65537 });
   try {
     await vi.advanceTimersByTimeAsync(3600000);
+    assert.equal(delivered.length, 0, "due, but no agent has finished work yet");
+    runtime.onAgentWorkingToIdle("owner-a");
+    runtime.onAgentWorkingToIdle("owner-b");
+    await vi.advanceTimersByTimeAsync(0);
     assert.deepEqual(
       delivered.map(({ owner, item, notice }) => [owner, item.notificationClass, notice]),
       [
-        ["owner-a", "memory_size_hint", { startStoppedAgent: false }],
-        ["owner-b", "memory_size_hint", { startStoppedAgent: false }],
+        ["owner-a", "memory_size_hint", { startStoppedAgent: false, requireIdle: true }],
+        ["owner-b", "memory_size_hint", { startStoppedAgent: false, requireIdle: true }],
       ],
     );
     assert.match(formatAgentInboxAppItems(inboxes.get("owner-a")!.list()), /class=memory_size_hint/);

@@ -344,9 +344,15 @@ test("agent inbox formatting renders target rows without previews", () => {
   assert.doesNotMatch(delta, /hidden/);
 
   const totalDelta = formatAgentInboxDelta(rows, { totalPendingMessages: 3 });
-  assert.match(totalDelta, /^Inbox update: 3 unread messages total; 1 changed target/);
+  assert.match(totalDelta, /^Inbox update: 3 messages pending your read across all conversations; 1 changed target/);
   assert.match(totalDelta, /#proj-runtime/);
   assert.doesNotMatch(totalDelta, /hidden/);
+  // The header must not borrow the word "unread": `raft inbox check` uses it for a
+  // DIFFERENT measure (the RW read cursor), and this number is the rows' own `pending`
+  // summed over every conversation. Scoped to the FIRST LINE on purpose, because the
+  // notice footer legitimately says "unread messages" when naming `read --unread`;
+  // asserting over the whole notice would match the footer and never fail for the header.
+  assert.doesNotMatch(totalDelta.split("\n")[0], /unread/);
 });
 
 test("third-party event inbox notice stays a grouped pending projection", () => {
@@ -386,7 +392,10 @@ test("third-party event inbox notice stays a grouped pending projection", () => 
   assert.deepEqual(rows[0]?.flags, ["dm"]);
 
   const delta = formatAgentInboxDelta(rows, { totalPendingMessages: 2 });
-  assert.match(delta, /dm:@third-party-agent-events:agent-123/);
+  // The grouped transport target is not readable; the notice names it and
+  // points to the command that fetches the events.
+  assert.doesNotMatch(delta, /third-party-agent-events/);
+  assert.match(delta, /^Third-party app events  pending: 2 messages .* fetch with raft message check$/m);
   assert.doesNotMatch(delta, /agent-event:aaaaaaaa/);
   assert.doesNotMatch(delta, /agent-event:bbbbbbbb/);
   assert.doesNotMatch(delta, /must not leak/);

@@ -119,6 +119,13 @@ export function getServerCapabilities(role: ServerRole | null | undefined): Serv
   return role ? SERVER_CAPABILITY_MATRIX[role] : EMPTY_SERVER_CAPABILITIES;
 }
 
+const SERVER_ROLES_ASCENDING = ["guest", "member", "admin", "owner"] as const satisfies readonly ServerRole[];
+
+/** The lowest server role whose matrix grants `capability` (null if no role does). */
+export function minimumServerRoleWithCapability(capability: ServerCapability): ServerRole | null {
+  return SERVER_ROLES_ASCENDING.find((role) => SERVER_CAPABILITY_MATRIX[role][capability]) ?? null;
+}
+
 /**
  * One capability projection for every `/s/:slug` presentation state.
  * Authentication and membership stay independent: signing in may widen

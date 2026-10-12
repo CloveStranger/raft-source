@@ -165,10 +165,14 @@ export async function reingestCandidates(
       }
       const ledgerStatus = typeof ledger.scopedb_status === "string" ? ledger.scopedb_status : "unknown";
 
-      // machine_evidence and transcript_outcome objects are one JSON document
-      // each, not trace JSONL; their ledgers say scopedb "skipped" by design.
-      // Never replay them as traces.
-      if (ledger.feedback_attachment_kind === "machine_evidence" || ledger.feedback_attachment_kind === "transcript_outcome") {
+      // machine_evidence, transcript_outcome and agent_event_tail objects are
+      // one JSON document each, not trace JSONL; their ledgers say scopedb
+      // "skipped" by design. Never replay them as traces.
+      if (
+        ledger.feedback_attachment_kind === "machine_evidence"
+        || ledger.feedback_attachment_kind === "transcript_outcome"
+        || ledger.feedback_attachment_kind === "agent_event_tail"
+      ) {
         outcomes.push({ ...candidate, action: "skipped_not_trace" });
         continue;
       }

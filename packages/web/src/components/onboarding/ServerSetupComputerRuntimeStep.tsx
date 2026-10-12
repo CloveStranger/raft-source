@@ -1,4 +1,4 @@
-import { useEffect, useReducer, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { useIntl } from "react-intl";
 import { clearClockTimeout, getMachineRuntimeDisplayOptions, getSetupRuntimeOptions, setClockTimeout } from "@botiverse/raft-shared";
@@ -95,6 +95,8 @@ export type ServerSetupRuntimeCatalogEntry = RuntimeInfo & {
 export type ServerSetupComputerRuntimeStepProps = {
   computer: ServerSetupComputer | null;
   computerInstallCommand?: string;
+  /** mac/Linux one-paste install + setup; see `ComputerCommands.installAndSetup`. */
+  computerInstallAndSetupCommand?: string | null;
   /**
    * The server's verdict, from `ServerSetupProjection`. Not derived in the browser — and
    * NOT a boolean: "we have not been told yet" (`checking`/`unknown`) is a different thing
@@ -182,18 +184,21 @@ function getDetectedRuntimeNames(runtimeOptions: readonly RuntimeSelectionOption
     .map((runtime) => runtime.displayName);
 }
 
+const NO_OFFLINE_COMPUTERS: NonNullable<ServerSetupComputerRuntimeStepProps["offlineComputers"]> = [];
+
 export default function ServerSetupComputerRuntimeStep({
   computer,
   runtimeStatus,
   runtimeOptions = [],
   hasConnectedComputer = false,
-  offlineComputers = [],
+  offlineComputers = NO_OFFLINE_COMPUTERS,
   serverSlug = null,
   showOwnApiKey = true,
   loading = false,
   error = "",
   setupCommand = null,
   computerInstallCommand = "",
+  computerInstallAndSetupCommand = null,
   windowsComputerInstallCommand = "",
   windowsComputerSetupCommand = null,
   onCopyInstallCommand,
@@ -253,6 +258,15 @@ export default function ServerSetupComputerRuntimeStep({
   // The computer has ANSWERED the runtime question (whatever the answer was) — per the
   // server, not per whatever the store happens to be holding.
   const runtimesReported = runtimeAnswered || ready;
+  const recoveryComputers = useMemo(() => (offlineComputers.length > 0
+    ? offlineComputers
+    : computer
+      ? [{ id: computer.id, name: computer.name, lastHeartbeat: null, isComputer: computer.isComputer }]
+      : []), [computer, offlineComputers]);
+  const toggleExpandedRuntime = useCallback((runtimeId: string) => {
+    setExpandedRuntimeId(activeExpandedRuntimeId === runtimeId ? "" : runtimeId);
+  }, [activeExpandedRuntimeId]);
+  const toggleOwnApiKey = useCallback(() => toggleExpandedRuntime("own-api-key"), [toggleExpandedRuntime]);
 
   useEffect(() => {
     const wasOnline = previousComputerOnlineRef.current;
@@ -323,11 +337,7 @@ export default function ServerSetupComputerRuntimeStep({
               Windows path that disagrees with the Computer page. */}
           {recovering ? (
             <OfflineComputerRecovery
-              computers={offlineComputers.length > 0
-                ? offlineComputers
-                : computer
-                  ? [{ id: computer.id, name: computer.name, lastHeartbeat: null, isComputer: computer.isComputer }]
-                  : []}
+              computers={recoveryComputers}
               serverSlug={serverSlug ?? null}
               setupCommand={setupCommand}
               computerInstallCommand={computerInstallCommand}
@@ -342,6 +352,7 @@ export default function ServerSetupComputerRuntimeStep({
               <ComputerCommandGuide
                 computerCommand={setupCommand}
                 computerInstallCommand={computerInstallCommand}
+                computerInstallAndSetupCommand={computerInstallAndSetupCommand}
                 windowsComputerCommand={windowsComputerSetupCommand}
                 windowsComputerInstallCommand={windowsComputerInstallCommand}
                 onPlatformChange={setPlatform}
@@ -396,7 +407,7 @@ export default function ServerSetupComputerRuntimeStep({
               runtime={runtime}
               computerName={computer?.name ?? null}
               expanded={activeExpandedRuntimeId === runtime.id}
-              onToggle={() => setExpandedRuntimeId(activeExpandedRuntimeId === runtime.id ? "" : runtime.id)}
+              onToggle={toggleExpandedRuntime}
               onCopyInstallCommand={onCopyInstallCommand}
             />
           ))}
@@ -408,7 +419,7 @@ export default function ServerSetupComputerRuntimeStep({
               runtime={runtime}
               computerName={computer?.name ?? null}
               expanded={activeExpandedRuntimeId === runtime.id}
-              onToggle={() => setExpandedRuntimeId(activeExpandedRuntimeId === runtime.id ? "" : runtime.id)}
+              onToggle={toggleExpandedRuntime}
               onCopyInstallCommand={onCopyInstallCommand}
               quiet={!runtime.detected}
             />
@@ -416,7 +427,7 @@ export default function ServerSetupComputerRuntimeStep({
           {showOwnApiKey ? (
             <OwnApiKeyRow
               expanded={activeExpandedRuntimeId === "own-api-key"}
-              onToggle={() => setExpandedRuntimeId(activeExpandedRuntimeId === "own-api-key" ? "" : "own-api-key")}
+              onToggle={toggleOwnApiKey}
               onOpenSettings={onOpenApiKeySettings}
             />
           ) : null}
@@ -479,6 +490,7 @@ function RecoveryCommandRow({
   onCopy: (command: string) => void;
 }) {
   const { formatMessage } = useIntl();
+  const handleCopy = useCallback(() => onCopy(command), [command, onCopy]);
   return (
     <div className="flex items-center gap-2">
       <code
@@ -490,7 +502,7 @@ function RecoveryCommandRow({
       <Tooltip content={formatMessage({ id: "onboarding.computerRuntime.copyCommand" }, { command })}>
         <Button
           type="button"
-          onClick={() => onCopy(command)}
+          onClick={handleCopy}
           size="icon-sm"
           variant="outline"
           className="shrink-0"
@@ -524,11 +536,11 @@ function OfflineComputerRecovery({
 }) {
   const { formatMessage, locale } = useIntl();
   const [copied, setCopied] = useState<string | null>(null);
-  const copy = (command: string) => {
+  const copy = useCallback((command: string) => {
     void navigator.clipboard?.writeText(command);
     setCopied(command);
     setClockTimeout(() => setCopied(null), 1_500);
-  };
+  }, []);
 
   const many = computers.length > 1;
   // `raft-computer start` is the SAME command on every one of their machines, and the
@@ -828,12 +840,14 @@ function RuntimeRow({
   runtime: ServerSetupRuntimeCatalogEntry;
   computerName: string | null;
   expanded: boolean;
-  onToggle: () => void;
+  onToggle: (runtimeId: string) => void;
   onCopyInstallCommand?: (runtimeId: string, command: string) => void;
   quiet?: boolean;
 }) {
   const { formatMessage } = useIntl();
   const command = RUNTIME_INSTALL_COMMANDS[runtime.id];
+  const runtimeId = runtime.id;
+  const handleToggle = useCallback(() => onToggle(runtimeId), [onToggle, runtimeId]);
   // Says so where the click happened, instead of throwing a toast across the screen.
   const [copied, setCopied] = useState(false);
   return (
@@ -842,7 +856,7 @@ function RuntimeRow({
         type="button"
         className={`flex w-full items-center gap-2.5 px-3.5 py-2 text-left ${quiet ? "text-foreground-hint" : ""}`}
         aria-expanded={expanded}
-        onClick={onToggle}
+        onClick={handleToggle}
       >
         <span className={`flex shrink-0 items-center justify-center rounded-md border border-line-muted bg-layer-panel font-mono text-[9px] font-bold text-foreground-strong theme-brutal:rounded-none theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white ${runtime.recommended ? "size-7" : "size-6"}`}>
           {runtime.abbreviation}

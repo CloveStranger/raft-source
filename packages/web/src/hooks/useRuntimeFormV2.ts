@@ -7,6 +7,9 @@ import type {
 } from "@botiverse/raft-runtime-form";
 
 import api from "../api/client";
+import { useLocale } from "../i18n/LocaleProvider";
+import { htmlLangForLocale } from "../i18n/locale";
+import type { Locale } from "../i18n/locale";
 import { useServerStore } from "../store/serverStore";
 
 /**
@@ -21,6 +24,9 @@ export const WEB_RUNTIME_FORM_V2_CAPABILITIES: ReadonlySet<string> = new Set<str
   "choice.labels",
   // Per-source status, retry and submit blocking (this hook + RuntimeFormV2Fields).
   "option_source.status",
+  // Saved provider connection options, connection-owned field handling and
+  // the formRevision echo (this hook + RuntimeFormV2Fields).
+  "provider.saved_connection",
 ]);
 
 export type RuntimeFormV2State =
@@ -38,6 +44,16 @@ export type RuntimeFormV2State =
   | { status: "error"; errorCode?: string }
   /** The form needs client capabilities this build lacks: use the legacy form. */
   | { status: "unsupported"; missingCapabilities: string[] };
+
+/**
+ * v2 form copy is server-sent: ask for it in the app's display language, not the
+ * browser's (which the browser would send by default).
+ */
+export function runtimeFormV2RequestHeaders(locale: Locale): Record<string, string> {
+  return { "Accept-Language": htmlLangForLocale(locale) };
+}
+
+type RequestHeaders = Record<string, string>;
 
 const runtimeFormV2Base = (serverId: string, machineId: string, runtimeId: string) =>
   `/servers/${serverId}/machines/${machineId}/runtime-forms/v2/${encodeURIComponent(runtimeId)}`;
@@ -60,25 +76,42 @@ async function loadRuntimeFormV2Source(
   form: ParsedRuntimeFormV2,
   sourceId: string,
   refresh: boolean,
+  headers: RequestHeaders,
 ): Promise<RuntimeFormV2OptionSource> {
-  const url = `${base}/option-sources/${encodeURIComponent(sourceId)}${refresh ? "?refresh=1" : ""}`;
+  // A revisioned form echoes its token (Definition.revision, capability
+  // provider.saved_connection): the server answers within the form's declared
+  // capability range or says the form is stale. An unrevisioned form keeps the
+  // plain protocol.
+  const query = new URLSearchParams();
+  if (refresh) query.set("refresh", "1");
+  if (form.revision) query.set("formRevision", form.revision);
+  const suffix = query.toString();
+  const url = `${base}/option-sources/${encodeURIComponent(sourceId)}${suffix ? `?${suffix}` : ""}`;
   try {
-    const { data } = await api.get(url);
+    const { data } = await api.get(url, { headers });
     return data as RuntimeFormV2OptionSource;
   } catch (error) {
     // Forms without option_source.status keep the old contract: a failed
-    // source fails the whole form (with the server's error code).
-    if (!form.requiredClientCapabilities.includes("option_source.status")) throw error;
+    // source fails the whole form (with the server's error code). A stale
+    // revision always propagates: the caller refetches the whole form.
+    if (isFormRevisionStale(error) || !form.requiredClientCapabilities.includes("option_source.status")) throw error;
     return unreachableSource(form, sourceId);
   }
 }
 
+/** 409 form_revision_stale: the server's form build moved on; refetch the whole form. */
+function isFormRevisionStale(error: unknown): boolean {
+  return (error as { response?: { data?: { code?: unknown } } }).response?.data?.code === "form_revision_stale";
+}
+
 async function loadRuntimeFormV2(
   base: string,
+  headers: RequestHeaders,
   agentId?: string,
+  attempt = 0,
 ): Promise<Exclude<RuntimeFormV2State, { status: "idle" | "loading" }>> {
   // Edit reads the same form plus the agent's current values from the agent itself.
-  const { data } = await api.get(agentId ? `/agents/${encodeURIComponent(agentId)}/runtime-form` : base);
+  const { data } = await api.get(agentId ? `/agents/${encodeURIComponent(agentId)}/runtime-form` : base, { headers });
   const form = parseRuntimeFormV2(data);
   if (!form) return { status: "error" };
   const missingCapabilities = missingRuntimeFormV2Capabilities(form, WEB_RUNTIME_FORM_V2_CAPABILITIES);
@@ -86,9 +119,16 @@ async function loadRuntimeFormV2(
   if (missingCapabilities.length > 0) return { status: "unsupported", missingCapabilities };
   // Each source loads on its own: with option_source.status one failing source
   // is reported on its field (loadRuntimeFormV2Source) and never fails the form.
-  const sources = Object.fromEntries(await Promise.all(Object.keys(form.optionSources).map(async (sourceId) =>
-    [sourceId, await loadRuntimeFormV2Source(base, form, sourceId, false)] as const)));
-  return { status: "ready", form, sources, retryingSourceIds: [] };
+  try {
+    const sources = Object.fromEntries(await Promise.all(Object.keys(form.optionSources).map(async (sourceId) =>
+      [sourceId, await loadRuntimeFormV2Source(base, form, sourceId, false, headers)] as const)));
+    return { status: "ready", form, sources, retryingSourceIds: [] };
+  } catch (error) {
+    // The form went stale between fetches (a flag flip mid-session): refetch
+    // the whole form once. Options are never merged across builds.
+    if (isFormRevisionStale(error) && attempt < 1) return loadRuntimeFormV2(base, headers, agentId, attempt + 1);
+    throw error;
+  }
 }
 
 /**
@@ -103,7 +143,9 @@ export function useRuntimeFormV2(
   agentId?: string,
 ): RuntimeFormV2State {
   const serverId = useServerStore((state) => state.current?.id);
-  const requestKey = serverId && machineId && runtimeId ? `${serverId}\0${machineId}\0${runtimeId}\0${agentId ?? ""}` : "";
+  const { locale } = useLocale();
+  // The locale is part of the key: switching language reloads the form's copy.
+  const requestKey = serverId && machineId && runtimeId ? `${serverId}\0${machineId}\0${runtimeId}\0${agentId ?? ""}\0${locale}` : "";
   const [state, setState] = useState<{ requestKey: string; value: RuntimeFormV2State }>({ requestKey: "", value: { status: "idle" } });
 
   // One snapshot per request key; each branch replaces the whole object.
@@ -111,43 +153,83 @@ export function useRuntimeFormV2(
   useEffect(() => {
     if (!serverId || !machineId || !runtimeId) return;
     let cancelled = false;
+    // A mid-session form rebuild (a flag flip) is recovered by refetching the
+    // whole form; bounded so a flapping server cannot loop the panel.
+    let staleReloads = 0;
+    // Bumped on every whole-form (re)install: an option-source response from a
+    // previous generation (a retry that was still in flight across a stale
+    // reload) is discarded instead of being merged into the newer form.
+    let generation = 0;
     setState({ requestKey, value: { status: "loading" } });
     const base = runtimeFormV2Base(serverId, machineId, runtimeId);
+    const headers = runtimeFormV2RequestHeaders(locale);
     // Updates the ready snapshot of this request only; a later request key wins.
     const updateReady = (update: (ready: Extract<RuntimeFormV2State, { status: "ready" }>) => RuntimeFormV2State) =>
       setState((previous) => previous.requestKey === requestKey && previous.value.status === "ready"
         ? { requestKey, value: update(previous.value) }
         : previous);
-    loadRuntimeFormV2(base, agentId).then(
-      (loaded) => {
-        if (cancelled) return;
-        if (loaded.status !== "ready") {
-          setState({ requestKey, value: loaded });
-          return;
-        }
-        const inFlight = new Set<string>();
-        const retrySource = (sourceId: string) => {
-          if (cancelled || inFlight.has(sourceId)) return;
-          inFlight.add(sourceId);
-          updateReady((ready) => ({ ...ready, retryingSourceIds: [...inFlight] }));
-          void loadRuntimeFormV2Source(base, loaded.form, sourceId, true)
-            .catch(() => unreachableSource(loaded.form, sourceId))
-            .then((source) => {
+    const reinstall = (loaded: Exclude<RuntimeFormV2State, { status: "idle" | "loading" }>): void => {
+      if (cancelled) return;
+      generation += 1;
+      const gen = generation;
+      if (loaded.status !== "ready") {
+        setState({ requestKey, value: loaded });
+        return;
+      }
+      const inFlight = new Set<string>();
+      const retrySource = (sourceId: string) => {
+        if (cancelled || gen !== generation || inFlight.has(sourceId)) return;
+        inFlight.add(sourceId);
+        updateReady((ready) => ({ ...ready, retryingSourceIds: [...inFlight] }));
+        void loadRuntimeFormV2Source(base, loaded.form, sourceId, true, headers)
+          .then(
+            (source) => {
               inFlight.delete(sourceId);
-              if (cancelled) return;
+              if (cancelled || gen !== generation) return;
               updateReady((ready) => ({ ...ready, sources: { ...ready.sources, [sourceId]: source }, retryingSourceIds: [...inFlight] }));
-            });
-        };
-        setState({ requestKey, value: { ...loaded, retrySource } });
-      },
-      (error: unknown) => {
-        if (cancelled) return;
-        const code = (error as { response?: { data?: { code?: unknown } } }).response?.data?.code;
-        setState({ requestKey, value: { status: "error", ...(typeof code === "string" ? { errorCode: code } : {}) } });
-      },
-    );
+            },
+            (error: unknown) => {
+              inFlight.delete(sourceId);
+              if (cancelled || gen !== generation) return;
+              // A stale revision means the whole form moved on: refetch it
+              // (once more) instead of degrading one source and merging it
+              // into a build the server no longer serves.
+              if (isFormRevisionStale(error)) {
+                if (staleReloads < 1) {
+                  staleReloads += 1;
+                  // Retire every callback from this form before starting recovery.
+                  generation += 1;
+                  // The form in hand is known-stale: drop to loading so nothing
+                  // can be edited or submitted against it while the whole form
+                  // is refetched.
+                  setState({ requestKey, value: { status: "loading" } });
+                  loadRuntimeFormV2(base, headers, agentId).then(reinstall, reinstallError);
+                  return;
+                }
+                // Recovery budget exhausted: a known-stale form must never
+                // stay editable (and a stale source must never merge into
+                // it) — surface the form-level error state instead.
+                setState({ requestKey, value: { status: "error", errorCode: "form_revision_stale" } });
+                return;
+              }
+              updateReady((ready) => ({
+                ...ready,
+                sources: { ...ready.sources, [sourceId]: unreachableSource(loaded.form, sourceId) },
+                retryingSourceIds: [...inFlight],
+              }));
+            },
+          );
+      };
+      setState({ requestKey, value: { ...loaded, retrySource } });
+    };
+    const reinstallError = (error: unknown): void => {
+      if (cancelled) return;
+      const code = (error as { response?: { data?: { code?: unknown } } }).response?.data?.code;
+      setState({ requestKey, value: { status: "error", ...(typeof code === "string" ? { errorCode: code } : {}) } });
+    };
+    loadRuntimeFormV2(base, headers, agentId).then(reinstall, reinstallError);
     return () => { cancelled = true; };
-  }, [agentId, machineId, requestKey, runtimeId, serverId]);
+  }, [agentId, locale, machineId, requestKey, runtimeId, serverId]);
 
   if (!requestKey) return { status: "idle" };
   if (state.requestKey !== requestKey) return { status: "loading" };

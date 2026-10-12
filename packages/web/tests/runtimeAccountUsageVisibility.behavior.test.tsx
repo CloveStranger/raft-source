@@ -82,7 +82,7 @@ function renderComputer(
             ? { type: "human", id: "user-1", name: "member", displayName: "Member", avatarUrl: null }
             : null,
         }}
-        workspaceEmbedded
+        hideHeader
       />
     </MemoryRouter>,
   );

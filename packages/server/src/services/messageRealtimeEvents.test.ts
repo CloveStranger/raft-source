@@ -114,6 +114,7 @@ test("rich message socket projection excludes storage-only message columns", () 
     actionMetadata: null,
     searchText: "must-not-leak",
     searchVector: "must-not-leak",
+    senderTimezone: "Asia/Shanghai",
     threadId: null,
     taskStatus: null,
     taskNumber: null,
@@ -137,6 +138,7 @@ test("rich message socket projection excludes storage-only message columns", () 
   assert.equal("agentSendKey" in projectedNew, false);
   assert.equal("searchText" in projectedNew, false);
   assert.equal("searchVector" in projectedNew, false);
+  assert.equal("senderTimezone" in projectedNew, false, "the sender zone is agent-only");
   assert.equal(projectedNew.id, payload.id);
   assert.equal(projectedNew.senderName, payload.senderName);
   assert.deepEqual(projectedNew.attachments, []);
@@ -146,6 +148,7 @@ test("rich message socket projection excludes storage-only message columns", () 
   assert.equal("agentSendKey" in projectedUpdated, false);
   assert.equal("searchText" in projectedUpdated, false);
   assert.equal("searchVector" in projectedUpdated, false);
+  assert.equal("senderTimezone" in projectedUpdated, false);
   assert.equal(projectedUpdated.commentRef, null);
 });
 

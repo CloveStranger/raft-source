@@ -1,4 +1,6 @@
+import { useMemo } from "react";
 import ReactMarkdown from "react-markdown";
+import type { Components, Options } from "react-markdown";
 import remarkBreaks from "remark-breaks";
 import remarkGfm from "remark-gfm";
 import { InlineCode } from "raft-ui";
@@ -7,6 +9,37 @@ import { remarkAutolinkBareUrls } from "../../utils/markdownAutolink";
 const INLINE_PREVIEW_CODE_CLASS =
   "border-0 bg-transparent p-0 font-normal leading-[inherit] text-inherit";
 
+const REMARK_PLUGINS: Options["remarkPlugins"] = [remarkGfm, remarkAutolinkBareUrls, remarkBreaks];
+
+// Preview cards wrap this renderer in line-clamp utilities. Keep every
+// markdown construct inline so hidden list/table content cannot reserve
+// extra height below the visible preview on mobile Safari.
+const INLINE_COMPONENTS: Components = {
+  p: ({ children }) => <span>{children}</span>,
+  code: ({ children }) => (
+    <InlineCode className={INLINE_PREVIEW_CODE_CLASS}>{children}</InlineCode>
+  ),
+  br: () => <span> </span>,
+  ul: ({ children }) => <span>{children}</span>,
+  ol: ({ children }) => <span>{children}</span>,
+  li: ({ children }) => <span>{children} </span>,
+  blockquote: ({ children }) => <span>{children}</span>,
+  h1: ({ children }) => <span>{children}</span>,
+  h2: ({ children }) => <span>{children}</span>,
+  h3: ({ children }) => <span>{children}</span>,
+  h4: ({ children }) => <span>{children}</span>,
+  h5: ({ children }) => <span>{children}</span>,
+  h6: ({ children }) => <span>{children}</span>,
+  pre: ({ children }) => <span className="font-mono">{children}</span>,
+  table: ({ children }) => <span>{children}</span>,
+  thead: ({ children }) => <span>{children}</span>,
+  tbody: ({ children }) => <span>{children}</span>,
+  tr: ({ children }) => <span>{children}</span>,
+  th: ({ children }) => <span>{children} </span>,
+  td: ({ children }) => <span>{children} </span>,
+  hr: () => <span> </span>,
+};
+
 export default function InlineMarkdownPreview({
   markdown,
   linkClassName = "text-blue-700 dark:text-blue-300 underline decoration-2 underline-offset-2",
@@ -14,39 +47,16 @@ export default function InlineMarkdownPreview({
   markdown: string;
   linkClassName?: string;
 }) {
+  const components = useMemo<Components>(
+    () => ({
+      ...INLINE_COMPONENTS,
+      a: ({ children }) => <span className={linkClassName}>{children}</span>,
+    }),
+    [linkClassName],
+  );
+
   return (
-    <ReactMarkdown
-      remarkPlugins={[remarkGfm, remarkAutolinkBareUrls, remarkBreaks]}
-      components={{
-        // Preview cards wrap this renderer in line-clamp utilities. Keep every
-        // markdown construct inline so hidden list/table content cannot reserve
-        // extra height below the visible preview on mobile Safari.
-        p: ({ children }) => <span>{children}</span>,
-        a: ({ children }) => <span className={linkClassName}>{children}</span>,
-        code: ({ children }) => (
-          <InlineCode className={INLINE_PREVIEW_CODE_CLASS}>{children}</InlineCode>
-        ),
-        br: () => <span> </span>,
-        ul: ({ children }) => <span>{children}</span>,
-        ol: ({ children }) => <span>{children}</span>,
-        li: ({ children }) => <span>{children} </span>,
-        blockquote: ({ children }) => <span>{children}</span>,
-        h1: ({ children }) => <span>{children}</span>,
-        h2: ({ children }) => <span>{children}</span>,
-        h3: ({ children }) => <span>{children}</span>,
-        h4: ({ children }) => <span>{children}</span>,
-        h5: ({ children }) => <span>{children}</span>,
-        h6: ({ children }) => <span>{children}</span>,
-        pre: ({ children }) => <span className="font-mono">{children}</span>,
-        table: ({ children }) => <span>{children}</span>,
-        thead: ({ children }) => <span>{children}</span>,
-        tbody: ({ children }) => <span>{children}</span>,
-        tr: ({ children }) => <span>{children}</span>,
-        th: ({ children }) => <span>{children} </span>,
-        td: ({ children }) => <span>{children} </span>,
-        hr: () => <span> </span>,
-      }}
-    >
+    <ReactMarkdown remarkPlugins={REMARK_PLUGINS} components={components}>
       {markdown}
     </ReactMarkdown>
   );

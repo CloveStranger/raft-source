@@ -34,7 +34,13 @@ test("agent runtime configuration badges use standard RUI props without local vi
 });
 
 test("machine runtime chips use the shared badge recipe without forcing a legacy border or height", () => {
-  const source = readSource("src/components/machine/MachineDetailPanel.tsx");
+  const source = [
+    readSource("src/components/machine/MachineDetailPanel.tsx"),
+    readSource("src/components/machine/CommandCopyRoot.tsx"),
+    readSource("src/components/machine/WorkspaceDeleteButton.tsx"),
+    readSource("src/components/machine/BulkResetOptionCard.tsx"),
+    readSource("src/components/machine/MachineAgentRow.tsx"),
+  ].join("\n");
   const branch = source.match(/const chipClassName = detected([\s\S]*?);/);
   assert.ok(branch);
   assert.match(branch[1], /bg-info-soft text-info-strong/);

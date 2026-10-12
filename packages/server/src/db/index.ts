@@ -7,16 +7,29 @@ import { drizzle as drizzlePglite } from "drizzle-orm/pglite";
 import { PGlite } from "@electric-sql/pglite";
 import pg from "pg";
 import { attachPoolClientErrorHandler } from "./pgPoolErrorHandler";
+import { prewarmPool, resolvePoolPrewarmCount } from "./poolPrewarm";
+import { connectPermitWaitMs, createConnectGate, gatedClientClass, resolveConnectConcurrency } from "./connectGate";
 import { noopTracer, type TraceContext, type Tracer } from "@botiverse/raft-shared";
 import * as schema from "./schema";
 import { migratePglite } from "./pgliteMigrations";
-import { closeRisingWavePool } from "./risingwave";
+import { closeRisingWavePool, getRisingWavePoolState, isRisingWaveConfigured } from "./risingwave";
 import {
   recordSecondConnectionInsideTransaction,
   scopeTransactions,
   type Database,
 } from "./ambientTransaction";
-import { dbPoolConnections, dbPoolWaitingRequests, pgPoolReadOnlyClientRecycledTotal } from "../metrics";
+import {
+  dbPoolConnectPermitWait,
+  dbPoolConnections,
+  dbPoolWaitingRequests,
+  pgPoolReadOnlyClientRecycledTotal,
+} from "../metrics";
+import {
+  observeStatement,
+  recordStatementError,
+  statementKindFromText,
+  type DbStatementKind,
+} from "./statementMetrics";
 import { errorClassOf, getCurrentTraceContext } from "../tracing/semanticTrace";
 
 let _tracer: Tracer = noopTracer;
@@ -53,8 +66,6 @@ export function withDbTraceAttributes<T>(attrs: Record<string, string | number |
   return dbTraceAttributes.run({ ...parentAttrs, ...attrs }, fn);
 }
 
-type DbStatementKind = "select" | "insert" | "update" | "delete" | "transaction" | "unknown";
-
 interface QueryIdentity {
   rawSql: string;
   fingerprint: string;
@@ -84,6 +95,18 @@ interface PoolCheckoutState {
   // connection was held for other work" when hold_ms is high.
   firstQueryStartMs?: number;
   firstQueryMs?: number;
+  // Splits firstQueryMs into hops: until the statement's bytes were handed to
+  // the kernel (the last socket write before the reply; local to the process),
+  // and until the reply's first bytes arrived (network plus everything remote).
+  firstQueryWriteMs?: number;
+  firstQueryFirstByteMs?: number;
+  // Stable per client in this process, so spans of one connection can be grouped.
+  connectionId: number;
+  // How long the client sat idle in the pool before this checkout (reused only).
+  idleMs?: number;
+  // New clients only: part of connect_ms spent queued behind other handshakes
+  // of this pool (./connectGate).
+  connectPermitWaitMs?: number;
   traceParent: TraceContext | null;
   traceAttributes?: Record<string, string | number | boolean>;
 }
@@ -108,8 +131,97 @@ function markClientCheckedOut(client: object): boolean {
   return reused;
 }
 
+const poolClientIds = new WeakMap<object, number>();
+let nextPoolClientId = 1;
+// When each client was last released, for idle_ms on its next checkout.
+const poolClientReleasedAtMs = new WeakMap<object, number>();
+
+function poolClientId(client: object): number {
+  let id = poolClientIds.get(client);
+  if (id === undefined) {
+    id = nextPoolClientId;
+    nextPoolClientId += 1;
+    poolClientIds.set(client, id);
+  }
+  return id;
+}
+
+type SocketWrite = (chunk: unknown, encodingOrCallback?: unknown, callback?: unknown) => boolean;
+
+// The checkout whose first statement a client's socket is timing (both the
+// connect path and pool.query set it; cleared on release).
+const socketTimingCheckouts = new WeakMap<object, PoolCheckoutState>();
+const socketInstrumentedClients = new WeakSet<object>();
+
+/** Starts socket timing and connection identity for one checkout of `client`. */
+function beginCheckoutTiming(client: pg.PoolClient, checkout: PoolCheckoutState) {
+  if (!socketInstrumentedClients.has(client)) {
+    socketInstrumentedClients.add(client);
+    instrumentClientSocket(client as InstrumentedPoolClient);
+  }
+  socketTimingCheckouts.set(client, checkout);
+}
+
+function endCheckoutTiming(client: object) {
+  socketTimingCheckouts.delete(client);
+  poolClientReleasedAtMs.set(client, Date.now());
+}
+
+function checkoutIdentity(client: object, connectionReused: boolean): Pick<PoolCheckoutState, "connectionId" | "idleMs"> {
+  const releasedAtMs = poolClientReleasedAtMs.get(client);
+  return {
+    connectionId: poolClientId(client),
+    ...(connectionReused && releasedAtMs !== undefined ? { idleMs: Math.max(0, Date.now() - releasedAtMs) } : {}),
+  };
+}
+
+/**
+ * Times the first statement of each checkout on the client's socket: when its
+ * bytes were flushed (write callback) and when the reply's first bytes came
+ * back. Installed once per client; a client without a socket (tests, other
+ * drivers) simply reports neither.
+ */
+function instrumentClientSocket(instrumented: InstrumentedPoolClient) {
+  const socket = (instrumented as unknown as { connection?: { stream?: { write?: SocketWrite; on?: (event: string, listener: () => void) => void } } })
+    .connection?.stream;
+  if (!socket || typeof socket.write !== "function" || typeof socket.on !== "function") return;
+  const originalWrite = socket.write.bind(socket) as SocketWrite;
+  const pendingFirstQuery = () => {
+    const checkout = socketTimingCheckouts.get(instrumented);
+    return checkout && checkout.firstQueryStartMs !== undefined && checkout.firstQueryFirstByteMs === undefined && checkout.firstQueryMs === undefined
+      ? checkout
+      : null;
+  };
+  socket.write = ((chunk: unknown, encodingOrCallback?: unknown, callback?: unknown) => {
+    const checkout = pendingFirstQuery();
+    if (!checkout) return originalWrite(chunk, encodingOrCallback, callback);
+    const flushed = () => {
+      // The last write before the reply counts (parse/bind/execute/sync are separate writes).
+      if (checkout.firstQueryFirstByteMs === undefined && checkout.firstQueryStartMs !== undefined) {
+        checkout.firstQueryWriteMs = Date.now() - checkout.firstQueryStartMs;
+      }
+    };
+    if (typeof encodingOrCallback === "function") {
+      return originalWrite(chunk, (err?: Error) => { flushed(); (encodingOrCallback as (err?: Error) => void)(err); });
+    }
+    if (typeof callback === "function") {
+      return originalWrite(chunk, encodingOrCallback, (err?: Error) => { flushed(); (callback as (err?: Error) => void)(err); });
+    }
+    return originalWrite(chunk, encodingOrCallback, flushed);
+  }) as SocketWrite;
+  socket.on("data", () => {
+    const checkout = pendingFirstQuery();
+    if (checkout && checkout.firstQueryStartMs !== undefined) checkout.firstQueryFirstByteMs = Date.now() - checkout.firstQueryStartMs;
+  });
+}
+
 interface InstrumentedPool extends pg.Pool {
   __slockDbInstrumented?: boolean;
+  __slockDbLabel?: string;
+}
+
+function isSubmittable(input: unknown): boolean {
+  return !!input && typeof (input as { submit?: unknown }).submit === "function";
 }
 
 interface ReadOnlyRecoveryState {
@@ -186,29 +298,6 @@ function queryTextFromInput(input: unknown): string | undefined {
   return typeof text === "string" ? text : undefined;
 }
 
-function statementKindFromText(text: string | undefined): DbStatementKind {
-  if (!text) return "unknown";
-  const keyword = text.trimStart().match(/^[a-zA-Z]+/)?.[0]?.toLowerCase();
-  switch (keyword) {
-    case "select":
-    case "with":
-      return "select";
-    case "insert":
-      return "insert";
-    case "update":
-      return "update";
-    case "delete":
-      return "delete";
-    case "begin":
-    case "commit":
-    case "rollback":
-    case "savepoint":
-      return "transaction";
-    default:
-      return "unknown";
-  }
-}
-
 function normalizeSqlShape(text: string | undefined): string {
   if (!text) return "unknown";
   return text
@@ -255,7 +344,12 @@ function releaseDiscarded(args: unknown[]): boolean {
 
 function recordConnectionSpan(checkout: PoolCheckoutState, releaseArgs: unknown[]) {
   const holdMs = Date.now() - checkout.startMs;
-  if (holdMs <= 100 || _tracer === noopTracer) return;
+  // Reused checkouts are recorded only when held > 100 ms (volume). Every new
+  // connection is recorded, so new-connection counts and connect_ms are complete
+  // (Neon connection-limit analysis, 10-12). record_condition tells readers
+  // which rule admitted the span; never read a count of all checkouts from it.
+  const recordCondition = !checkout.connectionReused ? "new_connection" : holdMs > 100 ? "hold_over_100ms" : null;
+  if (recordCondition === null || _tracer === noopTracer) return;
   const discarded = releaseDiscarded(releaseArgs);
   _tracer.startSpan("server.db.connection", {
     parent: checkout.traceParent,
@@ -263,13 +357,19 @@ function recordConnectionSpan(checkout: PoolCheckoutState, releaseArgs: unknown[
     startTimeMs: checkout.startMs - checkout.queueMs,
     attrs: {
       event_kind: "db_connection",
+      record_condition: recordCondition,
       pool: checkout.label,
       queue_ms: checkout.queueMs,
       hold_ms: holdMs,
       pool_occupancy_ms: holdMs,
       connection_reused: checkout.connectionReused,
       ...(checkout.connectionReused ? {} : { connect_ms: checkout.queueMs }),
+      ...(checkout.connectPermitWaitMs === undefined ? {} : { connect_permit_wait_ms: checkout.connectPermitWaitMs }),
       ...(checkout.firstQueryMs === undefined ? {} : { first_query_ms: checkout.firstQueryMs }),
+      ...(checkout.firstQueryWriteMs === undefined ? {} : { first_query_write_ms: checkout.firstQueryWriteMs }),
+      ...(checkout.firstQueryFirstByteMs === undefined ? {} : { first_query_first_byte_ms: checkout.firstQueryFirstByteMs }),
+      connection_id: checkout.connectionId,
+      ...(checkout.idleMs === undefined ? {} : { idle_ms: checkout.idleMs }),
       db_operation: "unknown",
       statement_kind: checkout.queryIdentity.statementKind,
       query: checkout.queryIdentity.rawSql,
@@ -299,6 +399,8 @@ function recordConnectionCheckoutFailure(
   traceParent: TraceContext | null,
   err: unknown,
 ) {
+  // Before the tracer check: the counter must move even with tracing off.
+  recordStatementError(label, err);
   if (_tracer === noopTracer) return;
   _tracer.startSpan("server.db.connection", {
     parent: traceParent,
@@ -363,13 +465,20 @@ function preparePoolClient(
       const checkout = instrumented.__slockDbInstrumentation?.checkout;
       const timesFirstQuery = Boolean(checkout && checkout.firstQueryStartMs === undefined);
       if (checkout && timesFirstQuery) checkout.firstQueryStartMs = Date.now();
-      const finishFirstQuery = () => {
+      const statementStartMs = Date.now();
+      let statementKind: DbStatementKind = "unknown";
+      // pool.query times its own statement (no checkout here); a submittable
+      // (pg.Query) completes after this call returns, so its caller times it.
+      const timesStatement = Boolean(checkout) && !isSubmittable(args[0]);
+      const finishStatement = (err?: unknown) => {
         if (checkout && timesFirstQuery && checkout.firstQueryMs === undefined && checkout.firstQueryStartMs !== undefined) {
           checkout.firstQueryMs = Date.now() - checkout.firstQueryStartMs;
         }
+        if (checkout && timesStatement) observeStatement(checkout.label, statementKind, statementStartMs, err);
       };
       if (checkout) {
         const queryIdentity = queryIdentityFromInput(args[0]);
+        statementKind = queryIdentity.statementKind;
         const isWorkStatement = queryIdentity.statementKind !== "transaction";
         if (isWorkStatement || !checkout.hasWorkStatement) {
           checkout.queryIdentity = queryIdentity;
@@ -381,7 +490,7 @@ function preparePoolClient(
       if (typeof callback === "function") {
         const queryArgs = args.slice(0, -1);
         return originalQuery(...queryArgs as [never], (err: Error | undefined, ...rest: unknown[]) => {
-          finishFirstQuery();
+          finishStatement(err);
           markReadOnlyRecycle(instrumented, checkout?.label ?? "unknown", err, readOnlyRecoveryState);
           callback(err, ...rest);
         });
@@ -392,20 +501,20 @@ function preparePoolClient(
         if (result && typeof (result as Promise<unknown>).then === "function") {
           return (result as Promise<unknown>).then(
             (value) => {
-              finishFirstQuery();
+              finishStatement();
               return value;
             },
             (err) => {
-              finishFirstQuery();
+              finishStatement(err);
               markReadOnlyRecycle(instrumented, checkout?.label ?? "unknown", err, readOnlyRecoveryState);
               throw err;
             },
           );
         }
-        finishFirstQuery();
+        finishStatement();
         return result;
       } catch (err) {
-        finishFirstQuery();
+        finishStatement(err);
         markReadOnlyRecycle(instrumented, checkout?.label ?? "unknown", err, readOnlyRecoveryState);
         throw err;
       }
@@ -429,21 +538,26 @@ function preparePoolClient(
       if (checkout) {
         recordConnectionSpan(checkout, releaseArgs);
       }
+      endCheckoutTiming(client);
       return originalRelease(...releaseArgs as [never]);
     }) as InstrumentedRelease;
     release.__slockDbInstrumentedRelease = true;
     client.release = release;
   }
 
-  instrumented.__slockDbInstrumentation.checkout = {
+  const checkout: PoolCheckoutState = {
     label,
     queueMs,
     connectionReused,
+    ...checkoutIdentity(client, connectionReused),
+    ...(connectionReused ? {} : { connectPermitWaitMs: connectPermitWaitMs(client) }),
     startMs: Date.now(),
     queryIdentity: queryIdentityFromInput(undefined),
     traceParent: getCurrentTraceContext(),
     traceAttributes: dbTraceAttributes.getStore(),
   };
+  instrumented.__slockDbInstrumentation.checkout = checkout;
+  beginCheckoutTiming(client, checkout);
   return client;
 }
 
@@ -451,6 +565,7 @@ export function instrumentPool(label: string, pool: pg.Pool) {
   const instrumented = pool as InstrumentedPool;
   if (instrumented.__slockDbInstrumented) return;
   instrumented.__slockDbInstrumented = true;
+  instrumented.__slockDbLabel = label;
   const readOnlyRecoveryState = createReadOnlyRecoveryState();
 
   const originalConnect = pool.connect.bind(pool) as (...args: unknown[]) => Promise<pg.PoolClient> | void;
@@ -504,6 +619,8 @@ export function instrumentPool(label: string, pool: pg.Pool) {
       // pool.query runs exactly one statement right after checkout, so its round
       // trip is the whole hold.
       checkout.firstQueryMs ??= Date.now() - checkout.startMs;
+      observeStatement(label, queryIdentity.statementKind, checkout.startMs, releaseArgs[0]);
+      endCheckoutTiming(client);
       const finalReleaseArgs = readOnlyRecoveryReleaseArgs(label, releaseArgs, readOnlyRecoveryState);
       if (finalReleaseArgs.length > 0) {
         client.release(finalReleaseArgs[0] as never);
@@ -516,15 +633,19 @@ export function instrumentPool(label: string, pool: pg.Pool) {
     if (typeof callback === "function") {
       const queryArgs = args.slice(0, -1);
       (originalConnect() as Promise<pg.PoolClient>).then((client) => {
+        const connectionReused = markClientCheckedOut(client);
         const checkout: PoolCheckoutState = {
           label,
           queueMs: Date.now() - queueStart,
-          connectionReused: markClientCheckedOut(client),
+          connectionReused,
+          ...checkoutIdentity(client, connectionReused),
           startMs: Date.now(),
           queryIdentity,
           traceParent,
           traceAttributes,
         };
+        checkout.firstQueryStartMs = checkout.startMs;
+        beginCheckoutTiming(client, checkout);
         const query = client.query as (...queryArgs: unknown[]) => unknown;
         try {
           query(...queryArgs, (queryErr: Error | undefined, result: unknown) => {
@@ -543,15 +664,19 @@ export function instrumentPool(label: string, pool: pg.Pool) {
     }
 
     return (originalConnect() as Promise<pg.PoolClient>).then((client) => {
+      const connectionReused = markClientCheckedOut(client);
       const checkout: PoolCheckoutState = {
         label,
         queueMs: Date.now() - queueStart,
-        connectionReused: markClientCheckedOut(client),
+        connectionReused,
+        ...checkoutIdentity(client, connectionReused),
         startMs: Date.now(),
         queryIdentity,
         traceParent,
         traceAttributes,
       };
+      checkout.firstQueryStartMs = checkout.startMs;
+      beginCheckoutTiming(client, checkout);
       return Promise.resolve((client.query as (...queryArgs: unknown[]) => unknown)(...args)).then(
         (result) => {
           finishQuery(client, checkout, []);
@@ -739,16 +864,25 @@ export async function executeCancellablePgPoolSql<T extends pg.QueryResultRow = 
     signal.addEventListener("abort", onAbort, { once: true });
   }
 
+  const poolLabel = (pool as InstrumentedPool).__slockDbLabel;
+  let statementStartMs: number | undefined;
   try {
     throwIfSearchAborted(signal);
+    statementStartMs = Date.now();
     client.query(query);
     const result = await queryPromise;
     queryDone = true;
+    if (poolLabel) observeStatement(poolLabel, statementKindFromText(pgQuery.sql), statementStartMs);
     if (cancelRequested) throw abortError;
     return result;
   } catch (error) {
     queryDone = true;
-    if (cancelRequested || (signal?.aborted && isPgQueryCanceledError(error))) {
+    const callerAborted = cancelRequested || (signal?.aborted && isPgQueryCanceledError(error));
+    // A cancel the caller asked for is not a database timeout; keep it out of 57014.
+    if (poolLabel && statementStartMs !== undefined && !isSearchQueryAbortedError(error) && !callerAborted) {
+      observeStatement(poolLabel, statementKindFromText(pgQuery.sql), statementStartMs, error);
+    }
+    if (callerAborted) {
       throw abortError;
     }
     throw error;
@@ -791,22 +925,53 @@ function getPgliteDataDir(connectionString: string): string | undefined {
   return raw;
 }
 
+// How long an idle client stays in the pool before it is closed. Every new
+// connection costs a 600-700 ms TLS + auth handshake through Neon's proxy, and
+// the proxy refused ~14k new connections in the 24 h to 10-12 ("Too many
+// database connection attempts are currently ongoing"). Replaying that day's
+// pool sizes, a 5 min timeout opens ~71% fewer connections than 60 s.
+// Safe to hold for 5 minutes: TCP keepalive (below) sends a probe every 10 s
+// of silence, which keeps the AWS NAT gateway flow (350 s idle limit) alive,
+// and Neon's PgBouncer does not close idle clients (checked by holding pooled
+// connections idle for 330 s and 620 s on production).
+export const DEFAULT_PG_POOL_IDLE_TIMEOUT_MS = 300_000;
+
+/** `PG_POOL_IDLE_TIMEOUT_MS` (default 300000). Values below 1000 fall back to the default. */
+export function resolvePoolIdleTimeoutMs(env: NodeJS.ProcessEnv): number {
+  const raw = env.PG_POOL_IDLE_TIMEOUT_MS;
+  const parsed = raw === undefined || raw.trim() === "" ? DEFAULT_PG_POOL_IDLE_TIMEOUT_MS : Number(raw);
+  if (!Number.isFinite(parsed) || parsed < 1_000) return DEFAULT_PG_POOL_IDLE_TIMEOUT_MS;
+  return Math.floor(parsed);
+}
+
 // Exported for the task #269 real-PG teeth: the child process in
 // pgPoolErrorHandler.realPg.child.ts must exercise this exact wiring (helper
 // + attach site), not a mirror of it.
-export function createPool(connectionString: string) {
+export function createPool(
+  connectionString: string,
+  options: { min?: number; label?: string; connectConcurrency?: number } = {},
+) {
   const isNeon = connectionString.includes("neon.tech");
+  const label = options.label ?? "pg";
+  // At most this many handshakes in flight per pool; the rest queue (./connectGate).
+  const connectGate = createConnectGate(options.connectConcurrency ?? resolveConnectConcurrency(process.env));
   const pool = new pg.Pool({
+    Client: gatedClientClass(connectGate, (waitMs) => {
+      dbPoolConnectPermitWait.labels(label).observe(waitMs / 1000);
+    }),
     connectionString,
-    max: Number(process.env.PG_MAX_CONNECTIONS) || 50,
+    max: pgMaxConnections(),
+    // Idle clients up to `min` are not closed by idleTimeoutMillis. Set only on
+    // the primary pool, to the pre-warm count (see ./poolPrewarm).
+    min: options.min ?? 0,
     // Timeout waiting for a free connection from the pool (fail fast instead of queuing forever)
     connectionTimeoutMillis: 10_000,
-    // Close idle connections after 60s — must be shorter than Fly.io NAT timeout (~5min)
-    // so we never hand out a connection that Fly's network has silently dropped.
-    idleTimeoutMillis: 60_000,
+    // Close idle connections after PG_POOL_IDLE_TIMEOUT_MS (default 5 min, see above).
+    idleTimeoutMillis: resolvePoolIdleTimeoutMs(process.env),
     ssl: isNeon ? { rejectUnauthorized: false } : undefined,
-    // TCP keepalive: probe after 10s of silence on a checked-out connection.
-    // This detects dead connections (e.g., Fly NAT drop) within ~30s instead of TCP's default ~20min.
+    // TCP keepalive: probe after 10s of silence on the socket, idle in the pool
+    // or checked out. Keeps NAT flows alive and detects dead connections within
+    // ~30s instead of TCP's default ~20min.
     keepAlive: true,
     keepAliveInitialDelayMillis: 10_000,
   });
@@ -828,7 +993,7 @@ export async function initDatabase(
     return initPgliteDatabase(new PGlite(getPgliteDataDir(databaseUrl)));
   }
 
-  _pool = createPool(databaseUrl);
+  _pool = createPool(databaseUrl, { min: resolvePoolPrewarmCount(process.env, pgMaxConnections()), label: "primary" });
   instrumentPool("primary", _pool);
   _rootDb = drizzleNodePg(_pool, { schema });
   _db = scopeTransactions(_rootDb);
@@ -837,7 +1002,7 @@ export async function initDatabase(
   const hasSearchReplica = !!searchDatabaseUrl && searchDatabaseUrl !== databaseUrl;
   const log = options.log ?? console.log;
   if (hasSearchReplica) {
-    _searchPool = createPool(searchDatabaseUrl);
+    _searchPool = createPool(searchDatabaseUrl, { label: "search" });
     instrumentPool("search", _searchPool);
     _searchDb = scopeTransactions(drizzleNodePg(_searchPool, { schema }));
     log("[db] search: using read replica");
@@ -933,6 +1098,27 @@ export function getSearchDb() {
   return _searchDb;
 }
 
+function pgMaxConnections(): number {
+  return Number(process.env.PG_MAX_CONNECTIONS) || 50;
+}
+
+/**
+ * Open PG_POOL_PREWARM (default 10) primary connections before the server
+ * listens. Primary pool only; the search pool stays on demand. Never throws and
+ * is bounded (2s per connect, 5s overall), so it cannot hold startup.
+ */
+export async function prewarmPrimaryPool(): Promise<void> {
+  const pool = _pool;
+  if (!pool) return;
+  const count = resolvePoolPrewarmCount(process.env, pgMaxConnections());
+  if (count === 0) return;
+  try {
+    await prewarmPool(pool, { count });
+  } catch (error) {
+    console.warn("[db] pool pre-warm skipped:", error instanceof Error ? error.message : String(error));
+  }
+}
+
 export async function pingDatabase() {
   const db = getDb();
   await db.execute(sql`SELECT 1`);
@@ -949,6 +1135,13 @@ export function startPoolMetricsReporting(): void {
     const search = _searchPool;
     if (search && search !== primary) {
       reportPoolMetrics("search", search);
+    }
+    if (isRisingWaveConfigured()) {
+      // Read-only peek: reports zeros until the first RW read opens the pool.
+      const rw = getRisingWavePoolState();
+      dbPoolConnections.set({ pool: "risingwave", state: "total" }, rw.rw_pool_total);
+      dbPoolConnections.set({ pool: "risingwave", state: "idle" }, rw.rw_pool_idle);
+      dbPoolWaitingRequests.set({ pool: "risingwave" }, rw.rw_pool_waiting);
     }
   };
   report();

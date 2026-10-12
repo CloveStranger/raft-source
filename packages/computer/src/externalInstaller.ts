@@ -11,6 +11,7 @@ import { join } from "node:path";
 import type { Channel } from "./lib/channelState";
 import type { ComputerLastUpgradeReceipt } from "@botiverse/raft-shared";
 import { computerDir, resolveRaftHome } from "./paths";
+import { COMPUTER_VERSION } from "./version";
 import { computerFetch } from "./proxy";
 
 const DEFAULT_INSTALLER_BASE = "https://hands.build/dl/raft-computer-installer";
@@ -177,6 +178,38 @@ export async function recordRemoteUpgradeLaunch(slockHome: string, input: { requ
   const dir = join(computerDir(slockHome), "installer");
   mkdirSync(dir, { recursive: true });
   await writeFile(join(dir, LAST_REMOTE_UPGRADE_MARKER), JSON.stringify({ ...input, launchedAt: new Date().toISOString() }), "utf8");
+}
+
+/**
+ * task #917: Computer refused to launch the installer (external supervisor
+ * cannot be upgraded in place). Settle the request the same way the installer
+ * would, as a `failed` receipt under the request id, so the successor relay
+ * and the server read one terminal outcome instead of waiting for a deadline.
+ * The shape follows raft-computer-installer/v3 (rust/report.rs) so a later
+ * installer run with the same id reads a valid historical receipt.
+ */
+export async function recordRemoteUpgradeRefusal(slockHome: string, input: { requestId: string; targetVersion?: string; reason: string }): Promise<void> {
+  const dir = join(computerDir(slockHome), "installer", "receipts");
+  await mkdir(dir, { recursive: true, mode: 0o700 });
+  const reason = input.reason.replace(/[\u0000-\u001f\u007f]+/gu, " ").slice(0, 2048);
+  const receipt = {
+    protocol: "raft-computer-installer/v3",
+    installerVersion: `raft-computer/${COMPUTER_VERSION}`,
+    id: input.requestId,
+    operation: "upgrade",
+    presence: "unattended",
+    targetVersion: input.targetVersion ?? null,
+    fromVersion: COMPUTER_VERSION,
+    approvedBy: `remote:${input.requestId}`,
+    outcome: "failed",
+    exitCode: 1,
+    reason,
+    line: "Raft Computer did not start the upgrade: the service is managed by an external supervisor that must be configured first.",
+    nextStep: null,
+    finishedAtMs: Date.now(),
+    detail: { refusedBy: "raft-computer", refusal: "external_supervisor" },
+  };
+  await writeFile(join(dir, `${createHash("sha256").update(input.requestId).digest("hex")}.json`), JSON.stringify(receipt), { encoding: "utf8", mode: 0o600 });
 }
 
 export async function readLastRemoteUpgradeReceipt(slockHome: string): Promise<ComputerLastUpgradeReceipt | null> {

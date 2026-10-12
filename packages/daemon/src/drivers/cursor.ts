@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { spawnRuntimeChild } from "./runtimeChild";
 import { existsSync, readdirSync } from "node:fs";
 import path from "node:path";
 import { clearClockTimeout, CURSOR_MODEL_DETECTION_TIMEOUT_MS, hydrateRuntimeConfig, setClockTimeout, runtimeConfigToLaunchFields, runtimeModelSourceOutcomeFromSet, type AgentConfig, type RuntimeModelInfo, type RuntimeModelSet, type RuntimeModelSourceOutcome , type AxSurfaceText } from "@botiverse/raft-shared";
@@ -172,7 +173,9 @@ export class CursorDriver implements RuntimeDriver {
     const spawnEnv = await buildCursorSpawnEnv(ctx);
 
     const launch = resolveCursorLaunch(args, { env: spawnEnv });
-    const proc = spawn(launch.command, launch.args, {
+    // task #365: after the last await, right before the child exists.
+    ctx.assertLaunchCurrent?.();
+    const proc = spawnRuntimeChild(launch.command, launch.args, {
       cwd: ctx.workingDirectory,
       stdio: ["pipe", "pipe", "pipe"],
       env: launch.env ?? spawnEnv,

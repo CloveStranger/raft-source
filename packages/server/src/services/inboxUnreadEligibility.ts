@@ -5,7 +5,7 @@ import { SYSTEM_MESSAGE_BORN_READ_CLASSIFICATION } from "./systemMessageBornRead
 /**
  * THE rule for "is this persisted message unread for this receiver", on the
  * application side. It is the per-row half of the unified inbox chain's unread
- * predicate (rw_inbox_normal_v4, infra/risingwave/sql/063-unified-inbox-chain.sql):
+ * predicate (rw_inbox_normal_v5, infra/risingwave/sql/075-inbox-cursor-decouple.sql):
  *
  *   NOT (sender = receiver)
  *   AND NOT COALESCE(message_type = 'system' AND causal_actor = receiver, FALSE)

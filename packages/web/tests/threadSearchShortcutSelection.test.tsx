@@ -11,14 +11,6 @@ import ThreadPanel, {
   getThreadPanelSelectedSearchText,
   scrollThreadTimelineToTop,
 } from "../src/components/message/ThreadPanel";
-import {
-  WORKSPACE_GRID_SCROLL_THREAD_TO_TOP_EVENT,
-  requestWorkspaceGridThreadScrollToTopFromTarget,
-  subscribeWorkspaceGridThreadScrollToTop,
-} from "../src/components/workspace/workspaceGridOpenEvents";
-import type {
-  WorkspaceGridScrollThreadToTopEventDetail,
-} from "../src/components/workspace/workspaceGridOpenEvents";
 import { useAuthStore } from "../src/store/authStore";
 import type { User } from "../src/store/authStore";
 import type { Channel } from "../src/store/channelStore";
@@ -126,7 +118,6 @@ function renderThreadSearchPanel(opts: {
   openParentChannelId?: string | null;
   presentation?: "side" | "modal" | "mobile-modal";
   hasReplies?: boolean;
-  scrollToTopRequest?: number;
   onOpenProfile?: (kind: "agent" | "human", id: string) => void;
   hydrateMentionMember?: boolean;
   parentMessage?: Partial<Message>;
@@ -320,7 +311,6 @@ function renderThreadSearchPanel(opts: {
     <MemoryRouter>
       <ThreadPanel
         presentation={opts.presentation}
-        scrollToTopRequest={opts.scrollToTopRequest}
         onOpenProfile={opts.onOpenProfile}
       />
     </MemoryRouter>,
@@ -442,59 +432,6 @@ test("thread scroll-to-top intent tolerates a missing timeline", () => {
   let callCount = 0;
   scrollThreadTimelineToTop({ scrollToTop: () => { callCount += 1; } });
   assert.equal(callCount, 1);
-});
-
-test("workspace tab double-click commands are scoped to thread tab hitboxes", () => {
-  const tabButton = document.createElement("div");
-  tabButton.className = "flexlayout__tab_button";
-  const paddingTarget = document.createElement("span");
-  const marker = document.createElement("span");
-  marker.dataset.workspaceThreadTab = "true";
-  marker.dataset.workspaceThreadChannelId = "channel-a";
-  marker.dataset.workspaceThreadRootId = "root-a";
-  marker.dataset.workspaceThreadChannelIdResolved = "thread-a";
-  tabButton.append(paddingTarget, marker);
-  document.body.append(tabButton);
-
-  const requests: WorkspaceGridScrollThreadToTopEventDetail[] = [];
-  const onRequest = (event: Event) => {
-    requests.push((event as CustomEvent<WorkspaceGridScrollThreadToTopEventDetail>).detail);
-  };
-  window.addEventListener(WORKSPACE_GRID_SCROLL_THREAD_TO_TOP_EVENT, onRequest);
-  let matchingRequests = 0;
-  let otherRequests = 0;
-  const unsubscribeMatching = subscribeWorkspaceGridThreadScrollToTop(
-    { kind: "thread", channelId: "channel-a", threadRootId: "root-a", threadChannelId: "thread-a" },
-    () => { matchingRequests += 1; },
-  );
-  const unsubscribeOther = subscribeWorkspaceGridThreadScrollToTop(
-    { kind: "thread", channelId: "channel-b", threadRootId: "root-b" },
-    () => { otherRequests += 1; },
-  );
-
-  try {
-    assert.equal(requestWorkspaceGridThreadScrollToTopFromTarget(paddingTarget), true);
-    assert.deepEqual(requests, [{
-      ref: {
-        kind: "thread",
-        channelId: "channel-a",
-        threadRootId: "root-a",
-        threadChannelId: "thread-a",
-      },
-    }]);
-    assert.equal(matchingRequests, 1);
-    assert.equal(otherRequests, 0);
-
-    marker.remove();
-    assert.equal(requestWorkspaceGridThreadScrollToTopFromTarget(paddingTarget), false);
-    assert.equal(requestWorkspaceGridThreadScrollToTopFromTarget(document.body), false);
-    assert.equal(requests.length, 1, "channel, DM, and panel content targets emit no thread command");
-  } finally {
-    unsubscribeMatching();
-    unsubscribeOther();
-    window.removeEventListener(WORKSPACE_GRID_SCROLL_THREAD_TO_TOP_EVENT, onRequest);
-    tabButton.remove();
-  }
 });
 
 test("thread search menu command opens with an empty query when no text is selected", async () => {
@@ -771,35 +708,7 @@ test("a resolved absent thread renders empty and replyable without a durable cha
   assert.equal(useThreadStore.getState().openThreadChannelId, null);
 });
 
-test("an external workspace request reuses the thread timeline scroll-to-top behavior", async () => {
-  const originalScrollTo = HTMLElement.prototype.scrollTo;
-  let scrolledElement: HTMLElement | null = null;
-  let scrollOptions: ScrollToOptions | undefined;
-  HTMLElement.prototype.scrollTo = function (options?: ScrollToOptions | number, _y?: number) {
-    scrolledElement = this;
-    scrollOptions = typeof options === "object" ? options : undefined;
-  };
-
-  try {
-    const view = renderThreadSearchPanel({ presentation: "side", scrollToTopRequest: 0 });
-    await screen.findByTestId("thread-panel-parent");
-
-    view.rerender(
-      <MemoryRouter>
-        <ThreadPanel presentation="side" scrollToTopRequest={1} />
-      </MemoryRouter>,
-    );
-
-    await waitFor(() => {
-      assert.equal(scrolledElement?.getAttribute("data-testid"), "thread-message-scroller");
-    });
-    assert.deepEqual(scrollOptions, { top: 0, behavior: "smooth" });
-  } finally {
-    HTMLElement.prototype.scrollTo = originalScrollTo;
-  }
-});
-
-test("thread sender avatars delegate profile navigation to their workspace host", async () => {
+test("thread sender avatars delegate profile navigation to their host", async () => {
   const opened: Array<{ kind: "agent" | "human"; id: string }> = [];
   renderThreadSearchPanel({
     onOpenProfile: (kind, id) => opened.push({ kind, id }),
@@ -810,7 +719,7 @@ test("thread sender avatars delegate profile navigation to their workspace host"
   assert.deepEqual(opened, [{ kind: "human", id: "user-1" }]);
 });
 
-test("thread body mentions delegate profile navigation to their workspace host", async () => {
+test("thread body mentions delegate profile navigation to their host", async () => {
   const opened: Array<{ kind: "agent" | "human"; id: string }> = [];
   renderThreadSearchPanel({
     parentMessage: {
@@ -829,7 +738,7 @@ test("thread body mentions delegate profile navigation to their workspace host",
   });
 });
 
-test("conversation sender avatars delegate profile navigation to their workspace host", async () => {
+test("conversation sender avatars delegate profile navigation to their host", async () => {
   const seeded = renderThreadSearchPanel();
   seeded.unmount();
   const opened: Array<{ kind: "agent" | "human"; id: string }> = [];
@@ -870,7 +779,7 @@ test("conversation sender avatars delegate profile navigation to their workspace
   assert.deepEqual(opened, [{ kind: "human", id: "user-1" }]);
 });
 
-test("conversation body mentions delegate profile navigation to their workspace host", async () => {
+test("conversation body mentions delegate profile navigation to their host", async () => {
   const seeded = renderThreadSearchPanel({
     parentMessage: {
       content: "ask @ada",

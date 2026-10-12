@@ -1,6 +1,6 @@
 import { Card, Button } from "raft-ui";
 import CloseButton from "../ui/CloseButton";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import type { SyntheticEvent } from "react";
 import { useIntl } from "react-intl";
 import { Check, Copy, Download, Share2, X } from "lucide-react";
@@ -53,6 +53,10 @@ async function canSavePngViaNativeShare(dataUrl: string, filename: string): Prom
  * an artifact action. Platform-specific share targets intentionally live here,
  * not in the toolbar, so the image is ready before the user sends it anywhere.
  */
+const stopClickPropagation = (event: React.MouseEvent) => {
+  event.stopPropagation();
+};
+
 export default function SelectShareLightbox({
   dataUrl,
   filename = "slock-export.png",
@@ -118,7 +122,7 @@ export default function SelectShareLightbox({
     };
   }, []);
 
-  const handleDownload = async () => {
+  const handleDownload = useCallback(async () => {
     if (sharingToX || savingImage || copyingImage) return;
     if (!canNativeSaveImage) {
       downloadDataUrl(dataUrl, filename);
@@ -142,9 +146,9 @@ export default function SelectShareLightbox({
     } finally {
       setSavingImage(false);
     }
-  };
+  }, [sharingToX, savingImage, copyingImage, canNativeSaveImage, dataUrl, filename, onSaved, onClose, formatMessage]);
 
-  const handleCopyImage = async () => {
+  const handleCopyImage = useCallback(async () => {
     if (sharingToX || savingImage || copyingImage) return;
     setCopyingImage(true);
     setImageCopied(false);
@@ -165,9 +169,9 @@ export default function SelectShareLightbox({
     } finally {
       setCopyingImage(false);
     }
-  };
+  }, [sharingToX, savingImage, copyingImage, dataUrl, formatMessage]);
 
-  const handleShareToX = async () => {
+  const handleShareToX = useCallback(async () => {
     if (!onShareToX || sharingToX || savingImage || copyingImage) return;
     setSharingToX(true);
     try {
@@ -175,7 +179,7 @@ export default function SelectShareLightbox({
     } finally {
       setSharingToX(false);
     }
-  };
+  }, [onShareToX, sharingToX, savingImage, copyingImage, dataUrl]);
 
   return (
     <Lightbox
@@ -187,7 +191,7 @@ export default function SelectShareLightbox({
     >
       <Card
         className=" flex max-h-[90vh] w-full max-w-3xl flex-col"
-        onClick={(e) => e.stopPropagation()}
+        onClick={stopClickPropagation}
       >
         <div className="flex h-panel-header shrink-0 items-center justify-between border-b-2 border-line-muted theme-brutal:border-black bg-layer-panel theme-brutal:bg-white px-5">
           <h2 className="text-base font-bold text-foreground-strong theme-brutal:text-black">{formatMessage({ id: "message.selectShare.title" })}</h2>
@@ -227,7 +231,7 @@ export default function SelectShareLightbox({
                 type="button"
                 size="sm"
                 variant="outline"
-                onClick={() => void handleCopyImage()}
+                onClick={handleCopyImage}
                 disabled={sharingToX || savingImage || copyingImage}
                 loading={copyingImage}
                 loadingLabel={formatMessage({ id: "message.selectShare.copying" })}
@@ -243,7 +247,7 @@ export default function SelectShareLightbox({
               type="button"
               size="sm"
               variant="outline"
-              onClick={() => void handleDownload()}
+              onClick={handleDownload}
               disabled={sharingToX || savingImage || copyingImage}
               loading={savingImage}
               loadingLabel={formatMessage({ id: "message.selectShare.saving" })}
@@ -259,7 +263,7 @@ export default function SelectShareLightbox({
                 type="button"
                 size="sm"
                 variant="accent"
-                onClick={() => void handleShareToX()}
+                onClick={handleShareToX}
                 disabled={sharingToX || savingImage || copyingImage}
                 loading={sharingToX}
                 loadingLabel={formatMessage({ id: "message.selectShare.sharing" })}

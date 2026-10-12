@@ -10,6 +10,7 @@ import {
   agentMigrationReceiptChannels,
   agentMigrationReceiptOutbox,
   agentMigrations,
+  agents,
   channelAgents,
   channelHumans,
   channels,
@@ -22,10 +23,11 @@ import {
   users,
 } from "../db/schema";
 import type { AgentOrchestrator, AgentMessageDeliveryResult } from "./agentOrchestrator";
-import { createAgent } from "./agentService";
+import { createAgent, deleteAgent } from "./agentService";
 import {
   canAgentAccessChannel,
   canUserAccessChannel,
+  findOrCreateAgentDM,
   findOrCreateDM,
   listDMChannels,
 } from "./channelService";
@@ -61,6 +63,7 @@ import {
   formatAgentMigrationTerminalReceipt,
 } from "./agentMigrationReceiptService";
 import { referenceAgentInboxChain } from "../test/agentInboxChainReference";
+import { withChannelDelivery } from "../test/orchestratorStub";
 
 
 const TRANSFER_SUMMARY = {
@@ -108,10 +111,10 @@ function fakeOrchestrator(
   deliver: (agentId: string, message: Record<string, unknown>) => Promise<AgentMessageDeliveryResult>,
   machineStatus: (machineId: string) => "online" | "offline" = () => "online",
 ): AgentOrchestrator {
-  return {
+  return withChannelDelivery({
     deliverMessage: deliver,
     getMachineStatus: async (machineId: string) => machineStatus(machineId),
-  } as unknown as AgentOrchestrator;
+  }) as unknown as AgentOrchestrator;
 }
 
 function rejectionContains(expected: string) {
@@ -282,6 +285,44 @@ async function receiptRows() {
     outbox: await db.select().from(agentMigrationReceiptOutbox),
   };
 }
+
+test("deleteAgent succeeds for a migrated agent and leaves receipt surfaces intact", async ({ db }) => {
+  const fixture = await seedStartingMigration(false);
+  const peer = await createAgent(fixture.server.id, "receipt-peer", { runtime: "codex" });
+  const dm = await findOrCreateAgentDM(fixture.server.id, fixture.agent.id, peer.id);
+  assert.ok(dm, "expected an agent-to-agent DM");
+
+  await deleteAgent(fixture.agent.id);
+
+  const [deleted] = await db.select({
+    deletedAt: agents.deletedAt,
+    status: agents.status,
+  }).from(agents).where(eq(agents.id, fixture.agent.id));
+  assert.ok(deleted?.deletedAt, "agent should be soft-deleted");
+  assert.equal(deleted?.status, "inactive");
+
+  const receipts = await db.select().from(agentMigrationReceiptChannels)
+    .where(eq(agentMigrationReceiptChannels.agentId, fixture.agent.id));
+  assert.equal(receipts.length, 1);
+  assert.equal(receipts[0]!.channelId, fixture.receiptChannelId);
+
+  const [receiptChannel] = await db.select({
+    deletedAt: channels.deletedAt,
+  }).from(channels).where(eq(channels.id, fixture.receiptChannelId));
+  assert.equal(receiptChannel?.deletedAt, null);
+
+  const receiptMembership = await db.select().from(channelAgents).where(and(
+    eq(channelAgents.agentId, fixture.agent.id),
+    eq(channelAgents.channelId, fixture.receiptChannelId),
+  ));
+  assert.equal(receiptMembership.length, 1);
+
+  const leftoverPeerDm = await db.select().from(channelAgents).where(and(
+    eq(channelAgents.agentId, fixture.agent.id),
+    eq(channelAgents.channelId, dm.id),
+  ));
+  assert.equal(leftoverPeerDm.length, 0);
+});
 
 test("authoritative completion atomically persists one private frozen-name receipt", async ({ db }) => {
 

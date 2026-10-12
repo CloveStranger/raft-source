@@ -1,15 +1,16 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useIntl } from "react-intl";
-import { Button, Spinner } from "raft-ui";
-import { MoveRight } from "lucide-react";
+import { Badge, Button } from "raft-ui";
 import Banner from "../ui/Banner";
+import SectionEyebrow from "../ui/SectionEyebrow";
 import { useAppNavigate } from "../../hooks/useAppNavigate";
+import { useAgentStore } from "../../store/agentStore";
 import type { Agent } from "../../store/agentStore";
 import { useMachineStore } from "../../store/machineStore";
 import { useServerStore } from "../../store/serverStore";
 import { agentMigrationRequiresUpgrade } from "./billing";
 import { migrationStatusErrorPresentation } from "./presentation";
-import { canCancelMigration, isActiveMigrationState, isFailedMigrationState } from "./state";
+import { canCancelMigration, isActiveMigrationState, isCanceledMigrationState, isCompletedMigrationState, isFailedMigrationState } from "./state";
 import { useAgentMigrationStatus } from "./useAgentMigrationStatus";
 import { useAgentMigrationUiEnabled } from "./useAgentMigrationUiEnabled";
 import { AgentMigrationCancelDialog } from "./AgentMigrationCancelDialog";
@@ -55,73 +56,116 @@ export function AgentMigrationSection({ agent }: { agent: Agent }) {
     void loadBilling();
   }, [enabled, loadBilling]);
 
+  // A completed migration moves the agent to another computer, but no agent
+  // update is broadcast for it. When this view watched the migration finish,
+  // re-read agents once so the Computer row and sidebar grouping follow it.
+  const loadAgents = useAgentStore((s) => s.loadAgents);
+  const watchedActiveRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!notice) return;
+    if (isActiveMigrationState(notice.state)) {
+      watchedActiveRef.current = notice.migrationRef;
+    } else if (isCompletedMigrationState(notice.state) && watchedActiveRef.current === notice.migrationRef) {
+      watchedActiveRef.current = null;
+      void loadAgents();
+    }
+  }, [notice, loadAgents]);
+
+  const openMigration = useCallback(() => {
+    if (requiresUpgrade) {
+      setShowUpgradeDialog(true);
+      return;
+    }
+    setShowDialog(true);
+  }, [requiresUpgrade]);
+  const showCancelDialog = useCallback(() => setShowCancel(true), []);
+  const closeCancelDialog = useCallback(() => setShowCancel(false), []);
+  const closeMigrationDialog = useCallback(() => setShowDialog(false), []);
+  const closeUpgradeDialog = useCallback(() => setShowUpgradeDialog(false), []);
+  const handleProRequired = useCallback(() => {
+    setShowDialog(false);
+    setShowUpgradeDialog(true);
+    void loadBilling();
+  }, [loadBilling]);
+  const handleMigrationStarted = useCallback(async () => {
+    setShowDialog(false);
+    await refresh();
+  }, [refresh]);
+  const viewPlans = useCallback(() => nav.toSettings("billing"), [nav]);
+
   if (!enabled) return null;
 
   return (
-    <>
-      <Button variant="success" size="md"
-        type="button"
-        onClick={() => {
-          if (requiresUpgrade) {
-            setShowUpgradeDialog(true);
-            return;
-          }
-          setShowDialog(true);
-        }}
-        disabled={active || billingChecking}
-        aria-busy={billingChecking}
-        className="w-full"
-      >
-        {active ? (
-          <Spinner size="sm" aria-hidden="true" />
-        ) : (
-          <MoveRight size={14} aria-hidden="true" />
-        )}
-        {active
-          ? formatMessage({ id: "agent.detail.migrationInProgress" })
-          : canRetry
-            ? formatMessage({ id: "agent.detail.tryMigrationAgain" })
-            : formatMessage({ id: "agent.detail.moveToAnotherComputer" })}
-      </Button>
+    <section
+      aria-labelledby="agent-migration-section-title"
+      className="px-5 py-4 border-t border-line-muted theme-brutal:border-black/10"
+      data-testid="agent-migration-section"
+    >
+      <div className="flex items-center gap-2">
+        <h3 id="agent-migration-section-title">
+          <SectionEyebrow>{formatMessage({ id: "agent.migration.sectionTitle" })}</SectionEyebrow>
+        </h3>
+        {/* Migration is a Pro feature; on other plans Migrate opens the upgrade prompt. */}
+        <Badge variant="accent" data-testid="agent-migration-pro-badge">
+          {formatMessage({ id: "billing.pro" })}
+        </Badge>
+      </div>
+      {/* What migration does matters before one exists; once a migration is shown, its block says it. */}
+      {notice && !isCompletedMigrationState(notice.state) && !isCanceledMigrationState(notice.state) ? null : (
+        <p className="mt-1 text-xs font-normal text-foreground-muted">
+          {formatMessage({ id: "agent.migration.sectionDescription" })}
+        </p>
+      )}
       {notice ? (
-        <MigrationProgressPanel
-          notice={notice}
-          machines={machines}
-          onShowCancel={() => setShowCancel(true)}
-        />
+        <div className="mt-3">
+          <MigrationProgressPanel
+            notice={notice}
+            machines={machines}
+            onShowCancel={showCancelDialog}
+          />
+        </div>
       ) : null}
       {statusError ? (
         <Banner
           intent="warning"
           density="sm"
+          className="mt-3"
           title={formatMessage({ id: "agent.detail.migrationStatusUnavailable" })}
         >
           <MigrationErrorContent presentation={statusError} />
         </Banner>
       ) : null}
+      {/* While a migration runs, the progress block owns the only action (Cancel). */}
+      {active ? null : (
+        <div className="mt-3 flex justify-end">
+          <Button variant="outline" size="sm"
+            type="button"
+            onClick={openMigration}
+            disabled={billingChecking}
+            aria-busy={billingChecking}
+          >
+            {canRetry
+              ? formatMessage({ id: "agent.detail.tryMigrationAgain" })
+              : formatMessage({ id: "agent.detail.startMigration" })}
+          </Button>
+        </div>
+      )}
 
       {showDialog && (
         <AgentMigrationDialog
           agent={agent}
           machines={machines}
           sourceMachineId={agent.machineId ?? null}
-          onClose={() => setShowDialog(false)}
-          onProRequired={() => {
-            setShowDialog(false);
-            setShowUpgradeDialog(true);
-            void loadBilling();
-          }}
-          onStarted={async () => {
-            setShowDialog(false);
-            await refresh();
-          }}
+          onClose={closeMigrationDialog}
+          onProRequired={handleProRequired}
+          onStarted={handleMigrationStarted}
         />
       )}
 
       {showUpgradeDialog && (
         <AgentMigrationUpgradeDialog
-          onClose={() => setShowUpgradeDialog(false)}
-          onViewPlans={() => nav.toSettings("billing")}
+          onClose={closeUpgradeDialog}
+          onViewPlans={viewPlans}
         />
       )}
 
@@ -130,10 +174,10 @@ export function AgentMigrationSection({ agent }: { agent: Agent }) {
           agentId={agent.id}
           notice={notice}
           machines={machines}
-          onClose={() => setShowCancel(false)}
+          onClose={closeCancelDialog}
           onRefresh={refresh}
         />
       )}
-    </>
+    </section>
   );
 }

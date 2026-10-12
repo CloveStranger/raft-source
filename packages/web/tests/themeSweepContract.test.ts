@@ -37,27 +37,39 @@ test("theme sweep keeps confirmation and drawer copy on semantic tokens", () => 
 
 test("theme sweep keeps account, notification and billing actions semantic", () => {
   const settings = source("src/components/settings/SettingsPanel.tsx");
+  // The plan/billing body moved to its own file (task #709 one-component-per-file).
+  const planSection = source("src/components/settings/PlanSectionContent.tsx");
   assert.match(settings, /variant="outline"[\s\S]*settings\.account\.saveProfile/);
   assert.match(settings, /settings\.account\.saveProfile/);
   assert.match(settings, /<Badge variant="success" appearance="soft"/);
   assert.match(settings, /<Badge variant="muted" uppercase>/);
   assert.doesNotMatch(settings, /inline-flex shrink-0 border-2 border-line-strong bg-fill-muted/);
   assert.match(settings, /variant="outline"[\s\S]*settings\.notifications\.enabling/);
-  assert.match(settings, /variant="outline"[\s\S]*billing\.seeAllFeaturesAndComparePlans/);
-  assert.match(settings, /h-full bg-primary-strong/);
-  assert.match(settings, /h-full bg-accent-strong/);
+  assert.match(planSection, /variant="outline"[\s\S]*billing\.seeAllFeaturesAndComparePlans/);
+  assert.match(planSection, /h-full bg-primary-strong/);
+  assert.match(planSection, /h-full bg-accent-strong/);
 });
 
 test("theme sweep keeps mobile links, billing summary, and search entity badges on RUI recipes", () => {
   const settings = source("src/components/settings/SettingsPanel.tsx");
+  // The billing summary card lives in PlanSectionContent since task #709.
+  const planSection = source("src/components/settings/PlanSectionContent.tsx");
   const search = source("src/components/search/MessageSearchPage.tsx");
+  // The search result rows live in their own files since task #709.
+  const searchRows = [
+    source("src/components/search/EntityResultRow.tsx"),
+    source("src/components/search/MessageHitRow.tsx"),
+    source("src/components/search/SearchHomeEntityRow.tsx"),
+  ];
 
   assert.match(settings, /render=\{\([\s\S]*mobileDownloadUrl\("android"\)[\s\S]*data-testid="mobile-download-android"/);
   assert.match(settings, /render=\{\([\s\S]*mobileDownloadUrl\("ios"\)[\s\S]*data-testid="mobile-download-ios"/);
-  assert.match(settings, /<Card[\s\S]*variant="option"[\s\S]*data-testid="billing-summary-card"/);
+  assert.match(planSection, /<Card[\s\S]*variant="option"[\s\S]*data-testid="billing-summary-card"/);
   assert.doesNotMatch(settings, /data-testid="mobile-download-(?:android|ios)"[\s\S]*btn-brutal-sm/);
-  assert.doesNotMatch(search, /ARCHIVED_CHANNEL_BADGE_CLASS/);
-  assert.doesNotMatch(search, /variant="muted" appearance="outline"/);
+  for (const searchSource of [search, ...searchRows]) {
+    assert.doesNotMatch(searchSource, /ARCHIVED_CHANNEL_BADGE_CLASS/);
+    assert.doesNotMatch(searchSource, /variant="muted" appearance="outline"/);
+  }
 });
 
 test("theme sweep keeps task status and profile resize readable", () => {
@@ -66,11 +78,13 @@ test("theme sweep keeps task status and profile resize readable", () => {
   const statusUi = source("src/components/task/taskStatusUi.ts");
   const profile = source("src/components/profile/ProfilePanel.tsx");
   const agent = source("src/components/agent/AgentDetailPanel.tsx");
-  assert.match(status, /getTaskStatusBadgeClassName/);
+  // Task status appearance is raft-ui's single source now: StatusBadge renders
+  // rui's TaskStatusBadge, and slock's taskStatusUi no longer holds any colour
+  // (the old per-theme classes moved into raft-ui's task-status tokens).
+  assert.match(status, /TaskStatusBadge/);
+  assert.doesNotMatch(statusUi, /bg-brutal-|dark:bg-.*-soft/);
   assert.match(tasks, /<TaskSectionBadge status=\{ruiStatus\}/);
   assert.match(tasks, /variant="outline"[\s\S]*task\.board\.newTask/);
-  assert.match(statusUi, /dark:bg-(?:warning|info|accent|success)-soft/);
-  assert.match(statusUi, /theme-brutal:bg-brutal-cyan/);
   assert.match(profile, /flex: "0 0 auto"/);
   assert.match(agent, /variant="outline"[\s\S]*text-foreground-strong/);
 });
@@ -89,7 +103,10 @@ test("theme sweep keeps feedback, agent channel rows, and dark sidebar active re
 });
 
 test("theme sweep closes the remaining dialog and fallback contrast leaks", () => {
-  const members = source("src/components/agent/ChannelMembers.tsx");
+  const members = [
+    source("src/components/agent/ChannelMembers.tsx"),
+    source("src/components/agent/MemberRoleActions.tsx"),
+  ].join("\n");
   const avatar = source("src/components/ui/AvatarSlot.tsx");
   const stableField = source("src/components/agent/StableField.tsx");
   const reset = source("src/components/agent/ResetAgentDialog.tsx");
@@ -100,7 +117,10 @@ test("theme sweep closes the remaining dialog and fallback contrast leaks", () =
     assert.match(memberSource, /input-member-search/);
   }
   assert.match(source("src/index.css"), /\.input-member-search[\s\S]*?background: var\(--layer-panel\)/);
-  assert.match(members, /variant="primary"[\s\S]*?!text-black[\s\S]*?data-testid="add-member-confirm"/);
+  // Confirm-add reads dark-on-pink in Brutal and dark-on-yellow in Elegant
+  // through the Button variant (accent / primary), not a className override.
+  assert.match(members, /const confirmAddVariant = themeFamily === "brutal" \? "accent" : "primary";/);
+  assert.match(members, /variant=\{confirmAddVariant\}[\s\S]*?data-testid="add-member-confirm"/);
   assert.match(members, /appearance=\{failedNow \? "soft" : "solid"\}[\s\S]*?variant=\{failedNow \? "warning" : kind === "agent" \? "information" : "accent"\}[\s\S]*?theme-brutal:bg-brutal-orange\/25 theme-brutal:text-black/);
   assert.match(members, /data-member-failure="true"/);
   assert.match(members, /aria-describedby=\{failedKeys\.has\(key\) \?/);
@@ -140,15 +160,19 @@ test("dark elegant sidebar selector is bound to real product rows", () => {
   const sidebar = source("src/components/layout/Sidebar.tsx");
   assert.match(sidebar, /data-slot="sidebar-item"/);
   assert.match(sidebar, /active=\{selected\}/);
-  assert.match(sidebar, /active=\{isAgentSelected\(agent\.id\)\}/);
-  assert.match(sidebar, /active=\{isHumanSelected\(human\.userId\)\}/);
+  assert.match(sidebar, /selected=\{isAgentSelected\(agent\.id\)\}/);
+  assert.match(sidebar, /selected=\{isHumanSelected\(human\.userId\)\}/);
+  assert.match(sidebar, /active=\{selected\}/);
 });
 
 test("profile and member surfaces preserve layout while using theme-aware chrome", () => {
   const profile = source("src/components/agent/AgentDetailPanel.tsx");
   const resize = source("src/components/profile/ProfilePanel.tsx");
   const members = source("src/components/channel/ChannelMemberList.tsx");
-  const nestedMembers = source("src/components/agent/ChannelMembers.tsx");
+  const nestedMembers = [
+    source("src/components/agent/ChannelMembers.tsx"),
+    source("src/components/agent/MemberRoleActions.tsx"),
+  ].join("\n");
 
   assert.match(profile, /overflow-x-auto overflow-y-hidden scrollbar-none/);
   assert.match(profile, /className="group relative size-16 shrink-0 !p-0"/);
@@ -188,12 +212,17 @@ test("manual translation remains wired to the shared context menu action", () =>
 test("dark elegant popovers and accent submits keep readable foregrounds", () => {
   const switcher = source("src/components/ui/ServerSwitcherMenu.tsx");
   const composer = source("src/components/message/MessageInput.tsx");
+  const autocompleteOptionRow = source("src/components/message/AutocompleteOptionRow.tsx");
   const createAgent = source("src/components/agent/CreateAgentDialog.tsx");
   const createTask = source("src/components/task/CreateTaskDialog.tsx");
 
   assert.match(switcher, /text-foreground-strong theme-brutal:text-black/);
   assert.match(switcher, /text-foreground-muted theme-brutal:text-black\/40/);
-  assert.match(composer, /ComposerSuggestionList[\s\S]*?data-testid="mention-autocomplete-popover"[\s\S]*?ComposerSuggestionOption/);
+  assert.match(composer, /ComposerSuggestionList[\s\S]*?data-testid="mention-autocomplete-popover"[\s\S]*?AutocompleteOptionRow/);
+  // The option rows are extracted (task #709 react-perf): the row component owns
+  // the ComposerSuggestionOption element and the per-item select closure, and
+  // lives in its own file.
+  assert.match(autocompleteOptionRow, /function AutocompleteOptionRow[\s\S]*?ComposerSuggestionOption/);
   assert.match(composer, /ComposerSuggestionList[\s\S]*?data-testid="mention-autocomplete-popover"[\s\S]*?ComposerSuggestionTitle/);
   assert.match(composer, /ComposerSuggestionTitle className="max-w-\[12rem\] flex-\[0_1_auto\]"/);
   assert.doesNotMatch(composer, /ComposerSuggestionTitle className="[^"]*(?:min-w-\[7\.5rem\]|flex-\[1_1_12rem\])/);
@@ -203,7 +232,9 @@ test("dark elegant popovers and accent submits keep readable foregrounds", () =>
   assert.match(composer, /ComposerSuggestionList[\s\S]*?data-testid="channel-autocomplete-popover"[\s\S]*?ComposerSuggestionTitle/);
   assert.match(composer, /data-testid="channel-autocomplete-popover"[\s\S]*?ComposerSuggestionMeta>{ch\.description}/);
   assert.match(createAgent, /dark:bg-warning-soft dark:text-warning-strong/);
-  assert.match(createAgent, /variant="accent"[\s\S]*dark:!text-foreground-inverse/);
+  // rui accent buttons own their text colour; a dark-mode override here put
+  // near-black text on the soft pink Elegant Dark fill (task #733).
+  assert.doesNotMatch(createAgent, /text-foreground-inverse/);
   assert.match(createTask, /<Button[\s\S]*?variant="accent"/);
 });
 
@@ -242,7 +273,7 @@ test("Activity shell keeps structural brutal dividers at one pixel", () => {
   const leftRail = source("src/components/layout/LeftRail.tsx");
   const threadsInbox = source("src/components/thread/ThreadsInbox.tsx");
 
-  assert.match(leftRail, /const brutalRailDividerClassName = thinDivider && side === "left" \? "theme-brutal:!border-r" : "";/);
+  assert.match(leftRail, /const brutalRailDividerClassName = thinDivider \? "theme-brutal:!border-r" : "";/);
   assert.match(mainLayout, /<LeftRail[\s\S]{0,120}thinDivider=\{isActivityRoute\}/);
   assert.match(threadsInbox, /<ActivityInboxPanel edge="attached" className="theme-brutal:!border-l">/);
   assert.match(
@@ -274,7 +305,7 @@ test("tooltips preserve the shared content and arrow palette", () => {
   for (const path of [
     "layout/LeftRail", "layout/NotificationTrigger", "agent/AgentProfileOverflowMenu",
     "window/ThreadWindowRoute", "task/LegacyTaskPanel", "message/attachmentTooltip",
-    "agent/AgentMcpTab",
+    "agent/AgentMcpTab", "agent/McpServerListItem",
   ]) {
     const caller = source(`src/components/${path}.tsx`);
     assert.doesNotMatch(caller, /contentProps=\{\{[^}]*className: "[^"]*(?:bg-white|bg-layer-panel)/,
@@ -291,14 +322,14 @@ test("thread footer reserves the available row width for its composer", () => {
 
 test("Saved navigation delegates inactive and active chrome to the same SidebarItem as channels", () => {
   const sidebar = source("src/components/layout/Sidebar.tsx");
-  assert.match(sidebar, /const savedEntry[\s\S]*?<SidebarItem[\s\S]*?active=\{location\.pathname\.endsWith\("\/saved"\)\}[\s\S]*?sidebarItemClass[\s\S]*?data-testid="sidebar-saved-entry"/);
+  assert.match(sidebar, /\{\/\* Saved \*\/\}[\s\S]*?<SidebarItem[\s\S]*?active=\{location\.pathname\.endsWith\("\/saved"\)\}[\s\S]*?sidebarItemClass[\s\S]*?data-testid="sidebar-saved-entry"/);
 });
 
-test("classic Members Graph navigation keeps its icon and label in the shared row primitive", () => {
+test("Members Graph navigation keeps its icon and label in the shared row primitive", () => {
   const sidebar = source("src/components/layout/Sidebar.tsx");
   assert.match(
     sidebar,
-    /!workspaceEnabled \? \(\s*<SidebarItem[\s\S]*?active=\{location\.pathname === `\$\{pathBase\}\/members\/graph`\}[\s\S]*?<GitBranch size=\{14\} className="shrink-0" \/>[\s\S]*?layout\.sidebar\.graph[\s\S]*?<\/SidebarItem>/,
+    /<SidebarItem[\s\S]*?active=\{location\.pathname === `\$\{pathBase\}\/members\/graph`\}[\s\S]*?<GitBranch size=\{14\} className="shrink-0" \/>[\s\S]*?layout\.sidebar\.graph[\s\S]*?<\/SidebarItem>/,
   );
 });
 
@@ -307,7 +338,10 @@ test("auth and onboarding surfaces ride the RUI recipes instead of hardcoded bru
   const onboardingShell = source("src/components/auth/OnboardingCreateShell.tsx");
   const login = source("src/components/auth/LoginPage.tsx");
   const register = source("src/components/auth/RegisterPage.tsx");
-  const selector = source("src/components/auth/ServerSelector.tsx");
+  const selector = [
+    source("src/components/auth/ServerSelector.tsx"),
+    source("src/components/auth/ServerOptionCard.tsx"),
+  ].join("\n");
   const openGuide = source("src/components/auth/OpenInBrowserSignInGuide.tsx");
 
   // The shell keeps the brand bar but the surfaces themselves ride layer tokens.

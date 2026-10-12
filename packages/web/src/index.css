@@ -55,7 +55,6 @@
   --color-brutal-yellow: #FFD440;   /* Soft Signal */
   --color-soft-signal: var(--color-brutal-yellow); /* Semantic alias for source callsites; do not use bg-brutal-yellow directly in TS/TSX. */
   --color-status-busy: #FFD440; /* FIXED busy/thinking status-light yellow. Status lights are semantic (red/green/yellow) and must NOT follow the skin — desktop skins re-hue --color-soft-signal and the brutal-yellow scale, so status callsites use this token instead (@WAWQAQ 2026-09-10 #kabi-desktop 5c2901df). */
-  --color-workspace-mode-active: #E3B100; /* Depressed Workspace rail toggle; deliberately darker than the rail. */
   --color-brutal-pink: #FE7DA8;     /* Bubble Pink */
   --color-brutal-lavender: #BBAFE6; /* Soft Haze */
   --color-brutal-cream: #FFFAEF;    /* Cotton Core — sidebar bg per stdrc 2026-05-02 #proj-uiux:95e25b5b inversion: sidebar warm cream, main panel white. */
@@ -93,7 +92,6 @@
   --shadow-brutal-lg: 6px 6px 0px #141111;
   --shadow-brutal-hover: 2px 2px 0px #141111;
   --shadow-brutal-active: 1px 1px 0px #141111;
-  --shadow-workspace-mode-active: inset 3px 3px 0px rgb(20 17 17 / 35%);
   /* Directional occlusion cues for horizontally clipped content. Unlike the
      brutal elevation shadows, these cast inward so the edge reads as another
      item continuing underneath the viewport. */
@@ -411,6 +409,23 @@
 
   .onboarding-runtime-reveal {
     animation: onboarding-runtime-reveal 160ms cubic-bezier(0.2, 0, 0.2, 1);
+  }
+
+  /* Bulk Change model dialog (task #1287): steps 3/4/5a share one fixed shell;
+     the body slides 16px and fades in. Reduced motion switches instantly. */
+  @keyframes bulk-model-step-in {
+    0% { opacity: 0; transform: translateX(16px); }
+    100% { opacity: 1; transform: translateX(0); }
+  }
+
+  .bulk-model-step {
+    animation: bulk-model-step-in 200ms ease-out;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .bulk-model-step {
+      animation: none;
+    }
   }
 
   @keyframes notification-activation-progress {
@@ -790,10 +805,8 @@
 }
 
 /* Responsive high-frequency actions use the width of their owning surface,
-   not a viewport breakpoint. This keeps split panes and narrow desktop
-   drawers readable while preserving the same affordance on phones. */
-.workspace-grid-tabset-actions,
-.workspace-grid-tabset-action-host,
+   not a viewport breakpoint. This keeps narrow desktop drawers readable
+   while preserving the same affordance on phones. */
 .channel-file-row {
   container-type: inline-size;
 }
@@ -1098,4 +1111,28 @@
 [data-slot="tooltip-portal"],
 [data-slot="tooltip-portal"] > * {
   pointer-events: none;
+}
+
+/* Keep both columns in flow at their ordinary widths. Only the thread
+   surface overlays the row; hidden channel geometry never changes on toggle. */
+@media (orientation: landscape), (min-width: 1280px) {
+  @container thread-layout (min-width: 680px) {
+    .thread-layout-container[data-thread-maximized="true"] { position: relative; }
+    .thread-layout-container[data-thread-maximized="true"] > .thread-main-column {
+      visibility: hidden;
+      pointer-events: none;
+    }
+    .thread-layout-container[data-thread-maximized="true"] > .thread-side-column {
+      position: static;
+    }
+    .thread-layout-container[data-thread-maximized="true"] > .thread-side-column > .thread-side-column-resizer {
+      display: none;
+    }
+    .thread-layout-container[data-thread-maximized="true"] > .thread-side-column > [data-slot="thread-panel-root"] {
+      position: absolute;
+      inset: 0;
+      z-index: 30;
+      border-left-width: 0;
+    }
+  }
 }

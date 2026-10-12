@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { dbTest as test } from "../test/integration/dbTest";
 import { eq } from "drizzle-orm";
 import { machines, servers, users } from "../db/schema";
-import { recordMachineComputerVersion } from "./machineService";
+import { listMachines, recordMachineComputerVersion } from "./machineService";
 
 test("Computer version inventory writes changes immediately and refreshes unchanged reports after 24 hours", async ({ db }) => {
   const [user] = await db.insert(users).values({
@@ -74,4 +74,29 @@ test("Computer version inventory writes changes immediately and refreshes unchan
 
   assert.equal(await recordMachineComputerVersion(machine!.id, "   ", new Date()), false);
   assert.equal((await readMachine()).computerVersion, "0.0.0-dev");
+});
+
+test("the machine list carries the stored version report the read model falls back to", async ({ db }) => {
+  const [user] = await db.insert(users).values({
+    email: "machine-list-version@example.com",
+    name: "machine-list-version",
+    passwordHash: "test",
+  }).returning();
+  const [server] = await db.insert(servers).values({
+    name: "machine-list-version",
+    slug: "machine-list-version",
+    ownerId: user!.id,
+  }).returning();
+  const [machine] = await db.insert(machines).values({
+    serverId: server!.id,
+    userId: user!.id,
+    name: "list-version-source",
+    apiKeyHash: "test",
+  }).returning();
+  const reportedAt = new Date("2026-10-12T02:43:15.000Z");
+  await recordMachineComputerVersion(machine!.id, "1.0.47", reportedAt);
+
+  const [listed] = await listMachines(server!.id);
+  assert.equal(listed!.computerVersion, "1.0.47");
+  assert.equal(listed!.computerVersionReportedAt?.toISOString(), reportedAt.toISOString());
 });

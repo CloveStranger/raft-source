@@ -1,6 +1,6 @@
 {
   "schema": "raft-agent-api-description.v1",
-  "manifestVersion": "1d0fc2a4c66a25e1",
+  "manifestVersion": "1f425c1bf59cd214",
   "basePath": "/internal/agent-api",
   "capabilities": [
     "read",
@@ -373,6 +373,26 @@
                     ]
                   },
                   "sender_description": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "senderTimezone": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "sender_timezone": {
                     "anyOf": [
                       {
                         "type": "string"
@@ -1072,6 +1092,26 @@
                     ]
                   },
                   "sender_description": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "senderTimezone": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "sender_timezone": {
                     "anyOf": [
                       {
                         "type": "string"
@@ -2225,6 +2265,26 @@
                           }
                         ]
                       },
+                      "senderTimezone": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "sender_timezone": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
                       "external_message": {
                         "type": "object",
                         "properties": {
@@ -2715,6 +2775,26 @@
                         ]
                       },
                       "sender_description": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "senderTimezone": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "sender_timezone": {
                         "anyOf": [
                           {
                             "type": "string"
@@ -3300,6 +3380,26 @@
                           }
                         ]
                       },
+                      "senderTimezone": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "sender_timezone": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
                       "external_message": {
                         "type": "object",
                         "properties": {
@@ -3790,6 +3890,26 @@
                         ]
                       },
                       "sender_description": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "senderTimezone": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "sender_timezone": {
                         "anyOf": [
                           {
                             "type": "string"
@@ -4548,6 +4668,26 @@
                           }
                         ]
                       },
+                      "senderTimezone": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "sender_timezone": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
                       "external_message": {
                         "type": "object",
                         "properties": {
@@ -5038,6 +5178,26 @@
                         ]
                       },
                       "sender_description": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "senderTimezone": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "sender_timezone": {
                         "anyOf": [
                           {
                             "type": "string"
@@ -5623,6 +5783,26 @@
                           }
                         ]
                       },
+                      "senderTimezone": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "sender_timezone": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
                       "external_message": {
                         "type": "object",
                         "properties": {
@@ -6113,6 +6293,26 @@
                         ]
                       },
                       "sender_description": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "senderTimezone": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "sender_timezone": {
                         "anyOf": [
                           {
                             "type": "string"
@@ -6768,6 +6968,26 @@
                   ]
                 },
                 "sender_description": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "senderTimezone": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "sender_timezone": {
                   "anyOf": [
                     {
                       "type": "string"
@@ -7673,6 +7893,26 @@
                 }
               ]
             },
+            "senderTimezone": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "sender_timezone": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "external_message": {
               "type": "object",
               "properties": {
@@ -8215,6 +8455,26 @@
               ]
             },
             "sender_description": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "senderTimezone": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "sender_timezone": {
               "anyOf": [
                 {
                   "type": "string"
@@ -9255,6 +9515,435 @@
       }
     },
     {
+      "key": "channelCreate",
+      "method": "POST",
+      "path": "/channels",
+      "fullPath": "/internal/agent-api/channels",
+      "client": {
+        "resource": "channels",
+        "method": "create"
+      },
+      "capability": "channels",
+      "description": "Create a public or private channel when the bound agent's server role allows it; the agent joins it.",
+      "sideEffect": "write",
+      "idempotency": "none",
+      "destructive": false,
+      "audience": "both",
+      "retryPolicy": "single_attempt",
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false
+      },
+      "request": {
+        "params": null,
+        "query": null,
+        "body": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string",
+              "minLength": 1
+            },
+            "description": {
+              "type": "string",
+              "maxLength": 500
+            },
+            "visibility": {
+              "type": "string",
+              "enum": [
+                "public",
+                "private"
+              ]
+            }
+          },
+          "required": [
+            "name"
+          ],
+          "additionalProperties": {}
+        }
+      },
+      "response": {
+        "kind": "json",
+        "body": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string"
+            },
+            "description": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "id",
+            "name",
+            "type"
+          ],
+          "additionalProperties": {}
+        }
+      }
+    },
+    {
+      "key": "channelUpdate",
+      "method": "PATCH",
+      "path": "/channels/:channelId",
+      "fullPath": "/internal/agent-api/channels/:channelId",
+      "client": {
+        "resource": "channels",
+        "method": "update"
+      },
+      "capability": "channels",
+      "description": "Rename a channel, change its description, or change its visibility, when the bound agent's role allows it.",
+      "sideEffect": "write",
+      "idempotency": "natural",
+      "destructive": true,
+      "audience": "both",
+      "retryPolicy": "retry",
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": true
+      },
+      "request": {
+        "params": {
+          "type": "object",
+          "properties": {
+            "channelId": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": [
+            "channelId"
+          ],
+          "additionalProperties": {}
+        },
+        "query": null,
+        "body": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string",
+              "minLength": 1
+            },
+            "description": {
+              "type": "string",
+              "maxLength": 500
+            },
+            "visibility": {
+              "type": "string",
+              "enum": [
+                "public",
+                "private"
+              ]
+            }
+          },
+          "additionalProperties": {}
+        }
+      },
+      "response": {
+        "kind": "json",
+        "body": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string"
+            },
+            "description": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "id",
+            "name",
+            "type"
+          ],
+          "additionalProperties": {}
+        }
+      }
+    },
+    {
+      "key": "channelMemberAdd",
+      "method": "POST",
+      "path": "/channels/:channelId/members",
+      "fullPath": "/internal/agent-api/channels/:channelId/members",
+      "client": {
+        "resource": "channels",
+        "method": "addMember"
+      },
+      "capability": "channels",
+      "description": "Add a human or agent to a channel when the bound agent's role allows it.",
+      "sideEffect": "write",
+      "idempotency": "natural",
+      "destructive": false,
+      "audience": "both",
+      "retryPolicy": "retry",
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": true
+      },
+      "request": {
+        "params": {
+          "type": "object",
+          "properties": {
+            "channelId": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": [
+            "channelId"
+          ],
+          "additionalProperties": {}
+        },
+        "query": null,
+        "body": {
+          "type": "object",
+          "properties": {
+            "userId": {
+              "type": "string",
+              "minLength": 1
+            },
+            "agentId": {
+              "type": "string",
+              "minLength": 1
+            },
+            "user": {
+              "type": "string",
+              "minLength": 1
+            },
+            "human": {
+              "type": "string",
+              "minLength": 1
+            },
+            "agent": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "additionalProperties": {}
+        }
+      },
+      "response": {
+        "kind": "json",
+        "body": {
+          "type": "object",
+          "properties": {
+            "ok": {
+              "type": "boolean",
+              "const": true
+            },
+            "alreadyMember": {
+              "type": "boolean"
+            },
+            "channelId": {
+              "type": "string"
+            },
+            "member": {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "type": "string",
+                  "enum": [
+                    "human",
+                    "agent"
+                  ]
+                },
+                "id": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "id",
+                "name"
+              ],
+              "additionalProperties": {}
+            }
+          },
+          "required": [
+            "ok",
+            "alreadyMember",
+            "channelId",
+            "member"
+          ],
+          "additionalProperties": {}
+        }
+      }
+    },
+    {
+      "key": "channelMemberRemove",
+      "method": "DELETE",
+      "path": "/channels/:channelId/members",
+      "fullPath": "/internal/agent-api/channels/:channelId/members",
+      "client": {
+        "resource": "channels",
+        "method": "removeMember"
+      },
+      "capability": "channels",
+      "description": "Remove a human or agent from a channel when the bound agent's role allows it.",
+      "sideEffect": "write",
+      "idempotency": "natural",
+      "destructive": true,
+      "audience": "both",
+      "retryPolicy": "retry",
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": true
+      },
+      "request": {
+        "params": {
+          "type": "object",
+          "properties": {
+            "channelId": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": [
+            "channelId"
+          ],
+          "additionalProperties": {}
+        },
+        "query": null,
+        "body": {
+          "type": "object",
+          "properties": {
+            "userId": {
+              "type": "string",
+              "minLength": 1
+            },
+            "agentId": {
+              "type": "string",
+              "minLength": 1
+            },
+            "user": {
+              "type": "string",
+              "minLength": 1
+            },
+            "human": {
+              "type": "string",
+              "minLength": 1
+            },
+            "agent": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "additionalProperties": {}
+        }
+      },
+      "response": {
+        "kind": "json",
+        "body": {
+          "type": "object",
+          "properties": {
+            "ok": {
+              "type": "boolean",
+              "const": true
+            },
+            "wasMember": {
+              "type": "boolean"
+            },
+            "channelId": {
+              "type": "string"
+            },
+            "member": {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "type": "string",
+                  "enum": [
+                    "human",
+                    "agent"
+                  ]
+                },
+                "id": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "id",
+                "name"
+              ],
+              "additionalProperties": {}
+            },
+            "attention": {
+              "type": "object",
+              "properties": {
+                "state": {
+                  "type": "string"
+                },
+                "ordinaryActivity": {
+                  "type": "string"
+                },
+                "stillArrives": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "threadBoundary": {
+                  "type": "string"
+                },
+                "manageCommand": {
+                  "type": "string"
+                },
+                "manageApi": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": {}
+            }
+          },
+          "required": [
+            "ok",
+            "wasMember",
+            "channelId",
+            "member"
+          ],
+          "additionalProperties": {}
+        }
+      }
+    },
+    {
       "key": "channelMembers",
       "method": "GET",
       "path": "/channel-members",
@@ -9351,6 +10040,29 @@
                   },
                   "role": {
                     "type": "string"
+                  },
+                  "servers": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "name": {
+                          "type": "string"
+                        },
+                        "slug": {
+                          "type": "string"
+                        },
+                        "yours": {
+                          "type": "boolean",
+                          "const": true
+                        }
+                      },
+                      "required": [
+                        "name",
+                        "slug"
+                      ],
+                      "additionalProperties": {}
+                    }
                   }
                 },
                 "required": [
@@ -9799,6 +10511,841 @@
       }
     },
     {
+      "key": "assistantOwnerInbox",
+      "method": "GET",
+      "path": "/assistant/owner-inbox",
+      "fullPath": "/internal/agent-api/assistant/owner-inbox",
+      "client": {
+        "resource": "assistant",
+        "method": "ownerInbox"
+      },
+      "capability": "read",
+      "description": "Personal assistants only: list your owner's inbox (what they would see in Activity, minus DMs), newest activity first. Reads nothing as read for anyone.",
+      "sideEffect": "read",
+      "idempotency": "natural",
+      "destructive": false,
+      "audience": "both",
+      "retryPolicy": "retry",
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true
+      },
+      "request": {
+        "params": null,
+        "query": {
+          "type": "object",
+          "properties": {
+            "filter": {
+              "type": "string",
+              "enum": [
+                "all",
+                "unread",
+                "mentions",
+                "unread_mentions"
+              ]
+            },
+            "limit": {
+              "type": "string",
+              "pattern": "^[1-9][0-9]*$"
+            },
+            "offset": {
+              "type": "string",
+              "pattern": "^(0|[1-9][0-9]*)$"
+            }
+          },
+          "additionalProperties": {}
+        },
+        "body": null
+      },
+      "response": {
+        "kind": "json",
+        "body": {
+          "type": "object",
+          "properties": {
+            "owner": {
+              "type": "object",
+              "properties": {
+                "userId": {
+                  "type": "string",
+                  "format": "uuid",
+                  "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                }
+              },
+              "required": [
+                "userId"
+              ],
+              "additionalProperties": {}
+            },
+            "filter": {
+              "type": "string",
+              "enum": [
+                "all",
+                "unread",
+                "mentions",
+                "unread_mentions"
+              ]
+            },
+            "items": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "channel",
+                      "thread"
+                    ]
+                  },
+                  "channelId": {
+                    "type": "string",
+                    "format": "uuid",
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                  },
+                  "channelName": {
+                    "type": "string"
+                  },
+                  "channelType": {
+                    "type": "string"
+                  },
+                  "parentChannelId": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "format": "uuid",
+                        "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "parentMessageId": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "format": "uuid",
+                        "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "unread": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "hasMention": {
+                    "type": "boolean"
+                  },
+                  "latestAt": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "latestSenderName": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "latestPreview": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "firstUnreadMessageId": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "format": "uuid",
+                        "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "kind",
+                  "channelId",
+                  "channelName",
+                  "channelType",
+                  "parentChannelId",
+                  "parentMessageId",
+                  "unread",
+                  "hasMention",
+                  "latestAt",
+                  "latestSenderName",
+                  "latestPreview",
+                  "firstUnreadMessageId"
+                ],
+                "additionalProperties": {}
+              }
+            },
+            "hasMore": {
+              "type": "boolean"
+            },
+            "nextOffset": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "owner",
+            "filter",
+            "items",
+            "hasMore",
+            "nextOffset"
+          ],
+          "additionalProperties": {}
+        }
+      }
+    },
+    {
+      "key": "assistantOwnerMessages",
+      "method": "GET",
+      "path": "/assistant/owner-messages",
+      "fullPath": "/internal/agent-api/assistant/owner-messages",
+      "client": {
+        "resource": "assistant",
+        "method": "ownerMessages"
+      },
+      "capability": "read",
+      "description": "Personal assistants only: read messages in a channel or thread your owner can see (never a DM): the newest, or a window before / after / around a message. Marks nothing read for anyone.",
+      "sideEffect": "read",
+      "idempotency": "natural",
+      "destructive": false,
+      "audience": "both",
+      "retryPolicy": "retry",
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true
+      },
+      "request": {
+        "params": null,
+        "query": {
+          "type": "object",
+          "properties": {
+            "channelId": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+            },
+            "before": {
+              "type": "string"
+            },
+            "after": {
+              "type": "string"
+            },
+            "around": {
+              "type": "string"
+            },
+            "limit": {
+              "type": "string",
+              "pattern": "^[1-9][0-9]*$"
+            }
+          },
+          "required": [
+            "channelId"
+          ],
+          "additionalProperties": {}
+        },
+        "body": null
+      },
+      "response": {
+        "kind": "json",
+        "body": {
+          "type": "object",
+          "properties": {
+            "owner": {
+              "type": "object",
+              "properties": {
+                "userId": {
+                  "type": "string",
+                  "format": "uuid",
+                  "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                }
+              },
+              "required": [
+                "userId"
+              ],
+              "additionalProperties": {}
+            },
+            "channelId": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+            },
+            "messages": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "seq": {
+                    "type": "number"
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "message_id": {
+                    "type": "string"
+                  },
+                  "timestamp": {
+                    "type": "string",
+                    "format": "date-time",
+                    "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
+                  },
+                  "createdAt": {
+                    "type": "string",
+                    "format": "date-time",
+                    "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
+                  },
+                  "senderType": {
+                    "type": "string"
+                  },
+                  "sender_type": {
+                    "type": "string"
+                  },
+                  "senderName": {
+                    "type": "string"
+                  },
+                  "sender_name": {
+                    "type": "string"
+                  },
+                  "senderDescription": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "sender_description": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "senderTimezone": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "sender_timezone": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "external_message": {
+                    "type": "object",
+                    "properties": {
+                      "schema": {
+                        "type": "string",
+                        "const": "external-message-provenance.v1"
+                      },
+                      "provider": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "workspace_id": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "conversation_id": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "message_id": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "actor_id": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "actor_kind": {
+                        "type": "string",
+                        "enum": [
+                          "human",
+                          "guest",
+                          "remote",
+                          "bot",
+                          "unknown"
+                        ]
+                      },
+                      "projection_id": {
+                        "type": "string",
+                        "format": "uuid",
+                        "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                      }
+                    },
+                    "required": [
+                      "schema",
+                      "provider",
+                      "workspace_id",
+                      "conversation_id",
+                      "message_id",
+                      "actor_id",
+                      "actor_kind",
+                      "projection_id"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "channel_type": {
+                    "type": "string"
+                  },
+                  "channel_name": {
+                    "type": "string"
+                  },
+                  "parent_channel_type": {
+                    "type": "string"
+                  },
+                  "parent_channel_name": {
+                    "type": "string"
+                  },
+                  "content": {
+                    "type": "string"
+                  },
+                  "attachments": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "id": {
+                          "type": "string"
+                        },
+                        "filename": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "id",
+                        "filename"
+                      ],
+                      "additionalProperties": {}
+                    }
+                  },
+                  "taskStatus": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "task_status": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "taskNumber": {
+                    "anyOf": [
+                      {
+                        "type": "integer",
+                        "exclusiveMinimum": 0,
+                        "maximum": 9007199254740991
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "task_number": {
+                    "anyOf": [
+                      {
+                        "type": "integer",
+                        "exclusiveMinimum": 0,
+                        "maximum": 9007199254740991
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "taskAssigneeId": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "task_assignee_id": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "taskAssigneeType": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "task_assignee_type": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "taskAssigneeName": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "task_assignee_name": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "taskCurrentProjection": {
+                    "type": "object",
+                    "properties": {
+                      "title": {
+                        "type": "string"
+                      },
+                      "description": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "revision": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9007199254740991
+                      },
+                      "superseded": {
+                        "type": "boolean"
+                      },
+                      "amendedAt": {
+                        "anyOf": [
+                          {
+                            "type": "string",
+                            "format": "date-time",
+                            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "amended_at": {
+                        "anyOf": [
+                          {
+                            "type": "string",
+                            "format": "date-time",
+                            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "amendedByType": {
+                        "anyOf": [
+                          {
+                            "type": "string",
+                            "enum": [
+                              "user",
+                              "agent",
+                              "system"
+                            ]
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "amended_by_type": {
+                        "anyOf": [
+                          {
+                            "type": "string",
+                            "enum": [
+                              "user",
+                              "agent",
+                              "system"
+                            ]
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "amendedByName": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "amended_by_name": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "source": {
+                        "type": "string",
+                        "const": "tasks_current_projection"
+                      }
+                    },
+                    "required": [
+                      "title",
+                      "description",
+                      "revision",
+                      "superseded",
+                      "source"
+                    ],
+                    "additionalProperties": {}
+                  },
+                  "task_current_projection": {
+                    "type": "object",
+                    "properties": {
+                      "title": {
+                        "type": "string"
+                      },
+                      "description": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "revision": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9007199254740991
+                      },
+                      "superseded": {
+                        "type": "boolean"
+                      },
+                      "amendedAt": {
+                        "anyOf": [
+                          {
+                            "type": "string",
+                            "format": "date-time",
+                            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "amended_at": {
+                        "anyOf": [
+                          {
+                            "type": "string",
+                            "format": "date-time",
+                            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "amendedByType": {
+                        "anyOf": [
+                          {
+                            "type": "string",
+                            "enum": [
+                              "user",
+                              "agent",
+                              "system"
+                            ]
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "amended_by_type": {
+                        "anyOf": [
+                          {
+                            "type": "string",
+                            "enum": [
+                              "user",
+                              "agent",
+                              "system"
+                            ]
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "amendedByName": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "amended_by_name": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "source": {
+                        "type": "string",
+                        "const": "tasks_current_projection"
+                      }
+                    },
+                    "required": [
+                      "title",
+                      "description",
+                      "revision",
+                      "superseded",
+                      "source"
+                    ],
+                    "additionalProperties": {}
+                  },
+                  "threadId": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "replyCount": {
+                    "anyOf": [
+                      {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9007199254740991
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "additionalProperties": {}
+              }
+            },
+            "hasMore": {
+              "type": "boolean"
+            },
+            "hasOlder": {
+              "type": "boolean"
+            },
+            "hasNewer": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "owner",
+            "channelId",
+            "messages",
+            "hasMore",
+            "hasOlder",
+            "hasNewer"
+          ],
+          "additionalProperties": {}
+        }
+      }
+    },
+    {
       "key": "agentContext",
       "method": "GET",
       "path": "/context",
@@ -9863,6 +11410,35 @@
                 },
                 "external": {
                   "type": "boolean"
+                },
+                "assistantOf": {
+                  "anyOf": [
+                    {
+                      "type": "object",
+                      "properties": {
+                        "userId": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "userId"
+                      ],
+                      "additionalProperties": {}
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "serverRole": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
                 }
               },
               "required": [
@@ -10572,6 +12148,403 @@
       }
     },
     {
+      "key": "serverLabs",
+      "method": "GET",
+      "path": "/labs",
+      "fullPath": "/internal/agent-api/labs",
+      "client": {
+        "resource": "labs",
+        "method": "list"
+      },
+      "capability": "read",
+      "description": "The server's Labs: whether Labs access is on, each lab's state and enrollment, and what the bound agent may change.",
+      "sideEffect": "read",
+      "idempotency": "natural",
+      "destructive": false,
+      "audience": "both",
+      "retryPolicy": "retry",
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true
+      },
+      "request": {
+        "params": null,
+        "query": null,
+        "body": null
+      },
+      "response": {
+        "kind": "json",
+        "body": {
+          "type": "object",
+          "properties": {
+            "serverId": {
+              "type": "string"
+            },
+            "accessEnabled": {
+              "type": "boolean"
+            },
+            "version": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "canManageAccess": {
+              "type": "boolean"
+            },
+            "canManageEnrollments": {
+              "type": "boolean"
+            },
+            "labs": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "labKey": {
+                    "type": "string"
+                  },
+                  "name": {
+                    "type": "string"
+                  },
+                  "description": {
+                    "type": "string"
+                  },
+                  "state": {
+                    "type": "string"
+                  },
+                  "enrolled": {
+                    "type": "boolean"
+                  },
+                  "effective": {
+                    "type": "boolean"
+                  },
+                  "updatedAt": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "labKey",
+                  "name",
+                  "description",
+                  "state",
+                  "enrolled",
+                  "effective",
+                  "updatedAt"
+                ],
+                "additionalProperties": {}
+              }
+            }
+          },
+          "required": [
+            "serverId",
+            "accessEnabled",
+            "version",
+            "canManageAccess",
+            "canManageEnrollments",
+            "labs"
+          ],
+          "additionalProperties": {}
+        }
+      }
+    },
+    {
+      "key": "serverLabsAccess",
+      "method": "PATCH",
+      "path": "/labs/access",
+      "fullPath": "/internal/agent-api/labs/access",
+      "client": {
+        "resource": "labs",
+        "method": "setAccess"
+      },
+      "capability": "server",
+      "description": "Turn the server's Labs access on or off (server owner only).",
+      "sideEffect": "write",
+      "idempotency": "natural",
+      "destructive": true,
+      "audience": "both",
+      "retryPolicy": "retry",
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": true
+      },
+      "request": {
+        "params": null,
+        "query": null,
+        "body": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "expectedVersion": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": [
+            "enabled",
+            "expectedVersion"
+          ],
+          "additionalProperties": {}
+        }
+      },
+      "response": {
+        "kind": "json",
+        "body": {
+          "type": "object",
+          "properties": {
+            "serverId": {
+              "type": "string"
+            },
+            "accessEnabled": {
+              "type": "boolean"
+            },
+            "version": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "canManageAccess": {
+              "type": "boolean"
+            },
+            "canManageEnrollments": {
+              "type": "boolean"
+            },
+            "labs": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "labKey": {
+                    "type": "string"
+                  },
+                  "name": {
+                    "type": "string"
+                  },
+                  "description": {
+                    "type": "string"
+                  },
+                  "state": {
+                    "type": "string"
+                  },
+                  "enrolled": {
+                    "type": "boolean"
+                  },
+                  "effective": {
+                    "type": "boolean"
+                  },
+                  "updatedAt": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "labKey",
+                  "name",
+                  "description",
+                  "state",
+                  "enrolled",
+                  "effective",
+                  "updatedAt"
+                ],
+                "additionalProperties": {}
+              }
+            },
+            "applied": {
+              "type": "boolean"
+            },
+            "auditEventId": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "serverId",
+            "accessEnabled",
+            "version",
+            "canManageAccess",
+            "canManageEnrollments",
+            "labs",
+            "applied",
+            "auditEventId"
+          ],
+          "additionalProperties": {}
+        }
+      }
+    },
+    {
+      "key": "serverLabEnrollment",
+      "method": "PUT",
+      "path": "/labs/:labKey",
+      "fullPath": "/internal/agent-api/labs/:labKey",
+      "client": {
+        "resource": "labs",
+        "method": "setEnrollment"
+      },
+      "capability": "server",
+      "description": "Enroll the server in an open lab or leave it (server settings authority).",
+      "sideEffect": "write",
+      "idempotency": "natural",
+      "destructive": true,
+      "audience": "both",
+      "retryPolicy": "retry",
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": true
+      },
+      "request": {
+        "params": {
+          "type": "object",
+          "properties": {
+            "labKey": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": [
+            "labKey"
+          ],
+          "additionalProperties": {}
+        },
+        "query": null,
+        "body": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "expectedVersion": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": [
+            "enabled",
+            "expectedVersion"
+          ],
+          "additionalProperties": {}
+        }
+      },
+      "response": {
+        "kind": "json",
+        "body": {
+          "type": "object",
+          "properties": {
+            "serverId": {
+              "type": "string"
+            },
+            "accessEnabled": {
+              "type": "boolean"
+            },
+            "version": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "canManageAccess": {
+              "type": "boolean"
+            },
+            "canManageEnrollments": {
+              "type": "boolean"
+            },
+            "labs": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "labKey": {
+                    "type": "string"
+                  },
+                  "name": {
+                    "type": "string"
+                  },
+                  "description": {
+                    "type": "string"
+                  },
+                  "state": {
+                    "type": "string"
+                  },
+                  "enrolled": {
+                    "type": "boolean"
+                  },
+                  "effective": {
+                    "type": "boolean"
+                  },
+                  "updatedAt": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "labKey",
+                  "name",
+                  "description",
+                  "state",
+                  "enrolled",
+                  "effective",
+                  "updatedAt"
+                ],
+                "additionalProperties": {}
+              }
+            },
+            "applied": {
+              "type": "boolean"
+            },
+            "auditEventId": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "serverId",
+            "accessEnabled",
+            "version",
+            "canManageAccess",
+            "canManageEnrollments",
+            "labs",
+            "applied",
+            "auditEventId"
+          ],
+          "additionalProperties": {}
+        }
+      }
+    },
+    {
       "key": "mentionActionsPending",
       "method": "GET",
       "path": "/mention-actions/pending",
@@ -11207,6 +13180,26 @@
                           }
                         ]
                       },
+                      "senderTimezone": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "sender_timezone": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
                       "external_message": {
                         "type": "object",
                         "properties": {
@@ -11697,6 +13690,26 @@
                         ]
                       },
                       "sender_description": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "senderTimezone": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "sender_timezone": {
                         "anyOf": [
                           {
                             "type": "string"
@@ -13045,6 +15058,26 @@
                           }
                         ]
                       },
+                      "senderTimezone": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "sender_timezone": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
                       "external_message": {
                         "type": "object",
                         "properties": {
@@ -13535,6 +15568,26 @@
                         ]
                       },
                       "sender_description": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "senderTimezone": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "sender_timezone": {
                         "anyOf": [
                           {
                             "type": "string"
@@ -14721,6 +16774,26 @@
                           }
                         ]
                       },
+                      "senderTimezone": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "sender_timezone": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
                       "external_message": {
                         "type": "object",
                         "properties": {
@@ -15211,6 +17284,26 @@
                         ]
                       },
                       "sender_description": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "senderTimezone": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "sender_timezone": {
                         "anyOf": [
                           {
                             "type": "string"

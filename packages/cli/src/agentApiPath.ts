@@ -504,6 +504,14 @@ export function createAgentApiSurfaceClient(client: CliAgentApiHttpClient, optio
         requestClientAsApiResponse(agentApi.channels.archive(body)),
       unarchive: (body: AgentApiRequestBodyByRoute["channelUnarchive"]) =>
         requestClientAsApiResponse(agentApi.channels.unarchive(body)),
+      create: (body: AgentApiRequestBodyByRoute["channelCreate"]) =>
+        requestClientAsApiResponse(agentApi.channels.create(body)),
+      update: (params: AgentApiRequestParamsByRoute["channelUpdate"], body: AgentApiRequestBodyByRoute["channelUpdate"]) =>
+        requestClientAsApiResponse(agentApi.channels.update(params, body)),
+      addMember: (params: AgentApiRequestParamsByRoute["channelMemberAdd"], body: AgentApiRequestBodyByRoute["channelMemberAdd"]) =>
+        requestClientAsApiResponse(agentApi.channels.addMember(params, body)),
+      removeMember: (params: AgentApiRequestParamsByRoute["channelMemberRemove"], body: AgentApiRequestBodyByRoute["channelMemberRemove"]) =>
+        requestClientAsApiResponse(agentApi.channels.removeMember(params, body)),
       members: (query: AgentApiRequestQueryByRoute["channelMembers"]) =>
         requestClientAsApiResponse(agentApi.channels.members(query)),
       resolve: (body: AgentApiRequestBodyByRoute["resolveChannel"]) =>

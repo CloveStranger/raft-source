@@ -46,3 +46,10 @@ test("drag-sort wiring keeps the remove button outside the drag handle", () => {
   assert.match(sortableAttachmentRegion, /<div\s+\{\.\.\.listeners\}/, "listeners stay on the inner chip body");
   assert.match(sortableAttachmentRegion, /\{\.\.\.listeners\}[\s\S]*<ComposerAttachmentRemove/);
 });
+
+test("image chip body fills the fixed chip so portrait previews stay clipped", () => {
+  // The brutal recipe sizes ComposerAttachmentImage as size-full of the chip
+  // body. An auto-height body let a portrait image grow to its natural height
+  // and cover the textarea (#bug-triage task #11).
+  assert.match(sortableAttachmentRegion, /className=\{`\$\{preview \? "size-full " : ""\}/);
+});

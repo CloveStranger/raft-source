@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, inArray, isNull, lte, ne, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, getTableColumns, gte, inArray, isNull, lte, ne, or, sql } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 import type {
   ReminderEventSummary,
@@ -9,7 +9,7 @@ import type {
   RaftTargetString,
 } from "@botiverse/raft-shared";
 import { getDb, type DatabaseExecutor } from "../../db/index";
-import { agents, reminders, reminderEvents, servers, messages, channels } from "../../db/schema";
+import { agents, machines, reminders, reminderEvents, servers, messages, channels } from "../../db/schema";
 import { reminderSourceAcknowledgements } from "./sourceAckSchema";
 import * as channelService from "../../services/channelService";
 import * as messageService from "../../services/messageService";
@@ -805,13 +805,30 @@ export async function recordReminderArmed(
   return (row as ReminderRow | undefined) ?? null;
 }
 
+/**
+ * A machine whose last persisted heartbeat is older than this is offline for
+ * the arm watchdog: the same 90 s cutoff the outbound projection uses.
+ */
+export const REMINDER_ARM_MACHINE_ONLINE_WINDOW_MS = 90_000;
+
 export async function getReminderArmGaps(
   horizonAt: Date,
   opts: ReminderServiceOptions & { limit?: number } = {},
 ): Promise<ReminderRow[]> {
+  // OFFLINE MACHINES ARE NOT GAPS (task #441). A reminder whose agent sits on an
+  // offline machine can never receive an armed receipt, so re-pushing it only
+  // fans out an unroutable reminder.upsert from every replica every tick. It
+  // re-arms through the reminder snapshot the server pushes when that machine
+  // sends `ready`. Excluding it here, rather than skipping it after selection,
+  // keeps premise (b) below: a selected row that is skipped without being
+  // stamped would hold its place at the head and starve everything behind it.
+  // Agents with no machine keep the historical behaviour.
+  const onlineAfter = new Date(getClock(opts).now().getTime() - REMINDER_ARM_MACHINE_ONLINE_WINDOW_MS);
   const rows = await getExecutor(opts)
-    .select()
+    .select(getTableColumns(reminders))
     .from(reminders)
+    .leftJoin(agents, eq(agents.id, reminders.ownerAgentId))
+    .leftJoin(machines, eq(machines.id, agents.machineId))
     .where(and(
       eq(reminders.status, "scheduled"),
       lte(reminders.fireAt, horizonAt),
@@ -819,6 +836,10 @@ export async function getReminderArmGaps(
         ne(reminders.armState, "armed"),
         isNull(reminders.armedVersion),
         ne(reminders.armedVersion, reminders.version),
+      ),
+      or(
+        isNull(agents.machineId),
+        gte(machines.lastHeartbeat, onlineAfter),
       ),
     ))
     // FAIRNESS / BOUNDED REACH (task #801). Ordering by fireAt alone starves:

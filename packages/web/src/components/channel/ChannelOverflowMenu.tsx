@@ -1,5 +1,5 @@
 import type { ReactElement } from "react";
-import { useRef, useState, useSyncExternalStore } from "react";
+import { useCallback, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { useIntl } from "react-intl";
 import { ChevronRight, CircleStop, Search, Settings } from "lucide-react";
 import { Badge, TooltipProvider, Button, Skeleton } from "raft-ui";
@@ -36,6 +36,9 @@ const STRIP_TILE_GAP_PX = 8;
 const STRIP_FALLBACK_COLUMNS = 7;
 const STRIP_PRELOAD_LIMIT = STRIP_MAX_ROWS * STRIP_FALLBACK_COLUMNS;
 export const MEMBERS_STRIP_TOOLTIP_DELAY_MS = 250;
+const NO_CHANNEL_AGENTS: ChannelAgent[] = [];
+const NO_CHANNEL_HUMANS: ChannelHuman[] = [];
+const NO_CHANNEL_EXTERNAL_MEMBERS: ChannelExternalMember[] = [];
 
 function MemberStripTooltip({
   children,
@@ -106,12 +109,15 @@ function createStripColumnStore() {
 function MembersStrip({
   channelAgents,
   channelHumans,
+  channelExternalMembers = NO_CHANNEL_EXTERNAL_MEMBERS,
   loading,
   onOpen,
   onAdd,
 }: {
   channelAgents: ChannelAgent[];
   channelHumans: ChannelHuman[];
+  /** Slack participants of a bridged channel (display-only, never Raft members). */
+  channelExternalMembers?: ChannelExternalMember[];
   loading: boolean;
   onOpen: () => void;
   onAdd?: () => void;
@@ -123,11 +129,15 @@ function MembersStrip({
     columnStore.getSnapshot,
     columnStore.getServerSnapshot,
   );
-  const totalMembers = channelHumans.length + channelAgents.length;
+  const totalMembers = channelHumans.length + channelAgents.length + channelExternalMembers.length;
   const visibleMemberLimit = getVisibleMemberLimit(totalMembers, columnCount);
   const humans = channelHumans.slice(0, visibleMemberLimit);
   const agents = channelAgents.slice(0, Math.max(0, visibleMemberLimit - humans.length));
-  const overflow = channelHumans.length + channelAgents.length - humans.length - agents.length;
+  const externalMembers = channelExternalMembers.slice(
+    0,
+    Math.max(0, visibleMemberLimit - humans.length - agents.length),
+  );
+  const overflow = totalMembers - humans.length - agents.length - externalMembers.length;
 
   return (
     <div className="px-4 pb-3 pt-3" data-testid="channel-overflow-members-strip">
@@ -148,7 +158,16 @@ function MembersStrip({
         <span className="inline-flex min-w-0 items-center gap-1 text-xs font-bold text-foreground-muted theme-brutal:text-black">
           {loading
             ? formatMessage({ id: "message.chatPanel.overflow.membersLoading" })
-            : formatMessage(
+            : channelExternalMembers.length > 0
+              ? formatMessage(
+                { id: "message.chatPanel.overflow.membersSummaryWithSlack" },
+                {
+                  humans: channelHumans.length,
+                  agents: channelAgents.length,
+                  slack: channelExternalMembers.length,
+                },
+              )
+              : formatMessage(
                 { id: "message.chatPanel.overflow.membersSummary" },
                 { humans: channelHumans.length, agents: channelAgents.length },
               )}
@@ -215,6 +234,25 @@ function MembersStrip({
                       />
                     )}
                   />
+                </button>
+              </MemberStripTooltip>
+            );
+          })}
+          {!loading && externalMembers.map((member) => {
+            const label = formatMessage(
+              { id: "message.chatPanel.overflow.slackMemberLabel" },
+              { name: member.displayName },
+            );
+            return (
+              <MemberStripTooltip key={member.id} label={label}>
+                <button
+                  type="button"
+                  onClick={onOpen}
+                  aria-label={label}
+                  data-kind="external"
+                  className="shrink-0 transition-colors hover:brightness-90"
+                >
+                  <AvatarSlot context="panel-header" type="human" humanAvatarUrl={member.avatarUrl} />
                 </button>
               </MemberStripTooltip>
             );
@@ -430,7 +468,7 @@ export default function ChannelOverflowMenu({
   const settingsSaveAndCloseAvailableRef = useRef(true);
   const settingsSaveRef = useRef<(() => Promise<boolean>) | null>(null);
   const postCloseActionRef = useRef<(() => void) | null>(null);
-  const setOpen = (next: boolean) => {
+  const setOpen = useCallback((next: boolean) => {
     if (!next) {
       settingsDirtyRef.current = false;
       settingsSaveAndCloseAvailableRef.current = true;
@@ -440,12 +478,13 @@ export default function ChannelOverflowMenu({
     }
     if (onOpenChange) onOpenChange(next);
     else setInternalOpen(next);
-  };
-  const close = () => setOpen(false);
+  }, [onOpenChange]);
+  const close = useCallback(() => setOpen(false), [setOpen]);
+  const handleOpen = useCallback(() => setOpen(true), [setOpen]);
   // The members page ✕ rides the same draft guard as every other close
   // affordance; row → profile keeps the historical unguarded close (the
   // old drawer panel behavior).
-  const guardedClose = (postCloseAction?: () => void) => {
+  const guardedClose = useCallback((postCloseAction?: () => void) => {
     if (settingsDirtyRef.current) {
       postCloseActionRef.current = postCloseAction ?? null;
       setUnsavedCanSave(settingsSaveAndCloseAvailableRef.current);
@@ -454,8 +493,54 @@ export default function ChannelOverflowMenu({
     }
     close();
     postCloseAction?.();
-  };
-  const handleSaveAndClose = async () => {
+  }, [close]);
+  const handleSearch = useCallback(() => guardedClose(onSearch), [guardedClose, onSearch]);
+  const handleCloseGuarded = useCallback(() => {
+    postCloseActionRef.current = null;
+    setUnsavedCanSave(settingsSaveAndCloseAvailableRef.current);
+    setShowUnsavedPrompt(true);
+  }, []);
+  const handleOpenMembers = useCallback(() => {
+    setMembersInitialView(undefined);
+    setView("members");
+  }, []);
+  const handleAddMembers = useCallback(() => {
+    if (!canAddMembers) return;
+    setMembersInitialView("add");
+    // The add picker opens straight away: fetch the agent roster it lists.
+    void useAgentStore.getState().loadAgents();
+    setView("members");
+  }, [canAddMembers]);
+  const handleBackToRoot = useCallback(() => setView("root"), []);
+  const prefetchedMembers = useMemo(() => members ? {
+    channelAgents: members.agents,
+    channelHumans: members.humans,
+    channelExternalMembers: members.externalMembers,
+    loading: members.loading,
+    addMembers: members.addMembers,
+    addAgent: members.addAgent,
+    removeAgent: members.removeAgent,
+    addHuman: members.addHuman,
+    removeHuman: members.removeHuman,
+    changeMemberRole: members.changeMemberRole,
+    roleChangeFailed: members.roleChangeFailed,
+  } : undefined, [members]);
+  const handleKeepEditing = useCallback(() => {
+    postCloseActionRef.current = null;
+    setShowUnsavedPrompt(false);
+  }, []);
+  const handleUnsavedPromptClose = useCallback(() => {
+    if (unsavedBusy) return;
+    handleKeepEditing();
+  }, [unsavedBusy, handleKeepEditing]);
+  const handleDiscardAndClose = useCallback(() => {
+    const postCloseAction = postCloseActionRef.current;
+    postCloseActionRef.current = null;
+    setShowUnsavedPrompt(false);
+    close();
+    postCloseAction?.();
+  }, [close]);
+  const handleSaveAndClose = useCallback(async () => {
     setUnsavedBusy(true);
     try {
       const saved = (await settingsSaveRef.current?.()) ?? true;
@@ -469,19 +554,19 @@ export default function ChannelOverflowMenu({
     } finally {
       setUnsavedBusy(false);
     }
-  };
+  }, [close]);
 
   return (
     <>
       <OverflowMenuTrigger
         labelId="message.chatPanel.searchChannel"
-        onClick={() => guardedClose(onSearch)}
+        onClick={handleSearch}
         icon={<Search size={14} />}
         testId="channel-topbar-search"
       />
       <OverflowMenuTrigger
         labelId="message.chatPanel.overflow.open"
-        onClick={() => setOpen(true)}
+        onClick={handleOpen}
         icon={<Settings size={14} />}
         testId="channel-overflow-trigger"
       />
@@ -534,11 +619,7 @@ export default function ChannelOverflowMenu({
         closeLabelId="message.chatPanel.overflow.close"
         hideDesktopClose
         closeGuardRef={settingsDirtyRef}
-        onCloseGuarded={() => {
-          postCloseActionRef.current = null;
-          setUnsavedCanSave(settingsSaveAndCloseAvailableRef.current);
-          setShowUnsavedPrompt(true);
-        }}
+        onCloseGuarded={handleCloseGuarded}
         bare={view === "members"}
         testId="channel-overflow-sheet"
       >
@@ -547,20 +628,12 @@ export default function ChannelOverflowMenu({
         <div className={view === "members" ? "hidden" : undefined}>
           {showMembers && (
             <MembersStrip
-              channelAgents={members?.agents ?? []}
-              channelHumans={members?.humans ?? []}
+              channelAgents={members?.agents ?? NO_CHANNEL_AGENTS}
+              channelHumans={members?.humans ?? NO_CHANNEL_HUMANS}
+              channelExternalMembers={members?.externalMembers ?? NO_CHANNEL_EXTERNAL_MEMBERS}
               loading={members?.loading ?? true}
-              onOpen={() => {
-                setMembersInitialView(undefined);
-                setView("members");
-              }}
-              onAdd={canAddMembers ? () => {
-                if (!canAddMembers) return;
-                setMembersInitialView("add");
-                // The add picker opens straight away: fetch the agent roster it lists.
-                void useAgentStore.getState().loadAgents();
-                setView("members");
-              } : undefined}
+              onOpen={handleOpenMembers}
+              onAdd={canAddMembers ? handleAddMembers : undefined}
             />
           )}
 
@@ -613,20 +686,8 @@ export default function ChannelOverflowMenu({
             presentation="page"
             channelId={channelId}
             initialView={membersInitialView}
-            prefetchedMembers={members ? {
-              channelAgents: members.agents,
-              channelHumans: members.humans,
-              channelExternalMembers: members.externalMembers,
-              loading: members.loading,
-              addMembers: members.addMembers,
-              addAgent: members.addAgent,
-              removeAgent: members.removeAgent,
-              addHuman: members.addHuman,
-              removeHuman: members.removeHuman,
-              changeMemberRole: members.changeMemberRole,
-              roleChangeFailed: members.roleChangeFailed,
-            } : undefined}
-            onBack={() => setView("root")}
+            prefetchedMembers={prefetchedMembers}
+            onBack={handleBackToRoot}
             onClose={guardedClose}
             onRequestClose={close}
           />
@@ -639,11 +700,7 @@ export default function ChannelOverflowMenu({
            must be sent from its own form or explicitly discarded. Three
            actions, so a plain Modal instead of the two-action ConfirmDialog. */
         <Modal
-          onClose={() => {
-            if (unsavedBusy) return;
-            postCloseActionRef.current = null;
-            setShowUnsavedPrompt(false);
-          }}
+          onClose={handleUnsavedPromptClose}
           layer={1}
         >
           <div
@@ -664,10 +721,7 @@ export default function ChannelOverflowMenu({
             </p>
             <div className="flex justify-end gap-3">
               <Button
-                onClick={() => {
-                  postCloseActionRef.current = null;
-                  setShowUnsavedPrompt(false);
-                }}
+                onClick={handleKeepEditing}
                 disabled={unsavedBusy}
                 size="sm"
                 variant="outline"
@@ -676,13 +730,7 @@ export default function ChannelOverflowMenu({
                 {formatMessage({ id: "message.chatPanel.overflow.keepEditing" })}
               </Button>
               <Button
-                onClick={() => {
-                  const postCloseAction = postCloseActionRef.current;
-                  postCloseActionRef.current = null;
-                  setShowUnsavedPrompt(false);
-                  close();
-                  postCloseAction?.();
-                }}
+                onClick={handleDiscardAndClose}
                 disabled={unsavedBusy}
                 size="sm"
                 variant="warning"
@@ -693,7 +741,7 @@ export default function ChannelOverflowMenu({
               </Button>
               {unsavedCanSave && (
                 <Button
-                  onClick={() => void handleSaveAndClose()}
+                  onClick={handleSaveAndClose}
                   disabled={unsavedBusy}
                   size="sm"
                   variant="accent"

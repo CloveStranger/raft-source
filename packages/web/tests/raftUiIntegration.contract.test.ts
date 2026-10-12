@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { EXPECTED_RAFT_UI_VERSION } from "./helpers/raftUiVersion";
 
 const repoRoot = resolve(import.meta.dirname, "..");
 
@@ -10,11 +9,6 @@ function read(path: string): string {
 }
 
 test("web app installs raft-ui global CSS and providers", () => {
-  const packageJson = JSON.parse(read("package.json")) as {
-    dependencies?: Record<string, string>;
-  };
-  assert.equal(packageJson.dependencies?.["raft-ui"], EXPECTED_RAFT_UI_VERSION);
-
   const css = read("src/index.css");
   assert.match(css, /@import "raft-ui\/styles\.css";/);
   assert.match(css, /@source "\.\.\/node_modules\/raft-ui\/dist";/);
@@ -93,7 +87,6 @@ test("segmented controls use raft-ui directly at callsites", () => {
 test("select fields use raft-ui directly at business callsites", () => {
   for (const file of [
     "src/components/agent/CreateAgentDialog.tsx",
-    "src/components/agentMigration/AgentMigrationDialog.tsx",
     "src/components/agent/RuntimeConfigFields.tsx",
     "src/components/settings/SettingsPanel.tsx",
     "src/pages/HumanLoginSetupPage.tsx",
@@ -111,6 +104,8 @@ test("select fields use raft-ui directly at business callsites", () => {
   }
 
   const migrationDialog = read("src/components/agentMigration/AgentMigrationDialog.tsx");
+  assert.match(migrationDialog, /from "raft-ui\/wip";/);
+  assert.match(migrationDialog, /<ComboboxSelect[\s>]/, "agent migration picks the target with the raft-ui ComboboxSelect");
   assert.doesNotMatch(
     migrationDialog,
     /<select[\s>]/,

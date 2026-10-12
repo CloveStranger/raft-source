@@ -114,6 +114,29 @@ test("formatChannelMembers: full channel member list", () => {
   assert.match(out, /@alice/);
 });
 
+test("formatChannelMembers: joint roster lists every server a person takes part through", () => {
+  const out = formatChannelMembers({
+    channel: { ref: "#shared-room", type: "joint" },
+    agents: [],
+    humans: [
+      { name: "dual", role: "member", servers: [{ name: "Home", slug: "home", yours: true }, { name: "Peer Co", slug: "peer" }] },
+      { name: "peer-only", role: "owner", servers: [{ name: "Peer Co", slug: "peer" }] },
+      { name: "twins", servers: [{ name: "Acme", slug: "acme-1" }, { name: "Acme", slug: "acme-2" }] },
+      { name: "local" },
+    ],
+  });
+  assert.match(out, /`\[servers: \.\.\.\]` marks people in this joint channel/);
+  assert.match(out, /gives them no rights here/);
+  assert.match(out, /@dual \[servers: this server, Peer Co\]\n/);
+  assert.match(out, /@peer-only \(owner\) \[servers: Peer Co\]\n/);
+  // Two listed servers with the same display name fall back to their slugs.
+  assert.match(out, /@twins \[servers: acme-1, acme-2\]\n/);
+  assert.match(out, /@local\n/);
+
+  const plain = formatChannelMembers({ channel: { ref: "#all", type: "channel" }, agents: [], humans: [{ name: "local" }] });
+  assert.doesNotMatch(plain, /servers/);
+});
+
 test("formatChannelMembers: empty members", () => {
   const out = formatChannelMembers({ channel: { ref: "#all", type: "channel" }, agents: [], humans: [] });
   assert.match(out, /\(none\)/);

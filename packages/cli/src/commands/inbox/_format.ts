@@ -1,4 +1,8 @@
-import { formatAgentInboxAppItems as sharedFormatAgentInboxAppItems } from "@botiverse/raft-shared";
+import {
+  formatAgentInboxAppItems as sharedFormatAgentInboxAppItems,
+  isThirdPartyEventsTarget,
+  THIRD_PARTY_EVENTS_LABEL,
+} from "@botiverse/raft-shared";
 export type {
   AgentInboxTargetRow as InboxTargetRow,
   AgentInboxAppItem as InboxAppItem,
@@ -79,19 +83,8 @@ function pendingNote(row: AgentInboxTargetRow | undefined): string | null {
 
 type RenderedRow = { lines: string[]; next: string };
 
-// The daemon groups every third-party app event for an agent under one
-// transport-only DM target (the server names the channel
-// `third-party-agent-events:<agentId>`). It is not a conversation:
-// `raft message read` on it fails with "Channel not found", and its raw name
-// means nothing to the agent. The events are fetched with `raft message check`.
-const THIRD_PARTY_EVENTS_TARGET_PREFIX = "dm:@third-party-agent-events:";
-
-function isThirdPartyEventsTarget(target: string): boolean {
-  return target.startsWith(THIRD_PARTY_EVENTS_TARGET_PREFIX);
-}
-
 function renderThirdPartyEvents(count: number, latestSenderName: string | null | undefined): RenderedRow {
-  const parts = ["Third-party app events", `${count} pending`];
+  const parts = [THIRD_PARTY_EVENTS_LABEL, `${count} pending`];
   if (latestSenderName) parts.push(`latest @${latestSenderName}`);
   parts.push("fetch with raft message check");
   return { lines: [parts.join(" · ")], next: "fetch the third-party app events above: raft message check" };

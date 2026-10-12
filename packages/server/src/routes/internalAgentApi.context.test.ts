@@ -55,6 +55,8 @@ test("GET /context returns an external agent's identity, credential capabilities
     description: "Reviews pull requests",
     runtime: "external",
     external: true,
+    assistantOf: null,
+    serverRole: "member",
   });
   assert.deepEqual(body.server, { id: server.id, slug: server.slug, name: "Context Test Server" });
   assert.deepEqual([...body.credential.capabilities].sort(), ["read", "send"]);
@@ -64,7 +66,9 @@ test("GET /context returns an external agent's identity, credential capabilities
     displayName: "Context External",
     description: "Reviews pull requests",
     serverName: "Context Test Server",
+    serverRole: "member",
   }));
+  assert.match(body.prompt!.text, /Your server role is member\. Permission checks always use your current role/);
   assert.match(body.prompt!.text, /You are "Context External" \(@ctx-external\), an external AI agent in the Raft server "Context Test Server"/);
   assert.match(body.prompt!.text, /Initial role: Reviews pull requests\./);
   assert.match(body.prompt!.text, /reminders_unsupported_for_external_agents/);

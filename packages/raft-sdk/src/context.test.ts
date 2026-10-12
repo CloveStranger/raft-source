@@ -40,7 +40,7 @@ test("agent.context returns the bound agent, server slug and name, and capabilit
     data: {
       agent: {
         id: "agent-1", name: "bobo", displayName: "BoBo", description: null,
-        runtime: "external", external: true,
+        runtime: "external", external: true, assistantOf: null,
       },
       server: { id: "server-1", slug: "botiverse", name: "Botiverse" },
       capabilities: ["send", "read"],
@@ -93,4 +93,21 @@ test("agent.context failures carry a stable code and no response body", async ()
   if (transportResult.ok) return;
   assert.equal(transportResult.error.code, "TRANSPORT_ERROR");
   assert.equal(JSON.stringify(transportResult).includes(secret), false);
+});
+
+test("agent.context carries assistantOf (RFC 074): the owner when set, null when null or absent", async () => {
+  const contextWith = async (agentExtra: Record<string, unknown>) => {
+    const client = createRaftClient({
+      serverUrl: "https://raft.example",
+      credential,
+      fetch: async () => Response.json({ ...body, agent: { ...body.agent, ...agentExtra } }),
+    });
+    const result = await client.agent.context();
+    assert.equal(result.ok, true);
+    return result.ok ? result.data.agent.assistantOf : "unreached";
+  };
+  const owner = "11111111-1111-4111-8111-111111111111";
+  assert.deepEqual(await contextWith({ assistantOf: { userId: owner } }), { userId: owner });
+  assert.equal(await contextWith({ assistantOf: null }), null);
+  assert.equal(await contextWith({}), null, "older Servers omit it");
 });

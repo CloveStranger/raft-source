@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useCallback, useState } from "react";
 import { useIntl } from "react-intl";
 import { Button } from "raft-ui";
 import type { AgentHostedRuntimeSummary } from "@botiverse/raft-shared";
@@ -44,7 +44,7 @@ export function HostedRuntimeStatus({
   const [retrying, setRetrying] = useState(false);
   const [retryError, setRetryError] = useState(false);
   const view = describeHostedRuntime(summary);
-  const retry = async () => {
+  const retry = useCallback(async () => {
     setRetrying(true);
     setRetryError(false);
     try {
@@ -54,7 +54,8 @@ export function HostedRuntimeStatus({
     } finally {
       setRetrying(false);
     }
-  };
+  }, [onRetry]);
+  const handleRetryClick = useCallback(() => void retry(), [retry]);
   return (
     <div className="space-y-2" data-testid="agent-hosted-runtime-status" data-state={summary.state}>
       <div className="flex flex-wrap items-center gap-2">
@@ -81,7 +82,7 @@ export function HostedRuntimeStatus({
       )}
       {view.canRetry && (
         <div className="flex items-center gap-2">
-          <Button variant="outline" size="sm" type="button" disabled={retrying} onClick={() => void retry()}>
+          <Button variant="outline" size="sm" type="button" disabled={retrying} onClick={handleRetryClick}>
             {formatMessage({ id: "agent.detail.hostedRuntime.retry" })}
           </Button>
           {retryError && (

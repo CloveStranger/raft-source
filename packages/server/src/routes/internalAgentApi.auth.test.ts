@@ -1,4 +1,6 @@
 import { createApiTest } from "../test/integration/apiTest";
+import { tokenForHuman } from "../test/integration/credentials";
+import { resolveAgentVisibleMessagePayload } from "./internal";
 import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
@@ -61,6 +63,7 @@ type AuthFixture = {
   channelId: string;
   channelName: string;
   joinOnlyChannelId: string;
+  machineId: string;
   machineApiKey: string;
   computerApiKey: string;
   agentApiKey: string;
@@ -122,7 +125,12 @@ function humanJsonHeaders(token: string, serverId: string): Record<string, strin
 
 async function assertCapabilityDenied(res: Response, expectedError: string, label: string): Promise<void> {
   assert.equal(res.status, 403, `${label}: expected 403, got ${res.status}`);
-  assert.equal(((await res.json()) as { error?: string }).error, expectedError, label);
+  const body = (await res.json()) as { error?: string; code?: string; currentRole?: string | null; suggestedNextAction?: string };
+  assert.equal(body.error, expectedError, label);
+  // The SDK forwards only `code` and `suggestedNextAction` to the model.
+  assert.equal(body.code, "server_role_required", label);
+  assert.equal(body.currentRole, "member", label);
+  assert.match(body.suggestedNextAction ?? "", /your role is member/, label);
 }
 
 function containsOAuthSecret(value: unknown): boolean {
@@ -214,6 +222,7 @@ async function seedAuthFixture(): Promise<AuthFixture> {
     channelId: channel.id,
     channelName: channel.name,
     joinOnlyChannelId: joinOnlyChannel.id,
+    machineId: machine.id,
     machineApiKey,
     computerApiKey: computerMaterial.apiKey,
     agentApiKey,
@@ -1099,6 +1108,98 @@ test("agent-api task mine is untruncated, identity-bound, and hides inaccessible
   assert.equal(missingSelector.status, 400, "one task-list selector is required");
 });
 
+test("agent-api task mine resolves channel visibility in a constant number of queries", async ({ app }) => {
+  type PgliteLike = { query: (...args: unknown[]) => Promise<unknown> };
+  const fixture = await seedAuthFixture();
+  const db = getDb();
+  const assign = async (channelId: string, title: string) => {
+    await db.insert(tasks).values({
+      channelId,
+      taskNumber: 1,
+      title,
+      status: "todo",
+      createdByType: "user",
+      createdById: fixture.ownerId,
+      claimedByType: "agent",
+      claimedById: fixture.agentId,
+    });
+  };
+  const seedJoint = async (label: string) => {
+    const [storageServer] = await db.insert(serversTable).values({
+      name: `Count Joint Storage ${label}`,
+      slug: `count-joint-storage-${randomUUID()}`,
+      kind: "joint_storage",
+      ownerId: fixture.ownerId,
+      plan: "founder",
+      agentAllChannelGreetingEnabled: false,
+    }).returning();
+    const storage = await createChannel(storageServer.id, `count-joint-storage-${randomUUID().slice(0, 8)}`);
+    const local = await createChannel(fixture.serverId, `count-joint-${randomUUID().slice(0, 8)}`, undefined, "joint");
+    await addAgent(local.id, fixture.agentId);
+    const [joint] = await db.insert(jointChannels).values({
+      canonicalChannelId: storage.id,
+      createdByServerId: fixture.serverId,
+      createdByUserId: fixture.ownerId,
+    }).returning();
+    await db.insert(jointChannelServers).values({
+      jointChannelId: joint.id,
+      serverId: fixture.serverId,
+      localChannelId: local.id,
+      role: "host",
+      status: "active",
+      joinedByUserId: fixture.ownerId,
+    });
+    await assign(local.id, `joint ${label}`);
+  };
+  const seedBatch = async (label: string, size: number) => {
+    for (let i = 0; i < size; i += 1) {
+      const open = await createChannel(fixture.serverId, `count-open-${randomUUID().slice(0, 8)}`);
+      await assign(open.id, `open ${label} ${i}`);
+      const closed = await createChannel(fixture.serverId, `count-private-${randomUUID().slice(0, 8)}`, undefined, "private");
+      await addAgent(closed.id, fixture.agentId);
+      await assign(closed.id, `private ${label} ${i}`);
+      await seedJoint(`${label} ${i}`);
+    }
+  };
+  const countMine = async () => {
+    const pg = (db as unknown as { $client: PgliteLike }).$client;
+    const originalQuery = pg.query.bind(pg);
+    let count = 0;
+    pg.query = ((...args: unknown[]) => {
+      count += 1;
+      return originalQuery(...args);
+    }) as PgliteLike["query"];
+    try {
+      const res = await fetch(`${app.baseUrl}/internal/agent-api/tasks?mine=true`, {
+        headers: jsonHeaders(fixture.agentApiKey),
+      });
+      const text = await res.text();
+      assert.equal(res.status, 200, text);
+      return { count, body: JSON.parse(text) as { tasks: Array<{ title: string; channelRef?: string }> } };
+    } finally {
+      pg.query = originalQuery;
+    }
+  };
+
+  const dm = await findOrCreateDM(fixture.serverId, fixture.ownerId, fixture.agentId);
+  assert.ok(dm);
+  await assign(dm.id, "dm assignment");
+  await seedBatch("few", 1);
+  await countMine();
+  const few = await countMine();
+  await seedBatch("many", 8);
+  await countMine();
+  const many = await countMine();
+
+  assert.ok(few.count > 0, "the counter must observe queries");
+  assert.equal(many.body.tasks.length, few.body.tasks.length + 24);
+  // Each channel used to cost several channel/membership/surface queries.
+  assert.equal(many.count, few.count, `${few.body.tasks.length} tasks: ${few.count} queries, ${many.body.tasks.length} tasks: ${many.count}`);
+  for (const task of many.body.tasks) {
+    if (task.title === "dm assignment") assert.equal(task.channelRef, `dm:@${fixture.ownerName}`);
+    else assert.match(task.channelRef ?? "", /^#count-(open|private|joint)-/, task.title);
+  }
+});
 test("agent-api bulk task create wakes each recipient once while preserving every inbox fact", async ({ app }) => {
   const fixture = await seedAuthFixture();
   const target = await createAgent(fixture.serverId, `batch-wake-${randomUUID().slice(0, 8)}`, {
@@ -2414,6 +2515,48 @@ test("agent-api history around does not advance unread cursor", async ({ app }) 
     0,
     "around history is a context lookup and must not consume unread state",
   );
+});
+
+// Task #266: a human web sender's IANA zone is agent-facing transport. Both
+// agent history reads and the resolved-message payload carry it; the human
+// read of the same channel does not.
+test("agent history and resolved-message reads carry the human sender's time zone", async ({ app }) => {
+  const fixture = await seedAuthFixture();
+  const zoned = await createMessage(fixture.channelId, "user", fixture.ownerId, "zoned human send", "chat", undefined, {
+    senderTimezone: "Asia/Shanghai",
+  });
+  const plain = await createMessage(fixture.channelId, "agent", fixture.agentId, "agent reply without a zone");
+  const channelRef = encodeURIComponent(`#${fixture.channelName}`);
+
+  const agentApi = await fetch(`${app.baseUrl}/internal/agent-api/history?channel=${channelRef}&limit=10`, {
+    headers: jsonHeaders(fixture.readOnlyApiKey),
+  });
+  assert.equal(agentApi.status, 200);
+  const agentApiBody = await agentApi.json() as { messages: Array<{ id: string; senderTimezone?: string | null }> };
+  assert.equal(agentApiBody.messages.find((message) => message.id === zoned.id)?.senderTimezone, "Asia/Shanghai");
+  assert.equal(agentApiBody.messages.find((message) => message.id === plain.id)?.senderTimezone, null);
+
+  const legacy = await fetch(`${app.baseUrl}/internal/agent/${fixture.agentId}/history?channel=${channelRef}&limit=10`, {
+    headers: jsonHeaders(fixture.machineApiKey),
+  });
+  assert.equal(legacy.status, 200);
+  const legacyBody = await legacy.json() as { messages: Array<{ id: string; senderTimezone?: string | null }> };
+  assert.equal(legacyBody.messages.find((message) => message.id === zoned.id)?.senderTimezone, "Asia/Shanghai");
+
+  const resolved = await resolveAgentVisibleMessagePayload(zoned.id, fixture.serverId, fixture.agentId);
+  assert.equal(resolved?.sender_timezone, "Asia/Shanghai");
+  const resolvedPlain = await resolveAgentVisibleMessagePayload(plain.id, fixture.serverId, fixture.agentId);
+  assert.equal(resolvedPlain?.sender_timezone, null);
+
+  const humanToken = await tokenForHuman(fixture.ownerEmail);
+  const humanPage = await fetch(`${app.baseUrl}/api/messages/channel/${fixture.channelId}?limit=10`, {
+    headers: { Authorization: `Bearer ${humanToken}`, "X-Server-Id": fixture.serverId },
+  });
+  assert.equal(humanPage.status, 200);
+  const humanBody = await humanPage.json() as { messages: Array<Record<string, unknown>> };
+  const humanRow = humanBody.messages.find((message) => message.id === zoned.id);
+  assert.ok(humanRow, "the human page must include the zoned message");
+  assert.equal("senderTimezone" in humanRow, false, "a human client never receives another user's zone");
 });
 
 test("legacy machine-agent history advances unread cursor but not send freshness proof", async ({ app }) => {
@@ -6884,4 +7027,90 @@ test("agent-api integration list hides disabled server-local apps from services"
   const serviceKeys = body.services?.map((s) => s.clientId) ?? [];
   assert.ok(serviceKeys.includes("enabled-local-app"));
   assert.ok(!serviceKeys.includes("disabled-local-app"), "disabled server_local app must not appear in services");
+});
+
+test("agent rosters read activity and server roles as batches, not per agent", async ({ app }) => {
+  type PgliteLike = { query: (...args: unknown[]) => Promise<unknown> };
+  const fixture = await seedAuthFixture();
+  const orchestrator = app.app.get("agentOrchestrator") as {
+    getActivity: (agentId: string) => Promise<{ activity: string; activityDetail: string }>;
+    getActivities: (rows: ReadonlyArray<{ id: string }>) => Promise<Array<{ activity: string; activityDetail: string }>>;
+  };
+  let singleReads = 0;
+  let batchRows = 0;
+  orchestrator.getActivity = async () => {
+    singleReads += 1;
+    return { activity: "offline", activityDetail: "" };
+  };
+  orchestrator.getActivities = async (rows) => {
+    batchRows += rows.length;
+    return rows.map(() => ({ activity: "online", activityDetail: "batched" }));
+  };
+  const addAgents = async (size: number) => {
+    for (let i = 0; i < size; i += 1) {
+      const extra = await createAgent(fixture.serverId, `roster-${randomUUID().slice(0, 8)}`, { runtime: "claude", model: "sonnet" });
+      await addAgent(fixture.channelId, extra.id);
+      await assignMachine(extra.id, fixture.machineId);
+    }
+  };
+  const routes = {
+    serverInfo: { path: "/internal/agent-api/server", key: fixture.agentApiKey },
+    channelMembers: { path: `/internal/agent-api/channel-members?channel=${encodeURIComponent(`#${fixture.channelName}`)}`, key: fixture.agentApiKey },
+    legacyChannelMembers: { path: `/internal/agent/${fixture.agentId}/channel-members?channel=${encodeURIComponent(`#${fixture.channelName}`)}`, key: fixture.machineApiKey },
+    machineAgents: { path: "/internal/machine/agents", key: fixture.machineApiKey },
+  };
+  const count = async (route: { path: string; key: string }) => {
+    const pg = (getDb() as unknown as { $client: PgliteLike }).$client;
+    const originalQuery = pg.query.bind(pg);
+    let queries = 0;
+    pg.query = ((...args: unknown[]) => {
+      queries += 1;
+      return originalQuery(...args);
+    }) as PgliteLike["query"];
+    try {
+      const res = await fetch(`${app.baseUrl}${route.path}`, { headers: jsonHeaders(route.key) });
+      const text = await res.text();
+      assert.equal(res.status, 200, `${route.path}: ${text}`);
+      return { queries, body: JSON.parse(text) as unknown };
+    } finally {
+      pg.query = originalQuery;
+    }
+  };
+  const countAll = async () => {
+    const result: Record<string, { queries: number; body: unknown }> = {};
+    for (const [name, route] of Object.entries(routes)) {
+      await count(route);
+      result[name] = await count(route);
+    }
+    return result;
+  };
+
+  await addAgents(1);
+  const few = await countAll();
+  await addAgents(10);
+  const many = await countAll();
+
+  for (const name of Object.keys(routes)) {
+    assert.ok(few[name]!.queries > 0, `${name}: the counter must observe queries`);
+    // Each agent used to cost its own role query (and an activity read).
+    assert.equal(many[name]!.queries, few[name]!.queries, `${name}: ${few[name]!.queries} -> ${many[name]!.queries} queries`);
+  }
+  assert.equal(singleReads, 0, "no route reads activity agent by agent");
+  assert.ok(batchRows > 0);
+
+  const serverAgents = (many.serverInfo!.body as { agents: Array<{ name: string; activity: string | null; activityDetail: string; role: string | null }> }).agents;
+  assert.ok(serverAgents.length >= 12);
+  for (const agent of serverAgents) {
+    assert.equal(agent.activity, "online", agent.name);
+    assert.equal(agent.activityDetail, "batched", agent.name);
+    assert.ok(agent.role !== undefined, agent.name);
+  }
+  for (const name of ["channelMembers", "legacyChannelMembers"] as const) {
+    const agents = (many[name]!.body as { agents: Array<{ name: string; role: string | null }> }).agents;
+    assert.ok(agents.length >= 12, name);
+    assert.ok(agents.every((agent) => agent.role === "member"), `${name}: ${JSON.stringify(agents)}`);
+  }
+  const machineAgents = many.machineAgents!.body as Array<{ id: string; activity: string; activityDetail: string }>;
+  assert.ok(machineAgents.length >= 12);
+  assert.ok(machineAgents.every((agent) => agent.activity === "online" && agent.activityDetail === "batched"));
 });

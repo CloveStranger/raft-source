@@ -60,6 +60,12 @@ function sameStrings(left: string[], right: string[]): boolean {
   return a.length === b.length && a.every((value, index) => value === b[index]);
 }
 
+/** Every required scope is present in actual. Extras allowed. */
+function scopesCover(actual: string[], required: string[]): boolean {
+  const have = new Set(canonicalStrings(actual));
+  return required.every((s) => have.has(s));
+}
+
 async function loadCurrentGrant(
   tx: DbLike,
   input: {
@@ -445,7 +451,6 @@ export async function completeExternalOAuthAttempt(input: {
   providerTeamId: string;
   providerEnterpriseId?: string | null;
   providerUserId: string;
-  providerInstallerIsWorkspaceAdmin: boolean;
   botUserId: string;
   providerBotId?: string | null;
   workspaceName?: string | null;
@@ -509,7 +514,6 @@ export async function completeExternalOAuthAttempt(input: {
       || !providerTeamId
       || !providerUserId
       || !botUserId
-      || input.providerInstallerIsWorkspaceAdmin !== true
       || providerUserId === botUserId
       || (
         input.providerEnterpriseId !== undefined
@@ -522,7 +526,7 @@ export async function completeExternalOAuthAttempt(input: {
       );
     }
     const installedScopes = canonicalStrings(input.installedScopes);
-    if (!sameStrings(installedScopes, attempt.requestedScopes)) {
+    if (!scopesCover(installedScopes, attempt.requestedScopes)) {
       throw new ExternalAppControlPlaneError(
         "External provider scopes do not match the authorized request",
         "external_app_scope_mismatch",
@@ -568,7 +572,10 @@ export async function completeExternalOAuthAttempt(input: {
       && existing.providerAuthorityId === providerTeamId
       && existing.botUserId === botUserId
       && (existing.providerBotId === null || existing.providerBotId === (input.providerBotId ?? null))
-      && sameStrings(existing.installedScopes, installedScopes),
+      // The shared install must itself satisfy the contract — not the new
+      // token (already checked upstream). If the existing install predates
+      // a required scope, this server must re-authorize, not silently share.
+      && scopesCover(existing.installedScopes, attempt.requestedScopes),
     );
     if (
       existing

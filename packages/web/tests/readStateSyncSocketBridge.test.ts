@@ -1726,3 +1726,164 @@ test("server reset clears accepted read-state watermarks", () => {
     "accepted",
   );
 });
+
+// ── Channel thread badges from the server's unread count (task #9) ──
+
+function seedThreadBadge(threadChannelId: string, unreadCount = 3) {
+  useThreadStore.setState({
+    summaries: {
+      [`parent-${threadChannelId}`]: {
+        threadChannelId,
+        replyCount: 3,
+        lastReplyAt: "2026-07-12T00:00:03.000Z",
+        participantIds: [],
+        unreadCount,
+        firstUnreadMessageId: `${threadChannelId}-reply-1`,
+      },
+    },
+    followedThreads: [makeFollowedThread({ threadChannelId, unreadCount })],
+  });
+}
+
+function badge(threadChannelId: string) {
+  return useThreadStore.getState().summaries[`parent-${threadChannelId}`];
+}
+
+test("a thread read elsewhere clears the channel badge from the server count without fetching", () => {
+  resetAll();
+  seedThreadBadge("thread-elsewhere");
+  const getCalls: string[] = [];
+  api.get = (async (url: string) => {
+    getCalls.push(url);
+    return { data: {} };
+  }) as typeof api.get;
+
+  readStateHandler("read_state:updated")({
+    serverId: "server-read-state",
+    scopeId: "thread-elsewhere",
+    maxReadSeq: 9,
+    readStateVersion: 1,
+    unreadCount: 0,
+  });
+
+  assert.equal(badge("thread-elsewhere")?.unreadCount, 0);
+  assert.equal(badge("thread-elsewhere")?.firstUnreadMessageId, null);
+  assert.equal(useThreadStore.getState().followedThreads[0]?.unreadCount, 0);
+  assert.deepEqual(getCalls, []);
+});
+
+test("mark all read clears every unloaded thread badge from the bulk counts", () => {
+  resetAll();
+  useThreadStore.setState({
+    summaries: Object.fromEntries(["t1", "t2", "t3"].map((id) => [`parent-${id}`, {
+      threadChannelId: id,
+      replyCount: 2,
+      lastReplyAt: null,
+      participantIds: [],
+      unreadCount: 2,
+      firstUnreadMessageId: `${id}-reply-1`,
+    }])),
+  });
+
+  readStateHandler("read_state:updated_bulk")({
+    serverId: "server-read-state",
+    scopes: ["t1", "t2", "t3"].map((scopeId) => ({ scopeId, maxReadSeq: 9, readStateVersion: 1, unreadCount: 0 })),
+  });
+
+  for (const id of ["t1", "t2", "t3"]) assert.equal(badge(id)?.unreadCount, 0, id);
+});
+
+test("a partial read elsewhere shows the remaining count and keeps the jump target", () => {
+  resetAll();
+  seedThreadBadge("thread-partial", 5);
+
+  readStateHandler("read_state:updated")({
+    serverId: "server-read-state",
+    scopeId: "thread-partial",
+    maxReadSeq: 4,
+    readStateVersion: 1,
+    unreadCount: 2,
+  });
+
+  assert.equal(badge("thread-partial")?.unreadCount, 2);
+  assert.equal(badge("thread-partial")?.firstUnreadMessageId, "thread-partial-reply-1");
+});
+
+test("an older read-state count never overwrites a newer one", () => {
+  resetAll();
+  seedThreadBadge("thread-order");
+  const handler = readStateHandler("read_state:updated");
+
+  handler({ serverId: "server-read-state", scopeId: "thread-order", maxReadSeq: 9, readStateVersion: 2, unreadCount: 0 });
+  handler({ serverId: "server-read-state", scopeId: "thread-order", maxReadSeq: 4, readStateVersion: 1, unreadCount: 2 });
+
+  assert.equal(badge("thread-order")?.unreadCount, 0);
+});
+
+test("a read-state event without a count (older server) leaves an unprojectable badge as it was", () => {
+  resetAll();
+  seedThreadBadge("thread-legacy");
+
+  readStateHandler("read_state:updated")({
+    serverId: "server-read-state",
+    scopeId: "thread-legacy",
+    maxReadSeq: 9,
+    readStateVersion: 1,
+  });
+
+  assert.equal(badge("thread-legacy")?.unreadCount, 3);
+});
+
+test("a malformed unread count is dropped without rejecting the read fact", () => {
+  resetAll();
+  const update = normalizeReadStateUpdated({
+    serverId: "server-read-state",
+    scopeId: "thread-malformed",
+    maxReadSeq: 9,
+    readStateVersion: 1,
+    unreadCount: -1,
+  });
+  assert.deepEqual(update, { serverId: "server-read-state", scopeId: "thread-malformed", maxReadSeq: 9, readStateVersion: 1 });
+  assert.deepEqual(
+    normalizeReadStateUpdatedBulk({
+      serverId: "server-read-state",
+      scopes: [{ scopeId: "t", maxReadSeq: 9, readStateVersion: 1, unreadCount: 0 }],
+    }),
+    [{ serverId: "server-read-state", scopeId: "t", maxReadSeq: 9, readStateVersion: 1, unreadCount: 0 }],
+  );
+});
+
+test("a server count never raises a badge: an unfollowed thread at 0 stays 0", () => {
+  resetAll();
+  seedThreadBadge("thread-unfollowed", 0);
+  seedThreadBadgeAlso("thread-own-replies", 1);
+
+  const handler = readStateHandler("read_state:updated");
+  handler({ serverId: "server-read-state", scopeId: "thread-unfollowed", maxReadSeq: 4, readStateVersion: 1, unreadCount: 3 });
+  handler({ serverId: "server-read-state", scopeId: "thread-own-replies", maxReadSeq: 4, readStateVersion: 1, unreadCount: 2 });
+
+  assert.equal(badge("thread-unfollowed")?.unreadCount, 0);
+  assert.equal(badge("thread-own-replies")?.unreadCount, 1, "a different count algorithm must not bounce the badge up");
+  assert.equal(
+    useThreadStore.getState().followedThreads.find((t) => t.threadChannelId === "thread-unfollowed")?.unreadCount,
+    0,
+  );
+});
+
+function seedThreadBadgeAlso(threadChannelId: string, unreadCount: number) {
+  const { summaries, followedThreads } = useThreadStore.getState();
+  useThreadStore.setState({
+    summaries: {
+      ...summaries,
+      [`parent-${threadChannelId}`]: {
+        threadChannelId,
+        replyCount: 3,
+        lastReplyAt: null,
+        participantIds: [],
+        unreadCount,
+        firstUnreadMessageId: null,
+      },
+    },
+    followedThreads: [...followedThreads, makeFollowedThread({ threadChannelId, unreadCount })],
+  });
+}

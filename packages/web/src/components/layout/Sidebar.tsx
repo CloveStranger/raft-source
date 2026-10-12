@@ -1,12 +1,12 @@
 import { Badge, Card, ContextMenuPopup, SidebarItem, SidebarItemCount, SidebarItemMetaIcon, SidebarRoot, toast, DirectMessageIcon } from "raft-ui";
 import Tooltip from "../ui/Tooltip";
-import { createContext, useState, useEffect, useCallback, useContext, useLayoutEffect, useRef, useMemo, useSyncExternalStore, memo } from "react";
+import { createContext, useState, useEffect, useCallback, useContext, useLayoutEffect, useEffectEvent, useRef, useMemo, useSyncExternalStore, memo } from "react";
 import type { ButtonHTMLAttributes, HTMLAttributes, ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { useLocation, useNavigate } from "react-router-dom";
 import { useIntl } from "react-intl";
 import type { MessageId } from "../../i18n/messages";
-import { Archive, ArrowRightLeft, Plus, Trash2, ChevronRight, ChevronDown, ChevronLeft, User, MessageSquare, MessageSquareCheck, MessageSquareDot, Monitor, Bot, X, Pencil, Bookmark, FileText, BookOpenText, Network, Search, Pin, PinOff, Square, RotateCcw, Play, Bell, BellOff, AtSign, Building2, Activity, ArrowUpDown, Languages, GitBranch, Type, CreditCard, Shield, Link2, BadgeInfo, Blocks, Check, FlaskConical, KeyRound, FolderInput, FolderPlus } from "lucide-react";
+import { Archive, ArrowRightLeft, Plus, Trash2, ChevronRight, ChevronDown, ChevronLeft, User, MessageSquare, Monitor, Bot, X, Pencil, Bookmark, FileText, BookOpenText, Network, Search, Pin, PinOff, Square, RotateCcw, Play, Bell, BellOff, AtSign, Building2, Activity, Languages, GitBranch, Type, CreditCard, Shield, Link2, BadgeInfo, Blocks, Check, FlaskConical, KeyRound, FolderInput, FolderPlus } from "lucide-react";
 import {
   DndContext,
   DragOverlay,
@@ -25,7 +25,6 @@ import {
   SortableContext,
   useSortable,
   verticalListSortingStrategy,
-  arrayMove,
   sortableKeyboardCoordinates,
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
@@ -38,6 +37,7 @@ import { canToggleActivityMute, matchesActivityMuteState, normalizeActivityMuteS
 import { selectAgentDisplayState, useAgentStore } from "../../store/agentStore";
 import type { Agent } from "../../store/agentStore";
 import { useMachineStore } from "../../store/machineStore";
+import type { Machine } from "../../store/machineStore";
 import { orderSidebarMachineIds } from "./sidebarMachineOrder";
 import { useShallow } from "zustand/react/shallow";
 import { useAuthStore } from "../../store/authStore";
@@ -57,11 +57,11 @@ import { useRailMode } from "../../hooks/useSidebarTab";
 import AttentionDot from "../ui/AttentionDot";
 import ContextMenuDivider from "../ui/ContextMenuDivider";
 import MenuItem from "../ui/MenuItem";
-import SelectionPopover from "../ui/SelectionPopover";
 import StatusDot from "../ui/StatusDot";
 import { SkeletonRow } from "../ui/Skeleton";
 import AgentActivityDot from "../agent/AgentActivityDot";
 import { useLongPress } from "../../hooks/useLongPress";
+import { useComputerUpgradeReconnect } from "../../hooks/useComputerUpgradeReconnect";
 import { useServerPermissions } from "../../hooks/useServerPermissions";
 import CreateChannelDialog from "../channel/CreateChannelDialog";
 import CreateJointChannelDialog from "../channel/CreateJointChannelDialog";
@@ -112,13 +112,16 @@ import {
   readSidebarChannelFocusRequest,
 } from "./sidebarChannelFocus";
 import type { SidebarChannelFocusRequest } from "./sidebarChannelFocus";
-import { emitWorkspaceGridDragPanel, emitWorkspaceGridOpenChannel, emitWorkspaceGridOpenDm, emitWorkspaceGridOpenPanel } from "../workspace/workspaceGridOpenEvents";
-import { useWorkspaceGridNavigationStore } from "../workspace/workspaceGridNavigationStore";
-import type { WorkspaceGridRailMode } from "../workspace/workspaceGridNavigationStore";
-import type { WorkspacePanelRef } from "../workspace/workspaceGridDemoConfig";
 import { canOpenSettingsTab, settingsTabIdForRouteSlug } from "../settings/settingsNavigation";
 import SidebarSectionDialog from "./SidebarSectionDialog";
+import { SidebarSortMenu } from "./SidebarSortMenu";
+import { SidebarReadToggleMenuItem } from "./SidebarReadToggleMenuItem";
+import { SectionSortModeMenuItem } from "./SectionSortModeMenuItem";
+import { MoveToSectionMenuItem } from "./MoveToSectionMenuItem";
+import { MemberAgentRow } from "./MemberAgentRow";
+import { MemberHumanRow } from "./MemberHumanRow";
 import SettingsSidebarList from "../settings/SettingsSidebarList";
+import type { SettingsSidebarGroup } from "../settings/SettingsSidebarList";
 import {
   moveSidebarItemToCustomSection,
   moveSidebarItemToCustomSectionAtPosition,
@@ -127,12 +130,6 @@ import {
   sidebarSectionItemKey,
 } from "../../store/sidebarSections";
 import type { SidebarCustomSection, SidebarSectionItemKind, SidebarSectionPlacement } from "../../store/sidebarSections";
-import {
-  createWorkspaceGridSidebarSelection,
-  selectWorkspaceGridActive,
-  selectWorkspaceGridActiveAncestorRefKey,
-  selectWorkspaceGridActiveRefKey,
-} from "../workspace/workspaceGridSidebarSelection";
 import {
   hasSidebarPinnedRef,
   removeSidebarPinnedRef,
@@ -215,6 +212,7 @@ type PinnedDisplayItem =
   | { id: string; ref: SidebarPinnedRef; type: "agent"; agent: Agent; createdAt: string; lastMessageAt?: string | null; label: string };
 
 const EMPTY_PINNED_REFS: SidebarPinnedRef[] = [];
+const EMPTY_SIDEBAR_ITEM_IDS: string[] = [];
 
 type CustomSectionDisplayItem =
   | { id: string; type: "channel"; channel: Channel; createdAt: string; lastMessageAt?: string | null; label: string; placementKind: "channel" }
@@ -257,69 +255,16 @@ function orderByIds<T extends { id: string }>(items: T[], orderedIds: string[]):
   return orderedIds.map((id) => itemMap.get(id)).filter((item): item is T => !!item);
 }
 
-export function reorderSidebarSubset(
-  orderedIds: string[],
-  sortableIds: string[],
-  activeId: string,
-  overId: string,
-): string[] | null {
-  const oldIndex = sortableIds.indexOf(activeId);
-  const newIndex = sortableIds.indexOf(overId);
-  if (oldIndex === -1 || newIndex === -1 || oldIndex === newIndex) return null;
-  const reordered = arrayMove(sortableIds, oldIndex, newIndex);
-  const remaining = [...reordered];
-  const reorderedSet = new Set(reordered);
-  return orderedIds.map((id) => reorderedSet.has(id) ? remaining.shift()! : id);
-}
-
-type WorkspaceSidebarReorderScope = "channels" | "jointChannels" | "dms";
-
-export function getWorkspaceSidebarReorderScope(
-  activeId: string,
-  overId: string,
-  options: {
-    channelManualSort: boolean;
-    jointChannelManualSort: boolean;
-    dmManualSort: boolean;
-    sortableChannelIds: string[];
-    sortableJointChannelIds: string[];
-    sortableDmIds: string[];
-  },
-): WorkspaceSidebarReorderScope | null {
-  const activeParsed = parseDragId(activeId);
-  const overParsed = parseDragId(overId);
-  if (activeParsed?.kind === "channel" && overParsed?.kind === "channel") {
-    if (
-      options.channelManualSort
-      && options.sortableChannelIds.includes(activeParsed.id)
-      && options.sortableChannelIds.includes(overParsed.id)
-    ) return "channels";
-    if (
-      options.jointChannelManualSort
-      && options.sortableJointChannelIds.includes(activeParsed.id)
-      && options.sortableJointChannelIds.includes(overParsed.id)
-    ) return "jointChannels";
-  }
-  if (
-    options.dmManualSort
-    && activeParsed?.kind === "dm"
-    && overParsed?.kind === "dm"
-    && options.sortableDmIds.includes(activeParsed.id)
-    && options.sortableDmIds.includes(overParsed.id)
-  ) return "dms";
-  return null;
-}
-
-const SIDEBAR_SORT_MODES: SidebarSortMode[] = ["manual", "recent", "az"];
+export const SIDEBAR_SORT_MODES: SidebarSortMode[] = ["manual", "recent", "az"];
 // Sort-mode option labels are display copy — the map now holds the layout
 // catalog id and the rendering call sites resolve it through formatMessage.
-const SIDEBAR_SORT_LABEL_ID: Record<SidebarSortMode, MessageId> = {
+export const SIDEBAR_SORT_LABEL_ID: Record<SidebarSortMode, MessageId> = {
   manual: "layout.sidebar.sortManual",
   recent: "layout.sidebar.sortRecent",
   az: "layout.sidebar.sortAz",
 };
 
-type SidebarSortSection = "pinned" | "jointChannels" | "channels" | "dms";
+export type SidebarSortSection = "pinned" | "jointChannels" | "channels" | "dms";
 // Stryker disable all: accessible section labels are asserted by rendered DOM tests; mutating copy inside Sidebar does not exercise a separate domain seam.
 const SIDEBAR_SORT_SECTION_LABEL_ID: Record<SidebarSortSection, MessageId> = {
   pinned: "layout.sidebar.pinned",
@@ -340,8 +285,8 @@ const SIDEBAR_SECTION_ROW_CLASS = "mb-1 mt-3 flex h-6 items-center justify-betwe
 // without removing the test pin.
 const SIDEBAR_SECTION_ROW_FIRST_CLASS = "mb-1 flex h-6 items-center justify-between px-2";
 void SIDEBAR_SECTION_ROW_FIRST_CLASS;
-const SIDEBAR_SECTION_TOGGLE_CLASS = "flex h-6 min-w-0 flex-1 items-center gap-1 text-xs font-bold uppercase text-foreground-strong tracking-widest transition-colors hover:text-foreground-muted theme-brutal:text-black theme-brutal:hover:text-black/70";
-const SIDEBAR_SECTION_ICON_BUTTON_CLASS = "btn-flat-sm flex size-6 items-center justify-center p-0";
+const SIDEBAR_SECTION_TOGGLE_CLASS = "flex h-6 min-w-0 flex-1 items-center gap-1 [&>svg]:shrink-0 text-xs font-bold uppercase text-foreground-strong tracking-widest transition-colors hover:text-foreground-muted theme-brutal:text-black theme-brutal:hover:text-black/70";
+export const SIDEBAR_SECTION_ICON_BUTTON_CLASS = "btn-flat-sm flex size-6 items-center justify-center p-0";
 type SidebarSectionDescriptionProps = HTMLAttributes<HTMLDivElement> & {
   tone?: "muted" | "subtle" | "strong";
 };
@@ -372,10 +317,6 @@ function SidebarSectionDescription({
 // Stryker disable all: drag-id helpers are exercised through source contracts and manual/browser DnD; the command-runner mutation oracle cannot synthesize dnd-kit pointer flows.
 function channelDragId(id: string): string {
   return `channel:${id}`;
-}
-
-function dmDragId(id: string): string {
-  return `dm:${id}`;
 }
 
 function agentDragId(id: string): string {
@@ -419,7 +360,6 @@ export function getSidebarDropIndicatorEdge(
 interface SidebarProps {
   mobileInline?: boolean;
   bottomSlot?: ReactNode;
-  workspaceRailMode?: WorkspaceGridRailMode;
 }
 
 function SortableSidebarItem({
@@ -556,18 +496,28 @@ function SortableSidebarSection({
   );
 }
 
-function SidebarSectionHeader({ children, onContextMenu }: {
+function SidebarSectionHeader({ children, section, onOpenContextMenu }: {
   children: ReactNode;
-  onContextMenu: (event: React.MouseEvent<HTMLDivElement>) => void;
+  section: SectionCtxMenu["section"];
+  onOpenContextMenu: (event: React.MouseEvent<HTMLDivElement>, section: SectionCtxMenu["section"]) => void;
 }) {
   return (
-    <div className={SIDEBAR_SECTION_ROW_CLASS} onContextMenu={onContextMenu}>
+    <div className={SIDEBAR_SECTION_ROW_CLASS} onContextMenu={(event) => onOpenContextMenu(event, section)}>
       {children}
     </div>
   );
 }
 
-function SidebarSectionToggle({ children, className = "", ...props }: ButtonHTMLAttributes<HTMLButtonElement>) {
+function SidebarSectionToggle<K extends string>({
+  children,
+  className = "",
+  sectionKey,
+  onToggleSection,
+  ...props
+}: Omit<ButtonHTMLAttributes<HTMLButtonElement>, "onClick"> & {
+  sectionKey: K;
+  onToggleSection: (sectionKey: K) => void;
+}) {
   const sortable = useContext(SidebarSectionDragHandleContext);
   return (
     <button
@@ -577,6 +527,7 @@ function SidebarSectionToggle({ children, className = "", ...props }: ButtonHTML
       {...sortable?.attributes}
       {...sortable?.listeners}
       {...props}
+      onClick={() => onToggleSection(sectionKey)}
     >
       {children}
     </button>
@@ -598,20 +549,6 @@ export function getSidebarDragItemTransform(
   return { ...transform, x: 0 };
 }
 
-// Stryker disable all: the Workspace/native-drag vs classic/sortable branch is DOM + browser-drag verified; mutant DnD providers keep the command runner alive.
-function SidebarSortOwnership({
-  workspaceEnabled,
-  sortable,
-  staticContent,
-}: {
-  workspaceEnabled: boolean;
-  sortable: ReactNode;
-  staticContent: ReactNode;
-}) {
-  return workspaceEnabled ? staticContent : sortable;
-}
-// Stryker restore all
-
 /**
  * Loading placeholder for a Sidebar list (channels / DMs / computers / agents).
  * Shown WHILE the store is loading so the section reads as "loading" rather than
@@ -620,6 +557,11 @@ function SidebarSortOwnership({
  * padding + avatar box so each placeholder row is the SAME height as the loaded
  * row — content swaps in without the list jumping.
  */
+const SIDEBAR_ROW_SKELETON_LINE_WIDTHS = ["w-3/5"];
+// Empty drag-only sections can mount after activation; remeasure droppables
+// deterministically instead of keeping pre-drag rects.
+const SIDEBAR_DND_MEASURING = { droppable: { strategy: MeasuringStrategy.Always } };
+
 function SidebarRowsSkeleton({ rows = 4 }: { rows?: number }) {
   return (
     <div aria-hidden="true">
@@ -629,7 +571,7 @@ function SidebarRowsSkeleton({ rows = 4 }: { rows?: number }) {
           className="gap-1.5 px-2 py-2"
           avatar
           avatarClassName="size-[18px]"
-          lineWidths={["w-3/5"]}
+          lineWidths={SIDEBAR_ROW_SKELETON_LINE_WIDTHS}
         />
       ))}
     </div>
@@ -663,17 +605,43 @@ export function ComputerRow({
   machineId,
   selected,
   onSelect,
-  onDragStart,
 }: {
   machineId: string;
   selected: boolean;
   onSelect: (machineId: string, clickCount: number) => void;
-  onDragStart?: (event: React.DragEvent<HTMLButtonElement>, machineId: string) => void;
 }) {
-  const { formatMessage } = useIntl();
   const machine = useMachineStore((s) => s.machines.find((m) => m.id === machineId));
+  const handleClick = useCallback(
+    (event: React.MouseEvent<HTMLButtonElement>) => onSelect(machineId, event.detail),
+    [machineId, onSelect],
+  );
   const latestComputerVersion = useMachineStore((s) => s.latestComputerVersion);
   if (!machine) return null;
+  return (
+    <ComputerRowBody
+      machine={machine}
+      latestComputerVersion={latestComputerVersion}
+      selected={selected}
+      onClick={handleClick}
+    />
+  );
+}
+
+function ComputerRowBody({
+  machine,
+  latestComputerVersion,
+  selected,
+  onClick: handleClick,
+}: {
+  machine: Machine;
+  latestComputerVersion: string | null;
+  selected: boolean;
+  onClick: (event: React.MouseEvent<HTMLButtonElement>) => void;
+}) {
+  const { formatMessage } = useIntl();
+  // Same answer as the detail page: offline while its upgrade restarts reads
+  // "upgrading", not "computer offline".
+  const { reconnecting: upgradeReconnecting } = useComputerUpgradeReconnect(machine);
   // "A newer version exists" is the web's own comparison, so the arrow also
   // shows when web upgrade is off or this version is too old for the web; the
   // detail page then gives the commands.
@@ -687,13 +655,9 @@ export function ComputerRow({
   );
   return (
     <SidebarItem variant="accent"
-      onClick={(event) => onSelect(machine.id, event.detail)}
+      onClick={handleClick}
       data-slot="sidebar-item"
       active={selected}
-      // Stryker disable next-line all: optional workspace drag glue is browser-smoke verified.
-      draggable={!!onDragStart}
-      // Stryker disable next-line all: optional workspace drag glue is browser-smoke verified.
-      onDragStart={(event) => onDragStart?.(event, machine.id)}
       data-testid={`computer-list-item-${machine.id}`}
       className={`mb-1.5 flex w-full items-center gap-2.5 px-2.5 py-2 [@media(max-height:600px)]:py-1 text-left border transition-colors theme-brutal:border-2 ${
  selected
@@ -704,8 +668,10 @@ export function ComputerRow({
       <Card className="relative flex size-9 shrink-0 items-center justify-center overflow-visible p-0"><Monitor size={18} />
         <StatusDot
           className="absolute -right-1 -top-1"
-          title={formatMessage({ id: rowDotTitle.id }, rowDotTitle.values)}
-          tone={getComputerRowDotTone(rowDotStatus)}
+          title={upgradeReconnecting
+            ? formatMessage({ id: "machine.detail.upgradeV2.inProgress" })
+            : formatMessage({ id: rowDotTitle.id }, rowDotTitle.values)}
+          tone={upgradeReconnecting ? "bg-brutal-cyan" : getComputerRowDotTone(rowDotStatus)}
           data-testid={`computer-status-dot-${machine.id}`}
         />
       </Card>
@@ -719,7 +685,11 @@ export function ComputerRow({
           </div>
         )}
         <div className="mt-0.5 flex items-center gap-1.5 text-[11px] font-mono text-foreground-muted theme-brutal:text-black/50">
-          {(() => {
+          {upgradeReconnecting ? (
+            <span className="truncate" data-testid={`computer-upgrade-reconnecting-${machine.id}`}>
+              {formatMessage({ id: "machine.detail.upgradeV2.inProgress" })}
+            </span>
+          ) : (() => {
             const label = getMachineRunLabelDescriptor(machine);
             return (
               <span className={`truncate${label.isOffline ? " text-foreground-placeholder italic theme-brutal:text-black/30" : ""}`}>
@@ -756,10 +726,22 @@ export function ComputerRow({
   );
 }
 
-type SidebarCtxKind = CtxMenu["type"];
+// Returns `prev` untouched when every section is already open, so a route
+// reveal never re-renders the Sidebar for nothing.
+function expandSidebarSections(
+  prev: SidebarCollapsedSections,
+  sections: SidebarCollapsedSection[],
+): SidebarCollapsedSections {
+  if (!sections.some((section) => prev[section])) return prev;
+  const next = { ...prev };
+  for (const section of sections) next[section] = false;
+  return next;
+}
+
+export type SidebarCtxKind = CtxMenu["type"];
 
 // Touch long-press handlers spread onto a sidebar row button.
-type SidebarLongPress = {
+export type SidebarLongPress = {
   onTouchStart: (e: React.TouchEvent) => void;
   onTouchEnd: (e: React.TouchEvent) => void;
   onTouchMove: (e: React.TouchEvent) => void;
@@ -770,7 +752,7 @@ type SidebarLongPress = {
 // className from primitive `selected`/`menuOpen` props (no className prop, which
 // would change identity every parent render and defeat memoization).
 // Stryker disable all: row class-token variants are visual-equivalent under the DOM oracle; wrap/unread behavior is pinned by focused Sidebar DOM tests.
-function sidebarItemClass(selected: boolean, menuOpen = false, allowWrap = false) {
+export function sidebarItemClass(selected: boolean, menuOpen = false, allowWrap = false) {
   return `mx-0 w-full ${allowWrap ? "items-start whitespace-normal" : "items-center"} ${
     selected
       ? "data-active:bg-fill-muted dark:data-active:bg-fill-muted data-active:shadow-none data-active:ring-0 theme-brutal:data-active:bg-brutal-pink theme-brutal:data-active:shadow-brutal-sm"
@@ -779,7 +761,7 @@ function sidebarItemClass(selected: boolean, menuOpen = false, allowWrap = false
 }
 // Stryker restore all
 
-function SidebarAgentActivityBadge({ agentId }: { agentId: string }) {
+export function SidebarAgentActivityBadge({ agentId }: { agentId: string }) {
   return <AgentActivityDot agentId={agentId} size="sm" data-sidebar-avatar-badge="true" />;
 }
 
@@ -810,10 +792,6 @@ const ChannelRow = memo(function ChannelRow({
   onSelect,
   onContextMenu,
   makeLongPress,
-  onDragStart,
-  onDragEnd,
-  onDragOver,
-  onDrop,
   // Stryker disable next-line BooleanLiteral: default row wrapping is a visual fallback; pinned wrapping is covered by explicit DOM tests.
   allowWrap = false,
 }: {
@@ -823,10 +801,6 @@ const ChannelRow = memo(function ChannelRow({
   onSelect: (channel: Channel, clickCount: number) => void;
   onContextMenu: (e: React.MouseEvent, type: SidebarCtxKind, id: string) => void;
   makeLongPress: (type: SidebarCtxKind, id: string) => SidebarLongPress;
-  onDragStart?: (event: React.DragEvent<HTMLButtonElement>, channel: Channel) => void;
-  onDragEnd?: (event: React.DragEvent<HTMLButtonElement>) => void;
-  onDragOver?: (event: React.DragEvent<HTMLButtonElement>, channel: Channel) => void;
-  onDrop?: (event: React.DragEvent<HTMLButtonElement>, channel: Channel) => void;
   allowWrap?: boolean;
 }) {
   const unread = useMessageStore((s) => s.unreadCounts[channel.id] || 0);
@@ -846,20 +820,21 @@ const ChannelRow = memo(function ChannelRow({
     hasNew,
   });
   const showMentionMarker = mentionMarked && channel.joined;
+  const handleClick = useCallback(
+    (event: React.MouseEvent<HTMLButtonElement>) => onSelect(channel, event.detail),
+    [channel, onSelect],
+  );
+  const handleContextMenu = useCallback(
+    (event: React.MouseEvent) => onContextMenu(event, "channel", channel.id),
+    [channel.id, onContextMenu],
+  );
   return (
     <SidebarItem variant="accent"
       data-sidebar-channel-id={channel.id}
       data-slot="sidebar-item"
       active={selected}
-      // Stryker disable next-line all: optional workspace drag glue is browser-smoke verified.
-      draggable={!!onDragStart}
-      // Stryker disable next-line all: optional workspace drag glue is browser-smoke verified.
-      onDragStart={(event) => onDragStart?.(event, channel)}
-      onDragEnd={onDragEnd}
-      onDragOver={(event) => onDragOver?.(event, channel)}
-      onDrop={(event) => onDrop?.(event, channel)}
-      onClick={(event) => onSelect(channel, event.detail)}
-      onContextMenu={(e) => onContextMenu(e, "channel", channel.id)}
+      onClick={handleClick}
+      onContextMenu={handleContextMenu}
       {...makeLongPress("channel", channel.id)}
       className={sidebarItemClass(selected, menuOpen, allowWrap)}
     >
@@ -936,10 +911,6 @@ const DmRow = memo(function DmRow({
   onSelect,
   onContextMenu,
   makeLongPress,
-  onDragStart,
-  onDragEnd,
-  onDragOver,
-  onDrop,
   // Stryker disable next-line BooleanLiteral: default DM wrapping is a visual fallback; pinned wrapping is covered by explicit DOM tests.
   allowWrap = false,
 }: {
@@ -956,30 +927,27 @@ const DmRow = memo(function DmRow({
   onSelect: (dmId: string, clickCount: number) => void;
   onContextMenu: (e: React.MouseEvent, type: SidebarCtxKind, id: string) => void;
   makeLongPress: (type: SidebarCtxKind, id: string) => SidebarLongPress;
-  onDragStart?: (event: React.DragEvent<HTMLButtonElement>, dm: Channel) => void;
-  onDragEnd?: (event: React.DragEvent<HTMLButtonElement>) => void;
-  onDragOver?: (event: React.DragEvent<HTMLButtonElement>, dm: Channel) => void;
-  onDrop?: (event: React.DragEvent<HTMLButtonElement>, dm: Channel) => void;
   allowWrap?: boolean;
 }) {
   // Stryker disable all: visual class-token mutations are equivalent in the DOM oracle; pinned DM profile/source, wrapping, unread and pin-menu behavior are covered by behavior tests.
   const unread = useMessageStore((s) => s.unreadCounts[dm.id] || 0);
   // Stryker disable next-line all: pre-existing draft badge logic is outside the workspace mutation corpus.
   const hasDraft = useMessageStore((s) => !!s.drafts[dm.id]);
+  const handleClick = useCallback(
+    (event: React.MouseEvent<HTMLButtonElement>) => onSelect(dm.id, event.detail),
+    [dm.id, onSelect],
+  );
+  const handleContextMenu = useCallback(
+    (event: React.MouseEvent) => onContextMenu(event, ctxType, ctxId),
+    [ctxId, ctxType, onContextMenu],
+  );
   return (
     <SidebarItem variant="accent"
       data-sidebar-channel-id={dm.id}
       data-slot="sidebar-item"
       active={selected}
-      // Stryker disable next-line all: optional workspace drag glue is browser-smoke verified.
-      draggable={!!onDragStart}
-      // Stryker disable next-line all: optional workspace drag glue is browser-smoke verified.
-      onDragStart={(event) => onDragStart?.(event, dm)}
-      onDragEnd={onDragEnd}
-      onDragOver={(event) => onDragOver?.(event, dm)}
-      onDrop={(event) => onDrop?.(event, dm)}
-      onClick={(event) => onSelect(dm.id, event.detail)}
-      onContextMenu={(e) => onContextMenu(e, ctxType, ctxId)}
+      onClick={handleClick}
+      onContextMenu={handleContextMenu}
       {...makeLongPress(ctxType, ctxId)}
       className={sidebarItemClass(selected, menuOpen, allowWrap)}
     >
@@ -1000,7 +968,7 @@ const DmRow = memo(function DmRow({
         />
       )}
       <div className={`flex min-w-0 flex-1 ${allowWrap ? "flex-col items-start gap-0.5" : "items-baseline gap-1"} text-left`}>
-        <span className={`${allowWrap ? "min-w-0 max-w-full whitespace-normal break-words leading-tight" : "shrink-0 max-w-[70%] truncate"} text-sm ${unread > 0 ? "font-bold" : ""}`}>
+        <span className={`${allowWrap ? "min-w-0 max-w-full whitespace-normal break-words leading-tight" : "min-w-0 truncate"} text-sm ${unread > 0 ? "font-bold" : ""}`}>
           {displayName}
         </span>
         {description && (
@@ -1032,10 +1000,6 @@ export const AgentDmRow = memo(function AgentDmRow({
   onSelect,
   onContextMenu,
   makeLongPress,
-  onDragStart,
-  onDragEnd,
-  onDragOver,
-  onDrop,
   allowWrap = false,
   hideDescription = false,
 }: {
@@ -1047,10 +1011,6 @@ export const AgentDmRow = memo(function AgentDmRow({
   onSelect: (agent: Agent, dmId: string | undefined, clickCount: number) => void;
   onContextMenu: (e: React.MouseEvent, type: SidebarCtxKind, id: string) => void;
   makeLongPress: (type: SidebarCtxKind, id: string) => SidebarLongPress;
-  onDragStart?: (event: React.DragEvent<HTMLButtonElement>, agent: Agent, dmId: string | undefined) => void;
-  onDragEnd?: (event: React.DragEvent<HTMLButtonElement>) => void;
-  onDragOver?: (event: React.DragEvent<HTMLButtonElement>, dmId: string | undefined) => void;
-  onDrop?: (event: React.DragEvent<HTMLButtonElement>, dmId: string | undefined) => void;
   allowWrap?: boolean;
   hideDescription?: boolean;
 }) {
@@ -1058,6 +1018,14 @@ export const AgentDmRow = memo(function AgentDmRow({
   const unread = useMessageStore((s) => (dmId ? s.unreadCounts[dmId] || 0 : 0));
   const hasDraft = useMessageStore((s) => (dmId ? !!s.drafts[dmId] : false));
   const { displayName, description, avatarUrl } = resolveAgentDmProfileSource(agent, dm);
+  const handleClick = useCallback(
+    (event: React.MouseEvent<HTMLButtonElement>) => onSelect(agent, dmId, event.detail),
+    [agent, dmId, onSelect],
+  );
+  const handleContextMenu = useCallback(
+    (event: React.MouseEvent) => onContextMenu(event, "agent", agent.id),
+    [agent.id, onContextMenu],
+  );
   return (
     <SidebarItem variant="accent"
       // The ordinary DM row publishes this too. Without it, the same pinned
@@ -1068,15 +1036,8 @@ export const AgentDmRow = memo(function AgentDmRow({
       data-sidebar-channel-id={dmId}
       data-slot="sidebar-item"
       active={selected}
-      // Stryker disable next-line all: optional workspace drag glue is browser-smoke verified.
-      draggable={!!onDragStart}
-      // Stryker disable next-line all: optional workspace drag glue is browser-smoke verified.
-      onDragStart={(event) => onDragStart?.(event, agent, dmId)}
-      onDragEnd={onDragEnd}
-      onDragOver={(event) => onDragOver?.(event, dmId)}
-      onDrop={(event) => onDrop?.(event, dmId)}
-      onClick={(event) => onSelect(agent, dmId, event.detail)}
-      onContextMenu={(e) => onContextMenu(e, "agent", agent.id)}
+      onClick={handleClick}
+      onContextMenu={handleContextMenu}
       {...makeLongPress("agent", agent.id)}
       className={sidebarItemClass(selected, menuOpen, allowWrap)}
     >
@@ -1087,7 +1048,7 @@ export const AgentDmRow = memo(function AgentDmRow({
         badge={<SidebarAgentActivityBadge agentId={agent.id} />}
       />
       <div className={`flex min-w-0 flex-1 ${allowWrap ? "flex-col items-start gap-0.5" : "items-baseline gap-1"} text-left`}>
-        <span className={`${allowWrap ? "min-w-0 max-w-full whitespace-normal break-words leading-tight" : "shrink-0 max-w-[70%] truncate"} text-sm ${unread > 0 ? "font-bold" : ""}`}>{displayName}</span>
+        <span className={`${allowWrap ? "min-w-0 max-w-full whitespace-normal break-words leading-tight" : "min-w-0 truncate"} text-sm ${unread > 0 ? "font-bold" : ""}`}>{displayName}</span>
         {!hideDescription && description && (
           <span className={`min-w-0 ${allowWrap ? "max-w-full whitespace-normal break-words leading-tight" : "flex-1 truncate"} text-xs text-foreground-muted theme-brutal:text-black/40`}>{description}</span>
         )}
@@ -1146,7 +1107,7 @@ function MobileServerSelectorVectorSurface() {
   );
 }
 
-export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }: SidebarProps) {
+export default function Sidebar({ mobileInline, bottomSlot }: SidebarProps) {
   // Display-language (react-intl) — layout namespace. The 8 settings sub-nav
   // destinations below reuse the already-merged, AngLee-final `settings.tabs.*`
   // ids (identical English source + same destination) rather than forking the
@@ -1233,9 +1194,6 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
   const hasLocalUnread = useMessageStore((s) =>
     Object.values(s.unreadCounts).some((count) => count > 0),
   );
-  const markRead = useMessageStore((s) => s.markRead);
-  // Stryker disable next-line ArrowFunction: adjacent pre-existing selector is outside the Activity mute behavior slice.
-  const markUnread = useMessageStore((s) => s.markUnread);
   // Stryker disable next-line all: pre-existing inbox loading is outside the workspace mutation corpus.
   const loadInbox = useInboxStore((s) => s.loadInbox);
   // Subscribe to the server-provided total (not the loaded `saved` page) so the
@@ -1247,9 +1205,6 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
   const location = useLocation();
   const sidebarScrollRef = useRef<HTMLDivElement | null>(null);
   const handledSidebarFocusLocationKeyRef = useRef<string | null>(null);
-  const workspaceEnabled = useWorkspaceGridNavigationStore(selectWorkspaceGridActive);
-  const workspaceActiveRefKey = useWorkspaceGridNavigationStore(selectWorkspaceGridActiveRefKey);
-  const workspaceActiveAncestorRefKey = useWorkspaceGridNavigationStore(selectWorkspaceGridActiveAncestorRefKey);
   const labsUiEnabled = useServerFeatureFlag(SERVER_LABS_UI_FEATURE_FLAG_KEY).enabled;
   const providerConnectionsEnabled = useServerFeatureFlag(PROVIDER_CONNECTIONS_FEATURE_FLAG_KEY).enabled;
   const slackBridgeGate = useServerFeatureFlag(SLACK_BRIDGE_FEATURE_FLAG_KEYS.master);
@@ -1283,7 +1238,6 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
   const [sidebarDndSourceContainerId, setSidebarDndSourceContainerId] = useState<string | null>(null);
   const sidebarDndSnapshotRef = useRef<SidebarDndProjection | null>(null);
   const sidebarDndProjectionRef = useRef<SidebarDndProjection | null>(null);
-  const workspaceSidebarNativeDragIdRef = useRef<string | null>(null);
   const setMoveToSectionMenuNode = useCallback((menu: HTMLDivElement | null) => {
     const trigger = moveToSectionTriggerRef.current;
     if (!trigger || !menu) return;
@@ -1433,17 +1387,14 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
   // strictly in sync. On mobile the LeftRail is hidden; the 4-tab mobile
   // bar maps /computers back to the Settings tab (Computers is reachable
   // from the Settings sub-nav, not Members).
-  const { railMode: routeRailMode, selectRailMode } = useRailMode();
-  // Stryker disable all: host-mode projection is source-contract and browser-smoke verified.
-  const railMode = workspaceEnabled && workspaceRailMode ? workspaceRailMode : routeRailMode;
-  const activeTab: "chat" | "members" = railMode === "members" || railMode === "humans" ? "members" : "chat";
+  const { railMode, selectRailMode } = useRailMode();
+  const activeTab: "chat" | "members" = railMode === "members" ? "members" : "chat";
   const showSettingsRail = railMode === "settings";
   const showComputersRail = railMode === "computers";
   const showChatRail = activeTab === "chat";
   const railLabel = railMode === "settings" ? formatMessage({ id: "layout.sidebar.headerSettings" })
     : railMode === "tasks" ? formatMessage({ id: "layout.sidebar.headerTasks" })
     : railMode === "computers" ? formatMessage({ id: "layout.sidebar.headerComputers" })
-    : railMode === "humans" ? formatMessage({ id: "layout.sidebar.humans" })
     : railMode === "members" ? formatMessage({ id: "layout.sidebar.headerMembers" })
     : formatMessage({ id: "layout.sidebar.headerChat" });
   // Stryker restore all
@@ -1638,14 +1589,22 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
   }, [sidebarOrder.dmOrder, dmChannels]);
 
 
-  const toggleSection = (section: SidebarCollapsedSection) => {
+  const toggleSection = useCallback((section: SidebarCollapsedSection) => {
     setCollapsed((prev) => {
       const nextValue = !prev[section];
       const next = { ...prev, [section]: nextValue };
       writeSidebarCollapsedSection(user?.id, section, nextValue);
       return next;
     });
-  };
+  }, [user?.id]);
+
+  const toggleCustomSection = useCallback((sectionId: string) => {
+    setCollapsedCustomSections((current) => {
+      const nextValue = !current[sectionId];
+      writeSidebarCustomSectionCollapsed(user?.id, sectionId, nextValue);
+      return { ...current, [sectionId]: nextValue };
+    });
+  }, [user?.id]);
 
   useEffect(() => {
     if (!user?.id || servers.length === 0) return;
@@ -1702,6 +1661,10 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
     userId: user?.id,
   });
 
+  // Reopening a hidden DM reads the latest sidebar order without making it a
+  // trigger: the route reveal below must run only when the route changes.
+  const reopenRouteDm = useEffectEvent((dmId: string) => reopenDm(dmId));
+
   // Auto-expand collapsed sections only for a navigation that happens while
   // the Sidebar is already mounted. On the first render, the route merely
   // describes the page being restored and must not override the user's saved
@@ -1726,30 +1689,28 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
     const humanMatch = path.match(/\/human\/(.+)/);
 
     if (channelMatch) {
-      // oxlint-disable-next-line react-doctor/no-event-handler -- YMNNE-family: pre-existing non-bug site grandfathered; rule now gates new code (see docs/frontend/render-cost-contract.md)
-      if (collapsed.channels) setCollapsed((prev) => ({ ...prev, channels: false }));
+      setCollapsed((prev) => expandSidebarSections(prev, ["channels"]));
     } else if (dmMatch) {
       // Expand DMs section (reuses agents collapsed state)
-      if (collapsed.agents) setCollapsed((prev) => ({ ...prev, agents: false }));
+      setCollapsed((prev) => expandSidebarSections(prev, ["agents"]));
       // Reopen DM if it was closed (e.g. navigated via Message button)
-      reopenDm(dmMatch[1]);
+      reopenRouteDm(dmMatch[1]);
     } else if (agentMatch) {
-      // Expand agents in Tab 1
-      if (collapsed.agents) setCollapsed((prev) => ({ ...prev, agents: false }));
-      // Also expand in Tab 2
-      if (collapsed.machinesAgents) setCollapsed((prev) => ({ ...prev, machinesAgents: false }));
+      // Expand agents in Tab 1 and in Tab 2
+      setCollapsed((prev) => expandSidebarSections(prev, ["agents", "machinesAgents"]));
     } else if (machineMatch) {
-      if (collapsed.machinesAgents) setCollapsed((prev) => ({ ...prev, machinesAgents: false }));
+      setCollapsed((prev) => expandSidebarSections(prev, ["machinesAgents"]));
     } else if (humanMatch) {
-      if (collapsed.humans) setCollapsed((prev) => ({ ...prev, humans: false }));
+      setCollapsed((prev) => expandSidebarSections(prev, ["humans"]));
     }
-  }, [location.pathname, location.state, user?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [location.pathname, location.state, user?.id]);
 
   // Close context menu on Escape. Outside-click is handled by the overlay
   // div in the portal (below) — using a document mousedown listener here
   // would race with iOS's synthetic mousedown after a long-press touchend,
   // closing the menu the instant it opens. The overlay pattern is the same
   // one MessageItem uses for its context menu.
+  const clearCtxMenu = useCallback(() => setCtxMenu(null), []);
   const closeCtx = useCallback(() => {
     setCtxMenu(null);
     setMoveToSectionMenuOpen(false);
@@ -1874,27 +1835,19 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
   const handleSelectChannel = useCallback((channel: Channel, _clickCount = 1) => {
     if (longPressSuppressRef.current) return;
     markUnreadSidebarItemRead(channel.id);
-    if (workspaceEnabled) {
-      emitWorkspaceGridOpenChannel(channel.id);
-    } else {
-      nav.toChannel(channel.id);
-    }
+    nav.toChannel(channel.id);
     setSidebarOpen(false);
-  }, [longPressSuppressRef, markUnreadSidebarItemRead, nav, setSidebarOpen, workspaceEnabled]);
+  }, [longPressSuppressRef, markUnreadSidebarItemRead, nav, setSidebarOpen]);
   // Stryker restore all
 
   const openDmSurface = useCallback(
     (dmChannelId: string) => {
       markUnreadSidebarItemRead(dmChannelId);
-      if (workspaceEnabled) {
-        emitWorkspaceGridOpenDm(dmChannelId);
-      } else {
-        nav.toDm(dmChannelId);
-      }
+      nav.toDm(dmChannelId);
       setSidebarOpen(false);
     },
     // Stryker disable next-line ArrayDeclaration: callback freshness is exercised by sidebar navigation DOM tests; replacing the dependency list is not observable in the focused mutation lifecycle.
-    [markUnreadSidebarItemRead, nav, setSidebarOpen, workspaceEnabled],
+    [markUnreadSidebarItemRead, nav, setSidebarOpen],
   );
 
   // Stryker disable all: route-specific host wiring is contract-pinned and browser-smoke verified.
@@ -1912,25 +1865,17 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
   // Stryker restore all
 
   const handleSelectAgent = useCallback((agentId: string, _clickCount = 1) => {
-    // Stryker disable all: workspace host dispatch is contract-pinned and browser-smoke verified.
+    // Stryker disable all: route dispatch is browser-smoke verified.
     if (longPressSuppressRef.current) return;
-    if (workspaceEnabled) {
-      const agent = allAgents.find((candidate) => candidate.id === agentId);
-      emitWorkspaceGridOpenPanel(
-        { kind: "agent", id: agentId },
-        { title: `@${agent?.displayName || agent?.name || agentId}`, subtitle: formatMessage({ id: "workspace.panel.agent" }) },
-      );
-    } else {
-      nav.toAgent(agentId);
-    }
+    nav.toAgent(agentId);
     closeRightPanel();
     setSidebarOpen(false);
-  }, [allAgents, closeRightPanel, longPressSuppressRef, nav, setSidebarOpen, workspaceEnabled, formatMessage]);
+  }, [closeRightPanel, longPressSuppressRef, nav, setSidebarOpen]);
   // Stryker restore all
 
   // Combined select for agent DM rows: open the existing DM if there is one,
   // otherwise navigate to the agent profile. Stable so <AgentDmRow> stays memo'd.
-  // Stryker disable all: typed workspace routing is covered by channel/agent browser smoke.
+  // Stryker disable all: typed routing is covered by channel/agent browser smoke.
   const handleSelectAgentDm = useCallback((agent: Agent, dmId: string | undefined, clickCount = 1) => {
     if (dmId) handleSelectDm(dmId, clickCount);
     else handleSelectAgent(agent.id, clickCount);
@@ -1938,36 +1883,21 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
   // Stryker restore all
 
   const handleSelectMachine = useCallback((machineId: string, _clickCount = 1) => {
-    // Stryker disable all: workspace host dispatch is contract-pinned and browser-smoke verified.
+    // Stryker disable all: route dispatch is browser-smoke verified.
     if (longPressSuppressRef.current) return;
-    if (workspaceEnabled) {
-      emitWorkspaceGridOpenPanel(
-        { kind: "machine", id: machineId },
-        { title: machineNames[machineId] || formatMessage({ id: "machine.detail.computer" }), subtitle: formatMessage({ id: "workspace.panel.computer" }) },
-      );
-    } else {
-      nav.toComputer(machineId);
-    }
+    nav.toComputer(machineId);
     closeRightPanel();
     setSidebarOpen(false);
-  }, [closeRightPanel, formatMessage, longPressSuppressRef, machineNames, nav, setSidebarOpen, workspaceEnabled]);
+  }, [closeRightPanel, longPressSuppressRef, nav, setSidebarOpen]);
   // Stryker restore all
 
   const handleSelectHuman = useCallback((userId: string, _clickCount = 1) => {
-    // Stryker disable all: workspace host dispatch is contract-pinned and browser-smoke verified.
+    // Stryker disable all: route dispatch is browser-smoke verified.
     if (longPressSuppressRef.current) return;
-    if (workspaceEnabled) {
-      const human = members.find((candidate) => candidate.userId === userId);
-      emitWorkspaceGridOpenPanel(
-        { kind: "human", id: userId },
-        { title: `@${human?.displayName || human?.name || userId}`, subtitle: formatMessage({ id: "workspace.panel.human" }) },
-      );
-    } else {
-      nav.toHuman(userId);
-    }
+    nav.toHuman(userId);
     closeRightPanel();
     setSidebarOpen(false);
-  }, [closeRightPanel, longPressSuppressRef, members, nav, setSidebarOpen, workspaceEnabled, formatMessage]);
+  }, [closeRightPanel, longPressSuppressRef, nav, setSidebarOpen]);
   // Stryker restore all
 
   const handleOpenHumanDm = useCallback(
@@ -1993,19 +1923,6 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
     // Stryker disable next-line ArrayDeclaration: the DOM corpus remounts per intent; stale-closure behavior is covered by the broader sidebar navigation suite.
     [closeRightPanel, dmChannels, openDM, openDmSurface, selectSidebarTab],
   );
-
-  // Stryker disable all: native drag-event forwarding is browser-smoke verified.
-  const dragWorkspacePanel = useCallback((
-    event: React.DragEvent<HTMLElement>,
-    ref: WorkspacePanelRef,
-    source: { title?: string; subtitle?: string },
-    sidebarDragId?: string,
-  ) => {
-    if (!workspaceEnabled) return;
-    workspaceSidebarNativeDragIdRef.current = sidebarDragId ?? null;
-    emitWorkspaceGridDragPanel(event.nativeEvent, ref, source);
-  }, [workspaceEnabled]);
-  // Stryker restore all
 
   // Stryker disable all: pre-existing context-menu dispatch is outside the workspace mutation corpus.
   const openCtxMenu = useCallback((e: React.MouseEvent, type: CtxMenu["type"], id: string) => {
@@ -2118,32 +2035,12 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
   const pathBase = serverSlug ? `/s/${serverSlug}` : "";
   // Stryker restore all
 
-  // Stryker disable all: React wiring is browser-smoke verified; selection behavior is mutation-tested in the helper.
-  const isChannelSelected = createWorkspaceGridSidebarSelection({
-    kind: "channel",
-    workspaceActive: workspaceEnabled,
-    activeRefKey: workspaceActiveAncestorRefKey ?? workspaceActiveRefKey,
-    pathname: location.pathname,
-    pathBase,
-  });
-  const isDmSelected = createWorkspaceGridSidebarSelection({
-    kind: "dm",
-    workspaceActive: workspaceEnabled,
-    activeRefKey: workspaceActiveAncestorRefKey ?? workspaceActiveRefKey,
-    pathname: location.pathname,
-    pathBase,
-  });
-  const isAgentSelected = createWorkspaceGridSidebarSelection({
-    kind: "agent",
-    workspaceActive: workspaceEnabled,
-    activeRefKey: workspaceActiveRefKey,
-    pathname: location.pathname,
-    pathBase,
-  });
-  const isMachineSelected = (machineId: string) => workspaceEnabled
-    ? workspaceActiveRefKey === `machine:${machineId}`
-    : location.pathname === `${pathBase}/computer/${machineId}`
-      || location.pathname === `${pathBase}/machine/${machineId}`;
+  // Stryker disable all: route selection is browser-smoke verified.
+  const isChannelSelected = (id: string) => location.pathname === `${pathBase}/channel/${id}`;
+  const isDmSelected = (id: string) => location.pathname === `${pathBase}/dm/${id}`;
+  const isAgentSelected = (id: string) => location.pathname === `${pathBase}/agent/${id}`;
+  const isMachineSelected = (machineId: string) => location.pathname === `${pathBase}/computer/${machineId}`
+    || location.pathname === `${pathBase}/machine/${machineId}`;
   // Task #702 (artin): opening an agent page (/s/<server>/agent/<id>) lands
   // the rail on the People tab; the left list must locate the agent on open,
   // so scroll its row into view as soon as the list has it. `nearest` is a
@@ -2175,13 +2072,7 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
     locatedAgentRef.current = routeAgentId;
   }, [activeTab, routeAgentId, agents.length, collapsed.agents]);
 
-  const isHumanSelected = createWorkspaceGridSidebarSelection({
-    kind: "human",
-    workspaceActive: workspaceEnabled,
-    activeRefKey: workspaceActiveRefKey,
-    pathname: location.pathname,
-    pathBase,
-  });
+  const isHumanSelected = (id: string) => location.pathname === `${pathBase}/human/${id}`;
   // Stryker restore all
   const isReleaseNotesRoute = location.pathname.startsWith(`${pathBase}/release-notes`);
 
@@ -2217,15 +2108,7 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
     if (!t) return mobileInline ? null : "account";
     return settingsTabIdForRouteSlug(t);
   })();
-  type SettingsItem = {
-    id: string;
-    label: string;
-    icon: React.ReactNode;
-    onClick?: () => void;
-    href?: string;
-  };
-  type SettingsGroup = { label: string; items: SettingsItem[] };
-  const settingsSidebarGroups: SettingsGroup[] = pathBase
+  const settingsSidebarGroups = useMemo<SettingsSidebarGroup[]>(() => pathBase
     ? [
         {
           label: formatMessage({ id: "layout.sidebar.settingsGroupPersonal" }),
@@ -2277,7 +2160,21 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
           ],
         },
       ]
-    : [];
+    : [], [
+    canManageExternalAuth,
+    canViewAdministrationSettings,
+    canViewApplicationsSettings,
+    canViewBillingSettings,
+    canViewMcpSettings,
+    currentRole,
+    formatMessage,
+    labsUiEnabled,
+    mobileInline,
+    navigate,
+    pathBase,
+    providerConnectionsEnabled,
+    slackBridgeEnabled,
+  ]);
 
   // `sidebarItemClass` is now defined at module scope (pure) so the memoized row
   // leaves can use it too.
@@ -2289,85 +2186,47 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
     section: SidebarSortSection,
     value: SidebarSortMode,
     onChange: (value: SidebarSortMode) => void,
-  ) => {
-    const isOpen = openSortMenu === section;
-    // Sidebar sort = single-select dropdown — delegated to SelectionPopover
-    // so the ✓ position (right) and hover token (`bg-soft-signal/30`)
-    // match the rest of the Selection family. stdrc 2026-05-25
-    // #proj-theme:ac79cf20 msg=8fdf9cba + msg=b0b92c1c. Removes the older
-    // hand-rolled `<button role="menuitemradio">` rows that put ✓ on the
-    // left and used full-saturation `bg-soft-signal` for both hover and
-    // selected fill (Linear/Notion/GitHub/Figma all put ✓ on the right
-    // for single-select dropdowns).
-    return (
-      <div ref={isOpen ? sortMenuRef : undefined} className="relative shrink-0">
-        <Tooltip content={formatMessage(
-            { id: "layout.sidebar.sortTitle" },
-            { currentLabel: formatMessage({ id: SIDEBAR_SORT_LABEL_ID[value] }) },
-          )}>
-        <button
-          type="button"
-          aria-label={formatMessage({ id: "layout.sidebar.sortAria" })}
-          aria-haspopup="menu"
-          aria-expanded={isOpen}
-          data-testid="sidebar-sort-menu-button"
-          data-sort-section={section}
-          onClick={(event) => {
-            event.stopPropagation();
-            setOpenSortMenu((current) => (current === section ? null : section));
-          }}
-          className={SIDEBAR_SECTION_ICON_BUTTON_CLASS}
-        >
-          <ArrowUpDown size={14} />
-        </button>
-        </Tooltip>
-        {isOpen && (
-          <SelectionPopover
-            title={formatMessage({ id: "layout.sidebar.sortMenuTitle" })}
-            showHeader={false}
-            className="absolute right-0 top-8 z-50 min-w-[136px] overflow-hidden border border-line-muted bg-layer-panel shadow-raft-sm theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white theme-brutal:shadow-brutal"
-            options={SIDEBAR_SORT_MODES.map((mode) => ({
-              key: mode,
-              checked: mode === value,
-              label: formatMessage({ id: SIDEBAR_SORT_LABEL_ID[mode] }),
-              onClick: () => {
-                onChange(mode);
-                setOpenSortMenu(null);
-              },
-            }))}
-          />
-        )}
-      </div>
-    );
-  };
+  ) => (
+    <SidebarSortMenu
+      section={section}
+      value={value}
+      onChange={onChange}
+      open={openSortMenu === section}
+      setOpenSortMenu={setOpenSortMenu}
+      menuRef={sortMenuRef}
+    />
+  );
 
-  const openCreateChannelDialog = () => {
+  const openCreateChannelDialog = useCallback(() => {
     setSectionCtxMenu(null);
     setShowCreateChannel(true);
-  };
+  }, []);
 
-  const openCreateJointChannelDialog = () => {
+  const openCreateJointChannelDialog = useCallback(() => {
     if (!canCreateJointChannel) return;
     setSectionCtxMenu(null);
     setShowCreateJointChannel(true);
-  };
+  }, [canCreateJointChannel]);
 
-  const openCreateAgentDialog = () => {
+  const openCreateAgentDialog = useCallback((event: React.MouseEvent) => {
+    event.stopPropagation();
     setShowCreateAgentMenu(false);
     trackAgentCreateOpened("sidebar");
     setShowCreateAgent(true);
-  };
+  }, [setShowCreateAgent]);
 
-  const openCreateExternalAgentDialog = () => {
+  const openCreateExternalAgentDialog = useCallback((event: React.MouseEvent) => {
+    event.stopPropagation();
     setShowCreateAgentMenu(false);
     trackAgentCreateOpened("sidebar_external");
     setShowCreateExternalAgent(true);
-  };
+  }, []);
 
-  const openHandoffDialog = () => {
+  const openHandoffDialog = useCallback((event: React.MouseEvent) => {
+    event.stopPropagation();
     setShowCreateAgentMenu(false);
     setShowHandoff(true);
-  };
+  }, []);
 
   // Stryker disable all: rendered DOM and Playwright tests exercise both dedicated add buttons and their dialogs; this block is React event wiring.
   const renderSectionAddButton = (section: "channels" | "jointChannels") => {
@@ -2428,19 +2287,13 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
           >
             <MenuItem
               icon={<Bot size={14} className="shrink-0" />}
-              onClick={(event) => {
-                event.stopPropagation();
-                openCreateAgentDialog();
-              }}
+              onClick={openCreateAgentDialog}
             >
               {formatMessage({ id: "layout.sidebar.createAgent" })}
             </MenuItem>
             <MenuItem
               icon={<Link2 size={14} className="shrink-0" />}
-              onClick={(event) => {
-                event.stopPropagation();
-                openCreateExternalAgentDialog();
-              }}
+              onClick={openCreateExternalAgentDialog}
             >
               {formatMessage({ id: "layout.sidebar.createExternalAgent" })}
             </MenuItem>
@@ -2448,10 +2301,7 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
               <MenuItem
                 icon={<ArrowRightLeft size={14} className="shrink-0" />}
                 data-testid="sidebar-menu-handoff-session"
-                onClick={(event) => {
-                  event.stopPropagation();
-                  openHandoffDialog();
-                }}
+                onClick={openHandoffDialog}
               >
                 {formatMessage({ id: "layout.sidebar.handoffSession" })}
               </MenuItem>
@@ -2540,8 +2390,6 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
     () => orderedJointChannels.filter((channel) => !pinnedChannelIdSet.has(channel.id) && !customPlacedChannelIds.has(channel.id)),
     [orderedJointChannels, pinnedChannelIdSet, customPlacedChannelIds],
   );
-  const sortableChannelIds = useMemo(() => sortableChannels.map((channel) => channel.id), [sortableChannels]);
-  const sortableJointChannelIds = useMemo(() => sortableJointChannels.map((channel) => channel.id), [sortableJointChannels]);
   const channelManualSort = channelSortMode === "manual";
   const jointChannelManualSort = jointChannelSortMode === "manual";
   const dmManualSort = dmSortMode === "manual";
@@ -2903,7 +2751,6 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
     pinnedDmIdSet,
     pinnedHumanIdSet,
   ]);
-  const sortableDmIds = useMemo(() => orderedDms.map((dm) => dm.id), [orderedDms]);
 
   const sidebarDndDisplayItems = useMemo(() => {
     const items = new Map<string, SidebarDndDisplayItem>();
@@ -3119,7 +2966,7 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
     togglePinnedRef({ kind: "channel", id: channelId }, [{ kind: "channel", id: channelId }]);
   }, [togglePinnedRef]);
 
-  const toggleChannelActivityMute = async (channel: Channel) => {
+  const toggleChannelActivityMute = useCallback(async (channel: Channel) => {
     // Stryker disable next-line all: the context-menu visibility gate enforces the same supported/joined/non-thread predicate; this is defense-in-depth for non-UI callers.
     if (!canToggleActivityMute(channel)) return;
     const previous = {
@@ -3149,7 +2996,7 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
           : formatMessage({ id: "layout.sidebar.failedUnmuteActivity" }));
       }
     }
-  };
+  }, [formatMessage]);
 
   const togglePinAgent = useCallback((agentId: string) => {
     const agentDm = dmChannels.find((dm) => dm.peerType === "agent" && dm.peerId === agentId);
@@ -3167,66 +3014,6 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
     if (!ref) return;
     togglePinnedRef(ref, [{ kind: "channel", id: dm.id }]);
   }, [togglePinnedRef]);
-
-  const resolveWorkspaceSidebarReorderScope = useCallback((activeId: string, overId: string) => (
-    getWorkspaceSidebarReorderScope(activeId, overId, {
-      channelManualSort,
-      jointChannelManualSort,
-      dmManualSort,
-      sortableChannelIds,
-      sortableJointChannelIds,
-      sortableDmIds,
-    })
-  ), [channelManualSort, dmManualSort, jointChannelManualSort, sortableChannelIds, sortableDmIds, sortableJointChannelIds]);
-
-  const handleWorkspaceSidebarDragOver = useCallback((event: React.DragEvent<HTMLElement>, overId: string) => {
-    const activeId = workspaceSidebarNativeDragIdRef.current;
-    if (!activeId || !resolveWorkspaceSidebarReorderScope(activeId, overId)) return;
-    event.preventDefault();
-    event.dataTransfer.dropEffect = "move";
-  }, [resolveWorkspaceSidebarReorderScope]);
-
-  const handleWorkspaceSidebarDrop = useCallback((event: React.DragEvent<HTMLElement>, overId: string) => {
-    const activeId = workspaceSidebarNativeDragIdRef.current;
-    if (!activeId) return;
-    const scope = resolveWorkspaceSidebarReorderScope(activeId, overId);
-    if (!scope) return;
-    event.preventDefault();
-    event.stopPropagation();
-
-    const activeParsed = parseDragId(activeId);
-    const overParsed = parseDragId(overId);
-    if (!activeParsed || !overParsed) return;
-
-    if (scope === "dms") {
-      const nextOrder = reorderSidebarSubset(dmOrderIds, sortableDmIds, activeParsed.id, overParsed.id);
-      if (!nextOrder) return;
-      setDmOrderIds(nextOrder);
-      void updateSidebarOrder({ dmOrder: nextOrder });
-      workspaceSidebarNativeDragIdRef.current = null;
-      return;
-    }
-
-    const sortableIds = scope === "channels" ? sortableChannelIds : sortableJointChannelIds;
-    const nextOrder = reorderSidebarSubset(channelOrderIds, sortableIds, activeParsed.id, overParsed.id);
-    if (!nextOrder) return;
-    setChannelOrderIds(nextOrder);
-    void updateSidebarOrder({ channelOrder: nextOrder.filter((id) => id !== allChannelId) });
-    workspaceSidebarNativeDragIdRef.current = null;
-  }, [
-    allChannelId,
-    channelOrderIds,
-    dmOrderIds,
-    resolveWorkspaceSidebarReorderScope,
-    sortableChannelIds,
-    sortableDmIds,
-    sortableJointChannelIds,
-    updateSidebarOrder,
-  ]);
-
-  const handleWorkspaceSidebarDragEnd = useCallback(() => {
-    workspaceSidebarNativeDragIdRef.current = null;
-  }, []);
 
   const sidebarCollisionDetection = useCallback<CollisionDetection>((args) => {
     const activeId = String(args.active.id);
@@ -3480,17 +3267,6 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
       onSelect={handleSelectChannel}
       onContextMenu={openCtxMenu}
       makeLongPress={makeLongPressHandlers}
-      // Stryker disable all: typed drag payload forwarding is contract-pinned and browser-smoke verified.
-      onDragStart={workspaceEnabled ? (event, draggedChannel) => dragWorkspacePanel(
-        event,
-        { kind: "channel", id: draggedChannel.id },
-        { title: `#${draggedChannel.name}`, subtitle: formatMessage({ id: "workspace.panel.channel" }) },
-        channelDragId(draggedChannel.id),
-      ) : undefined}
-      onDragEnd={workspaceEnabled ? handleWorkspaceSidebarDragEnd : undefined}
-      onDragOver={workspaceEnabled ? (event, draggedChannel) => handleWorkspaceSidebarDragOver(event, channelDragId(draggedChannel.id)) : undefined}
-      onDrop={workspaceEnabled ? (event, draggedChannel) => handleWorkspaceSidebarDrop(event, channelDragId(draggedChannel.id)) : undefined}
-      // Stryker restore all
       allowWrap={options.allowWrap}
     />
   );
@@ -3510,26 +3286,6 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
         onSelect={handleSelectAgentDm}
         onContextMenu={openCtxMenu}
         makeLongPress={makeLongPressHandlers}
-        // Stryker disable all: typed drag payload forwarding is contract-pinned and browser-smoke verified.
-        onDragStart={workspaceEnabled ? (event, draggedAgent, draggedDmId) => dragWorkspacePanel(
-          event,
-          draggedDmId ? { kind: "dm", id: draggedDmId } : { kind: "agent", id: draggedAgent.id },
-          {
-            title: `@${draggedAgent.displayName || draggedAgent.name}`,
-            subtitle: draggedDmId
-              ? formatMessage({ id: "workspace.panel.directMessage" })
-              : formatMessage({ id: "workspace.panel.agent" }),
-          },
-          draggedDmId ? dmDragId(draggedDmId) : undefined,
-        ) : undefined}
-        onDragEnd={workspaceEnabled ? handleWorkspaceSidebarDragEnd : undefined}
-        onDragOver={workspaceEnabled ? (event, draggedDmId) => {
-          if (draggedDmId) handleWorkspaceSidebarDragOver(event, dmDragId(draggedDmId));
-        } : undefined}
-        onDrop={workspaceEnabled ? (event, draggedDmId) => {
-          if (draggedDmId) handleWorkspaceSidebarDrop(event, dmDragId(draggedDmId));
-        } : undefined}
-        // Stryker restore all
         allowWrap={options.allowWrap}
         hideDescription={options.hideDescription}
       />
@@ -3566,17 +3322,6 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
         onSelect={handleSelectDm}
         onContextMenu={openCtxMenu}
         makeLongPress={makeLongPressHandlers}
-        // Stryker disable all: typed drag payload forwarding is contract-pinned and browser-smoke verified.
-        onDragStart={workspaceEnabled ? (event, draggedDm) => dragWorkspacePanel(
-          event,
-          { kind: "dm", id: draggedDm.id },
-          { title: `@${displayName}`, subtitle: formatMessage({ id: "workspace.panel.directMessage" }) },
-          dmDragId(draggedDm.id),
-        ) : undefined}
-        onDragEnd={workspaceEnabled ? handleWorkspaceSidebarDragEnd : undefined}
-        onDragOver={workspaceEnabled ? (event, draggedDm) => handleWorkspaceSidebarDragOver(event, dmDragId(draggedDm.id)) : undefined}
-        onDrop={workspaceEnabled ? (event, draggedDm) => handleWorkspaceSidebarDrop(event, dmDragId(draggedDm.id)) : undefined}
-        // Stryker restore all
         allowWrap={options.allowWrap}
       />
     );
@@ -3584,74 +3329,23 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
 
   /** Render agent as an entity item (Members tab) — navigates to /agent/:agentId */
   // Stryker disable all: member-row interaction glue is contract-pinned and browser-smoke verified.
-  const renderAgentItem = (agent: typeof agents[0]) => {
-    return (
-      <SidebarItem variant="accent"
-        key={agent.id}
-        data-agent-id={agent.id}
-        draggable={workspaceEnabled}
-        onDragStart={(event) => dragWorkspacePanel(
-          event,
-          { kind: "agent", id: agent.id },
-          { title: `@${agent.displayName || agent.name}`, subtitle: formatMessage({ id: "workspace.panel.agent" }) },
-        )}
-        onClick={(event) => handleSelectAgent(agent.id, event.detail)}
-        onDoubleClick={(event) => {
-          event.preventDefault();
-          event.stopPropagation();
-          void handleOpenAgentDm(agent.id);
-        }}
-        onContextMenu={(e) => openCtxMenu(e, "member-agent", agent.id)}
-        data-slot="sidebar-item"
-        active={isAgentSelected(agent.id)}
-        {...makeLongPressHandlers("member-agent", agent.id)}
-        className={sidebarItemClass(isAgentSelected(agent.id), ctxMenu?.type === "member-agent" && ctxMenu.id === agent.id)}
-      >
-        <AvatarSlot
-          context="sidebar-list"
-          type="agent"
-          agentAvatarUrl={agent.avatarUrl}
-          badge={<SidebarAgentActivityBadge agentId={agent.id} />}
-        />
-        <div className="flex min-w-0 flex-1 items-baseline gap-1 text-left">
-          <span className="shrink-0 max-w-[70%] truncate text-sm">{agent.displayName || agent.name}</span>
-          {agent.description && (
-            <span className="min-w-0 flex-1 truncate text-xs text-foreground-muted theme-brutal:text-black/40">{agent.description}</span>
-          )}
-        </div>
-      </SidebarItem>
-    );
-  };
+  const renderAgentItem = (agent: typeof agents[0]) => (
+    <MemberAgentRow
+      key={agent.id}
+      agent={agent}
+      selected={isAgentSelected(agent.id)}
+      menuOpen={ctxMenu?.type === "member-agent" && ctxMenu.id === agent.id}
+      onSelect={handleSelectAgent}
+      onOpenDm={handleOpenAgentDm}
+      onContextMenu={openCtxMenu}
+      makeLongPress={makeLongPressHandlers}
+    />
+  );
   // Stryker restore all
 
   // Stryker disable all: pre-existing shared section-toggle glue is outside the workspace mutation corpus.
-  const toggleAgentsSection = () => toggleSection("agents");
   const agentsExpanded = !collapsed.agents;
   // Stryker restore all
-
-  const renderPinnedItem = (item: PinnedDisplayItem) => {
-    switch (item.type) {
-      case "channel":
-        return renderChannelItem(item.channel, { allowWrap: true });
-      case "dm":
-        // Stryker disable next-line all: allowWrap only changes pinned-row visual wrapping; DOM tests cover long-label wrapping for the pinned surface.
-        return renderDmItem(item.dm, { allowWrap: true, hideDescription: item.dm.peerType === "agent" });
-      case "agent":
-        // Stryker disable next-line all: allowWrap only changes pinned-row visual wrapping; DOM tests cover long-label wrapping for the pinned surface.
-        return renderAgentDmItem(item.agent, { allowWrap: true, hideDescription: true });
-    }
-  };
-
-  const renderCustomSectionItem = (item: CustomSectionDisplayItem) => {
-    switch (item.type) {
-      case "channel":
-        return renderChannelItem(item.channel);
-      case "dm":
-        return renderDmItem(item.dm, { hideDescription: true });
-      case "agent":
-        return renderAgentDmItem(item.agent, { hideDescription: true });
-    }
-  };
 
   const renderSidebarDndDisplayItem = (
     item: SidebarDndDisplayItem,
@@ -3716,21 +3410,24 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
     : contextMovableItem?.kind === "agent" && pinnedAgentIds.includes(contextMovableItem.id);
 
   const renderReadToggleAction = (channelId: string, hasUnread: boolean) => (
-    <MenuItem
-      icon={hasUnread ? <MessageSquareCheck size={14} /> : <MessageSquareDot size={14} />}
-      onClick={() => {
-        setCtxMenu(null);
-        const action = hasUnread ? markRead(channelId) : markUnread(channelId);
-        void action.catch(() => {
-          void useMessageStore.getState().loadUnreadCounts();
-        });
-      }}
-    >
-      {hasUnread
-        ? formatMessage({ id: "layout.sidebar.markAsRead" })
-        : formatMessage({ id: "layout.sidebar.markAsUnread" })}
-    </MenuItem>
+    <SidebarReadToggleMenuItem
+      channelId={channelId}
+      hasUnread={hasUnread}
+      onDone={clearCtxMenu}
+    />
   );
+
+  const closeServerMenu = useCallback(() => setShowServerMenu(false), []);
+  const openFinderChannel = useCallback((channelId: string) => nav.toChannel(channelId), [nav]);
+  const openFinderDm = useCallback((dmChannelId: string) => nav.toDm(dmChannelId), [nav]);
+  const openFinderAgentDm = useCallback((agentId: string) => {
+    void openDM(agentId).then((opened) => nav.toDm(opened.id));
+  }, [nav, openDM]);
+  const openFinderHumanDm = useCallback((userId: string) => {
+    void openUserDM(userId).then((opened) => nav.toDm(opened.id));
+  }, [nav, openUserDM]);
+  const openSaved = useCallback(() => nav.toSaved(), [nav]);
+  const openMembersGraph = useCallback(() => navigate(`${pathBase}/members/graph`), [navigate, pathBase]);
 
   // Stryker disable all: pre-existing empty-computer state is outside the workspace mutation corpus.
   const emptyComputersContent = Object.keys(machineNames).length === 0
@@ -3742,6 +3439,225 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
     : null;
   // Stryker restore all
 
+  // Dialog handlers. Each dialog only mounts while its state is set, so the
+  // null guards below never fire in practice; they keep the callbacks total.
+  const closeCreateChannelDialog = useCallback(() => setShowCreateChannel(false), []);
+  const closeCreateJointChannelDialog = useCallback(() => setShowCreateJointChannel(false), []);
+  const closeInviteHumanDialog = useCallback(() => setShowInviteHuman(false), []);
+  const closeCreateExternalAgentDialog = useCallback(() => setShowCreateExternalAgent(false), []);
+  const closeHandoffDialog = useCallback(() => setShowHandoff(false), []);
+  const closeDeleteConfirm = useCallback(() => setDeleteConfirm(null), []);
+  const confirmDelete = useCallback(async () => {
+    if (!deleteConfirm) return;
+    if (deleteConfirm.type === "agent") {
+      await deleteAgent(deleteConfirm.id);
+    } else {
+      await deleteChannel(deleteConfirm.id);
+    }
+    setDeleteConfirm(null);
+  }, [deleteAgent, deleteChannel, deleteConfirm]);
+  const closeStopAgentConfirm = useCallback(() => setStopAgentConfirm(null), []);
+  const confirmStopAgent = useCallback(async () => {
+    if (stopAgentConfirm) await stopAgent(stopAgentConfirm.id);
+  }, [stopAgent, stopAgentConfirm]);
+  const closeResetAgentDialog = useCallback(() => setResetAgentTarget(null), []);
+  const closeArchiveConfirm = useCallback(() => setArchiveConfirm(null), []);
+  const confirmArchive = useCallback(async () => {
+    if (archiveConfirm) await archiveChannel(archiveConfirm.id);
+  }, [archiveChannel, archiveConfirm]);
+  const closeSectionDialog = useCallback(() => setSectionDialog(null), []);
+  const submitCreateSection = useCallback((value: { name: string; emoji: string | null }) => {
+    if (sectionDialog?.mode === "create") createCustomSection(value, sectionDialog.moveItem);
+  }, [createCustomSection, sectionDialog]);
+  const submitEditSection = useCallback((value: { name: string; emoji: string | null }) => {
+    if (sectionDialog?.mode === "edit") updateCustomSection(sectionDialog.section.id, value);
+  }, [sectionDialog, updateCustomSection]);
+  const closeDeleteSectionConfirm = useCallback(() => setDeleteSectionConfirm(null), []);
+  const confirmDeleteSection = useCallback(() => {
+    if (!deleteSectionConfirm) return;
+    deleteCustomSection(deleteSectionConfirm.id);
+    setDeleteSectionConfirm(null);
+  }, [deleteCustomSection, deleteSectionConfirm]);
+
+  // Section context-menu actions. The menu only renders while
+  // `sectionCtxMenu` is set; each action reads the section it was opened for.
+  const selectSectionSortMode = useCallback((mode: SidebarSortMode) => {
+    if (!sectionCtxMenu) return;
+    if (contextCustomSection) {
+      void updateSidebarOrder({
+        customSections: customSections.map((section) => section.id === contextCustomSection.id ? { ...section, sortMode: mode } : section),
+      });
+    } else if (sectionCtxMenu.section === "pinned") updatePinnedSortMode(mode);
+    else if (sectionCtxMenu.section === "jointChannels") updateJointChannelSortMode(mode);
+    else if (sectionCtxMenu.section === "channels") updateChannelSortMode(mode);
+    else updateDmSortMode(mode);
+    closeSectionCtx();
+  }, [
+    closeSectionCtx,
+    contextCustomSection,
+    customSections,
+    sectionCtxMenu,
+    updateChannelSortMode,
+    updateDmSortMode,
+    updateJointChannelSortMode,
+    updatePinnedSortMode,
+    updateSidebarOrder,
+  ]);
+  const toggleJoinedChannelsOnlyFromMenu = useCallback(() => {
+    updateJoinedChannelsOnly(!joinedChannelsOnly);
+    closeSectionCtx();
+  }, [closeSectionCtx, joinedChannelsOnly, updateJoinedChannelsOnly]);
+  const toggleHideEmptySectionsFromMenu = useCallback(() => {
+    updateHideEmptySections(!hideEmptySections);
+    closeSectionCtx();
+  }, [closeSectionCtx, hideEmptySections, updateHideEmptySections]);
+  const renameContextSection = useCallback(() => {
+    if (!contextCustomSection) return;
+    setSectionDialog({ mode: "edit", section: contextCustomSection });
+    closeSectionCtx();
+  }, [closeSectionCtx, contextCustomSection]);
+  const createSectionFromSectionMenu = useCallback(() => {
+    setSectionDialog({ mode: "create" });
+    closeSectionCtx();
+  }, [closeSectionCtx]);
+  const deleteContextSection = useCallback(() => {
+    if (!contextCustomSection) return;
+    setDeleteSectionConfirm(contextCustomSection);
+    closeSectionCtx();
+  }, [closeSectionCtx, contextCustomSection]);
+
+  // Sidebar surface context-menu actions.
+  const createChannelFromSurfaceMenu = useCallback(() => {
+    setShowCreateChannel(true);
+    closeSidebarSurfaceCtx();
+  }, [closeSidebarSurfaceCtx]);
+  const createJointChannelFromSurfaceMenu = useCallback(() => {
+    setShowCreateJointChannel(true);
+    closeSidebarSurfaceCtx();
+  }, [closeSidebarSurfaceCtx]);
+  const createSectionFromSurfaceMenu = useCallback(() => {
+    setSectionDialog({ mode: "create" });
+    closeSidebarSurfaceCtx();
+  }, [closeSidebarSurfaceCtx]);
+
+  // Row context-menu targets and actions. Targets are resolved from the id the
+  // menu was opened with; actions only run while the menu (and so its target)
+  // is rendered.
+  const ctxChannel = ctxMenu?.type === "channel" ? channels.find((c) => c.id === ctxMenu.id) : undefined;
+  const ctxHumanDmChannel = ctxMenu?.type === "human"
+    ? dmChannels.find((dm) => dm.peerType === "user" && dm.peerId === ctxMenu.id)
+    : undefined;
+  const ctxDmChannel = ctxMenu?.type === "dm" ? dmChannels.find((dm) => dm.id === ctxMenu.id) : undefined;
+  const ctxAgent = ctxMenu?.type === "agent" || ctxMenu?.type === "member-agent"
+    ? agents.find((a) => a.id === ctxMenu.id)
+    : undefined;
+  const ctxAgentDmChannelId = ctxMenu?.type === "agent" && ctxAgent ? agentDmChannelId[ctxAgent.id] : undefined;
+  const ctxAgentIsOnline = ctxMenu?.type === "member-agent" && ctxAgent
+    ? selectAgentDisplayState(useAgentStore.getState(), ctxAgent.id, ctxAgent).isOnline
+    : false;
+  const ctxDmIdToClose = ctxHumanDmChannel?.id ?? ctxDmChannel?.id ?? ctxAgentDmChannelId;
+
+  const closeMoveToSectionMenuFromHover = useCallback((event: React.MouseEvent<HTMLDivElement>) => {
+    const menuItem = (event.target as Element).closest('[role="menuitem"]');
+    if (menuItem && !moveToSectionTriggerRef.current?.contains(menuItem)) {
+      setMoveToSectionMenuOpen(false);
+    }
+  }, []);
+  const closeMoveToSectionMenuFromFocus = useCallback((event: React.FocusEvent<HTMLDivElement>) => {
+    if (!moveToSectionTriggerRef.current?.contains(event.target)) {
+      setMoveToSectionMenuOpen(false);
+    }
+  }, []);
+  const openMoveToSectionMenu = useCallback(() => setMoveToSectionMenuOpen(true), []);
+  const toggleContextChannelMute = useCallback(() => {
+    if (!ctxChannel) return;
+    void toggleChannelActivityMute(ctxChannel);
+    setCtxMenu(null);
+  }, [ctxChannel, toggleChannelActivityMute]);
+  // Stryker disable all: pin behavior predates the Activity mute action and has separate coverage.
+  const toggleContextChannelPin = useCallback(() => {
+    if (!ctxMenu) return;
+    togglePinChannel(ctxMenu.id);
+    setCtxMenu(null);
+  }, [ctxMenu, togglePinChannel]);
+  // Stryker restore all
+  const archiveContextChannel = useCallback(() => {
+    if (!ctxMenu) return;
+    setArchiveConfirm({ id: ctxMenu.id, name: ctxChannel?.name ?? "" });
+    setCtxMenu(null);
+  }, [ctxChannel, ctxMenu]);
+  const toggleContextHumanPin = useCallback(() => {
+    if (!ctxMenu) return;
+    togglePinnedRef({ kind: "human", id: ctxMenu.id });
+    setCtxMenu(null);
+  }, [ctxMenu, togglePinnedRef]);
+  const toggleContextDmPin = useCallback(() => {
+    if (!ctxDmChannel) return;
+    togglePinDm(ctxDmChannel);
+    setCtxMenu(null);
+  }, [ctxDmChannel, togglePinDm]);
+  const toggleContextAgentPin = useCallback(() => {
+    if (!ctxMenu) return;
+    togglePinAgent(ctxMenu.id);
+    setCtxMenu(null);
+  }, [ctxMenu, togglePinAgent]);
+  const closeContextDm = useCallback(() => {
+    if (!ctxDmIdToClose) return;
+    closeDm(ctxDmIdToClose);
+    setCtxMenu(null);
+  }, [closeDm, ctxDmIdToClose]);
+  const messageContextHuman = useCallback(() => {
+    if (!ctxMenu) return;
+    setCtxMenu(null);
+    void handleOpenHumanDm(ctxMenu.id);
+  }, [ctxMenu, handleOpenHumanDm]);
+  const messageContextAgent = useCallback(() => {
+    if (!ctxAgent) return;
+    setCtxMenu(null);
+    void handleOpenAgentDm(ctxAgent.id);
+  }, [ctxAgent, handleOpenAgentDm]);
+  const toggleContextAgentRuntime = useCallback(() => {
+    if (!ctxAgent) return;
+    if (ctxAgentIsOnline) {
+      setStopAgentConfirm({ id: ctxAgent.id, name: ctxAgent.displayName || ctxAgent.name });
+    } else {
+      void startAgent(ctxAgent.id);
+    }
+    setCtxMenu(null);
+  }, [ctxAgent, ctxAgentIsOnline, startAgent]);
+  const resetContextAgent = useCallback(() => {
+    if (!ctxAgent) return;
+    setResetAgentTarget({ id: ctxAgent.id, name: ctxAgent.displayName || ctxAgent.name });
+    setCtxMenu(null);
+  }, [ctxAgent]);
+
+  // Move-to-section submenu actions.
+  const moveToSectionMenuStyle = useMemo<React.CSSProperties>(() => ({
+    left: moveToSectionMenuPosition?.x ?? 0,
+    top: moveToSectionMenuPosition?.y ?? 0,
+    visibility: moveToSectionMenuPosition ? "visible" : "hidden",
+  }), [moveToSectionMenuPosition]);
+  const moveContextItemToPinned = useCallback(() => {
+    if (!contextMovableItem) return;
+    moveItemToPinned(contextMovableItem);
+    closeCtx();
+  }, [closeCtx, contextMovableItem, moveItemToPinned]);
+  const moveContextItemToSection = useCallback((sectionId: string) => {
+    if (!contextMovableItem) return;
+    moveItemToCustomSection(contextMovableItem, sectionId);
+    closeCtx();
+  }, [closeCtx, contextMovableItem, moveItemToCustomSection]);
+  const createSectionWithContextItem = useCallback(() => {
+    if (!contextMovableItem) return;
+    setSectionDialog({ mode: "create", moveItem: contextMovableItem });
+    closeCtx();
+  }, [closeCtx, contextMovableItem]);
+  const removeContextItemFromSection = useCallback(() => {
+    if (!contextMovableItem) return;
+    removeItemFromCustomSection(contextMovableItem);
+    closeCtx();
+  }, [closeCtx, contextMovableItem, removeItemFromCustomSection]);
+
   return (
     <>
       {/* stdrc 2026-05-02 #proj-uiux:95e25b5b 6e039b98:
@@ -3751,7 +3667,7 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
             Sidebar full-screens as one tab → `bg-white`. */}
       <SidebarRoot
         // Stryker disable next-line StringLiteral: Tailwind composition is presentation-only and browser-smoke verified.
-        className={`relative flex h-full w-full flex-col ${mobileInline ? "" : workspaceEnabled && workspaceRailMode ? "border-r border-line-muted theme-brutal:border-black/25" : "border-r border-line-muted theme-brutal:border-r-2 theme-brutal:border-black"} ${mobileInline ? "theme-brutal:bg-white" : "bg-layer-canvas-muted theme-brutal:bg-brutal-cream"} ${workspaceEnabled ? "workspace-scrollbar-subtle" : ""} text-foreground-strong theme-brutal:text-black font-display select-none`}
+        className={`relative flex h-full w-full flex-col ${mobileInline ? "" : "border-r border-line-muted theme-brutal:border-r-2 theme-brutal:border-black"} ${mobileInline ? "theme-brutal:bg-white" : "bg-layer-canvas-muted theme-brutal:bg-brutal-cream"} text-foreground-strong theme-brutal:text-black font-display select-none`}
         data-testid="sidebar-root"
       >
         {/* Mobile tab-root NavBar — yellow h-panel-header matching the level-2+
@@ -3810,7 +3726,7 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
               </>
             ) : (
               <div className="min-w-0 flex-1">
-                <div className="text-base font-bold text-foreground-strong theme-brutal:text-black truncate">
+                <div className="font-heading text-base font-bold text-foreground-strong theme-brutal:text-black truncate">
                   {railLabel}
                 </div>
               </div>
@@ -3821,7 +3737,7 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
             {railMode === "chat" && (
               <ServerSwitcherMenu
                 open={showServerMenu}
-                onClose={() => setShowServerMenu(false)}
+                onClose={closeServerMenu}
                 serverUnreadCounts={serverUnreadCounts}
                 testId="mobile-server-switcher-menu"
                 navigationMode="replace-with-home"
@@ -3841,8 +3757,8 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
           // stdrc 2026-05-02 #proj-uiux:95e25b5b: sidebar header matches
           // sidebar body at `bg-brutal-cream`. Whole sidebar column
           // reads as one cream surface; main panel is white.
-          <div className={`flex shrink-0 items-center bg-layer-canvas-muted theme-brutal:bg-brutal-cream ${workspaceEnabled ? "h-12 border-b border-line-muted theme-brutal:border-black/25 px-4" : "h-panel-header border-b border-line-muted theme-brutal:border-b-2 theme-brutal:border-black px-5"}`}>
-            <div className={workspaceEnabled ? "text-base font-semibold text-foreground-strong theme-brutal:text-black" : "text-lg font-bold text-foreground-strong theme-brutal:text-black"}>
+          <div className="flex shrink-0 items-center bg-layer-canvas-muted theme-brutal:bg-brutal-cream h-panel-header border-b border-line-muted theme-brutal:border-b-2 theme-brutal:border-black px-5">
+            <div className="font-heading text-lg in-data-[theme=elegant]:text-[17px] font-bold text-foreground-strong theme-brutal:text-black">
               {railLabel}
             </div>
           </div>
@@ -3860,14 +3776,10 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
             agents={agents}
             members={members}
             currentUserId={user?.id}
-            onOpenChannel={(channelId: string) => nav.toChannel(channelId)}
-            onOpenDm={(dmChannelId: string) => nav.toDm(dmChannelId)}
-            onOpenAgentDm={(agentId: string) => {
-              void openDM(agentId).then((opened) => nav.toDm(opened.id));
-            }}
-            onOpenHumanDm={(userId: string) => {
-              void openUserDM(userId).then((opened) => nav.toDm(opened.id));
-            }}
+            onOpenChannel={openFinderChannel}
+            onOpenDm={openFinderDm}
+            onOpenAgentDm={openFinderAgentDm}
+            onOpenHumanDm={openFinderHumanDm}
           />
         )}
 
@@ -3935,13 +3847,6 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
                   machineId={machineId}
                   selected={isMachineSelected(machineId)}
                   onSelect={handleSelectMachine}
-                  // Stryker disable all: typed drag payload forwarding is contract-pinned and browser-smoke verified.
-                  onDragStart={workspaceEnabled ? (event, machineId) => dragWorkspacePanel(
-                    event,
-                    { kind: "machine", id: machineId },
-                    { title: machineNames[machineId] || formatMessage({ id: "machine.detail.computer" }), subtitle: formatMessage({ id: "workspace.panel.computer" }) },
-                  ) : undefined}
-                  // Stryker restore all
                 />
               ))}
 
@@ -4005,24 +3910,17 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
               {/* Tasks moved to its own LeftRail mode, removed from Chat sidebar. */}
 
               {/* Saved */}
-              {(() => {
-                // Stryker disable all: workspace-only Saved visibility and selected chrome are browser-smoke verified, outside this pinned-sidebar mutation corpus.
-                const savedEntry = !workspaceEnabled ? (
-                  <SidebarItem
-                    variant="accent"
-                    active={location.pathname.endsWith("/saved")}
-                    onClick={() => nav.toSaved()}
-                    className={`${sidebarItemClass(location.pathname.endsWith("/saved"))} mb-1`}
-                    data-testid="sidebar-saved-entry"
-                  >
-                    <Bookmark size={14} className="shrink-0" />
-                    {formatMessage({ id: "layout.sidebar.saved" })}
-                    <SavedNavCount total={savedTotal} />
-                  </SidebarItem>
-                ) : null;
-                // Stryker restore all
-                return savedEntry;
-              })()}
+              <SidebarItem
+                variant="accent"
+                active={location.pathname.endsWith("/saved")}
+                onClick={openSaved}
+                className={`${sidebarItemClass(location.pathname.endsWith("/saved"))} mb-1`}
+                data-testid="sidebar-saved-entry"
+              >
+                <Bookmark size={14} className="shrink-0" />
+                {formatMessage({ id: "layout.sidebar.saved" })}
+                <SavedNavCount total={savedTotal} />
+              </SidebarItem>
 
 
               {(() => {
@@ -4034,7 +3932,7 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
                 collisionDetection={sidebarCollisionDetection}
                 // Empty drag-only sections can mount after activation; remeasure
                 // droppables deterministically instead of keeping pre-drag rects.
-                measuring={{ droppable: { strategy: MeasuringStrategy.Always } }}
+                measuring={SIDEBAR_DND_MEASURING}
                 onDragStart={handleSidebarDragStart}
                 onDragOver={handleSidebarDragOver}
                 onDragCancel={resetSidebarDnd}
@@ -4045,9 +3943,10 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
               {/* Pinned */}
               {!isEmptySectionHidden(sidebarDndCurrentProjection[SIDEBAR_PINNED_CONTAINER_ID].length, SIDEBAR_PINNED_CONTAINER_ID, true) && (
               <SortableSidebarSection id="system:pinned" testId="sidebar-section-block-pinned" order={sectionOrder.indexOf("system:pinned")}>
-                  <SidebarSectionHeader onContextMenu={(event) => openSectionCtxMenu(event, "pinned")}>
+                  <SidebarSectionHeader section="pinned" onOpenContextMenu={openSectionCtxMenu}>
                     <SidebarSectionToggle
-                      onClick={() => toggleSection("pinned")}
+                      sectionKey="pinned"
+                      onToggleSection={toggleSection}
                       aria-expanded={!collapsed.pinned}
                       aria-controls="sidebar-section-pinned"
                       data-testid="sidebar-section-toggle-pinned"
@@ -4080,14 +3979,8 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
                         empty={sidebarDndCurrentProjection[SIDEBAR_PINNED_CONTAINER_ID].length === 0}
                       >
                         {sidebarDndCurrentProjection[SIDEBAR_PINNED_CONTAINER_ID].length > 0 ? (
-                            <SidebarSortOwnership
-                              workspaceEnabled={workspaceEnabled}
-                              sortable={sidebarDndCurrentProjection[SIDEBAR_PINNED_CONTAINER_ID]
-                                .map((itemId) => renderSidebarDndItem(itemId, SIDEBAR_PINNED_CONTAINER_ID))}
-                              staticContent={pinnedItems.map((item) => (
-                                <div key={item.id}>{renderPinnedItem(item)}</div>
-                              ))}
-                            />
+                            <>{sidebarDndCurrentProjection[SIDEBAR_PINNED_CONTAINER_ID]
+                              .map((itemId) => renderSidebarDndItem(itemId, SIDEBAR_PINNED_CONTAINER_ID))}</>
                           ) : (
                             <SidebarSectionDescription
                               data-testid="sidebar-pinned-empty-hint"
@@ -4111,18 +4004,14 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
                 .sort((a, b) => sectionOrder.indexOf(a.id) - sectionOrder.indexOf(b.id))
                 .map((section) => {
                   const containerId = sidebarCustomContainerId(section.id);
-                  const projectedItemIds = sidebarDndCurrentProjection[containerId] ?? [];
-                  const items = customSectionItems.get(section.id) ?? [];
+                  const projectedItemIds = sidebarDndCurrentProjection[containerId] ?? EMPTY_SIDEBAR_ITEM_IDS;
                   const collapsedCustom = collapsedCustomSections[section.id] === true;
                   return (
                     <SortableSidebarSection key={section.id} id={section.id} testId={`sidebar-custom-section-${section.id}`} order={sectionOrder.indexOf(section.id)}>
-                      <SidebarSectionHeader onContextMenu={(event) => openSectionCtxMenu(event, `custom:${section.id}`)}>
+                      <SidebarSectionHeader section={`custom:${section.id}`} onOpenContextMenu={openSectionCtxMenu}>
                         <SidebarSectionToggle
-                          onClick={() => setCollapsedCustomSections((current) => {
-                            const nextValue = !current[section.id];
-                            writeSidebarCustomSectionCollapsed(user?.id, section.id, nextValue);
-                            return { ...current, [section.id]: nextValue };
-                          })}
+                          sectionKey={section.id}
+                          onToggleSection={toggleCustomSection}
                           aria-expanded={!collapsedCustom}
                           className={SIDEBAR_SECTION_TOGGLE_CLASS}
                         >
@@ -4146,11 +4035,7 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
                               {formatMessage({ id: "layout.sidebar.noConversations" })}
                             </SidebarSectionDescription>
                           ) : (
-                            <SidebarSortOwnership
-                              workspaceEnabled={workspaceEnabled}
-                              sortable={projectedItemIds.map((itemId) => renderSidebarDndItem(itemId, containerId))}
-                              staticContent={items.map((item) => renderCustomSectionItem(item))}
-                            />
+                            <>{projectedItemIds.map((itemId) => renderSidebarDndItem(itemId, containerId))}</>
                           )}
                         </SidebarDndContainer>
                       </div>
@@ -4161,9 +4046,10 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
               {/* Joint Channels */}
               {!isEmptySectionHidden(sidebarDndCurrentProjection[SIDEBAR_JOINT_CHANNELS_CONTAINER_ID].length, SIDEBAR_JOINT_CHANNELS_CONTAINER_ID, true) && (
               <SortableSidebarSection id="system:joint" testId="sidebar-section-block-joint" order={sectionOrder.indexOf("system:joint")}>
-                  <SidebarSectionHeader onContextMenu={(event) => openSectionCtxMenu(event, "jointChannels")}>
+                  <SidebarSectionHeader section="jointChannels" onOpenContextMenu={openSectionCtxMenu}>
                     <SidebarSectionToggle
-                      onClick={() => toggleSection("jointChannels")}
+                      sectionKey="jointChannels"
+                      onToggleSection={toggleSection}
                       aria-expanded={!collapsed.jointChannels}
                       aria-controls="sidebar-section-joint-channels"
                       data-testid="sidebar-section-toggle-joint-channels"
@@ -4203,12 +4089,8 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
                             <SidebarSectionDescription>{formatMessage({ id: "layout.sidebar.jointChannelsEmpty" })}</SidebarSectionDescription>
                           )
                         ) : (
-                          <SidebarSortOwnership
-                            workspaceEnabled={workspaceEnabled}
-                            sortable={sidebarDndCurrentProjection[SIDEBAR_JOINT_CHANNELS_CONTAINER_ID]
-                              .map((itemId) => renderSidebarDndItem(itemId, SIDEBAR_JOINT_CHANNELS_CONTAINER_ID))}
-                            staticContent={sortableJointChannels.map((channel) => renderChannelItem(channel))}
-                          />
+                          <>{sidebarDndCurrentProjection[SIDEBAR_JOINT_CHANNELS_CONTAINER_ID]
+                            .map((itemId) => renderSidebarDndItem(itemId, SIDEBAR_JOINT_CHANNELS_CONTAINER_ID))}</>
                         )}
                       </SidebarDndContainer>
                     )}
@@ -4218,9 +4100,10 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
 
               {/* Channels */}
               <SortableSidebarSection id="system:channels" testId="sidebar-section-block-channels" order={sectionOrder.indexOf("system:channels")}>
-              <SidebarSectionHeader onContextMenu={(event) => openSectionCtxMenu(event, "channels")}>
+              <SidebarSectionHeader section="channels" onOpenContextMenu={openSectionCtxMenu}>
                 <SidebarSectionToggle
-                  onClick={() => toggleSection("channels")}
+                  sectionKey="channels"
+                      onToggleSection={toggleSection}
                   aria-expanded={!collapsed.channels}
                   aria-controls="sidebar-section-channels"
                   data-testid="sidebar-section-toggle-channels"
@@ -4256,12 +4139,8 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
                     itemIds={sidebarDndCurrentProjection[SIDEBAR_CHANNELS_CONTAINER_ID]}
                     empty={sidebarDndCurrentProjection[SIDEBAR_CHANNELS_CONTAINER_ID].length === 0}
                   >
-                    <SidebarSortOwnership
-                      workspaceEnabled={workspaceEnabled}
-                      sortable={sidebarDndCurrentProjection[SIDEBAR_CHANNELS_CONTAINER_ID]
-                        .map((itemId) => renderSidebarDndItem(itemId, SIDEBAR_CHANNELS_CONTAINER_ID))}
-                      staticContent={fallbackRegularChannels.map((channel) => renderChannelItem(channel))}
-                    />
+                    <>{sidebarDndCurrentProjection[SIDEBAR_CHANNELS_CONTAINER_ID]
+                      .map((itemId) => renderSidebarDndItem(itemId, SIDEBAR_CHANNELS_CONTAINER_ID))}</>
                     {shouldShowSidebarChannelEmptyState(fallbackRegularChannels) && (
                       channelsLoading ? (
                         <SidebarRowsSkeleton />
@@ -4281,9 +4160,10 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
               {/* Stryker disable all: pre-existing DM ordering and section chrome are outside the workspace mutation corpus. */}
                 {!isEmptySectionHidden(sidebarDndCurrentProjection[SIDEBAR_DMS_CONTAINER_ID].length, SIDEBAR_DMS_CONTAINER_ID) && (
                 <SortableSidebarSection id="system:dms" testId="sidebar-section-block-dms" order={sectionOrder.indexOf("system:dms")}>
-                  <SidebarSectionHeader onContextMenu={(event) => openSectionCtxMenu(event, "dms")}>
+                  <SidebarSectionHeader section="dms" onOpenContextMenu={openSectionCtxMenu}>
                     <SidebarSectionToggle
-                      onClick={toggleAgentsSection}
+                      sectionKey="agents"
+                      onToggleSection={toggleSection}
                       aria-expanded={agentsExpanded}
                       aria-controls="sidebar-section-direct-messages"
                       data-testid="sidebar-section-toggle-dms"
@@ -4316,12 +4196,8 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
                         empty={sidebarDndCurrentProjection[SIDEBAR_DMS_CONTAINER_ID].length === 0}
                       >
                         {sidebarDndCurrentProjection[SIDEBAR_DMS_CONTAINER_ID].length > 0 ? (
-                          <SidebarSortOwnership
-                            workspaceEnabled={workspaceEnabled}
-                            sortable={sidebarDndCurrentProjection[SIDEBAR_DMS_CONTAINER_ID]
-                              .map((itemId) => renderSidebarDndItem(itemId, SIDEBAR_DMS_CONTAINER_ID))}
-                            staticContent={orderedDms.map((dm) => renderDmItem(dm))}
-                          />
+                          <>{sidebarDndCurrentProjection[SIDEBAR_DMS_CONTAINER_ID]
+                            .map((itemId) => renderSidebarDndItem(itemId, SIDEBAR_DMS_CONTAINER_ID))}</>
                         ) : channelsLoading ? (
                           <SidebarRowsSkeleton rows={3} />
                         ) : null}
@@ -4352,28 +4228,21 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
           ) : (
             <>
               {/* People tab: Agents, Humans, Computers */}
-              {/* Stryker disable all: classic-only graph visibility is browser-smoke verified. */}
-              {!workspaceEnabled ? (
-                <SidebarItem
-                  variant="accent"
-                  active={location.pathname === `${pathBase}/members/graph`}
-                  onClick={() => navigate(`${pathBase}/members/graph`)}
-                  className={`${sidebarItemClass(location.pathname === `${pathBase}/members/graph`)} text-left`}
-                >
-                  <GitBranch size={14} className="shrink-0" />
-                  {formatMessage({ id: "layout.sidebar.graph" })}
-                </SidebarItem>
-              ) : null}
-              {/* Stryker restore all */}
+              <SidebarItem
+                variant="accent"
+                active={location.pathname === `${pathBase}/members/graph`}
+                onClick={openMembersGraph}
+                className={`${sidebarItemClass(location.pathname === `${pathBase}/members/graph`)} text-left`}
+              >
+                <GitBranch size={14} className="shrink-0" />
+                {formatMessage({ id: "layout.sidebar.graph" })}
+              </SidebarItem>
 
               {/* Agents */}
-              {/* Stryker disable all: workspace rail composition is browser-smoke verified. */}
-              {workspaceEnabled || railMode !== "humans" ? (
-                <>
               <div className={SIDEBAR_SECTION_ROW_CLASS}>
                 <button
                   type="button"
-                  onClick={toggleAgentsSection}
+                  onClick={() => toggleSection("agents")}
                   className={SIDEBAR_SECTION_TOGGLE_CLASS}
                 >
                   <ChevronRight
@@ -4444,12 +4313,9 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
                   )}
                 </>
               )}
-                </>
-              ) : null}
-              {/* Stryker restore all */}
 
               {/* Humans */}
-              {/* Stryker disable all: workspace rail composition is browser-smoke verified. */}
+              {/* Stryker disable all: rail composition is browser-smoke verified. */}
               {!hideHumansFromMembers && (
                 <>
                   <div className={SIDEBAR_SECTION_ROW_CLASS}>
@@ -4488,50 +4354,19 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
                         <SidebarSectionDescription>{formatMessage({ id: "layout.sidebar.noHumans" })}</SidebarSectionDescription>
                       ) : (
                         <>
-                          {members.map((human) => {
-                            const isSelf = human.userId === user?.id;
-                            return (
-                              <Tooltip key={human.userId} content={isSelf ? formatMessage({ id: "layout.sidebar.youTitle" }) : `${human.displayName || human.name}`}>
-                              <SidebarItem variant="accent"
-                                type="button"
-                                draggable={workspaceEnabled}
-                                onDragStart={(event) => dragWorkspacePanel(
-                                  event,
-                                  { kind: "human", id: human.userId },
-                                  { title: `@${human.displayName || human.name}`, subtitle: formatMessage({ id: "workspace.panel.human" }) },
-                                )}
-                                onClick={(event) => handleSelectHuman(human.userId, event.detail)}
-                                onDoubleClick={(event) => {
-                                  event.preventDefault();
-                                  event.stopPropagation();
-                                  void handleOpenHumanDm(human.userId);
-                                }}
-                                onContextMenu={(e) => openCtxMenu(e, "member-human", human.userId)}
-                                data-slot="sidebar-item"
-                                active={isHumanSelected(human.userId)}
-                                {...makeLongPressHandlers("member-human", human.userId)}
-                                className={sidebarItemClass(isHumanSelected(human.userId), ctxMenu?.type === "member-human" && ctxMenu.id === human.userId)}
-                              >
-                                <AvatarSlot context="sidebar-list" type="human" humanAvatarUrl={human.avatarUrl} gravatarHash={human.gravatarHash} />
-                                <div className="flex min-w-0 flex-1 items-baseline gap-1 text-left">
-                                  <span className="shrink-0 max-w-[70%] truncate text-sm">
-                                    {human.displayName || human.name}
-                                    {isSelf && <span className="text-foreground-placeholder ml-1 theme-brutal:text-black/40">{formatMessage({ id: "layout.sidebar.youSuffix" })}</span>}
-                                  </span>
-                                  {/* Only Guest is labeled: it is the rare role whose access differs. Same chip as ChannelMemberList. */}
-                                  {human.role === "guest" && (
-                                    <span className="shrink-0 self-center rounded-sm border border-line-muted bg-info-soft px-1.5 py-0.5 font-mono text-[10px] leading-3 text-foreground-strong theme-brutal:rounded-none theme-brutal:border-[1.5px] theme-brutal:border-black theme-brutal:bg-brutal-cyan theme-brutal:text-black">
-                                      {formatMessage({ id: "layout.sidebar.guestLabel" })}
-                                    </span>
-                                  )}
-                                  {human.description && (
-                                    <span className="min-w-0 flex-1 truncate text-xs text-foreground-muted theme-brutal:text-black/40">{human.description}</span>
-                                  )}
-                                </div>
-                              </SidebarItem>
-                              </Tooltip>
-                            );
-                          })}
+                          {members.map((human) => (
+                            <MemberHumanRow
+                              key={human.userId}
+                              human={human}
+                              isSelf={human.userId === user?.id}
+                              selected={isHumanSelected(human.userId)}
+                              menuOpen={ctxMenu?.type === "member-human" && ctxMenu.id === human.userId}
+                              onSelect={handleSelectHuman}
+                              onOpenDm={handleOpenHumanDm}
+                              onContextMenu={openCtxMenu}
+                              makeLongPress={makeLongPressHandlers}
+                            />
+                          ))}
                         </>
                       )}
                     </>
@@ -4564,27 +4399,27 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
 
       {showCreateChannel && (
         <CreateChannelDialog
-          onClose={() => setShowCreateChannel(false)}
+          onClose={closeCreateChannelDialog}
         />
       )}
 
       {showCreateJointChannel && canCreateJointChannel && (
-        <CreateJointChannelDialog onClose={() => setShowCreateJointChannel(false)} />
+        <CreateJointChannelDialog onClose={closeCreateJointChannelDialog} />
       )}
 
       {showInviteHuman && (
-        <InviteHumanDialog onClose={() => setShowInviteHuman(false)} />
+        <InviteHumanDialog onClose={closeInviteHumanDialog} />
       )}
 
       {showCreateExternalAgent && (
         <CreateAgentDialog
           external
-          onClose={() => setShowCreateExternalAgent(false)}
+          onClose={closeCreateExternalAgentDialog}
         />
       )}
 
       {showHandoff && (
-        <HandoffDialog onClose={() => setShowHandoff(false)} />
+        <HandoffDialog onClose={closeHandoffDialog} />
       )}
 
       {deleteConfirm && (() => {
@@ -4609,15 +4444,8 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
             message={label.message}
             confirmLabel={label.confirmLabel}
             loadingLabel={formatMessage({ id: "layout.sidebar.deletingLabel" })}
-            onConfirm={async () => {
-              if (target.type === "agent") {
-                await deleteAgent(target.id);
-              } else {
-                await deleteChannel(target.id);
-              }
-              setDeleteConfirm(null);
-            }}
-            onClose={() => setDeleteConfirm(null)}
+            onConfirm={confirmDelete}
+            onClose={closeDeleteConfirm}
           />
         );
       })()}
@@ -4630,8 +4458,8 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
           confirmLabel={formatMessage({ id: "layout.sidebar.stopAgentTitle" })}
           loadingLabel={formatMessage({ id: "layout.sidebar.stoppingLabel" })}
           confirmColor="bg-brutal-orange"
-          onConfirm={() => stopAgent(stopAgentConfirm.id)}
-          onClose={() => setStopAgentConfirm(null)}
+          onConfirm={confirmStopAgent}
+          onClose={closeStopAgentConfirm}
         />
       )}
 
@@ -4641,7 +4469,7 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
           agentName={resetAgentTarget.name}
           canFullReset={capabilities.resetAgentWorkspace}
           memberRuntimeOnly={currentRole === "member"}
-          onClose={() => setResetAgentTarget(null)}
+          onClose={closeResetAgentDialog}
         />
       )}
 
@@ -4653,10 +4481,8 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
           confirmLabel={formatMessage({ id: "layout.sidebar.archiveChannelTitle" })}
           loadingLabel={formatMessage({ id: "layout.sidebar.archivingLabel" })}
           confirmColor="bg-brutal-orange"
-          onConfirm={async () => {
-            await archiveChannel(archiveConfirm.id);
-          }}
-          onClose={() => setArchiveConfirm(null)}
+          onConfirm={confirmArchive}
+          onClose={closeArchiveConfirm}
         />
       )}
 
@@ -4664,8 +4490,8 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
         <SidebarSectionDialog
           title={formatMessage({ id: "layout.sidebar.newSectionTitle" })}
           submitLabel={formatMessage({ id: "layout.sidebar.createSection" })}
-          onSubmit={(value) => createCustomSection(value, sectionDialog.moveItem)}
-          onClose={() => setSectionDialog(null)}
+          onSubmit={submitCreateSection}
+          onClose={closeSectionDialog}
         />
       )}
 
@@ -4675,8 +4501,8 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
           initialName={sectionDialog.section.name}
           initialEmoji={sectionDialog.section.emoji ?? ""}
           submitLabel={formatMessage({ id: "layout.sidebar.saveSection" })}
-          onSubmit={(value) => updateCustomSection(sectionDialog.section.id, value)}
-          onClose={() => setSectionDialog(null)}
+          onSubmit={submitEditSection}
+          onClose={closeSectionDialog}
         />
       )}
 
@@ -4689,11 +4515,8 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
           )}
           confirmLabel={formatMessage({ id: "layout.sidebar.deleteSection" })}
           loadingLabel={formatMessage({ id: "layout.sidebar.deletingLabel" })}
-          onConfirm={() => {
-            deleteCustomSection(deleteSectionConfirm.id);
-            setDeleteSectionConfirm(null);
-          }}
-          onClose={() => setDeleteSectionConfirm(null)}
+          onConfirm={confirmDeleteSection}
+          onClose={closeDeleteSectionConfirm}
         />
       )}
 
@@ -4743,25 +4566,12 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
                   : sectionCtxMenu.section === "channels" ? channelSortMode
                     : dmSortMode);
               return (
-                <MenuItem
+                <SectionSortModeMenuItem
                   key={mode}
-                  role="menuitemradio"
-                  aria-checked={mode === currentMode}
-                  trailing={mode === currentMode ? <Check size={14} /> : null}
-                  onClick={() => {
-                    if (contextCustomSection) {
-                      void updateSidebarOrder({
-                        customSections: customSections.map((section) => section.id === contextCustomSection.id ? { ...section, sortMode: mode } : section),
-                      });
-                    } else if (sectionCtxMenu.section === "pinned") updatePinnedSortMode(mode);
-                    else if (sectionCtxMenu.section === "jointChannels") updateJointChannelSortMode(mode);
-                    else if (sectionCtxMenu.section === "channels") updateChannelSortMode(mode);
-                    else updateDmSortMode(mode);
-                    closeSectionCtx();
-                  }}
-                >
-                  {formatMessage({ id: SIDEBAR_SORT_LABEL_ID[mode] })}
-                </MenuItem>
+                  mode={mode}
+                  checked={mode === currentMode}
+                  onSelect={selectSectionSortMode}
+                />
               );
             })}
             <ContextMenuDivider />
@@ -4773,10 +4583,7 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
                 role="menuitemcheckbox"
                 aria-checked={joinedChannelsOnly}
                 trailing={joinedChannelsOnly ? <Check size={14} /> : null}
-                onClick={() => {
-                  updateJoinedChannelsOnly(!joinedChannelsOnly);
-                  closeSectionCtx();
-                }}
+                onClick={toggleJoinedChannelsOnlyFromMenu}
               >
                 {formatMessage({ id: "layout.sidebar.showJoinedChannelsOnly" })}
               </MenuItem>
@@ -4785,10 +4592,7 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
               role="menuitemcheckbox"
               aria-checked={hideEmptySections}
               trailing={hideEmptySections ? <Check size={14} /> : null}
-              onClick={() => {
-                updateHideEmptySections(!hideEmptySections);
-                closeSectionCtx();
-              }}
+              onClick={toggleHideEmptySectionsFromMenu}
             >
               {formatMessage({ id: "layout.sidebar.hideEmptySections" })}
             </MenuItem>
@@ -4797,10 +4601,7 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
               <>
                 <MenuItem
                   icon={<Pencil size={14} />}
-                  onClick={() => {
-                    setSectionDialog({ mode: "edit", section: contextCustomSection });
-                    closeSectionCtx();
-                  }}
+                  onClick={renameContextSection}
                 >
                   {formatMessage({ id: "layout.sidebar.renameSection" })}
                 </MenuItem>
@@ -4808,10 +4609,7 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
             )}
             <MenuItem
               icon={<FolderPlus size={14} />}
-              onClick={() => {
-                setSectionDialog({ mode: "create" });
-                closeSectionCtx();
-              }}
+              onClick={createSectionFromSectionMenu}
             >
               {formatMessage({ id: "layout.sidebar.newSectionMenu" })}
             </MenuItem>
@@ -4820,10 +4618,7 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
                 <ContextMenuDivider />
                 <MenuItem
                   icon={<Trash2 size={14} />}
-                  onClick={() => {
-                    setDeleteSectionConfirm(contextCustomSection);
-                    closeSectionCtx();
-                  }}
+                  onClick={deleteContextSection}
                 >
                   {formatMessage({ id: "layout.sidebar.deleteSection" })}
                 </MenuItem>
@@ -4849,10 +4644,7 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
             {canManageServer && (
               <MenuItem
                 icon={<Plus size={14} />}
-                onClick={() => {
-                  setShowCreateChannel(true);
-                  closeSidebarSurfaceCtx();
-                }}
+                onClick={createChannelFromSurfaceMenu}
               >
                 {formatMessage({ id: "layout.sidebar.createChannel" })}
               </MenuItem>
@@ -4860,10 +4652,7 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
             {canCreateJointChannel && (
               <MenuItem
                 icon={<GitBranch size={14} />}
-                onClick={() => {
-                  setShowCreateJointChannel(true);
-                  closeSidebarSurfaceCtx();
-                }}
+                onClick={createJointChannelFromSurfaceMenu}
               >
                 {formatMessage({ id: "layout.sidebar.createJointChannel" })}
               </MenuItem>
@@ -4871,10 +4660,7 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
             {(canManageServer || canCreateJointChannel) && <ContextMenuDivider />}
             <MenuItem
               icon={<FolderPlus size={14} />}
-              onClick={() => {
-                setSectionDialog({ mode: "create" });
-                closeSidebarSurfaceCtx();
-              }}
+              onClick={createSectionFromSurfaceMenu}
             >
               {formatMessage({ id: "layout.sidebar.newSectionMenu" })}
             </MenuItem>
@@ -4900,17 +4686,8 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
             style={getSidebarContextMenuStyle(ctxMenu)}
             onMouseDown={stopSidebarContextMenuPropagation}
             onTouchStart={stopSidebarContextMenuPropagation}
-            onMouseOver={(event) => {
-              const menuItem = (event.target as Element).closest('[role="menuitem"]');
-              if (menuItem && !moveToSectionTriggerRef.current?.contains(menuItem)) {
-                setMoveToSectionMenuOpen(false);
-              }
-            }}
-            onFocus={(event) => {
-              if (!moveToSectionTriggerRef.current?.contains(event.target)) {
-                setMoveToSectionMenuOpen(false);
-              }
-            }}
+            onMouseOver={closeMoveToSectionMenuFromHover}
+            onFocus={closeMoveToSectionMenuFromFocus}
           >
           {contextMovableItem && (
             <>
@@ -4920,8 +4697,8 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
                   aria-haspopup="menu"
                   aria-expanded={moveToSectionMenuOpen}
                   trailing={<ChevronRight size={14} />}
-                  onMouseEnter={() => setMoveToSectionMenuOpen(true)}
-                  onClick={() => setMoveToSectionMenuOpen(true)}
+                  onMouseEnter={openMoveToSectionMenu}
+                  onClick={openMoveToSectionMenu}
                 >
                   {formatMessage({ id: "layout.sidebar.moveToSection" })}
                 </MenuItem>
@@ -4930,16 +4707,13 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
             </>
           )}
           {ctxMenu.type === "channel" && (() => {
-            const channel = channels.find((c) => c.id === ctxMenu.id);
+            const channel = ctxChannel;
             const canToggleChannelMute = canToggleActivityMute(channel);
             // Stryker disable all: unsupported and stale rows are covered by DOM tests; mutating this narrowing enters an invalid undefined-channel click path that the React oracle cannot terminate.
             const activityMuteAction = canToggleChannelMute && channel ? (
               <MenuItem
                 icon={channel.activityMuted === true ? <Bell size={14} /> : <BellOff size={14} />}
-                onClick={() => {
-                  void toggleChannelActivityMute(channel);
-                  setCtxMenu(null);
-                }}
+                onClick={toggleContextChannelMute}
               >
                 {channel.activityMuted === true
                   ? formatMessage({ id: "layout.sidebar.unmute" })
@@ -4950,7 +4724,6 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
             const isProtected = channel?.name === "all";
             const hasUnread = (useMessageStore.getState().unreadCounts[ctxMenu.id] || 0) > 0;
             const isPinned = hasSidebarPinnedRef(pinnedRefs, { kind: "channel", id: ctxMenu.id });
-            const archiveChannelName = channel?.name ?? "";
             // Stryker disable all: joint-channel archive suppression is pinned by a DOM context-menu test; generated JSX branch mutants time out under the command runner.
             const canArchiveChannel = !!channel
               && (channel.channelCapabilities?.archiveChannels ?? capabilities.archiveChannels)
@@ -4958,18 +4731,12 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
               && channel.type !== "joint"
               && !channel.archivedAt;
             // Stryker restore all
-            // Stryker disable all: pin behavior predates the Activity mute action and has separate coverage.
-            const handleToggleContextPin = () => {
-              togglePinChannel(ctxMenu.id);
-              setCtxMenu(null);
-            };
-            // Stryker restore all
             return (
               <>
                 {renderReadToggleAction(ctxMenu.id, hasUnread)}
                 <ChannelPinMenuItem
                   isPinned={isPinned}
-                  onToggle={handleToggleContextPin}
+                  onToggle={toggleContextChannelPin}
                   pinLabel={formatMessage({ id: "layout.sidebar.pin" })}
                   unpinLabel={formatMessage({ id: "layout.sidebar.unpin" })}
                 />
@@ -4980,10 +4747,7 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
                     <ContextMenuDivider />
                     <MenuItem
                       icon={<Archive size={14} />}
-                      onClick={() => {
-                        setArchiveConfirm({ id: ctxMenu.id, name: archiveChannelName });
-                        setCtxMenu(null);
-                      }}
+                      onClick={archiveContextChannel}
                     >
                       {formatMessage({ id: "layout.sidebar.archive" })}
                     </MenuItem>
@@ -5005,30 +4769,23 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
             // was mid-click on — measured as the cause of the
             // removed-dm-menu-actions flake. A remaining DM may outlive the
             // membership row, so only its absence should close the menu.
-            const humanDmChannel = dmChannels.find((dm) => dm.peerType === "user" && dm.peerId === ctxMenu.id);
+            const humanDmChannel = ctxHumanDmChannel;
             if (!humanDmChannel) return null;
             const hasUnread = (useMessageStore.getState().unreadCounts[humanDmChannel.id] || 0) > 0;
-            const humanPinnedRef: SidebarPinnedRef = { kind: "human", id: ctxMenu.id };
-            const isPinned = hasSidebarPinnedRef(pinnedRefs, humanPinnedRef);
+            const isPinned = hasSidebarPinnedRef(pinnedRefs, { kind: "human", id: ctxMenu.id });
             return (
               <>
                 {renderReadToggleAction(humanDmChannel.id, hasUnread)}
                 <MenuItem
                   icon={isPinned ? <PinOff size={14} /> : <Pin size={14} />}
-                  onClick={() => {
-                    togglePinnedRef(humanPinnedRef);
-                    setCtxMenu(null);
-                  }}
+                  onClick={toggleContextHumanPin}
                 >
                   {isPinned ? formatMessage({ id: "layout.sidebar.unpin" }) : formatMessage({ id: "layout.sidebar.pin" })}
                 </MenuItem>
                 <ContextMenuDivider />
                 <MenuItem
                   icon={<X size={14} />}
-                  onClick={() => {
-                    closeDm(humanDmChannel.id);
-                    setCtxMenu(null);
-                  }}
+                  onClick={closeContextDm}
                 >
                   {formatMessage({ id: "layout.sidebar.closeChat" })}
                 </MenuItem>
@@ -5042,7 +4799,7 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
           {(() => {
             // Stryker disable all: DM pin menu portal branch is covered by focused DOM/manual preview; generated portal mutants are equivalent to inaccessible menu states in this corpus.
             const directMessageMenu = ctxMenu.type === "dm" ? (() => {
-            const dmChannel = dmChannels.find((dm) => dm.id === ctxMenu.id);
+            const dmChannel = ctxDmChannel;
             if (!dmChannel) return null;
             const hasUnread = (useMessageStore.getState().unreadCounts[dmChannel.id] || 0) > 0;
             const dmPinnedRef = pinnedRefForDmChannel(dmChannel);
@@ -5053,10 +4810,7 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
                 {dmPinnedRef && (
                   <MenuItem
                     icon={isPinned ? <PinOff size={14} /> : <Pin size={14} />}
-                    onClick={() => {
-                      togglePinDm(dmChannel);
-                      setCtxMenu(null);
-                    }}
+                    onClick={toggleContextDmPin}
                   >
                     {isPinned ? formatMessage({ id: "layout.sidebar.unpin" }) : formatMessage({ id: "layout.sidebar.pin" })}
                   </MenuItem>
@@ -5064,10 +4818,7 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
                 <ContextMenuDivider />
                 <MenuItem
                   icon={<X size={14} />}
-                  onClick={() => {
-                    closeDm(dmChannel.id);
-                    setCtxMenu(null);
-                  }}
+                  onClick={closeContextDm}
                 >
                   {formatMessage({ id: "layout.sidebar.closeChat" })}
                 </MenuItem>
@@ -5086,10 +4837,7 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
             return (
               <MenuItem
                 icon={<DirectMessageIcon width={14} height={14} />}
-                onClick={() => {
-                  setCtxMenu(null);
-                  void handleOpenHumanDm(human.userId);
-                }}
+                onClick={messageContextHuman}
               >
                 {formatMessage({ id: "layout.sidebar.message" })}
               </MenuItem>
@@ -5097,20 +4845,16 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
           })()}
 
           {ctxMenu.type === "member-agent" && (() => {
-            const agent = agents.find((a) => a.id === ctxMenu.id);
+            const agent = ctxAgent;
             if (!agent) return null;
-            const isOnline = selectAgentDisplayState(useAgentStore.getState(), agent.id, agent).isOnline;
+            const isOnline = ctxAgentIsOnline;
             // External agents have no managed runtime: no Start/Stop/Reset.
             const isExternalAgent = agent.external === true || isExternalAgentRuntime(agent.runtime);
-            const agentName = agent.displayName || agent.name;
             return (
               <>
                 <MenuItem
                   icon={<DirectMessageIcon width={14} height={14} />}
-                  onClick={() => {
-                    setCtxMenu(null);
-                    void handleOpenAgentDm(agent.id);
-                  }}
+                  onClick={messageContextAgent}
                 >
                   {formatMessage({ id: "layout.sidebar.message" })}
                 </MenuItem>
@@ -5119,23 +4863,13 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
                     <ContextMenuDivider />
                     <MenuItem
                       icon={isOnline ? <Square size={14} /> : <Play size={14} />}
-                      onClick={() => {
-                        if (isOnline) {
-                          setStopAgentConfirm({ id: agent.id, name: agentName });
-                        } else {
-                          void startAgent(agent.id);
-                        }
-                        setCtxMenu(null);
-                      }}
+                      onClick={toggleContextAgentRuntime}
                     >
                       {isOnline ? formatMessage({ id: "layout.sidebar.stop" }) : formatMessage({ id: "layout.sidebar.start" })}
                     </MenuItem>
                     <MenuItem
                       icon={<RotateCcw size={14} />}
-                      onClick={() => {
-                        setResetAgentTarget({ id: agent.id, name: agentName });
-                        setCtxMenu(null);
-                      }}
+                      onClick={resetContextAgent}
                     >
                       {formatMessage({ id: "layout.sidebar.restartReset" })}
                     </MenuItem>
@@ -5146,9 +4880,9 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
           })()}
 
           {ctxMenu.type === "agent" && (() => {
-            const agent = agents.find((a) => a.id === ctxMenu.id);
+            const agent = ctxAgent;
             if (!agent) return null;
-            const dmChannelId = agentDmChannelId[agent.id];
+            const dmChannelId = ctxAgentDmChannelId;
             const hasUnread = dmChannelId ? (useMessageStore.getState().unreadCounts[dmChannelId] || 0) > 0 : false;
             const isPinned = pinnedAgentIds.includes(ctxMenu.id);
             return (
@@ -5156,10 +4890,7 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
                 {dmChannelId && renderReadToggleAction(dmChannelId, hasUnread)}
                 <MenuItem
                   icon={isPinned ? <PinOff size={14} /> : <Pin size={14} />}
-                  onClick={() => {
-                    togglePinAgent(ctxMenu.id);
-                    setCtxMenu(null);
-                  }}
+                  onClick={toggleContextAgentPin}
                 >
                   {isPinned ? formatMessage({ id: "layout.sidebar.unpin" }) : formatMessage({ id: "layout.sidebar.pin" })}
                 </MenuItem>
@@ -5168,10 +4899,7 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
                     <ContextMenuDivider />
                     <MenuItem
                       icon={<X size={14} />}
-                      onClick={() => {
-                        closeDm(dmChannelId);
-                        setCtxMenu(null);
-                      }}
+                      onClick={closeContextDm}
                     >
                       {formatMessage({ id: "layout.sidebar.closeChat" })}
                     </MenuItem>
@@ -5187,11 +4915,7 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
               role="menu"
               aria-label={formatMessage({ id: "layout.sidebar.moveToSection" })}
               className="fixed z-[51] max-h-[calc(100vh-16px)] w-56 overflow-y-auto select-none"
-              style={{
-                left: moveToSectionMenuPosition?.x ?? 0,
-                top: moveToSectionMenuPosition?.y ?? 0,
-                visibility: moveToSectionMenuPosition ? "visible" : "hidden",
-              }}
+              style={moveToSectionMenuStyle}
               onMouseDown={stopSidebarContextMenuPropagation}
               onTouchStart={stopSidebarContextMenuPropagation}
             >
@@ -5199,46 +4923,29 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
                 icon={<Pin size={14} />}
                 disabled={contextItemPinned}
                 trailing={contextItemPinned ? <Check size={14} /> : null}
-                onClick={() => {
-                  moveItemToPinned(contextMovableItem);
-                  closeCtx();
-                }}
+                onClick={moveContextItemToPinned}
               >
                 {formatMessage({ id: "layout.sidebar.pinned" })}
               </MenuItem>
               {customSections.map((section) => (
-                <MenuItem
+                <MoveToSectionMenuItem
                   key={section.id}
-                  icon={<FolderInput size={14} />}
-                  trailing={contextPlacement?.sectionId === section.id ? <Check size={14} /> : null}
-                  onClick={() => {
-                    moveItemToCustomSection(contextMovableItem, section.id);
-                    closeCtx();
-                  }}
-                >
-                  <span className="flex min-w-0 items-center gap-1">
-                    {section.emoji && <span aria-hidden>{section.emoji}</span>}
-                    <span className="truncate">{section.name}</span>
-                  </span>
-                </MenuItem>
+                  section={section}
+                  current={contextPlacement?.sectionId === section.id}
+                  onMove={moveContextItemToSection}
+                />
               ))}
               <ContextMenuDivider />
               <MenuItem
                 icon={<FolderPlus size={14} />}
-                onClick={() => {
-                  setSectionDialog({ mode: "create", moveItem: contextMovableItem });
-                  closeCtx();
-                }}
+                onClick={createSectionWithContextItem}
               >
                 {formatMessage({ id: "layout.sidebar.newSectionMenu" })}
               </MenuItem>
               {contextPlacement && (
                 <MenuItem
                   icon={<X size={14} />}
-                  onClick={() => {
-                    removeItemFromCustomSection(contextMovableItem);
-                    closeCtx();
-                  }}
+                  onClick={removeContextItemFromSection}
                 >
                   {formatMessage({ id: "layout.sidebar.removeFromSection" })}
                 </MenuItem>

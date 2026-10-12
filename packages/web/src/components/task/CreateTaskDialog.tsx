@@ -1,10 +1,11 @@
-import { Input, Button } from "raft-ui";
-import { useState } from "react";
+import { Button } from "raft-ui";
+import { useCallback, useState } from "react";
 import { useIntl } from "react-intl";
-import { Plus, Trash2 } from "lucide-react";
+import { Plus } from "lucide-react";
 import { useTaskStore } from "../../store/taskStore";
 import DialogCard from "../ui/DialogCard";
 import Banner from "../ui/Banner";
+import { TaskTitleRow } from "./TaskTitleRow";
 
 export default function CreateTaskDialog({
   channelId,
@@ -21,17 +22,17 @@ export default function CreateTaskDialog({
 
   const isBatch = titles.length > 1;
 
-  const updateTitle = (index: number, value: string) => {
+  const updateTitle = useCallback((index: number, value: string) => {
     setTitles((prev) => prev.map((t, i) => (i === index ? value : t)));
-  };
+  }, []);
 
-  const addRow = () => {
+  const addRow = useCallback(() => {
     setTitles((prev) => [...prev, ""]);
-  };
+  }, []);
 
-  const removeRow = (index: number) => {
+  const removeRow = useCallback((index: number) => {
     setTitles((prev) => prev.filter((_, i) => i !== index));
-  };
+  }, []);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -66,26 +67,15 @@ export default function CreateTaskDialog({
 
           <div>
             {titles.map((title, i) => (
-              <div key={i} className="flex items-center gap-1 mb-1">
-                <Input
-                  type="text"
-                  value={title}
-                  onChange={(e) => updateTitle(i, e.target.value)}
-                  className="w-full"
-                  placeholder={formatMessage({ id: "task.create.titlePlaceholder" }, { n: i + 1 })}
-                  autoFocus={i === 0}
-                />
-                {titles.length > 1 && (
-                  <Button size="sm"
-                    variant="danger"
-                    type="button"
-                    onClick={() => removeRow(i)}
-                    className="p-1"
-                  >
-                    <Trash2 size={14} />
-                  </Button>
-                )}
-              </div>
+              <TaskTitleRow
+                key={i}
+                index={i}
+                title={title}
+                placeholder={formatMessage({ id: "task.create.titlePlaceholder" }, { n: i + 1 })}
+                removable={titles.length > 1}
+                onChange={updateTitle}
+                onRemove={removeRow}
+              />
             ))}
             <Button size="sm"
               variant="outline"

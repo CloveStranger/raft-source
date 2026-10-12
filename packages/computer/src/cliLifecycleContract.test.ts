@@ -405,9 +405,11 @@ test("hidden CLI dispatch executes isolated service, takeover, supervisor and bu
       assert.equal(result.signal, null, `${args}: ${result.stderr}`);
       return result;
     };
-    const service = run(["__service", "--os-supervised", "invalid-test-kind"]);
+    // `--os-supervised` is deprecated: outside the retired closed form it is
+    // an unknown option, never a way to boot a service.
+    const service = run(["__service", "--os-supervised", "launchd-user"]);
     assert.equal(service.status, 1, service.stderr);
-    assert.match(service.stderr, /invalid OS supervisor kind: invalid-test-kind/);
+    assert.match(service.stderr, /unknown option '--os-supervised'/);
     // Help traverses the hidden nested command parser without retiring an OS
     // service. Removing the supervisor command must fail this subprocess.
     const supervisor = run(["__supervisor", "--help"]);

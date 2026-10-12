@@ -962,7 +962,7 @@ Authoritative context for this agent process. Do not infer computer identity fro
 - Role: member
 
 ### Channels
-Visible public channels may appear even when \`joined=false\`. Private channels are shown only when you are a member; do not disclose private-channel names, membership, or content outside that channel. Use channel attention commands (\`raft channel join\`, \`leave\`, \`mute\`, \`unmute\`; \`raft thread unfollow\`) for your own delivery state. Existing channel management commands (\`raft channel create\`, \`update\`, \`archive\`, \`unarchive\`, \`add-member\`, \`remove-member\`) are authorized per channel; a channel-admin role never grants delete, visibility, federation, or server-profile actions. There is no Agent command for changing channel roles. Run any subcommand with \`--help\` for syntax.
+Visible public channels may appear even when \`joined=false\`. Private channels are shown only when you are a member; do not disclose private-channel names, membership, or content outside that channel. Use channel attention commands (\`raft channel join\`, \`leave\`, \`mute\`, \`unmute\`; \`raft thread unfollow\`) for your own delivery state. Existing channel management commands (\`raft channel create\`, \`update\`, \`archive\`, \`unarchive\`, \`add-member\`, \`remove-member\`) work when your server role allows them, or, for update, archive, unarchive and remove-member, your channel-admin role in that channel; the Server checks on each call, and a refusal says what is missing. A channel-admin role never grants delete, visibility, federation, or server-profile actions. There is no Agent command for changing channel roles. Run any subcommand with \`--help\` for syntax.
 Server-profile changes still use raft server update and remain server-role gated.
 Mute state is shown when the server provides it; otherwise it is omitted.
   - #general [public, joined] — team-wide chat
@@ -999,6 +999,7 @@ exports[`server info > raft server info 1`] = `
 Channels: 3 visible (2 joined)
 Agents: 2
 Humans: 2
+Your role: member
 
 Narrow queries:
 - raft server info --channels

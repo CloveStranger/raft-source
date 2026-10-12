@@ -6,6 +6,7 @@ import type { AgentOrchestrator } from "../services/agentOrchestrator";
 import * as channelService from "../services/channelService";
 import * as messageService from "../services/messageService";
 import { addTraceEvent, errorClassOf } from "../tracing/semanticTrace";
+import { agentServerRoleRequiredBody } from "../lib/agentServerRoleRequired";
 
 export interface AgentChannelLifecycleActor {
   id: string;
@@ -70,8 +71,10 @@ export async function setChannelArchivedForAgent(input: {
     });
     return { status: 404, body: { error: "Channel not found" } };
   }
-  // Joint channels have no channel roles, so archive authority is the
-  // server capability, exactly as the human archive route decides it.
+  // Archiving a joint channel archives it for every connected server, so a
+  // joint channel admin cannot do it (JOINT_CHANNEL_ADMIN_CAPABILITIES): the
+  // authority is the server capability, exactly as the human archive route
+  // decides it.
   const isJoint = channel.type === "joint";
   const hasAuthority = isJoint
     ? await actorHasServerCapabilityInServer(serverId, "agent", actor.id, "archiveChannels")
@@ -89,7 +92,7 @@ export async function setChannelArchivedForAgent(input: {
     });
     return {
       status: 403,
-      body: { error: `Agent requires archiveChannels capability to ${action} channels` },
+      body: await agentServerRoleRequiredBody({ serverId, agentId: actor.id, capabilities: ["archiveChannels"], action: `${action} channels`, channelAdminIn: channel.type === "joint" ? undefined : channel.name }),
     };
   }
 
@@ -150,7 +153,7 @@ export async function setChannelArchivedForAgent(input: {
   } catch (err) {
     const message = err instanceof Error ? err.message : "";
     if (message === "Channel capability required") {
-      return { status: 403, body: { error: `Agent requires archiveChannels capability to ${action} channels` } };
+      return { status: 403, body: await agentServerRoleRequiredBody({ serverId, agentId: actor.id, capabilities: ["archiveChannels"], action: `${action} channels`, channelAdminIn: channel.type === "joint" ? undefined : channel.name }) };
     }
     if (message.includes("#all") || message.includes("Only regular")) {
       addTraceEvent("agent_channel_lifecycle.request.failed", {

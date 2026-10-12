@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useCallback, useMemo } from "react";
 import { createPortal } from "react-dom";
 import { ArrowLeft } from "lucide-react";
 import { useIntl } from "react-intl";
@@ -40,7 +40,7 @@ export default function ForwardedBundleRouteCard({
   const onBack = useMobileBack(fallbackPath);
   const detailOpen = searchParams.get("forward") === messageId;
 
-  const openDetail = () => {
+  const openDetail = useCallback(() => {
     if (!window.matchMedia("(max-width: 767px)").matches) return false;
     setSearchParams((current) => {
       const next = new URLSearchParams(current);
@@ -48,7 +48,7 @@ export default function ForwardedBundleRouteCard({
       return next;
     });
     return true;
-  };
+  }, [messageId, setSearchParams]);
 
   return (
     <>

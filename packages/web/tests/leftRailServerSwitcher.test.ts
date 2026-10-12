@@ -159,7 +159,7 @@ test("rail tabs hover to opaque white, not translucent gray", () => {
     "utf8",
   );
 
-  assert.match(source, /<AppRailItem[\s\S]*className=\{`\$\{compact \? "size-8"/);
+  assert.match(source, /<AppRailItem[\s\S]*className=\{`size-10 /);
   assert.match(source, /AppRailItem/);
   assert.doesNotMatch(source, /hover:bg-white\/70/);
 });

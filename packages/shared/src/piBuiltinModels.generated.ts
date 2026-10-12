@@ -2,7 +2,7 @@
 // Do NOT edit by hand. Source:
 // - @earendil-works/pi-ai generated model registry
 // - @earendil-works/pi-coding-agent defaultModelPerProvider
-// Pi SDK versions: @earendil-works/pi-ai 1.0.2; @earendil-works/pi-coding-agent 1.0.2.
+// Pi SDK versions: @earendil-works/pi-ai 1.1.0; @earendil-works/pi-coding-agent 1.1.0.
 // - local provider env mirror copied from Pi getApiKeyEnvVars until Pi exports raw provider env metadata
 // TODO: switch provider env metadata to codegen-read once Pi exports getApiKeyEnvVars.
 // Regenerate after any Pi SDK bump that affects exposed provider/model metadata.
@@ -214,11 +214,12 @@ export const PI_BUILTIN_PROVIDER_MODELS_GENERATED: Record<string, ReadonlyArray<
     { id: "openrouter/anthropic/claude-sonnet-4.5:batch", label: "Anthropic: Claude Sonnet 4.5 (batch)" },
     { id: "openrouter/anthropic/claude-sonnet-4", label: "Anthropic: Claude Sonnet 4" },
     { id: "openrouter/~anthropic/claude-sonnet-latest", label: "Anthropic: Claude Sonnet Latest" },
+    { id: "openrouter/anthropic/claude-haiku-5.5", label: "Anthropic: Claude Haiku 5.5" },
+    { id: "openrouter/anthropic/claude-haiku-5.5:batch", label: "Anthropic: Claude Haiku 5.5 (batch)" },
     { id: "openrouter/anthropic/claude-haiku-4.5", label: "Anthropic: Claude Haiku 4.5" },
     { id: "openrouter/anthropic/claude-haiku-4.5:batch", label: "Anthropic: Claude Haiku 4.5 (batch)" },
     { id: "openrouter/~anthropic/claude-haiku-latest", label: "Anthropic: Claude Haiku Latest" },
     { id: "openrouter/openai/gpt-5.1-codex-max", label: "OpenAI: GPT-5.1-Codex-Max" },
-    { id: "openrouter/kwaipilot/kat-coder-pro-v2.5", label: "Kwaipilot: KAT-Coder-Pro V2.5" },
     { id: "openrouter/qwen/qwen3-max-thinking", label: "Qwen: Qwen3 Max Thinking" },
     { id: "openrouter/qwen/qwen3.8-max-0902", label: "Qwen: Qwen3.8 Max (0902)" },
     { id: "openrouter/deepseek/deepseek-v4-pro-0813", label: "DeepSeek: DeepSeek V4 Pro 0813" },
@@ -294,6 +295,7 @@ export const PI_BUILTIN_PROVIDER_MODELS_GENERATED: Record<string, ReadonlyArray<
     { id: "openrouter/mistralai/mistral-large-2512:batch", label: "Mistral: Mistral Large 3 2512 (batch)" },
     { id: "openrouter/mistralai/mistral-large-2407", label: "Mistral Large 2407" },
     { id: "openrouter/nvidia/nemotron-3-super-120b-a12b", label: "NVIDIA: Nemotron 3 Super" },
+    { id: "openrouter/mistralai/mistral-large-4-0", label: "Mistral: Mistral Large 4" },
     { id: "openrouter/mistralai/mistral-large", label: "Mistral Large" },
     { id: "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free", label: "NVIDIA: Nemotron 3 Ultra (free)" },
     { id: "openrouter/openai/gpt-5.1-codex-mini", label: "OpenAI: GPT-5.1-Codex-Mini" },
@@ -479,7 +481,6 @@ export const PI_BUILTIN_PROVIDER_MODELS_GENERATED: Record<string, ReadonlyArray<
     { id: "openrouter/rekaai/reka-edge", label: "Reka Edge" },
     { id: "openrouter/relace/relace-search", label: "Relace: Relace Search" },
     { id: "openrouter/sakana/sakana-namazu", label: "Sakana: Sakana Namazu" },
-    { id: "openrouter/stealth/space-bunny-alpha", label: "Space Bunny Alpha" },
     { id: "openrouter/typesafe/jev-router", label: "TypeSafe: Jev Router" },
     { id: "openrouter/~x-ai/grok-latest", label: "xAI: Grok Latest" },
     { id: "openrouter/~z-ai/glm-latest", label: "Z.ai: GLM Latest" },
@@ -557,6 +558,7 @@ export const PI_BUILTIN_PROVIDER_MODELS_GENERATED: Record<string, ReadonlyArray<
     { id: "openrouter/openai/o3-mini", label: "OpenAI: o3 Mini" },
     { id: "openrouter/openai/o3-mini:batch", label: "OpenAI: o3 Mini (batch)" },
     { id: "openrouter/openai/o3-mini-high", label: "OpenAI: o3 Mini High" },
+    { id: "openrouter/google/gemini-nano-banana-2.1", label: "Google: Nano Banana 2.1" },
     { id: "openrouter/amazon/nova-2-lite-v1", label: "Amazon: Nova 2 Lite" },
     { id: "openrouter/bytedance-seed/seed-2.0-lite", label: "ByteDance Seed: Seed-2.0-Lite" },
     { id: "openrouter/bytedance-seed/seed-2.0-mini", label: "ByteDance Seed: Seed-2.0-Mini" },
@@ -567,7 +569,6 @@ export const PI_BUILTIN_PROVIDER_MODELS_GENERATED: Record<string, ReadonlyArray<
     { id: "openrouter/~openai/gpt-mini-latest", label: "OpenAI: GPT Mini Latest" },
     { id: "openrouter/google/gemma-4-31b-it:free", label: "Google: Gemma 4 31B (free)" },
     { id: "openrouter/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free", label: "NVIDIA: Nemotron 3 Nano Omni (free)" },
-    { id: "openrouter/qwen/qwen3.8-27b:free", label: "Qwen: Qwen3.8 27B (free)" },
     { id: "openrouter/google/gemma-4-26b-a4b-it:free", label: "Google: Gemma 4 26B A4B  (free)" },
     { id: "openrouter/nvidia/nemotron-3.5-lightning:free", label: "NVIDIA: Nemotron 3.5 Lightning (free)" },
     { id: "openrouter/dots-studio/dots-3-note-preview:free", label: "Dots Studio: Dots3-Note Preview (free)" },
@@ -647,6 +648,7 @@ export const PI_BUILTIN_PROVIDER_MODELS_GENERATED: Record<string, ReadonlyArray<
     { id: "anthropic/claude-sonnet-4-6", label: "Claude Sonnet 4.6" },
     { id: "anthropic/claude-sonnet-4-5", label: "Claude Sonnet 4.5 (latest)" },
     { id: "anthropic/claude-haiku-4-5-20251001", label: "Claude Haiku 4.5" },
+    { id: "anthropic/claude-haiku-5-5", label: "Claude Haiku 5.5" },
     { id: "anthropic/claude-haiku-4-5", label: "Claude Haiku 4.5 (latest)" },
   ],
   "google": [

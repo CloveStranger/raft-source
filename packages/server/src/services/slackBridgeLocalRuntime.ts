@@ -3253,10 +3253,9 @@ export async function createSlackBridgeLocalRuntimeFromEnv(
             providerTeamId,
             providerEnterpriseId: string(enterprise?.id),
             providerUserId,
-            // The local runtime is test-only and has no workspace-admin
-            // directory probe. Production OAuth proves this before emitting
-            // the authorized outcome.
-            installerIsWorkspaceAdmin: true,
+            // The local runtime is test-only and skips the users.info probe.
+            // Production OAuth proves the installer is a real, current,
+            // non-bot member before emitting the authorized outcome.
             botUserId,
             providerBotId: string(body.bot_id),
             workspaceName: string(team?.name),

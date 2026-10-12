@@ -3,7 +3,6 @@ import { act } from "react";
 import type { ReactNode } from "react";
 import { cleanup, render as rtlRender, screen } from "@testing-library/react";
 import { TestIntlProvider } from "./helpers/intl";
-const render: typeof rtlRender = (ui, options) => rtlRender(ui, { wrapper: TestIntlProvider, ...options });
 import { BrowserRouter, MemoryRouter, useSearchParams } from "react-router-dom";
 import api from "../src/api/client";
 import ChatPanel, { ChatPanelMessageRenderScope } from "../src/components/message/ChatPanel";
@@ -13,14 +12,6 @@ import { useAuthStore } from "../src/store/authStore";
 import { useAgentStore } from "../src/store/agentStore";
 import type { Channel } from "../src/store/channelStore";
 import { useChannelStore } from "../src/store/channelStore";
-import {
-  refreshSyncCoreMessagesFlagForCurrentServer,
-  resetSyncCoreMessagesFlagForTests,
-} from "../src/store/messageSyncFeatureFlag";
-import {
-  resetMessagesSyncCoreForTests,
-  SYNC_CORE_MESSAGES_FLAG_KEY,
-} from "../src/store/messageSyncDomain";
 import { REGISTERED_SERVER_FEATURE_FLAG_KEYS } from "../src/store/serverFeatureFlags";
 import {
   buildMainLayoutSocketBindings,
@@ -39,6 +30,7 @@ import type {
 import { useServerStore } from "../src/store/serverStore";
 import { useTaskStore } from "../src/store/taskStore";
 import { useThreadStore } from "../src/store/threadStore";
+const render: typeof rtlRender = (ui, options) => rtlRender(ui, { wrapper: TestIntlProvider, ...options });
 
 const originalGet = api.get.bind(api);
 const originalPost = api.post.bind(api);
@@ -79,8 +71,6 @@ afterEach(() => {
   useAgentStore.setState(useAgentStore.getInitialState(), true);
   useChannelStore.setState({ channels: [], dmChannels: [], channelActivity: {} });
   useMessageStore.setState(useMessageStore.getInitialState(), true);
-  resetMessagesSyncCoreForTests();
-  resetSyncCoreMessagesFlagForTests();
   useServerStore.setState({ current: null, members: [] });
   useTaskStore.setState({ tasks: [], currentChannelId: null });
   useThreadStore.setState(useThreadStore.getInitialState(), true);
@@ -136,7 +126,7 @@ function stubSyncCoreFlagEvaluation(enabled: boolean) {
     });
     return {
       data: {
-        evaluations: [{ key: SYNC_CORE_MESSAGES_FLAG_KEY, enabled }],
+        evaluations: [{ key: "sync_core_messages_v0", enabled }],
       },
     };
   }) as typeof api.post;
@@ -360,14 +350,8 @@ function mainLayoutSocketHandler(event: string) {
 }
 
 async function measureSocketMessageNewRenderCounts(flagVariant: "disabled" | "enabled") {
-  resetMessagesSyncCoreForTests();
-  resetSyncCoreMessagesFlagForTests();
   setServerFlagState();
   stubSyncCoreFlagEvaluation(flagVariant === "enabled");
-  assert.equal(
-    await refreshSyncCoreMessagesFlagForCurrentServer(),
-    flagVariant === "enabled",
-  );
   useMessageStore.setState(useMessageStore.getInitialState(), true);
 
   const rc = createRenderCounter();
@@ -415,7 +399,7 @@ test("per-channel message bucket writes do not re-render unrelated channel subsc
   assert.equal(rc.get("b"), b0, "channel B subscriber did not re-render for channel A message");
 });
 
-test("flagged socket message:new keeps per-channel render isolation no worse than flag-off", async () => {
+test("socket message:new keeps per-channel render isolation regardless of obsolete flag response", async () => {
   const flagOff = await measureSocketMessageNewRenderCounts("disabled");
   cleanup();
   const flagOn = await measureSocketMessageNewRenderCounts("enabled");

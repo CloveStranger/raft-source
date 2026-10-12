@@ -16,6 +16,9 @@ export type AvatarContext =
   | "account-tile"
   | "mention-card"
   | "panel-header"
+  /** The message row's own avatar (rui `messageItem.avatarSlot` recipe owns the
+   *  size: borderless 36, 24 on narrow viewports) — no forced frame. */
+  | "message-row"
   | "surface-list"
   | "members-row"
   | "creator-link"
@@ -62,6 +65,13 @@ const SPEC: Record<AvatarContext, ContextSpec> = {
   "panel-header": {
     agentPixel: 32,
     gravatarSize: 32,
+    gravatarIcon: 16,
+    placeholderIcon: 18,
+    serverInitialText: "text-sm",
+  },
+  "message-row": {
+    agentPixel: 36,
+    gravatarSize: 36,
     gravatarIcon: 16,
     placeholderIcon: 18,
     serverInitialText: "text-sm",
@@ -120,6 +130,10 @@ const RAFT_AVATAR_SPEC: Record<AvatarContext, { size: AvatarSize; className: str
   "account-tile": { size: "xl", className: "!size-14 !border-2" },
   "mention-card": { size: "lg", className: "!size-12 !border-2" },
   "panel-header": { size: "md", className: "!size-9 !border-2" },
+  // No forced size/frame: the rui message recipe sets `size-9`/`border-0` on
+  // `[data-slot=avatar][data-size=md]` and the `max-md` tier (32 slot / 24
+  // avatar). A `!`-override here would beat all of them (as it did before).
+  "message-row": { size: "md", className: "" },
   "surface-list": { size: "sm", className: "!size-8 !border-2" },
   "members-row": { size: "sm", className: "!size-7 !border" },
   "creator-link": { size: "xs", className: "!size-[22px] !border" },

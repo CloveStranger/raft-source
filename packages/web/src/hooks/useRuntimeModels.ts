@@ -4,6 +4,7 @@ import {
   getStaticRuntimeModelSourceSet,
   hasStaticRuntimeModelSource,
   isRuntimeModelDetectionErrorCode,
+  isRuntimeModelDetectionLookupReason,
   RUNTIME_MODELS,
   runtimeModelSourceOutcomeFromSet,
 } from "@botiverse/raft-shared";
@@ -151,6 +152,7 @@ export function parseRuntimeModelSourcePayload(payload: unknown): RuntimeModelSo
     value?: unknown;
     retryable?: unknown;
     code?: unknown;
+    reason?: unknown;
     recovery?: unknown;
     catalog?: unknown;
     models?: unknown;
@@ -179,6 +181,10 @@ export function parseRuntimeModelSourcePayload(payload: unknown): RuntimeModelSo
     return {
       kind: "error", retryable: candidate.retryable !== false,
       ...(isRuntimeModelDetectionErrorCode(candidate.code) ? { code: candidate.code } : {}),
+      // task #735: the lookup miss reason rides `runtime_not_found` on new
+      // daemons. Absent (old daemon) or unknown → dropped, so the display layer
+      // reads it as unresolved and never as a confirmed miss.
+          ...(isRuntimeModelDetectionLookupReason(candidate.reason) ? { reason: candidate.reason } : {}),
     };
   }
   if (Array.isArray(candidate.models)) {

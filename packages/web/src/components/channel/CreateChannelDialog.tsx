@@ -1,5 +1,5 @@
 import { Input, Textarea, Card, SegmentedControl, SegmentedControlItem, SegmentedControlLabel, Button } from "raft-ui";
-import { useMemo, useRef, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import { useIntl } from "react-intl";
 import { formatNameValidationError } from "../../i18n/nameValidation";
 import { Check, Search, Hash, Lock } from "lucide-react";
@@ -229,7 +229,7 @@ export default function CreateChannelDialog({
     }
   };
 
-  const handleUnarchiveCollision = async () => {
+  const handleUnarchiveCollision = useCallback(async () => {
     if (!archivedCollision) return;
     setUnarchiving(true);
     try {
@@ -242,7 +242,21 @@ export default function CreateChannelDialog({
     } finally {
       setUnarchiving(false);
     }
-  };
+  }, [archivedCollision, unarchiveChannel, onClose, nav, formatMessage]);
+
+  const handleChangeCollidingName = useCallback(() => {
+    setArchivedCollision(null);
+    setName("");
+  }, []);
+  const handleNameChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => setName(e.target.value), []);
+  const handleDescriptionChange = useCallback(
+    (e: React.ChangeEvent<HTMLTextAreaElement>) => setDescription(e.target.value),
+    [],
+  );
+  const handleMemberSearchChange = useCallback(
+    (e: React.ChangeEvent<HTMLInputElement>) => setMemberSearch(e.target.value),
+    [],
+  );
 
   const hasMembers = memberSearchEntries.length > 0;
 
@@ -310,10 +324,7 @@ export default function CreateChannelDialog({
                 <Button size="sm"
                   variant="outline"
                   type="button"
-                  onClick={() => {
-                    setArchivedCollision(null);
-                    setName("");
-                  }}
+                  onClick={handleChangeCollidingName}
                   className="px-2 py-1 text-xs"
                 >
                   {formatMessage({ id: "channel.create.changeName" })}
@@ -325,7 +336,7 @@ export default function CreateChannelDialog({
             <Input
               type="text"
               value={name}
-              onChange={(e) => setName(e.target.value)}
+              onChange={handleNameChange}
               className="w-full"
               placeholder={formatMessage({ id: "channel.create.namePlaceholder" })}
               required
@@ -335,7 +346,7 @@ export default function CreateChannelDialog({
           <FormField label={formatMessage({ id: "channel.create.descriptionLabel" })} optional>
             <Textarea
               value={description}
-              onChange={(e) => setDescription(e.target.value)}
+              onChange={handleDescriptionChange}
               className="w-full"
               placeholder={formatMessage({ id: "channel.create.descriptionPlaceholder" })}
               rows={2}
@@ -365,7 +376,7 @@ export default function CreateChannelDialog({
                   <Input
                     type="text"
                     value={memberSearch}
-                    onChange={(e) => setMemberSearch(e.target.value)}
+                    onChange={handleMemberSearchChange}
                     className="input-member-search w-full pl-9"
                     placeholder={formatMessage({ id: "channel.create.membersSearchPlaceholder" })}
                   />

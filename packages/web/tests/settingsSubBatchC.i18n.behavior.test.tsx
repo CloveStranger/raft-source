@@ -17,28 +17,15 @@ import { WEB_APP_VERSION } from "../src/utils/webAppVersion";
 // Settings sub-batch C (react-intl migration acceptance): the RESIDUE sweep over
 // SettingsPanel.tsx after sub-batches A and B. A and B migrated whole sections;
 // what was left behind was a scatter of individual strings the earlier passes
-// missed. This file is the regression backstop for that residue, covering three
+// missed. This file is the regression backstop for that residue, covering two
 // call-site families that no earlier sub-batch renders:
 //
 //   1. AccountSignOutSection  → `settings.session.*`      (8 ids)
 //   2. AboutSection           → `settings.about.*` version + workspace cards (4 ids)
-//   3. WorkspaceModeSettingsCard → `settings.workspaceMode.*` (SEE GAP NOTE)
 //
 // Sub-batch A already renders `AccountSection`, but asserts nothing about the
 // sign-out card nested inside it (line ~672) — so the session ids had no tooth
 // until now, and A staying green proves nothing about them.
-//
-// GAP (declared, not silently dropped): `WorkspaceModeSettingsCard` is gated by
-// `useWorkspaceGridAvailability()`, which reads `import.meta.env.DEV` — the
-// Vite-only graph this node harness cannot shim, the same reason sub-batch A
-// renders `AccountSection` instead of the full panel. Verified, not assumed:
-// rendering it here throws `Cannot read properties of undefined (reading 'DEV')`,
-// so the component is deliberately left unexported. Its two ids therefore get
-// CATALOG parity coverage below rather than a render tooth. That is weaker: it
-// proves the ids exist and are translated, NOT that they are wired to the call
-// site — a hardcoded English string left at that call site would still pass.
-// Follow-up owner: me; the render tooth belongs in the Playwright e2e layer,
-// where a real Vite build resolves the flag.
 
 afterEach(() => {
   cleanup();
@@ -167,8 +154,7 @@ test("the About card falls back to migrated Chinese copy when the server has no 
 
 test("every id this sub-batch added is present and actually translated in both catalogs", () => {
   // Reverse-RED: deleting an id from zh-cn.ts, or leaving it copy-pasted from
-  // English, fails here even if no component test happens to render it. This is
-  // also the ONLY coverage the workspaceMode ids get — see the GAP note above.
+  // English, fails here even if no component test happens to render it.
   const ids = [
     "settings.account.usernameLabel",
     "settings.session.sectionLabel",
@@ -183,8 +169,6 @@ test("every id this sub-batch added is present and actually translated in both c
     "settings.about.workspaceSectionLabel",
     "settings.about.workspaceNameFallback",
     "settings.about.workspaceDetailsFallback",
-    "settings.workspaceMode.title",
-    "settings.workspaceMode.description",
   ];
 
   const en = enMessages as Record<string, string>;
@@ -202,7 +186,7 @@ test("every id this sub-batch added is present and actually translated in both c
 });
 
 test("the workspace SCOPE strings use 工作空间, never the agent-directory 工作区", () => {
-  // These four shipped as 工作区 in sub-batch C and were corrected after @AngLee
+  // These three shipped as 工作区 in sub-batch C and were corrected after @AngLee
   // ruled (2026-07-31). English collapses two concepts onto "Workspace"; Chinese
   // does not: 工作空间 = the server/workspace scope, 工作区 = an agent's own
   // working directory. sidebarSettingsRoot already pinned the sidebar surface —
@@ -212,7 +196,6 @@ test("the workspace SCOPE strings use 工作空间, never the agent-directory �
     "settings.about.workspaceSectionLabel",
     "settings.about.workspaceNameFallback",
     "settings.about.workspaceDetailsFallback",
-    "settings.workspaceMode.title",
   ]) {
     assert.ok(zh[id].includes("工作空间"), `${id} must use 工作空间`);
     assert.ok(

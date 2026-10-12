@@ -390,6 +390,10 @@ export class CodexEventNormalizer {
     return this.turnState.canSteerBusy;
   }
 
+  get hasLiveTurn(): boolean {
+    return this.turnState.hasLiveTurn;
+  }
+
   markNonEmptyTurnInput(turnId: string | null | undefined): void {
     this.turnState.markNonEmptyInputForTurn(turnId);
   }

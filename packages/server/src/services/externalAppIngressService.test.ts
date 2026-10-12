@@ -382,7 +382,7 @@ test("signed Slack message admission seals current normalized payload and dedupe
       type: "message",
       channel: "C_TEST",
       user: "U_HUMAN",
-      text: "hello from Slack",
+      text: "hello <!subteam^SAGENT123|@build-bot> from Slack",
       ts: "1785931200.000100",
     },
   }));
@@ -401,7 +401,12 @@ test("signed Slack message admission seals current normalized payload and dedupe
         assert.equal(input.aad.bindingId, fixture.binding.id);
         assert.equal(input.aad.runtimeRevision, "runtime-exact-1");
         assert.equal(input.aad.schemaVersion, 2);
-        assert.match(input.plaintext, /hello from Slack/);
+        const normalized = JSON.parse(input.plaintext) as Record<string, unknown>;
+        assert.equal(normalized.schema, "external-inbound-normalized-event.v3");
+        assert.deepEqual(normalized.providerAgentMentions, [{
+          providerUsergroupId: "SAGENT123",
+          handle: "build-bot",
+        }]);
         return { encryptedPayload: "sealed:inbound-event", envelopeKeyId: "payload-key-1", aadVersion: 1 };
       },
     },
@@ -876,9 +881,10 @@ test("Slack Web attachment messages preserve captions without admitting private 
     if (result.kind !== "event") assert.fail("expected attachment event admission");
     assert.equal(result.status, "queued");
     assert.equal(result.duplicate, false);
-    assert.equal(normalizedPayloads.at(-1)?.schema, "external-inbound-normalized-event.v2");
+    assert.equal(normalizedPayloads.at(-1)?.schema, "external-inbound-normalized-event.v3");
     assert.equal(normalizedPayloads.at(-1)?.content, sample.expectedContent);
     assert.deepEqual(normalizedPayloads.at(-1)?.providerFileIds, ["F_PRIVATE"]);
+    assert.deepEqual(normalizedPayloads.at(-1)?.providerAgentMentions, []);
   }
   assert.equal((await getDb().select().from(externalInboundEvents)).length, 3);
   assert.equal((await getDb().select().from(externalIngressDiscardReceipts)).length, 0);

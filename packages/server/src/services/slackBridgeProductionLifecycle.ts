@@ -16,9 +16,14 @@ import {
 } from "./slackAudienceRefreshService";
 import type { SlackBridgeProviderRuntime } from "./slackBridgeProviderRuntime";
 import { refreshSlackBindingPrivacy } from "./slackBindingPrivacyFreshnessService";
-import { refreshSlackPublicConversationAuthority } from "./slackBridgeProvisioningControlPlane";
+import {
+  listSlackBridgeAgentMentionCandidates,
+  refreshSlackPublicConversationAuthority,
+} from "./slackBridgeProvisioningControlPlane";
 import type { SlackBridgeAvatarMaterializer } from "./slackBridgeProvisioningControlPlane";
 import { refreshSlackBridgeInstallGrantReceipts } from "./slackBridgeInstallGrantService";
+import { resolveExternalInstallServerGrantAuthority } from "./externalInstallServerGrantAuthority";
+import { SLACK_BRIDGE_AGENT_MENTION_BOT_SCOPES } from "./slackBridgeProductionAppContract";
 import {
   startSlackBridgePersistentWorker,
   type SlackBridgeAudienceRefreshReceipt,
@@ -137,10 +142,68 @@ export function createSlackBridgeProductionLifecycle(
     const activeBindingIds = await db.select({
       bindingId: externalChannelBindings.id,
       installId: externalChannelBindings.installId,
+      serverId: externalChannelBindings.serverId,
+      registrationId: externalChannelBindings.registrationId,
     })
       .from(externalChannelBindings)
       .where(eq(externalChannelBindings.state, "active"))
       .orderBy(externalChannelBindings.installId, externalChannelBindings.id);
+    if (dependencies.provider.provisioningProvider.reconcileAgentMentionHandles) {
+      const scopes = new Set<string>(SLACK_BRIDGE_AGENT_MENTION_BOT_SCOPES);
+      const groups = new Map<string, (typeof activeBindingIds)[number]>();
+      for (const row of activeBindingIds) {
+        groups.set(`${row.serverId}:${row.installId}`, row);
+      }
+      for (const group of groups.values()) {
+        try {
+          const [install] = await db.select().from(externalAppInstalls).where(and(
+            eq(externalAppInstalls.id, group.installId),
+            eq(externalAppInstalls.registrationId, group.registrationId),
+            eq(externalAppInstalls.state, "active"),
+          )).limit(2);
+          if (
+            !install?.botUserId
+            || [...scopes].some((scope) => !install.installedScopes.includes(scope))
+          ) continue;
+          const grant = await resolveExternalInstallServerGrantAuthority(db, {
+            installId: group.installId,
+            serverId: group.serverId,
+            registrationId: group.registrationId,
+          });
+          if (!grant.current) continue;
+          const bindings = await db.select().from(externalChannelBindings).where(and(
+            eq(externalChannelBindings.serverId, group.serverId),
+            eq(externalChannelBindings.installId, group.installId),
+            eq(externalChannelBindings.state, "active"),
+          ));
+          const candidates = await listSlackBridgeAgentMentionCandidates(
+            db,
+            group.serverId,
+            bindings,
+          );
+          const reconciled = await dependencies.provider.provisioningProvider
+            .reconcileAgentMentionHandles({
+              installId: install.id,
+              providerAppId: install.providerAppId,
+              providerAuthorityId: install.providerAuthorityId,
+              botUserId: install.botUserId,
+              connectionEpoch: install.connectionEpoch,
+              credentialRevision: install.credentialRevision,
+              now: observedAt,
+            }, { serverId: group.serverId, candidates });
+          const agentIds = reconciled.kind === "fact"
+            ? new Set(reconciled.fact.handles.map((handle) => handle.agentId))
+            : null;
+          if (
+            !agentIds
+            || agentIds.size !== candidates.length
+            || candidates.some((candidate) => !agentIds.has(candidate.agentId))
+          ) throw new Error("Slack Bridge Agent mention reconciliation failed");
+        } catch (error) {
+          dependencies.onError?.(error);
+        }
+      }
+    }
     const activeInstallIds = new Set(activeBindingIds.map(({ installId }) => installId));
     for (const installId of privacyRetryNotBeforeByInstall.keys()) {
       if (!activeInstallIds.has(installId)) privacyRetryNotBeforeByInstall.delete(installId);

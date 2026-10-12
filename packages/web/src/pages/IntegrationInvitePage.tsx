@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useEffectEvent, useMemo, useState } from "react";
 import { useIntl } from "react-intl";
 import { useNavigate, useParams } from "react-router-dom";
 import { Check, ExternalLink, Link2 } from "lucide-react";
@@ -80,7 +80,9 @@ export default function IntegrationInvitePage() {
   const [error, setError] = useState("");
   const [installed, setInstalled] = useState(false);
 
-  const loadInvite = async () => {
+  // Effect Event: the fetch re-runs only when the token changes, while still
+  // reading the current formatMessage for its fallback copy.
+  const loadInvite = useEffectEvent(async () => {
     setLoading(true);
     setError("");
     try {
@@ -94,20 +96,19 @@ export default function IntegrationInvitePage() {
     } finally {
       setLoading(false);
     }
-  };
+  });
 
   useEffect(() => {
     void loadInvite();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [token]);
 
   const selectedServer = invite?.manageableServers.find((server) => server.id === selectedServerId) ?? null;
-  const manageableServerOptions = invite?.manageableServers.map((server) => ({
+  const manageableServerOptions = useMemo(() => invite?.manageableServers.map((server) => ({
     value: server.id,
     label: `${server.name}${server.installedAt ? formatMessage({ id: "pages.integrationInvite.installedSuffix" }) : ""}`,
-  })) ?? [];
+  })) ?? [], [formatMessage, invite]);
 
-  const install = async () => {
+  const install = useCallback(async () => {
     if (!selectedServerId) return;
     setInstalling(true);
     setError("");
@@ -122,7 +123,18 @@ export default function IntegrationInvitePage() {
     } finally {
       setInstalling(false);
     }
-  };
+  }, [formatMessage, selectedServerId, token]);
+  const handleInstallClick = useCallback(() => {
+    void install();
+  }, [install]);
+  const handleServerChange = useCallback((value: string | null) => {
+    if (value == null) return;
+    setSelectedServerId(value);
+  }, []);
+  const selectedServerSlug = selectedServer?.slug;
+  const openSelectedServerSettings = useCallback(() => {
+    navigate(`/s/${selectedServerSlug}/settings`);
+  }, [navigate, selectedServerSlug]);
 
   return (
     <div
@@ -198,10 +210,7 @@ export default function IntegrationInvitePage() {
                     <div className="min-w-0">
                       <Select
                         value={selectedServerId}
-                        onValueChange={(value) => {
-                          if (value == null) return;
-                          setSelectedServerId(value);
-                        }}
+                        onValueChange={handleServerChange}
                         items={manageableServerOptions}
                       >
                         <SelectTrigger className="w-full">
@@ -214,12 +223,12 @@ export default function IntegrationInvitePage() {
                       </Select>
                     </div>
                     {selectedServer?.installedAt ? (
-                      <Button type="button" onClick={() => navigate(`/s/${selectedServer.slug}/settings`)} size="lg" className="w-full md:w-auto">
+                      <Button type="button" onClick={openSelectedServerSettings} size="lg" className="w-full md:w-auto">
                         <ExternalLink size={14} />
                         {formatMessage({ id: "pages.integrationInvite.openSettings" })}
                       </Button>
                     ) : (
-                      <Button type="button" onClick={() => void install()} disabled={installing || !selectedServerId} size="lg" variant="accent" className="w-full md:w-auto">
+                      <Button type="button" onClick={handleInstallClick} disabled={installing || !selectedServerId} size="lg" variant="accent" className="w-full md:w-auto">
                         <Check size={14} />
                         {installing ? formatMessage({ id: "pages.integrationInvite.installing" }) : formatMessage({ id: "pages.integrationInvite.installApp" })}
                       </Button>

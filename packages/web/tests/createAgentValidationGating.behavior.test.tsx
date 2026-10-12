@@ -632,8 +632,8 @@ test("the custom-model Input is declared as the field's control and not re-wrapp
   );
   assert.match(
     source,
-    /\{customModelSupported && customModelInputMode && \(\s*(?:\/\*[\s\S]*?\*\/\s*)?<Input\s+data-field-adopt/,
-    "the custom-model Input must be a DIRECT child carrying data-field-adopt — wrapped in an element it is invisible to adoption, which adopts the mode Select instead (custom mode) or nothing at all (gateway mode, where the Select is null)",
+    /\{customModelSupported && builtInGatewayProvider && \(\s*(?:\/\*[\s\S]*?\*\/\s*)?<Input\s+data-field-adopt/,
+    "the gateway model Input must be a DIRECT child carrying data-field-adopt — wrapped in an element it is invisible to adoption, and the field (whose model list is null in gateway mode) fails closed with nothing to adopt",
   );
 });
 
@@ -819,18 +819,15 @@ test("no-schema Kimi fields do not advertise an unmanaged reasoning capability",
 });
 
 /**
- * TOOTH 12 — the real custom-model branch, all four properties at once.
+ * TOOTH 12 — the real custom-model branch.
  *
- * Tooth 8 composes the two-control shape by hand; this drives the actual
- * `RuntimeConfigFields` in custom-model mode, which is what @Dozy asked for after
- * two rounds where a hand-built fixture agreed with a broken component.
- *
- * All four assertions live in ONE test deliberately. Split across tests they can
- * pass in combinations that are individually true and jointly wrong — "Select not
- * described" is satisfied by a field that describes nothing at all, and "Input
- * described" by one that describes everything. The property is the SPLIT.
+ * Custom mode used to be two controls (a mode Select and a value Input). The
+ * model field is now one searchable box that also takes a typed model id, so
+ * the property is simpler: that one box is the field's control — invalid,
+ * described by the required error, and named by the label — and the field
+ * does not fail closed.
  */
-test("real custom-model: the Input is invalid and described, the Select is clean, named, and not described", async () => {
+test("real custom-model: the model box is the field's one control, invalid, described and named", async () => {
   const { default: RuntimeConfigFields } = await import("../src/components/agent/RuntimeConfigFields");
 
   rtlRender(
@@ -875,23 +872,14 @@ test("real custom-model: the Input is invalid and described, the Select is clean
     </TestIntlProvider>,
   );
 
-  const valueInput = screen.getByPlaceholderText(/custom model|model name|model id/i);
-  const field = valueInput.closest('[data-slot="field"]');
-  assert.ok(field, "the custom-model Input must sit inside a Field");
-  const modeSelect = field.querySelector('[role="combobox"]');
-  assert.ok(modeSelect, "the mode Select must render beside it — this is the two-control shape");
-
-  assert.equal(valueInput.getAttribute("aria-invalid"), "true", "the value Input is the invalid one");
-  assert.match(ariaText(valueInput, "aria-describedby"), /required/i, "the value Input carries the error description");
-
-  assert.equal(modeSelect.getAttribute("aria-invalid"), null, "the mode Select holds a valid value and must not be marked invalid");
-  assert.equal(modeSelect.hasAttribute("data-invalid"), false, "...nor styled invalid");
-  assert.match(ariaText(modeSelect, "aria-labelledby"), /Model/, "...but must keep its accessible name");
-  assert.equal(
-    ariaText(modeSelect, "aria-describedby"),
-    "",
-    "...and must not be described by the value control's required-error",
-  );
+  const box = screen.getByTestId("runtime-model-combobox");
+  const field = box.closest('[data-slot="field"]');
+  assert.ok(field, "the model box must sit inside a Field");
+  assert.equal(field.getAttribute("data-field-config-error"), null, "one control: the field adopts it");
+  assert.equal(field.querySelectorAll('[role="combobox"]').length, 1, "no separate mode select any more");
+  assert.equal(box.getAttribute("data-invalid"), "true", "the box is marked invalid");
+  assert.match(ariaText(box, "aria-describedby"), /required/i, "the box carries the error description");
+  assert.match(ariaText(box, "aria-labelledby"), /Model/, "the box keeps its accessible name");
 });
 
 /**

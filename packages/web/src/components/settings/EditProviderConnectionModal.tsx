@@ -1,7 +1,7 @@
 import { Button, Checkbox, Input, Spinner } from "raft-ui";
 import { Pencil } from "lucide-react";
-import { useState } from "react";
-import type { FormEvent } from "react";
+import { useCallback, useState } from "react";
+import type { ChangeEvent, FormEvent } from "react";
 import { useIntl } from "react-intl";
 import type {
   ProviderConnectionProviderOption,
@@ -32,6 +32,16 @@ export default function EditProviderConnectionModal({
   const [supportsImageInput, setSupportsImageInput] = useState(connection.supportsImageInput);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
+  const handleNameChange = useCallback((event: ChangeEvent<HTMLInputElement>) => setName(event.target.value), []);
+  const handleEndpointUrlChange = useCallback(
+    (event: ChangeEvent<HTMLInputElement>) => setEndpointUrl(event.target.value),
+    [],
+  );
+  const handleApiKeyChange = useCallback((event: ChangeEvent<HTMLInputElement>) => setApiKey(event.target.value), []);
+  const handleSupportsImageInputChange = useCallback(
+    (checked: boolean) => setSupportsImageInput(checked === true),
+    [],
+  );
   const gateway = providerOptions.find((entry) => entry.id === connection.providerId)?.providerKind === "gateway";
 
   const submit = async (event: FormEvent) => {
@@ -79,7 +89,7 @@ export default function EditProviderConnectionModal({
             id={nameInputId}
             className="w-full"
             value={name}
-            onChange={(event) => setName(event.target.value)}
+            onChange={handleNameChange}
             maxLength={120}
             required
             autoFocus
@@ -92,7 +102,7 @@ export default function EditProviderConnectionModal({
               className="w-full"
               type="url"
               value={endpointUrl}
-              onChange={(event) => setEndpointUrl(event.target.value)}
+              onChange={handleEndpointUrlChange}
               required
             />
           </FormField>
@@ -108,7 +118,7 @@ export default function EditProviderConnectionModal({
             type="password"
             autoComplete="new-password"
             value={apiKey}
-            onChange={(event) => setApiKey(event.target.value)}
+            onChange={handleApiKeyChange}
           />
         </FormField>
         {gateway && (
@@ -116,7 +126,7 @@ export default function EditProviderConnectionModal({
             <Checkbox
               id={imageInputId}
               checked={supportsImageInput}
-              onCheckedChange={(checked) => setSupportsImageInput(checked === true)}
+              onCheckedChange={handleSupportsImageInputChange}
             />
             {formatMessage({ id: "settings.providers.imageInput" })}
           </label>

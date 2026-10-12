@@ -3,6 +3,7 @@ import { existsSync } from "node:fs";
 import path from "node:path";
 
 import { logger } from "../logger";
+import type { RuntimeProbeUnavailableReason } from "./types";
 import { createWindowsPowerShellChildEnv } from "./windowsPowerShellEnv";
 
 export interface ProbeDeps {
@@ -79,8 +80,11 @@ function summarizeWindowsEnvironmentError(error: unknown): string {
 }
 
 // Each runtime is probed again on reconnect/config refresh, so a slow lookup
-// fails this inventory pass without becoming a cached permanent miss.
-const WINDOWS_COMMAND_RESOLVE_TIMEOUT_MS = 1000;
+// fails this inventory pass without becoming a cached permanent miss. The
+// budget covers powershell.exe process start plus Get-Command; a lookup that
+// exceeds it is reported as `probe_timeout`, never as `not_installed`
+// (task #1240).
+export const WINDOWS_COMMAND_RESOLVE_TIMEOUT_MS = 1000;
 
 function normalizeProcessEnv(value: unknown): NodeJS.ProcessEnv {
   if (!value || typeof value !== "object" || Array.isArray(value)) return {};
@@ -211,9 +215,14 @@ function resolveCommandOnWindows(
   env: NodeJS.ProcessEnv,
   execFileSyncFn: typeof execFileSync,
   existsSyncFn: (filePath: string) => boolean,
-): string | null {
+): CommandLookup {
+  // Only a CommandNotFoundException means "not on PATH"; it exits with a
+  // reserved code. Any other failure of the lookup exits 1 (PowerShell's
+  // default for an uncaught error) and is not evidence that the command is
+  // absent.
   const script =
-    "& {$cmd = Get-Command -Name $args[0] -ErrorAction Stop | Select-Object -First 1; " +
+    "& {try { $cmd = Get-Command -Name $args[0] -ErrorAction Stop | Select-Object -First 1 } " +
+    `catch [System.Management.Automation.CommandNotFoundException] { exit ${WINDOWS_LOOKUP_NOT_FOUND_EXIT} }; ` +
     "if ($cmd.Path) { $cmd.Path } " +
     "elseif ($cmd.Source) { $cmd.Source } " +
     "elseif ($cmd.Definition) { $cmd.Definition } }";
@@ -231,7 +240,8 @@ function resolveCommandOnWindows(
       timeout: WINDOWS_COMMAND_RESOLVE_TIMEOUT_MS,
     }));
     const resolved = output.trim().split(/\r?\n/)[0];
-    if (!resolved) return null;
+    // Found but with no usable path, or a lookup that printed nothing: not a miss.
+    if (!resolved) return { command: null, missReason: "probe_failed" };
 
     // PowerShell Get-Command prefers .ps1, but cmd.exe cannot execute .ps1
     // (it opens Notepad or hangs). Prefer .cmd > .bat > .exe / extensionless
@@ -247,20 +257,51 @@ function resolveCommandOnWindows(
         path.join(dir, base),
       ];
       for (const alt of alternatives) {
-        if (existsSyncFn(alt)) return alt;
+        if (existsSyncFn(alt)) return { command: alt };
       }
-      return null;
+      // Found, but only as a PowerShell script cmd.exe cannot run.
+      return { command: null, missReason: "probe_failed" };
     }
 
-    return resolved;
-  } catch {
-    return null;
+    return { command: resolved };
+  } catch (error) {
+    return { command: null, missReason: classifyCommandLookupFailure(error, WINDOWS_LOOKUP_NOT_FOUND_EXIT) };
   }
+}
+
+/**
+ * Result of looking a command up on PATH. `missReason` is set only when
+ * `command` is null: "not_installed" means the lookup itself ran and reported
+ * the command absent; any other reason means the lookup could not decide
+ * (timed out, locator missing, ...), so the caller must not treat it as absent.
+ */
+export interface CommandLookup {
+  command: string | null;
+  missReason?: RuntimeProbeUnavailableReason;
+}
+
+/** Exit code the Windows lookup script reserves for "Get-Command found nothing". */
+const WINDOWS_LOOKUP_NOT_FOUND_EXIT = 3;
+/** `which` (debianutils, GNU, BusyBox, macOS) exits 1 when a command is not found; 2+ is a usage/internal error. */
+const POSIX_WHICH_NOT_FOUND_EXIT = 1;
+
+function classifyCommandLookupFailure(error: unknown, notFoundExit: number): RuntimeProbeUnavailableReason {
+  // Only the locator's own "not found" status means absent. Any other exit
+  // status (the locator failed) or a spawn error (timeout, missing locator,
+  // EACCES) cannot tell us the command is missing.
+  const status = error && typeof error === "object" ? (error as { status?: unknown }).status : undefined;
+  if (status === notFoundExit) return "not_installed";
+  return classifyProbeExecFailure(error);
 }
 
 const POSIX_USER_BIN_DIRS = [[".local", "bin"], [".kimi-code", "bin"]] as const;
 
 export function resolveCommandOnPath(command: string, deps: ProbeDeps = {}): string | null {
+  return lookupCommandOnPath(command, deps).command;
+}
+
+/** {@link resolveCommandOnPath} plus a structured reason when the command was not resolved. */
+export function lookupCommandOnPath(command: string, deps: ProbeDeps = {}): CommandLookup {
   const platform = deps.platform ?? process.platform;
   const env = withWindowsUserEnvironment(deps.env ?? process.env, deps);
   const execFileSyncFn = deps.execFileSyncFn ?? execFileSync;
@@ -270,26 +311,45 @@ export function resolveCommandOnPath(command: string, deps: ProbeDeps = {}): str
   }
   const locator = "which";
 
+  let missReason: RuntimeProbeUnavailableReason = "not_installed";
   try {
     const output = normalizeExecOutput(execFileSyncFn(locator, [command], {
       stdio: ["ignore", "pipe", "ignore"],
       env,
     }));
     const resolved = output.trim().split(/\r?\n/)[0];
-    if (resolved) return resolved;
-  } catch {
+    if (resolved) return { command: resolved };
+    // `which` succeeded but printed nothing: not evidence of absence.
+    missReason = "probe_failed";
+  } catch (error) {
     // Fall through to the user-local bin directories.
+    missReason = classifyCommandLookupFailure(error, POSIX_WHICH_NOT_FOUND_EXIT);
   }
   // A service started from a non-login context (installer, cron, `env -i`)
   // inherits the system default PATH, which omits the user-local bin
   // directories where the Claude Code, Codex, Grok and Kimi installers put
   // their binaries.
   const homeDir = deps.homeDir ?? env.HOME;
-  if (!homeDir) return null;
-  return firstExistingPath(
-    POSIX_USER_BIN_DIRS.map((segments) => path.posix.join(homeDir, ...segments, command)),
-    deps,
-  );
+  const fallback = homeDir
+    ? firstExistingPath(
+      POSIX_USER_BIN_DIRS.map((segments) => path.posix.join(homeDir, ...segments, command)),
+      deps,
+    )
+    : null;
+  return fallback ? { command: fallback } : { command: null, missReason };
+}
+
+/**
+ * Classify a failed probe child process (execFileSync error) by its structured
+ * fields. The command was already resolved, so this never returns
+ * "not_installed": a resolved command that fails to exec (even with ENOENT,
+ * e.g. a missing shebang interpreter) is a broken install, not a missing one.
+ */
+export function classifyProbeExecFailure(error: unknown): Exclude<RuntimeProbeUnavailableReason, "not_installed" | "unsupported_version"> {
+  const code = error && typeof error === "object" ? (error as { code?: unknown }).code : undefined;
+  if (code === "ETIMEDOUT") return "probe_timeout";
+  if (code === "EACCES" || code === "EPERM") return "permission_denied";
+  return "probe_failed";
 }
 
 export function firstExistingPath(candidates: string[], deps: ProbeDeps = {}): string | null {

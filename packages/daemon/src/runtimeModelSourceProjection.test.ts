@@ -79,3 +79,10 @@ test("empty live catalog normalizes to no_models before crossing the wire", () =
   assert.deepEqual(message.outcome, { kind: "no_models" });
   assert.deepEqual(message.models, []);
 });
+
+test("task #1242: the serialized result frame keeps the lookup verdict beside the legacy error field", () => {
+  const message = buildRuntimeModelSourceResultMessage("req-nf", { kind: "error", retryable: true, code: "runtime_not_found", reason: "probe_timeout" }, "launchable");
+  const wire = JSON.parse(JSON.stringify(message));
+  assert.deepEqual(wire.outcome, { kind: "error", retryable: true, code: "runtime_not_found", reason: "probe_timeout" });
+  assert.equal(wire.error, "error");
+});

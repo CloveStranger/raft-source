@@ -1,3 +1,4 @@
+import { useCallback, useMemo } from "react";
 import { useIntl } from "react-intl";
 import { Switch } from "raft-ui";
 import { useServerStore } from "../../store/serverStore";
@@ -6,6 +7,9 @@ import {
   removeSidebarPinnedRef,
   upsertSidebarPinnedRef,
 } from "../../utils/sidebarPinnedRefs";
+import type { SidebarPinnedRef } from "../../utils/sidebarPinnedRefs";
+
+const NO_PINNED_REFS: SidebarPinnedRef[] = [];
 
 /**
  * The per-user conversation preferences — Pin, (panel-only) Activity mute,
@@ -44,16 +48,21 @@ export function ChannelPreferencesSection({
   const { formatMessage } = useIntl();
   const sidebarOrder = useServerStore((s) => s.sidebarOrder);
   const updateSidebarOrder = useServerStore((s) => s.updateSidebarOrder);
-  const pinnedRefs = sidebarOrder.pinned ?? [];
-  const channelPinRef = { kind: "channel" as const, id: channelId };
+  const pinnedRefs = sidebarOrder.pinned ?? NO_PINNED_REFS;
+  const channelPinRef = useMemo(() => ({ kind: "channel" as const, id: channelId }), [channelId]);
   const isPinned = hasSidebarPinnedRef(pinnedRefs, channelPinRef);
-  const handleTogglePin = () => {
+  const handleTogglePin = useCallback(() => {
     const next = isPinned
       ? removeSidebarPinnedRef(pinnedRefs, channelPinRef)
       : upsertSidebarPinnedRef(pinnedRefs, channelPinRef);
     // Same fire-and-forget contract as the Sidebar context-menu toggle.
     void updateSidebarOrder({ pinned: next });
-  };
+  }, [isPinned, pinnedRefs, channelPinRef, updateSidebarOrder]);
+  // The Switch passes the next checked state; the toggles take no argument.
+  const toggleMute = activityMute?.onToggle;
+  const handleToggleMute = useCallback(() => toggleMute?.(), [toggleMute]);
+  const toggleCollapse = collapseLongMessages?.onToggle;
+  const handleToggleCollapse = useCallback(() => toggleCollapse?.(), [toggleCollapse]);
 
   return (
     <section className="mt-5" data-testid="channel-settings-preferences">
@@ -93,7 +102,7 @@ export function ChannelPreferencesSection({
               size="md"
               checked={activityMute.muted}
               disabled={activityMute.busy}
-              onCheckedChange={() => activityMute.onToggle()}
+              onCheckedChange={handleToggleMute}
               aria-labelledby="channel-settings-mute-label"
               className="shrink-0"
               data-testid="channel-overflow-mute-switch"
@@ -114,7 +123,7 @@ export function ChannelPreferencesSection({
               size="md"
               checked={collapseLongMessages.enabled}
               disabled={collapseLongMessages.busy}
-              onCheckedChange={() => collapseLongMessages.onToggle()}
+              onCheckedChange={handleToggleCollapse}
               aria-labelledby="channel-settings-collapse-label"
               className="shrink-0"
               data-testid="channel-settings-collapse-switch"

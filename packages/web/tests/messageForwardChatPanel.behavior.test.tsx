@@ -888,6 +888,36 @@ test("Forward note mention autocomplete scopes joint destinations and clears sta
   assert.ok(screen.getByText("Server Bot"));
 });
 
+test("Escape on the open mention list closes only the list; the forward composer and its note stay", async () => {
+  // task #20 follow-up (Artea): Escape used to close the whole Forward dialog
+  // and drop the note while the @mention list was open.
+  const source = makeChannel();
+  const target = makeChannel({ id: "target-channel", name: "target" });
+  renderForwardPanel(source, [makeMessage({ id: "message-note-escape" })], {
+    channels: [source, target],
+    dmChannels: [],
+    serverMembers: [makeServerMember({ userId: "user-peer", name: "PeerHuman", displayName: "Peer Human" })],
+    agents: [makeAgent({ id: "agent-helper", name: "HelperBot", displayName: "Helper Bot" })],
+  });
+
+  fireEvent.click(await screen.findByTestId("select-mode-forward"));
+  await screen.findByTestId("forward-composer-dialog");
+  fireEvent.click(screen.getByTestId("forward-target-target-channel"));
+  const textarea = screen.getByLabelText("Optional note") as HTMLTextAreaElement;
+  await act(async () => {
+    fireEvent.change(textarea, { target: { value: "hello @Hel", selectionStart: 10, selectionEnd: 10 } });
+  });
+  assert.ok(await screen.findByTestId("mention-autocomplete-popover"), "mention list is open");
+
+  await act(async () => { fireEvent.keyDown(textarea, { key: "Escape" }); });
+  await waitFor(() => assert.ok(screen.queryByTestId("mention-autocomplete-popover") === null, "the mention list closed"));
+  assert.ok(screen.queryByTestId("forward-composer-dialog"), "the Forward dialog stays open");
+  assert.equal((screen.getByLabelText("Optional note") as HTMLTextAreaElement).value, "hello @Hel", "the note is kept");
+
+  await act(async () => { fireEvent.keyDown(screen.getByLabelText("Optional note"), { key: "Escape" }); });
+  await waitFor(() => assert.ok(screen.queryByTestId("forward-composer-dialog") === null, "a plain Escape still closes the dialog"));
+});
+
 test("Forward note clears its synthetic draft when the composer closes", async () => {
   const source = makeChannel();
   const target = makeChannel({ id: "draft-cleanup-target", name: "draft-cleanup-target" });
@@ -941,12 +971,12 @@ test("forward composer sends canonical multi-target batches without an Open acti
   assert.equal(composerHeading?.textContent, "Forward");
   assert.equal(composerHeading?.classList.contains("uppercase"), false);
   const targetSearch = screen.getByPlaceholderText("Search targets");
-  // B3: the forward composer's box shadow is themed now (the bare brutal token
-    // leaked a hard black shadow into the elegant themes).
-    assert.match(targetSearch.parentElement?.className ?? "", /\bshadow-raft-sm\b/);
-    assert.match(targetSearch.parentElement?.className ?? "", /\btheme-brutal:shadow-brutal-sm\b/);
-  assert.match(targetSearch.parentElement?.className ?? "", /\bfocus-within:shadow-raft-md\b/);
-    assert.match(targetSearch.parentElement?.className ?? "", /\btheme-brutal:focus-within:shadow-brutal\b/);
+  // task #736: the target search is a rui InputGroup now, not a hand-rolled
+  // input with its own border/shadow theme classes. Assert the shared recipe
+  // owns the chrome (slot + shadow token) instead of pinning bespoke classes,
+  // so the box keeps following the design system across themes.
+  assert.equal(targetSearch.parentElement?.getAttribute("data-slot"), "input-group");
+  assert.match(targetSearch.parentElement?.className ?? "", /\bshadow-raft-sm\b/);
   assert.match(screen.getByTestId("forward-desktop-note-actions").className, /\bp-3\b/);
   fireEvent.click(screen.getByTestId("forward-target-target-a"));
   fireEvent.click(screen.getByTestId("forward-target-target-b"));

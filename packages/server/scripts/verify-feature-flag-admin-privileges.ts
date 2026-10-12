@@ -6,6 +6,7 @@ import {
   REQUIRED_FEATURE_FLAG_ADMIN_PRIVILEGES,
   reconcileAndVerifyFeatureFlagAdminPrivileges,
 } from "../src/db/featureFlagAdminPrivileges";
+import { withTransientConnectRetry } from "../src/db/transientConnectRetry";
 
 const rawRequired = process.env.FEATURE_FLAG_ADMIN_PRIVILEGE_GUARD_REQUIRED;
 
@@ -21,17 +22,26 @@ async function main(): Promise<void> {
   const url = process.env.DATABASE_URL;
   if (!url) throw new Error("database_url_missing");
 
-  const pool = new pg.Pool({ connectionString: url, max: 1 });
-  try {
-    await reconcileAndVerifyFeatureFlagAdminPrivileges((text, values) => pool.query(text, values));
-    console.log(
-      `[FEATURE_FLAG_ADMIN_PRIVILEGES_OK] role=${FEATURE_FLAG_ADMIN_OPERATOR_ROLE} `
-        + `required=${REQUIRED_FEATURE_FLAG_ADMIN_PRIVILEGES.length} `
-        + `forbidden=${FORBIDDEN_FEATURE_FLAG_ADMIN_PRIVILEGES.length}`,
-    );
-  } finally {
-    await pool.end().catch(() => undefined);
-  }
+  // Reconcile-and-verify is idempotent, so a transient connect refusal (Neon's
+  // proxy briefly rejecting new connections) is retried with a fresh pool.
+  await withTransientConnectRetry(async () => {
+    const pool = new pg.Pool({ connectionString: url, max: 1 });
+    try {
+      await reconcileAndVerifyFeatureFlagAdminPrivileges((text, values) => pool.query(text, values));
+    } finally {
+      await pool.end().catch(() => undefined);
+    }
+  }, {
+    onRetry: (attempt, error) => {
+      const reason = error instanceof Error ? error.message : "unknown";
+      console.warn(`[FEATURE_FLAG_ADMIN_PRIVILEGES_RETRY] attempt=${attempt} reason=${reason}`);
+    },
+  });
+  console.log(
+    `[FEATURE_FLAG_ADMIN_PRIVILEGES_OK] role=${FEATURE_FLAG_ADMIN_OPERATOR_ROLE} `
+      + `required=${REQUIRED_FEATURE_FLAG_ADMIN_PRIVILEGES.length} `
+      + `forbidden=${FORBIDDEN_FEATURE_FLAG_ADMIN_PRIVILEGES.length}`,
+  );
 }
 
 void main().catch((error: unknown) => {

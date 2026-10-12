@@ -33,6 +33,11 @@ import Tooltip from "../ui/Tooltip";
 
 const FEEDBACK_SETTINGS_SEGMENT = "/settings/feedback";
 
+const PANEL_HEADER_CONTAINER_PROPS = {
+  "data-testid": "settings-feedback-panel-header",
+  "data-slock-settings-tab": "feedback",
+};
+
 export function feedbackWorkspaceBasePath(pathname: string): string {
   const match = new RegExp(
     `^(.*${FEEDBACK_SETTINGS_SEGMENT})(?:/|$)`,
@@ -206,23 +211,35 @@ export default function AboutFeedbackPanel() {
     });
   }, [feedbackBasePath, location.pathname, navigate, onWorkspaceBack]);
 
+  const handleOpenAttachment = useCallback(
+    (input: { ticketId: string; attachmentId: string }) => void openAttachment(input),
+    [openAttachment],
+  );
+
+  const handleLightboxOpenChange = useCallback((open: boolean) => {
+    if (!open) closeAttachmentPreview();
+  }, [closeAttachmentPreview]);
+
+  const isInbox = pathRoute.view === "inbox";
+  const mobileBackProps = useMemo(
+    () => isInbox
+      ? {
+          "data-testid": "settings-feedback-mobile-back",
+          title: formatMessage({ id: "settings.tabs.back" }),
+        }
+      : undefined,
+    [formatMessage, isInbox],
+  );
+
   return (
     <div className="slock-feedback-panel flex h-full min-h-0 flex-col bg-layer-primary">
       <PanelHeader
         title={formatMessage({ id: "settings.about.feedbackTitle" })}
         icon={<MessageSquare size={18} />}
         iconBg="bg-primary-soft text-foreground-strong theme-brutal:bg-soft-signal theme-brutal:text-black"
-        containerProps={{
-          "data-testid": "settings-feedback-panel-header",
-          "data-slock-settings-tab": "feedback",
-        }}
-        onMobileBack={pathRoute.view === "inbox" ? onSettingsBack : undefined}
-        mobileBackProps={pathRoute.view === "inbox"
-          ? {
-              "data-testid": "settings-feedback-mobile-back",
-              title: formatMessage({ id: "settings.tabs.back" }),
-            }
-          : undefined}
+        containerProps={PANEL_HEADER_CONTAINER_PROPS}
+        onMobileBack={isInbox ? onSettingsBack : undefined}
+        mobileBackProps={mobileBackProps}
       />
       {attachmentError && (
         <Banner intent="warning" density="sm" className="mx-4 mt-3" role="alert">
@@ -244,7 +261,7 @@ export default function AboutFeedbackPanel() {
                   onRouteChange: onWorkspaceRouteChange,
                 }
               : {})}
-            onOpenAttachment={(input) => void openAttachment(input)}
+            onOpenAttachment={handleOpenAttachment}
             onOpenPendingAttachment={openPendingAttachment}
           />
         </FeedbackProvider>
@@ -252,9 +269,7 @@ export default function AboutFeedbackPanel() {
       {attachmentPreview && (
         <Lightbox
           open
-          onOpenChange={(open) => {
-            if (!open) closeAttachmentPreview();
-          }}
+          onOpenChange={handleLightboxOpenChange}
         >
           <LightboxContent aria-label={attachmentPreview.filename}>
             <LightboxToolbar>

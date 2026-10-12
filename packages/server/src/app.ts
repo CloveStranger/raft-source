@@ -14,6 +14,11 @@ import {
   SCOPE_ATTESTATION_REQUEST_MAX_BYTES,
   scopeAttestationBodyErrorHandler,
 } from "./routes/scopeAttestationRequestLimits";
+import {
+  AGENT_MIGRATION_CONTROL_PATH,
+  AGENT_MIGRATION_CONTROL_REQUEST_MAX_BYTES,
+  agentMigrationControlBodyErrorHandler,
+} from "./routes/agentMigrationControlRequestLimits";
 import { authRouter } from "./routes/auth";
 import { agentLoginRouter } from "./routes/agentLogin";
 import { deviceAuthRouter } from "./routes/deviceAuth";
@@ -28,7 +33,6 @@ import { serverRouter } from "./routes/servers";
 import { billingRouter, stripeWebhookHandler } from "./routes/billing";
 import { resendNewsletterWebhookHandler } from "./routes/newsletterWebhooks";
 import { taskRouter } from "./routes/tasks";
-import { workflowRouter } from "./routes/workflows";
 import { reminderRouter } from "./routes/reminders";
 import { attachmentRouter, attachmentPublicRouter } from "./routes/attachments";
 import { externalAvatarPublicRouter } from "./routes/externalAvatars";
@@ -247,6 +251,14 @@ export function createApp(options: CreateAppOptions = {}): Express {
     requireMachineAuth,
     express.json({ limit: SCOPE_ATTESTATION_REQUEST_MAX_BYTES }),
     scopeAttestationBodyErrorHandler,
+  );
+  // Same pattern for the migration control manifest (up to 512 KB): computer
+  // auth first, then a route-scoped parser the global one then skips.
+  app.post(
+    AGENT_MIGRATION_CONTROL_PATH,
+    authFromRegistry(),
+    express.json({ limit: AGENT_MIGRATION_CONTROL_REQUEST_MAX_BYTES }),
+    agentMigrationControlBodyErrorHandler,
   );
   app.use(express.json());
   // Default freshness policy for the whole authenticated API surface (human
@@ -625,7 +637,6 @@ export function createApp(options: CreateAppOptions = {}): Express {
   app.use("/api/agents", requireAuth, requireVerified, requireServer, agentRouter);
   app.use("/api/billing", requireAuth, requireVerified, requireServer, billingLimiter, billingRouter);
   app.use("/api/tasks", requireAuth, requireVerified, requireServer, taskRouter);
-  app.use("/api/workflows", requireAuth, requireVerified, requireServer, workflowRouter);
   app.use("/api/reminders", requireAuth, requireVerified, requireServer, reminderRouter);
   // Attachment-comment creation is MESSAGE-shaped traffic, not an upload:
   // it must ride the message limiter (60/min/user, skipped in the pglite
@@ -694,7 +705,17 @@ export function createApp(options: CreateAppOptions = {}): Express {
   // Internal routes (machine auth)
   app.use("/internal", requireMachineAuth, internalRouter);
 
-  // Health check — verifies DB connectivity so Fly.io can detect stale connections
+  // Liveness for the ALB/ECS health check: no database query on the request
+  // path, so a Neon pause cannot fail every task at once. See dbLiveness.ts.
+  app.get("/livez", async (_req, res) => {
+    const { getDbLivenessTracker, livezStatus } = await import("./dbLiveness");
+    const verdict = getDbLivenessTracker().verdict();
+    const status = livezStatus(verdict);
+    res.status(status).json({ status: status === 200 ? "ok" : "error", ...verdict });
+  });
+
+  // Health check (readiness) — verifies DB connectivity right now. Deploy
+  // smoke checks, the Web deploy gate and canary smoke depend on this meaning.
   app.get("/health", async (_req, res) => {
     try {
       const { pingDatabase } = await import("./db/index");

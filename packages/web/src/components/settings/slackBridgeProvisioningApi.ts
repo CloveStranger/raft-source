@@ -61,6 +61,20 @@ export function createSlackBridgeProvisioningProvider(
     return { kind: "redirect", url: result.authorizationUrl };
   };
 
+  const beginReauthorization = async (): Promise<SlackBridgeOAuthResult> => {
+    await load();
+    const authority: SlackBridgeOAuthAuthority | null = current?.oauthAuthority ?? null;
+    const stage = current?.snapshot.stage;
+    if (!authority || stage === "connect" || stage === "oauth") {
+      if (!current) throw new Error("Slack Bridge provisioning snapshot is unavailable");
+      return { kind: "view", view: ready(current) };
+    }
+
+    const response = await client.post("/slack-bridge/oauth/start", authority);
+    const result = slackBridgeOAuthStartResponseSchema.parse(response.data);
+    return { kind: "redirect", url: result.authorizationUrl };
+  };
+
   return {
     load,
     connect: async () => {
@@ -68,6 +82,7 @@ export function createSlackBridgeProvisioningProvider(
       return accept(response.data);
     },
     beginOAuth,
+    beginReauthorization,
     saveChannelPairs: async (pairs: readonly SlackBridgeChannelPair[]) => {
       const response = await client.put(`${PROVISIONING_PATH}/channel-pairs`, {
         pairs: pairs.map(({ raftChannelId, slackChannelId }) => ({ raftChannelId, slackChannelId })),

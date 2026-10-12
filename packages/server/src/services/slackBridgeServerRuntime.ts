@@ -72,6 +72,7 @@ export interface SlackBridgeProductionServerRuntime extends SlackBridgeManagedRu
   inboundWorkerDependencies: Pick<
     ExternalInboundWorkerDependencies,
     "decryptNormalizedPayload" | "resolveCurrentRuntime" | "resolveProviderMentionProfiles"
+      | "resolveProviderAgentMentionHandles"
   >;
   inboundAttachmentWorkerDependencies: ExternalInboundAttachmentWorkerDependencies;
 }
@@ -412,6 +413,68 @@ export async function createSlackBridgeServerRuntimeFromEnv(
           handle: user.handle,
         }))
         : [];
+    },
+    async resolveProviderAgentMentionHandles(input: {
+      frozenAuthority: Parameters<NonNullable<ExternalInboundWorkerDependencies["resolveProviderAgentMentionHandles"]>>[0]["frozenAuthority"];
+      providerUsergroupIds: readonly string[];
+    }) {
+      if (input.frozenAuthority.provider !== "slack" || input.providerUsergroupIds.length === 0) {
+        return [];
+      }
+      const executor = db ?? getDb();
+      const [binding] = await executor.select({
+        serverId: externalChannelBindings.serverId,
+        installId: externalChannelBindings.installId,
+        registrationId: externalChannelBindings.registrationId,
+      }).from(externalChannelBindings).where(and(
+        eq(externalChannelBindings.id, input.frozenAuthority.bindingId),
+        eq(externalChannelBindings.installId, input.frozenAuthority.installId),
+        eq(externalChannelBindings.registrationId, input.frozenAuthority.appRegistrationId),
+        eq(externalChannelBindings.channelId, input.frozenAuthority.raftChannelId),
+        eq(externalChannelBindings.bindingEpoch, input.frozenAuthority.bindingEpoch),
+        eq(externalChannelBindings.connectionEpoch, input.frozenAuthority.connectionEpoch),
+        eq(externalChannelBindings.state, "active"),
+      )).limit(2);
+      if (!binding) return null;
+      const grant = await resolveExternalInstallServerGrantAuthority(executor, {
+        installId: binding.installId,
+        serverId: binding.serverId,
+        registrationId: binding.registrationId,
+      });
+      if (!grant.current) return null;
+      const [install] = await executor.select({
+        id: externalAppInstalls.id,
+        providerAppId: externalAppInstalls.providerAppId,
+        providerAuthorityId: externalAppInstalls.providerAuthorityId,
+        botUserId: externalAppInstalls.botUserId,
+        connectionEpoch: externalAppInstalls.connectionEpoch,
+        credentialRevision: externalAppInstalls.credentialRevision,
+        installedScopes: externalAppInstalls.installedScopes,
+      }).from(externalAppInstalls).where(and(
+        eq(externalAppInstalls.id, binding.installId),
+        eq(externalAppInstalls.registrationId, binding.registrationId),
+        eq(externalAppInstalls.connectionEpoch, input.frozenAuthority.connectionEpoch),
+        eq(externalAppInstalls.state, "active"),
+      )).limit(2);
+      if (!install?.botUserId) return null;
+      // Installs that authorized before the Agent-mention scopes existed keep
+      // message sync without usergroup support: treat a scope-less install as
+      // "no agent mentions" instead of a provider failure that would block the
+      // message forever. The usergroup token still renders as plain text.
+      if (!install.installedScopes.includes("usergroups:read")) return [];
+      const resolved = await provider.resolveAgentMentionHandles({
+        installId: install.id,
+        providerAppId: install.providerAppId,
+        providerAuthorityId: install.providerAuthorityId,
+        botUserId: install.botUserId,
+        connectionEpoch: install.connectionEpoch,
+        credentialRevision: install.credentialRevision,
+        now: dependencies.now?.() ?? new Date(),
+      }, {
+        serverId: binding.serverId,
+        providerUsergroupIds: input.providerUsergroupIds,
+      });
+      return resolved.kind === "fact" ? resolved.fact.handles : null;
     },
     ...(dependencies.onInboundMessageCommitted
       ? { onMessageCommitted: dependencies.onInboundMessageCommitted }

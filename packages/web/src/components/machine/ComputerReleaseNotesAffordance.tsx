@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useCallback, useState } from "react";
 import { useIntl } from "react-intl";
 import { normalizeDisplayLocale, pickComputerReleaseNotesText } from "@botiverse/raft-shared";
 import type { ComputerReleaseNotes } from "@botiverse/raft-shared";
@@ -15,6 +15,8 @@ import MarkdownContent from "../markdown/MarkdownContent";
 export default function ComputerReleaseNotesAffordance({ notes }: { notes: ComputerReleaseNotes }) {
   const { formatMessage, locale } = useIntl();
   const [open, setOpen] = useState(false);
+  const openNotes = useCallback(() => setOpen(true), []);
+  const closeNotes = useCallback(() => setOpen(false), []);
   const text = pickComputerReleaseNotesText(notes, normalizeDisplayLocale(locale) ?? "en");
   if (!text) return null;
 
@@ -25,14 +27,14 @@ export default function ComputerReleaseNotesAffordance({ notes }: { notes: Compu
         className="text-xs"
         aria-haspopup="dialog"
         data-testid="computer-release-notes-open"
-        onClick={() => setOpen(true)}
+        onClick={openNotes}
       >
         {formatMessage({ id: "machine.detail.releaseNotesOpen" })}
       </TextLink>
       {open && (
         <DialogCard
           title={formatMessage({ id: "machine.detail.releaseNotesTitle" }, { version: notes.version })}
-          onClose={() => setOpen(false)}
+          onClose={closeNotes}
           maxWidthClass="max-w-lg"
           testId="computer-release-notes-dialog"
           closeOnBackdrop

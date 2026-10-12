@@ -17,7 +17,7 @@ and evidence SHA-256
 `f621fed34fb0a9082bce2e31aa76be7f303eb5a32b92dd45e99766c29756c991`.
 Tooling is exact-pinned to `zod-openapi@6.0.0`,
 `openapi-typescript@7.13.0`, and the independent `@redocly/cli@2.40.0`
-validator; the repository package-manager contract is `pnpm@10.29.3`.
+validator; the repository package-manager contract is `pnpm@12.11.2`.
 
 ## P1 boundary
 

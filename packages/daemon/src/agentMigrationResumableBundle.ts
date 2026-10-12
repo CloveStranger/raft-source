@@ -12,6 +12,7 @@ import {
   readlink,
   rename,
   symlink,
+  unlink,
   writeFile,
 } from "node:fs/promises";
 import path from "node:path";
@@ -758,8 +759,14 @@ export async function verifyAndStoreAgentMigrationChunk(input: {
     await rename(partialPath, chunkPath);
     return { outcome: "stored", chunkPath };
   } catch (error) {
-    // Partial chunks are intentionally left as classified failed residue. They
-    // are never mistaken for a verified receipt and are never auto-deleted.
+    // A digest mismatch keeps its partial as evidence of corrupt bytes. Any
+    // other failure (connection dropped mid-body, stream error) deletes it: the
+    // caller retries the chunk until the lease expires, and each attempt writes
+    // its own partial, so keeping them would pile up on a flapping network.
+    // Nothing reads partials; a successful migration deletes the directory.
+    if (!(error instanceof AgentMigrationChunkDigestMismatchError)) {
+      await unlink(partialPath).catch(() => undefined);
+    }
     throw error;
   }
 }

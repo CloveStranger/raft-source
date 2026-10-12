@@ -2,7 +2,7 @@
  * TEST-ONLY reference for the sidebar unread view.
  *
  * GET /channels/unread (bare and summary) and GET /servers/unread-summary read ONE
- * source: rw_conversation_unread_v2 (plus, for the summary, a request-time public
+ * source: rw_conversation_unread_v3 (plus, for the summary, a request-time public
  * channel `hasNew` arm), through channelService's conversation unread reader. CI
  * has no RisingWave, so this derives the same rows from Postgres with the SAME
  * semantics as the view; src/test/setup/risingWaveReadReference.ts installs it for
@@ -11,16 +11,16 @@
  *
  * This is a stand-in for the RW view, not a product path. KEEP IT IN SYNC with the
  * SQL it mirrors:
- *   - infra/risingwave/sql/068-chain-mention-v6-consumers.sql
- *                                                rw_conversation_unread_v2
+ *   - infra/risingwave/sql/076-cursor-decouple-consumers.sql
+ *                                                rw_conversation_unread_v3
  *   - infra/risingwave/sql/067-mention-v6.sql    rw_inbox_mention_v6
- *   - infra/risingwave/sql/066-conversation-unread-v1.sql
- *                                                rw_inbox_muted_full_v1
+ *   - infra/risingwave/sql/075-inbox-cursor-decouple.sql
+ *                                                rw_inbox_normal_v5, rw_inbox_muted_full_v2
  *   - infra/risingwave/sql/063-chain-v5.sql      rw_muted_subs_v1
  *   - infra/risingwave/sql/063-unified-inbox-chain.sql
  *                                                rw_message_target_v3, rw_target_latest_v4,
  *                                                rw_target_eligible_v1, rw_receiver_cursors_v1,
- *                                                rw_subs_v2, rw_inbox_normal_v4
+ *                                                rw_subs_v2
  *   - infra/risingwave/sql/061-inbox-derivation-chain.sql
  *                                                rw_thread_parent_v3, rw_message_preview_v1
  *   - channelService readConversationUnreadSummaryRows / readSidebarUnreadTotals
@@ -68,7 +68,7 @@ const NOISE_SUBTYPES = sql`('channel.self_unfollow_thread', 'task.deleted_summar
 const CANONICAL_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 /**
- * Every rw_conversation_unread_v2 row of one user, restricted to the given servers.
+ * Every rw_conversation_unread_v3 row of one user, restricted to the given servers.
  *
  * Cost is bounded by the user's own targets (memberships, follows, mentions in the
  * given servers), never by the size of messages/channels: the view's per-target
@@ -192,7 +192,7 @@ export async function referenceConversationUnreadViewRows(
       LEFT JOIN receiver_cursors AS rc ON rc.channel_id = tl.target_id
       WHERE tl.eligible
         AND tl.target_id IN (SELECT target_id FROM subs UNION ALL SELECT target_id FROM muted_subs)
-    ), normal AS (                  -- rw_inbox_normal_v4
+    ), normal AS (                  -- rw_inbox_normal_v5
       SELECT s.kind, s.target_id, s.server_id, s.done_at,
              MAX(g.latest_seq) AS latest_seq,
              CAST(SUM(COALESCE(tu.unread, 0)) AS BIGINT) AS unread_count
@@ -201,7 +201,7 @@ export async function referenceConversationUnreadViewRows(
       LEFT JOIN target_unread AS tu ON tu.target_id = s.target_id
       LEFT JOIN receiver_cursors AS rc ON rc.channel_id = s.target_id
       GROUP BY s.kind, s.target_id, s.server_id, s.done_at, rc.last_read_seq
-    ), muted_full AS (              -- rw_inbox_muted_full_v1
+    ), muted_full AS (              -- rw_inbox_muted_full_v2
       SELECT s.kind, s.target_id, s.server_id, s.done_at,
              MAX(g.latest_seq) AS latest_seq,
              CAST(SUM(COALESCE(tu.unread, 0)) AS BIGINT) AS unread_count

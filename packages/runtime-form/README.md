@@ -91,6 +91,15 @@ the current form, with no `schemaVersion` pin; option values come from
 `toRuntimeFormV2`; reference client parser: `parseRuntimeFormV2` (web uses it;
 mobile mirrors it). Agreed in `#raft-mobile-reconcile:3a0de29d`.
 
+Copy language: the form, the edit form (`GET /api/agents/:id/runtime-form`)
+and option sources read `Accept-Language` (BCP 47). Any Chinese range gets
+`zh-CN`; anything else, or no header, gets English. Only display copy changes
+(`uiSchema.localization` and generic option labels such as "Default"); values,
+structure and model/provider names never do, and copy without a translation
+stays English. Responses carry `Content-Language` and `Vary: Accept-Language`.
+Clients send their app display language, not the system's. Server table:
+`packages/server/src/services/runtimeFormV2Copy.ts`.
+
 The response still carries `schemaVersion` as a read-only label of which form
 the server built (useful when debugging); v2 clients never pin or negotiate on
 it.
@@ -99,7 +108,7 @@ Which runtimes have a v2 form: the server's v2 registry
 (`packages/server/src/services/runtimeFormV2Registry.ts`), one entry per
 runtime with its definition, option sources, form values ↔ runtimeConfig
 mapping and write-only runtimeConfig secrets. Today: Built-in Pi, Kimi Code,
-OpenCode, Codex, Grok, Claude, Cursor, Copilot, Pi, and the deprecated Kimi CLI, Gemini CLI and Antigravity CLI (edit
+OpenCode, Codex, Grok, Claude, Cursor, Pi, and the deprecated Kimi CLI, Gemini CLI, Antigravity CLI and Copilot CLI (edit
 only: the admission row offers a deprecated runtime only as an agent's current
 runtime, and a create with one is refused like any deprecated create). OpenCode
 and Kimi CLI take their model list from the Computer's probe; when the probe is
@@ -170,6 +179,17 @@ Client obligations:
    field means "keep the stored value" (a changed provider with a blank secret
    is refused). Save with `PATCH /api/agents/:id`, same `formDefinitionRef` and
    `formValues` as create.
+   The edit body may carry `writeOnlyKeepRequiresUnchanged`
+   (`{ "/apiKey": ["/provider", "/apiUrl"] }`): the fields the stored secret is
+   bound to. While a listed, visible field differs from `values` (compared as
+   strings, trimmed, trailing `/` removed) a blank secret cannot be kept: show
+   it as required, say a new one is needed, and block saving. Optional and
+   advisory (no capability name); a client that ignores it gets the server's
+   `api_key_required` on save. Today Claude (`/provider`, `/apiUrl`), Pi
+   (`/provider`) and Built-in Pi (`/providerId`, `/baseUrl`) send it, from the
+   registry secret's `form` binding, which
+   `packages/server/src/services/runtimeFormV2WriteOnlyKeep.test.ts` keeps equal
+   to what its `keepsIdentity` checks.
 
 7. Required client capabilities: the form may list
    `requiredClientCapabilities: string[]`, capabilities the client must
@@ -201,14 +221,40 @@ Client obligations:
      source-level failure never sends a client back to v1: that is only for a
      form-level 404 or protocol error.
 
+   - `provider.saved_connection`: saved provider connections inside the form
+     (today Built-in Pi). `Option.connectionId` (with the hard constraint
+     `value === "connection:" + connectionId`), `underlyingProviderId`,
+     `group` (`saved` first, then `direct`), and `unavailable`/
+     `unavailableReason` for an edit whose bound connection is not selectable
+     right now — it stays visible and blocks the save instead of being
+     silently rewritten. Fields the connection owns are marked
+     `x-connectionOwned` in the form: while a connection is selected the
+     client renders them disabled with a placeholder, treats them as not
+     required, and keeps them out of `formValues` entirely (never empty
+     strings); moving off a connection restores their own visibility/required
+     rules and clears them. The client never submits a secret for a connection
+     selection, and the server refuses any owned-field value on one (empty or
+     null included), re-resolving the connection by id in the current server
+     scope. The form also carries `Definition.revision`, an opaque token the
+     client echoes on every option-source request as `?formRevision=`: absent
+     keeps the plain direct-option protocol (a server never sends connection
+     options to an unrevisioned request), matching answers within the form's
+     declared range, and a mismatch is a typed 409 `form_revision_stale`
+     (`recovery: refetch_form`) — the client refetches the whole form and
+     never merges options across builds.
+
    The server sends these fields only on the v2 endpoints and only to forms
-   that list the capability: a form without it (Built-in Pi, Kimi Code,
-   OpenCode, Kimi CLI, Gemini, Antigravity) gets its option sources exactly as
+   that list the capability: a form without it (Kimi Code,
+   OpenCode, Kimi CLI, Gemini, Antigravity, and Built-in Pi on servers
+   without provider connections) gets its option sources exactly as
    before, typed 409s included (per registry entry, not by inspecting the
-   request). Today Codex, Claude, Copilot and Pi list all three, Grok lists
-   `choice.labels` and `option_source.status`, and Cursor lists
-   `select.custom_value` and `option_source.status`. Web implements all three
-   (`WEB_RUNTIME_FORM_V2_CAPABILITIES`).
+   request). Today Codex, Claude, Copilot and Pi list the first three, Grok
+   lists `choice.labels` and `option_source.status`, Cursor lists
+   `select.custom_value` and `option_source.status`, and Built-in Pi lists
+   `provider.saved_connection` only on servers with provider connections
+   enabled. Web implements all four (`WEB_RUNTIME_FORM_V2_CAPABILITIES`);
+   mobile does not implement `provider.saved_connection` yet and falls back to
+   v1 for a form that requires it.
 
    How the server maps the Computer's model probe
    (`packages/server/src/services/runtimeFormV2SourceStatus.ts`):
@@ -281,7 +327,8 @@ always has today).
 
 Batch 3b adds `claude.form.json`, `claude.edit.json` (a Custom provider; the
 stored key is not in `values`), `cursor.form.json`, `cursor.edit.json` (a stored
-custom model), `copilot.form.json`, `claude.option-source.provider.json` (the
+custom model), `copilot.edit.json` (Copilot CLI is deprecated, so edit-only; a
+stored custom model), `claude.option-source.provider.json` (the
 static provider select), `claude.option-source.fallback.json` (Computer
 offline), `cursor.option-source.fallback.json` (missing config) and
 `copilot.option-source.live.json` (the declared static catalog).

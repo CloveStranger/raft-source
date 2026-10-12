@@ -2319,20 +2319,9 @@ async function main() {
     if (!existingAnnouncement) {
       await db.insert(announcements).values({
         title: demoAnnouncementTitle,
-        pages: [
-          {
-            title: "Hello from Slock",
-            body: "This is an **account-level** popup. It follows you across every server you belong to — it's not tied to a specific workspace.\n\nClick **Next** to see how paging works.",
-          },
-          {
-            title: "What this is for",
-            body: "Use announcements to share:\n\n- Product updates & new features\n- Scheduled maintenance windows\n- Policy or terms-of-service changes\n- Onboarding hints\n\nMarkdown is supported, including [links](https://slock.ai) and `inline code`.",
-          },
-          {
-            title: "How dismissal works",
-            body: "Once you click **OK**, this announcement will not appear again — not after refresh, not after logging in on another device.\n\nWhen a new announcement is published, it arrives in real time without needing to reload.",
-          },
-        ],
+        pages: [{
+          body: "This announcement follows your account across workspaces.\n\nShare product updates, maintenance windows and onboarding hints here. Markdown supports [links](https://raft.build) and inline code.\n\nChoose **Got it** or close the dialog to dismiss it across your account.",
+        }],
       });
       console.error(`Seeded demo announcement: ${demoAnnouncementTitle}`);
     } else {

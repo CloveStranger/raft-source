@@ -50,7 +50,12 @@ export function MessageHoverToolbar({
       data-message-affordance="toolbar"
       // #6297 (task #477/task #532): keep the toolbar hit-testable while invisible so
       // hovering its upper half across the row boundary does not drop row hover.
-      className={`pointer-events-auto ${reactionActive ? "!opacity-100" : ""}`}
+      // Right edge rides the header action line (measured): wide elegant wants
+      // 8 from the row's padding box (`right-2`); narrow elegant 2
+      // (`max-md:right-0.5`). Brutal's narrow row wraps the padding box in
+      // mx-3+border+px-1.5, pulling the anchor 8 further left — the extra
+      // override lands the same line (−6 from that padding box).
+      className={`right-2 max-md:right-0.5 max-md:[[data-theme=brutal]_&]:-right-1.5 pointer-events-auto ${reactionActive ? "!opacity-100" : ""}`}
     >
       {!hideThreadActions && (
         <MessageItemToolbarButton

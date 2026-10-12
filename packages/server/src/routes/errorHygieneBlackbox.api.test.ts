@@ -16,6 +16,9 @@ import assert from "node:assert/strict";
 
 import { getDb } from "../db/index";
 import { users } from "../db/schema";
+import { createServer as createServerService } from "../services/serverService";
+import { createChannel as createChannelService, addHuman } from "../services/channelService";
+import { createMessage } from "../services/messageService";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 
@@ -93,4 +96,49 @@ test("mismatched X-Server-Id vs path id stays a typed 4xx (not swallowed, not le
   const raw = await res.text();
   assert.doesNotMatch(raw, /internal_server_error/, "typed 4xx was swallowed into a generic 500");
   assertNoLeak(raw, "mismatched X-Server-Id 4xx");
+});
+
+// Malformed ids in other id-keyed GET routes. The CJK case is the real-world
+// vector: a permalink typed straight into Chinese prose (`?msg=<uuid>这条…`)
+// used to send the swallowed text as the id and got a uuid-cast 500.
+test("malformed path and query ids on id-keyed GET routes are clean 4xx (black-box, no raw DB error)", async ({ app }) => {
+  const owner = await seedUser("hyg-blackbox-ids@slock.test", "hyg-blackbox-ids");
+  const token = await login(app.baseUrl, owner.email);
+  const server = await createServerService("Hygiene Ids", "hygiene-ids", owner.id);
+  const channel = await createChannelService(server.id, "hygiene-ids", "test channel");
+  await addHuman(channel.id, owner.id);
+  const messageId = (await createMessage(channel.id, "user", owner.id, "hello")).id;
+
+  const cases: Array<{ path: (bad: string) => string; status: number }> = [
+    { path: (bad) => `/api/messages/context/${bad}`, status: 400 },
+    { path: (bad) => `/api/messages/context/${messageId}?channelId=${bad}`, status: 400 },
+    { path: (bad) => `/api/messages/channel/${bad}`, status: 404 },
+    { path: (bad) => `/api/servers/${server.id}/members/${bad}/profile`, status: 404 },
+    { path: (bad) => `/api/public/servers/${server.slug}/channels/${bad}/messages`, status: 404 },
+    { path: (bad) => `/api/public/servers/${server.slug}/threads/${bad}/messages`, status: 404 },
+    { path: (bad) => `/api/mcp/agents/${bad}`, status: 404 },
+    { path: (bad) => `/api/integrations/agents/${bad}`, status: 404 },
+    { path: (bad) => `/api/integrations/clients/${bad}/app-notifications`, status: 404 },
+    { path: (bad) => `/api/integrations/clients/${bad}/share-link`, status: 404 },
+    { path: (bad) => `/api/integrations/marketplace/${bad}/install/app-notifications`, status: 404 },
+  ];
+  const malformed = ["not-a-uuid", encodeURIComponent(`${messageId}这条你是不是没收到`)];
+
+  for (const { path, status } of cases) {
+    for (const bad of malformed) {
+      const url = path(bad);
+      const res = await fetch(`${app.baseUrl}${url}`, {
+        headers: { Authorization: `Bearer ${token}`, "X-Server-Id": server.id },
+      });
+      const raw = await res.text();
+      assert.equal(res.status, status, `${url}: ${raw}`);
+      assertNoLeak(raw, url);
+    }
+  }
+
+  // The 8-hex short id stays a legal /context target.
+  const shortId = await fetch(`${app.baseUrl}/api/messages/context/${messageId.slice(0, 8)}?channelId=${channel.id}`, {
+    headers: { Authorization: `Bearer ${token}`, "X-Server-Id": server.id },
+  });
+  assert.equal(shortId.status, 200);
 });

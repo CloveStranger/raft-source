@@ -19,6 +19,8 @@ export interface RequestDaemonScopeAttestationOptions {
   metadata?: Record<string, unknown>;
   fetchImpl?: FetchLike;
   timeoutMs?: number;
+  /** Optional caller cancellation (merged with the per-hop timeout). Absent = today's behaviour. */
+  signal?: AbortSignal;
 }
 
 export interface DirectUploadCreateResponse {
@@ -42,6 +44,8 @@ export interface CreateDirectUploadSessionOptions<TResponse extends DirectUpload
   attestationMetadata?: Record<string, unknown>;
   fetchImpl?: FetchLike;
   timeoutMs?: number;
+  /** Optional caller cancellation for every hop. Absent = today's behaviour. */
+  signal?: AbortSignal;
 }
 
 export interface UploadWithSignedCapabilityOptions {
@@ -63,6 +67,8 @@ export interface UploadWithSignedCapabilityOptions {
   uploadBody: BodyInit;
   fetchImpl?: FetchLike;
   timeoutMs?: number;
+  /** Optional caller cancellation for every hop (attestation, create, PUT). Absent = today's behaviour. */
+  signal?: AbortSignal;
 }
 
 /** Which hop of a signed direct upload failed. */
@@ -122,6 +128,7 @@ export async function requestDaemonScopeAttestation({
   metadata,
   fetchImpl = daemonFetch,
   timeoutMs = DEFAULT_CHAT_BRIDGE_TOOL_TIMEOUT_MS,
+  signal,
 }: RequestDaemonScopeAttestationOptions): Promise<DaemonScopeAttestation> {
   const { data } = await executeJsonRequest<DaemonScopeAttestation>(
     joinUrl(serverUrl, "/internal/machine/scope-attestation"),
@@ -132,6 +139,7 @@ export async function requestDaemonScopeAttestation({
         scope,
         ...(metadata ? { metadata } : {}),
       }),
+      ...(signal ? { signal } : {}),
     },
     {
       toolName: "daemon_direct_upload.scope_attestation",
@@ -155,6 +163,7 @@ export async function createDirectUploadSession<TResponse extends DirectUploadCr
   verifyCapability,
   fetchImpl = daemonFetch,
   timeoutMs = DEFAULT_CHAT_BRIDGE_TOOL_TIMEOUT_MS,
+  signal,
 }: CreateDirectUploadSessionOptions<TResponse>): Promise<{ capability: DaemonScopeAttestation; response: TResponse }> {
   const capability = await requestDaemonScopeAttestation({
     serverUrl,
@@ -163,6 +172,7 @@ export async function createDirectUploadSession<TResponse extends DirectUploadCr
     metadata: attestationMetadata,
     fetchImpl,
     timeoutMs,
+    signal,
   });
   verifyCapability?.(capability);
 
@@ -175,6 +185,7 @@ export async function createDirectUploadSession<TResponse extends DirectUploadCr
         ...body,
         attestation: capability.attestation,
       }),
+      ...(signal ? { signal } : {}),
     },
     {
       toolName: "daemon_direct_upload.create",
@@ -200,6 +211,7 @@ export async function uploadWithSignedCapability({
   verifyCapability,
   fetchImpl = daemonFetch,
   timeoutMs = DEFAULT_CHAT_BRIDGE_TOOL_TIMEOUT_MS,
+  signal,
 }: UploadWithSignedCapabilityOptions): Promise<{ capability: DaemonScopeAttestation; session: DirectUploadCreateResponse; uploadResponse: Response }> {
   const { capability, response: session } = await createDirectUploadSession({
     serverUrl,
@@ -212,6 +224,7 @@ export async function uploadWithSignedCapability({
     verifyCapability,
     fetchImpl,
     timeoutMs,
+    signal,
   });
   verifySession?.(capability, session);
 
@@ -221,6 +234,7 @@ export async function uploadWithSignedCapability({
       method: session.upload.method,
       headers: session.upload.headers ?? {},
       body: uploadBody,
+      ...(signal ? { signal } : {}),
     },
     {
       toolName: "daemon_direct_upload.put",

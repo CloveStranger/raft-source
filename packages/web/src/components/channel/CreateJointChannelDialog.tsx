@@ -1,8 +1,9 @@
 import { Input, Textarea, Card, Button } from "raft-ui";
-import { useMemo, useRef, useState } from "react";
-import { Check, GitBranch, Plus, Search, Trash2 } from "lucide-react";
+import { useCallback, useMemo, useRef, useState } from "react";
+import { Check, GitBranch, Plus, Search } from "lucide-react";
 import { MAX_JOINT_CHANNEL_SERVERS, validateNameReason } from "@botiverse/raft-shared";
 import { useIntl } from "react-intl";
+import type { IntlShape } from "react-intl";
 import { formatNameValidationError } from "../../i18n/nameValidation";
 import { useAgentStore } from "../../store/agentStore";
 import { useAuthStore } from "../../store/authStore";
@@ -13,10 +14,10 @@ import AvatarSlot from "../ui/AvatarSlot";
 import Banner from "../ui/Banner";
 import FormField from "../ui/FormField";
 import SectionEyebrow from "../ui/SectionEyebrow";
-import SlugInput from "../ui/SlugInput";
 import DialogCard from "../ui/DialogCard";
 import { usePeopleSuggestionSearch } from "../../hooks/usePeopleSuggestionSearch";
 import type { PeopleSuggestionCandidate } from "../../utils/peopleSuggestionSearch";
+import { JointInviteDraftCard } from "./JointInviteDraftCard";
 
 interface ArchivedCollision {
   archivedChannelId: string;
@@ -24,7 +25,7 @@ interface ArchivedCollision {
   canUnarchiveArchivedChannel: boolean;
 }
 
-interface JointInviteDraft {
+export interface JointInviteDraft {
   id: string;
   targetServerSlug: string;
   invitedPeopleText: string;
@@ -33,6 +34,8 @@ interface JointInviteDraft {
 function isBillingGateError(error: string) {
   return error.includes("requires the Pro plan");
 }
+
+export type JointInviteDraftUpdate = Partial<Omit<JointInviteDraft, "id">>;
 
 export default function CreateJointChannelDialog({ onClose }: { onClose: () => void }) {
   const { formatMessage } = useIntl();
@@ -55,6 +58,7 @@ export default function CreateJointChannelDialog({ onClose }: { onClose: () => v
   const allAgents = useAgentStore((s) => s.agents);
   const members = useServerStore((s) => s.members);
   const plan = useServerStore((s) => s.current?.plan) || "free";
+  const currentServerSlug = useServerStore((s) => s.current?.slug ?? null);
   const currentUser = useAuthStore((s) => s.user);
   const nav = useAppNavigate();
   // Contract v0.3: free servers may host any number of joint channels; the
@@ -94,27 +98,27 @@ export default function CreateJointChannelDialog({ onClose }: { onClose: () => v
   // A submit error is about the invite list it was submitted with (e.g. the
   // free-server limit). Once that list changes, the error no longer describes
   // it, so clear it rather than leave a stale reason on screen.
-  const clearSubmitError = () => {
+  const clearSubmitError = useCallback(() => {
     setError("");
     setBillingError(false);
-  };
+  }, []);
 
-  const updateJointInviteDraft = (id: string, updates: Partial<Omit<JointInviteDraft, "id">>) => {
+  const updateJointInviteDraft = useCallback((id: string, updates: JointInviteDraftUpdate) => {
     clearSubmitError();
     setJointInviteDrafts((prev) => prev.map((draft) => draft.id === id ? { ...draft, ...updates } : draft));
-  };
+  }, [clearSubmitError]);
 
-  const addJointInviteDraft = () => {
+  const addJointInviteDraft = useCallback(() => {
     if (!canAddJointInviteDraft) return;
     clearSubmitError();
     const id = `invite-${nextInviteIdRef.current++}`;
     setJointInviteDrafts((prev) => [...prev, { id, targetServerSlug: "", invitedPeopleText: "" }]);
-  };
+  }, [canAddJointInviteDraft, clearSubmitError]);
 
-  const removeJointInviteDraft = (id: string) => {
+  const removeJointInviteDraft = useCallback((id: string) => {
     clearSubmitError();
     setJointInviteDrafts((prev) => prev.length > 1 ? prev.filter((draft) => draft.id !== id) : prev);
-  };
+  }, [clearSubmitError]);
 
   const toggleAgent = (agentId: string) => {
     setSelectedAgentIds((prev) => {
@@ -184,6 +188,8 @@ export default function CreateJointChannelDialog({ onClose }: { onClose: () => v
           data?: {
             error?: string;
             code?: string;
+            targetServerSlug?: string;
+            invitee?: string;
             archivedChannelId?: string;
             archivedChannelName?: string;
             archivedChannelType?: string;
@@ -192,6 +198,7 @@ export default function CreateJointChannelDialog({ onClose }: { onClose: () => v
         };
       };
       const body = axiosErr.response?.data;
+      const inviteError = describeJointInviteError(body, currentServerSlug, formatMessage);
       if (
         body?.code === "archived_name_collision"
         && body.archivedChannelId
@@ -208,6 +215,8 @@ export default function CreateJointChannelDialog({ onClose }: { onClose: () => v
         setBillingError(true);
       } else if (body?.code === "joint_server_limit") {
         setError(formatMessage({ id: "channel.joint.serverLimit" }, { max: MAX_JOINT_CHANNEL_SERVERS }));
+      } else if (inviteError) {
+        setError(inviteError);
       } else {
         const nextError = body?.error || formatMessage({ id: "channel.createJoint.failedCreate" });
         setError(nextError);
@@ -219,7 +228,7 @@ export default function CreateJointChannelDialog({ onClose }: { onClose: () => v
     }
   };
 
-  const handleUnarchiveCollision = async () => {
+  const handleUnarchiveCollision = useCallback(async () => {
     if (!archivedCollision) return;
     setSubmitting(true);
     try {
@@ -232,7 +241,24 @@ export default function CreateJointChannelDialog({ onClose }: { onClose: () => v
     } finally {
       setSubmitting(false);
     }
-  };
+  }, [archivedCollision, unarchiveChannel, onClose, nav, formatMessage]);
+
+  const handleChangeCollidingName = useCallback(() => {
+    setArchivedCollision(null);
+    setName("");
+  }, []);
+  const handleNameChange = useCallback(
+    (event: React.ChangeEvent<HTMLInputElement>) => setName(event.target.value),
+    [],
+  );
+  const handleDescriptionChange = useCallback(
+    (event: React.ChangeEvent<HTMLTextAreaElement>) => setDescription(event.target.value),
+    [],
+  );
+  const handleMemberSearchChange = useCallback(
+    (event: React.ChangeEvent<HTMLInputElement>) => setMemberSearch(event.target.value),
+    [],
+  );
 
   const dialogTitle = (
     <span className="flex min-w-0 items-center gap-2">
@@ -299,10 +325,7 @@ export default function CreateJointChannelDialog({ onClose }: { onClose: () => v
                 <Button size="sm"
                   variant="outline"
                   type="button"
-                  onClick={() => {
-                    setArchivedCollision(null);
-                    setName("");
-                  }}
+                  onClick={handleChangeCollidingName}
                   className="px-2 py-1 text-xs"
                 >
                   {formatMessage({ id: "channel.create.changeName" })}
@@ -315,7 +338,7 @@ export default function CreateJointChannelDialog({ onClose }: { onClose: () => v
             <Input
               type="text"
               value={name}
-              onChange={(event) => setName(event.target.value)}
+              onChange={handleNameChange}
               className="w-full"
               placeholder={formatMessage({ id: "channel.createJoint.namePlaceholder" })}
               required
@@ -326,7 +349,7 @@ export default function CreateJointChannelDialog({ onClose }: { onClose: () => v
           <FormField label={formatMessage({ id: "channel.create.descriptionLabel" })} optional>
             <Textarea
               value={description}
-              onChange={(event) => setDescription(event.target.value)}
+              onChange={handleDescriptionChange}
               className="w-full"
               placeholder={formatMessage({ id: "channel.createJoint.descriptionPlaceholder" })}
               rows={2}
@@ -360,48 +383,15 @@ export default function CreateJointChannelDialog({ onClose }: { onClose: () => v
               </p>
             )}
             {jointInviteDrafts.map((draft, index) => (
-              <Card key={draft.id} className="space-y-3 bg-layer-inset theme-brutal:bg-brutal-gray/20 p-3">
-                <div className="flex items-center justify-between gap-3">
-                  <div className="text-xs font-bold uppercase text-foreground-muted theme-brutal:text-black/60">
-                    {formatMessage({ id: "channel.createJoint.serverInviteIndex" }, { n: index + 1 })}
-                  </div>
-                  {jointInviteDrafts.length > 1 && (
-                    <Button size="sm"
-                      variant="danger"
-                      type="button"
-                      onClick={() => removeJointInviteDraft(draft.id)}
-                      disabled={submitting}
-                      className="p-1 disabled:opacity-50 disabled:cursor-not-allowed"
-                      aria-label={formatMessage({ id: "channel.createJoint.removeServerInvite" }, { n: index + 1 })}
-                    >
-                      <Trash2 size={14} />
-                    </Button>
-                  )}
-                </div>
-                <FormField label={formatMessage({ id: "channel.edit.serverSlugLabel" })} required>
-                  <SlugInput
-                    type="text"
-                    value={draft.targetServerSlug}
-                    onChange={(event) => updateJointInviteDraft(draft.id, { targetServerSlug: event.target.value })}
-                    placeholder="partner-workspace"
-                    required
-                  />
-                </FormField>
-                <FormField
-                  label={formatMessage({ id: "channel.edit.invitedPeopleLabel" })}
-                  required
-                  hint={formatMessage({ id: "channel.edit.invitedPeopleHint" })}
-                >
-                  <Textarea
-                    value={draft.invitedPeopleText}
-                    onChange={(event) => updateJointInviteDraft(draft.id, { invitedPeopleText: event.target.value })}
-                    className="w-full"
-                    placeholder={formatMessage({ id: "channel.edit.invitedPeoplePlaceholder" })}
-                    rows={2}
-                    required
-                  />
-                </FormField>
-              </Card>
+              <JointInviteDraftCard
+                key={draft.id}
+                draft={draft}
+                index={index}
+                canRemove={jointInviteDrafts.length > 1}
+                submitting={submitting}
+                onUpdate={updateJointInviteDraft}
+                onRemove={removeJointInviteDraft}
+              />
             ))}
           </Card>
 
@@ -413,7 +403,7 @@ export default function CreateJointChannelDialog({ onClose }: { onClose: () => v
                   <Input
                     type="text"
                     value={memberSearch}
-                    onChange={(event) => setMemberSearch(event.target.value)}
+                    onChange={handleMemberSearchChange}
                     className="input-member-search w-full pl-9"
                     placeholder={formatMessage({ id: "channel.create.membersSearchPlaceholder" })}
                   />
@@ -511,4 +501,50 @@ export default function CreateJointChannelDialog({ onClose }: { onClose: () => v
         </form>
     </DialogCard>
   );
+}
+
+/**
+ * Localizes the server's typed joint-invite rejections (`sendJointInviteValidationError`,
+ * PR #7654). The server's own `error` string is English-only and names the invitee,
+ * so showing it verbatim leaves zh users an untranslated sentence. The body carries
+ * `targetServerSlug` and, for invitee-scoped codes, `invitee` — the exact person the
+ * server rejected. The response's `inviteeIndex` is deliberately not used: it indexes
+ * the server's deduplicated invitee list, not the list this dialog submitted.
+ *
+ * Returns null for anything it cannot describe precisely; the caller then keeps the
+ * existing fallback (server text, else the generic failure).
+ */
+function describeJointInviteError(
+  body: { code?: string; targetServerSlug?: string; invitee?: string } | undefined,
+  currentServerSlug: string | null,
+  formatMessage: IntlShape["formatMessage"],
+): string | null {
+  const server = body?.targetServerSlug;
+  switch (body?.code) {
+    case "joint_invitee_not_found":
+    case "joint_invitee_not_admin": {
+      const invitee = body.invitee;
+      if (!server || !invitee) return null;
+      return formatMessage(
+        {
+          id: body.code === "joint_invitee_not_found"
+            ? "channel.jointInvite.error.inviteeNotFound"
+            : "channel.jointInvite.error.inviteeNotAdmin",
+        },
+        { invitee, server },
+      );
+    }
+    case "joint_target_server_invalid":
+      // One code, two causes: the server says "Target server not found" or "Cannot
+      // invite the current server". Only the slug tells them apart.
+      if (server && currentServerSlug && server === currentServerSlug) {
+        return formatMessage({ id: "channel.jointInvite.error.cannotInviteSelf" });
+      }
+      if (!server) return null;
+      return formatMessage({ id: "channel.jointInvite.error.serverNotFound" }, { server });
+    case "joint_invite_required":
+      return formatMessage({ id: "channel.edit.inviteePersonRequired" });
+    default:
+      return null;
+  }
 }

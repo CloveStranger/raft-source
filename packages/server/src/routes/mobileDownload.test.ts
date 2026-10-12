@@ -68,8 +68,8 @@ test("a resolved release yields the signed URL from the response", async () => {
       build: { version: "1.4.2" },
       expires_in: 3600,
       assets: [
-        { platform: "ios", download_url: "https://r2.example/ios.ipa" },
-        { platform: "android", download_url: "https://r2.example/app.apk" },
+        { platform: "ios", filetype: "ipa", download_url: "https://r2.example/ios.ipa" },
+        { platform: "android", filetype: "apk", download_url: "https://r2.example/app.apk" },
       ],
     });
   const result = await lookupLatestAsset("android", { fetch: fetchStub as unknown as typeof fetch });
@@ -87,7 +87,7 @@ test("an active release lacking this platform is a fault, not an empty channel",
   const fetchStub = async () =>
     jsonResponse(200, {
       build: { version: "1.4.2" },
-      assets: [{ platform: "ios", download_url: "https://r2.example/ios.ipa" }],
+      assets: [{ platform: "ios", filetype: "ipa", download_url: "https://r2.example/ios.ipa" }],
     });
   const result = await lookupLatestAsset("android", { fetch: fetchStub as unknown as typeof fetch });
   assert.equal(result.outcome, "not_configured");
@@ -188,7 +188,7 @@ test("route: a resolved build 302s to the signed URL", async () => {
     jsonResponse(200, {
       build: { version: "1.9.1" },
       expires_in: 3600,
-      assets: [{ platform: "android", download_url: "https://r2.example/app.apk" }],
+      assets: [{ platform: "android", filetype: "apk", download_url: "https://r2.example/app.apk" }],
     }));
   assert.equal(result.status, 302);
   assert.equal(result.location, "https://r2.example/app.apk");
@@ -212,7 +212,7 @@ test("route: a phone with no explicit platform is served from its UA", async () 
   const result = await callRoute("", { "user-agent": "Mozilla/5.0 (Linux; Android 14; Pixel 8)" }, () =>
     jsonResponse(200, {
       build: { version: "1.9.1" },
-      assets: [{ platform: "android", download_url: "https://r2.example/app.apk" }],
+      assets: [{ platform: "android", filetype: "apk", download_url: "https://r2.example/app.apk" }],
     }));
   assert.equal(result.status, 302);
   assert.equal(result.location, "https://r2.example/app.apk");
@@ -267,7 +267,7 @@ test("route: the chooser hand-off never overrides a device we DO recognise", asy
   const android = await callRoute("", { "user-agent": "Mozilla/5.0 (Linux; Android 14; Pixel 8)" }, () =>
     jsonResponse(200, {
       build: { version: "1.9.1" },
-      assets: [{ platform: "android", download_url: "https://r2.example/app.apk" }],
+      assets: [{ platform: "android", filetype: "apk", download_url: "https://r2.example/app.apk" }],
     }));
   assert.equal(android.location, "https://r2.example/app.apk");
 
@@ -300,7 +300,7 @@ test("mount: the production app actually serves /api/mobile-download", async ({ 
     jsonResponse(200, {
       build: { version: "1.9.1" },
       expires_in: 3600,
-      assets: [{ platform: "android", download_url: "https://r2.example/app.apk" }],
+      assets: [{ platform: "android", filetype: "apk", download_url: "https://r2.example/app.apk" }],
     })) as typeof fetch;
   try {
     const response = await originalFetch(`${app.baseUrl}/api/mobile-download?platform=android`, {
@@ -345,7 +345,7 @@ test("route: iOS goes to TestFlight, never to the Hands .ipa", async () => {
   const result = await callRoute("?platform=ios", {}, () =>
     jsonResponse(200, {
       build: { version: "1.0.0" },
-      assets: [{ platform: "ios", download_url: "https://r2.example/app.ipa" }],
+      assets: [{ platform: "ios", filetype: "ipa", download_url: "https://r2.example/app.ipa" }],
     }));
   assert.equal(result.status, 302);
   assert.ok(
@@ -353,4 +353,48 @@ test("route: iOS goes to TestFlight, never to the Hands .ipa", async () => {
     `iOS must land on TestFlight, got ${result.location}`,
   );
   assert.ok(!result.location?.includes("hands.build"), "iOS must not be sent to a Hands artifact");
+});
+
+test("android prefers the APK over the store bundle, in either order", async () => {
+  // The route previously took the first platform match; the live `latest`
+  // response lists the AAB first, so phones downloaded a store bundle that
+  // installs as nothing. Direct install must land on the APK.
+  const aab = { platform: "android", filetype: "aab", download_url: "https://r2.example/app.aab" };
+  const apk = { platform: "android", filetype: "apk", download_url: "https://r2.example/app.apk" };
+  for (const assets of [[aab, apk], [apk, aab]]) {
+    const fetchStub = async () =>
+      jsonResponse(200, { build: { version: "1.13.1" }, expires_in: 3600, assets });
+    const result = await lookupLatestAsset("android", { fetch: fetchStub as unknown as typeof fetch });
+    assert.equal(result.outcome, "asset");
+    assert.equal(
+      result.outcome === "asset" ? result.downloadUrl : null,
+      "https://r2.example/app.apk",
+      "the APK must win regardless of asset order",
+    );
+  }
+});
+
+test("a store-only release reads as no installable build, never as the AAB", async () => {
+  // Product ruling 2026-10-12: when the active release carries only the store
+  // bundle, the download entry says "no installable build yet" rather than
+  // handing out an artifact a person cannot install.
+  const fetchStub = async () =>
+    jsonResponse(200, {
+      build: { version: "1.13.1" },
+      assets: [{ platform: "android", filetype: "aab", download_url: "https://r2.example/app.aab" }],
+    });
+  const result = await lookupLatestAsset("android", { fetch: fetchStub as unknown as typeof fetch });
+  assert.equal(result.outcome, "no_installable_build");
+});
+
+test("route: a store-only release is 404 with no_installable_build, not a wrong artifact", async () => {
+  const result = await callRoute("?platform=android", {}, () =>
+    jsonResponse(200, {
+      build: { version: "1.13.1" },
+      expires_in: 3600,
+      assets: [{ platform: "android", filetype: "aab", download_url: "https://r2.example/app.aab" }],
+    }));
+  assert.equal(result.status, 404);
+  assert.equal((result.body as { code?: string } | undefined)?.code, "no_installable_build");
+  assert.equal(result.location, undefined, "a store-only release must not redirect anywhere");
 });

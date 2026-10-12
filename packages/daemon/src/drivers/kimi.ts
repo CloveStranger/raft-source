@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { spawn } from "node:child_process";
+import { spawnRuntimeChild } from "./runtimeChild";
 import { chmodSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -190,7 +190,9 @@ export class KimiDriver implements RuntimeDriver {
     const spawnEnv = (await prepareCliTransport(ctx, { NO_COLOR: "1" })).spawnEnv;
 
     const launch = resolveKimiSpawn(args);
-    const proc = spawn(launch.command, launch.args, {
+    // task #365: after the last await, right before the child exists.
+    ctx.assertLaunchCurrent?.();
+    const proc = spawnRuntimeChild(launch.command, launch.args, {
       cwd: ctx.workingDirectory,
       stdio: ["pipe", "pipe", "pipe"],
       env: spawnEnv,

@@ -27,6 +27,8 @@ import {
   type SlackOutboundAttachmentTransport,
 } from "./slackOutboundAttachmentAdapter";
 import type {
+  SlackBridgeAgentMentionCandidate,
+  SlackBridgeAgentMentionHandle,
   SlackBridgeProvisioningProvider,
   SlackBridgeProvisioningProviderAuthority,
   SlackBridgeProvisioningProviderResult,
@@ -46,6 +48,12 @@ import {
   findAnyCurrentExternalInstallServerGrantAuthority,
   resolveExternalInstallServerGrantAuthority,
 } from "./externalInstallServerGrantAuthority";
+import {
+  parseSlackAgentUsergroupMarker,
+  RAFT_AGENT_USERGROUP_MARKER_PREFIX,
+  slackAgentHandleCandidates,
+  slackAgentUsergroupMarker,
+} from "./slackMentionTokens";
 
 const DEFAULT_CREDENTIAL_LEASE_TTL_MS = 60_000;
 const DEFAULT_FETCH_TIMEOUT_MS = 15_000;
@@ -72,6 +80,7 @@ const SLACK_QUERY_METHODS = new Set([
   "conversations.history",
   "conversations.replies",
   "reactions.get",
+  "usergroups.list",
   "users.info",
 ]);
 
@@ -114,6 +123,12 @@ export interface SlackBridgeProviderRuntime extends SlackBridgeAudienceProviderR
     authority: SlackBridgeProvisioningProviderAuthority,
     providerUserIds: readonly string[],
   ): Promise<SlackBridgeProvisioningProviderResult<{ users: readonly SlackBridgeProvisioningProviderUser[] }>>;
+  resolveAgentMentionHandles(
+    authority: SlackBridgeProvisioningProviderAuthority,
+    input: { serverId: string; providerUsergroupIds: readonly string[] },
+  ): Promise<SlackBridgeProvisioningProviderResult<{
+    handles: readonly SlackBridgeAgentMentionHandle[];
+  }>>;
 }
 
 export interface SlackBridgeProviderRuntimeDependencies {
@@ -178,6 +193,64 @@ function slackProvisioningUser(value: unknown, expectedProviderUserId: string): 
 
 function record(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+type SlackAgentUsergroup = {
+  id: string;
+  name: string;
+  handle: string;
+  description: string;
+  disabled: boolean;
+};
+
+function parseSlackAgentUsergroup(value: unknown): SlackAgentUsergroup | null {
+  if (!record(value)) return null;
+  if (
+    !nonEmpty(value.id, 160)
+    || !nonEmpty(value.name, 80)
+    || !nonEmpty(value.handle, 80)
+  ) return null;
+  return {
+    id: value.id,
+    name: value.name,
+    handle: value.handle,
+    description: typeof value.description === "string" ? value.description : "",
+    disabled: value.date_delete !== undefined && Number(value.date_delete) > 0,
+  };
+}
+
+function chooseSlackAgentHandle(
+  candidate: SlackBridgeAgentMentionCandidate,
+  occupied: ReadonlySet<string>,
+): string | null {
+  return slackAgentHandleCandidates(candidate)
+    .find((handle) => handle.length > 0 && !occupied.has(handle)) ?? null;
+}
+
+function slackUsergroupNameWithSuffix(baseValue: string, suffixValue: string): string {
+  const base = Array.from(baseValue.trim());
+  const suffix = Array.from(suffixValue.trim()).slice(0, 32);
+  if (base.length === 0 || suffix.length === 0) return "";
+  const separator = " · ";
+  const available = Math.max(1, 80 - separator.length - suffix.length);
+  return `${base.slice(0, available).join("")}${separator}${suffix.join("")}`.slice(0, 80);
+}
+
+function chooseSlackAgentUsergroupName(
+  candidate: SlackBridgeAgentMentionCandidate,
+  occupied: ReadonlySet<string>,
+): string | null {
+  // Slack autocomplete shows usergroup *names* workspace-wide; carrying the
+  // Raft server name in the name makes agents from other servers on a shared
+  // Slack workspace self-evident ("Huarong · botiverse"). The handle stays
+  // the bare agent handle either way.
+  const displayName = Array.from(candidate.displayName.trim()).slice(0, 80).join("");
+  return [...new Set([
+    slackUsergroupNameWithSuffix(candidate.displayName, candidate.serverName),
+    slackUsergroupNameWithSuffix(candidate.displayName, candidate.serverSlug),
+    slackUsergroupNameWithSuffix(candidate.displayName, candidate.agentId.slice(0, 8)),
+    displayName,
+  ].filter(Boolean))].find((name) => !occupied.has(name.toLocaleLowerCase("en-US"))) ?? null;
 }
 
 function jsonObject(value: unknown): SlackJsonObject {
@@ -1234,6 +1307,50 @@ export function createSlackBridgeProviderRuntime(
     return { kind: "fact", fact: { users } };
   };
 
+  const resolveAgentMentionHandles: SlackBridgeProviderRuntime["resolveAgentMentionHandles"] = async (
+    authority,
+    input,
+  ) => {
+    if (
+      stopped
+      || !validDate(authority.now)
+      || !nonEmpty(input.serverId, 160)
+      || input.providerUsergroupIds.length === 0
+      || input.providerUsergroupIds.length > 50
+      || new Set(input.providerUsergroupIds).size !== input.providerUsergroupIds.length
+      || input.providerUsergroupIds.some((id) => !/^S[A-Z0-9]{2,}$/u.test(id))
+    ) return { kind: "unverified" };
+    const listed = await provisioningCall(authority, "usergroups.list", {
+      include_count: false,
+      include_disabled: true,
+    });
+    if (listed.kind !== "fact") return listed;
+    if (!Array.isArray(listed.fact.usergroups)) return { kind: "unverified" };
+    const requested = new Set(input.providerUsergroupIds);
+    const handles: SlackBridgeAgentMentionHandle[] = [];
+    for (const raw of listed.fact.usergroups) {
+      const group = parseSlackAgentUsergroup(raw);
+      if (!group) return { kind: "unverified" };
+      if (!requested.has(group.id)) continue;
+      const marker = parseSlackAgentUsergroupMarker(group.description);
+      if (!marker || marker.serverId !== input.serverId || group.disabled) continue;
+      handles.push({
+        agentId: marker.agentId,
+        providerUsergroupId: group.id,
+        handle: group.handle.toLocaleLowerCase("en-US"),
+      });
+    }
+    if (new Set(handles.map((handle) => handle.providerUsergroupId)).size !== handles.length) {
+      return { kind: "failed" };
+    }
+    return {
+      kind: "fact",
+      fact: { handles: handles.sort((left, right) => (
+        left.providerUsergroupId.localeCompare(right.providerUsergroupId)
+      )) },
+    };
+  };
+
   const provisioningProvider: SlackBridgeProvisioningProvider = {
     async readInstallGrant(authority) {
       if (stopped || !validDate(authority.now)) return { kind: "unverified" };
@@ -1393,6 +1510,130 @@ export function createSlackBridgeProviderRuntime(
         },
       };
     },
+
+    async reconcileAgentMentionHandles(authority, request) {
+      if (
+        stopped
+        || !validDate(authority.now)
+        || !nonEmpty(request.serverId, 160)
+        || request.candidates.length > 200
+        || request.candidates.some((candidate) => (
+          candidate.serverId !== request.serverId
+          || !nonEmpty(candidate.agentId, 160)
+          || !nonEmpty(candidate.name, 160)
+          || !nonEmpty(candidate.displayName, 512)
+          || !nonEmpty(candidate.serverSlug, 160)
+          || !nonEmpty(candidate.serverName, 512)
+        ))
+        || new Set(request.candidates.map((candidate) => candidate.agentId)).size
+          !== request.candidates.length
+      ) return { kind: "unverified" };
+
+      const listed = await provisioningCall(authority, "usergroups.list", {
+        include_count: false,
+        include_disabled: true,
+      });
+      if (listed.kind !== "fact") return { kind: listed.kind };
+      if (!Array.isArray(listed.fact.usergroups)) return { kind: "unverified" };
+      const groups: SlackAgentUsergroup[] = [];
+      for (const raw of listed.fact.usergroups) {
+        const group = parseSlackAgentUsergroup(raw);
+        if (!group) return { kind: "unverified" };
+        groups.push(group);
+      }
+
+      const managedPrefix = `${RAFT_AGENT_USERGROUP_MARKER_PREFIX}${request.serverId}:`;
+      const managedByMarker = new Map<string, SlackAgentUsergroup>();
+      for (const group of groups) {
+        if (!group.description.startsWith(managedPrefix)) continue;
+        if (managedByMarker.has(group.description)) return { kind: "failed" };
+        managedByMarker.set(group.description, group);
+      }
+      const desiredMarkers = new Set(
+        request.candidates.map((candidate) => slackAgentUsergroupMarker(
+          candidate.serverId,
+          candidate.agentId,
+        )),
+      );
+      const occupied = new Set(groups.map((group) => group.handle.toLocaleLowerCase("en-US")));
+      const occupiedNames = new Set(groups.map((group) => group.name.toLocaleLowerCase("en-US")));
+      const handles: SlackBridgeAgentMentionHandle[] = [];
+
+      for (const candidate of [...request.candidates].sort((left, right) => (
+        left.agentId.localeCompare(right.agentId)
+      ))) {
+        // Per-agent isolation: a collision on all three handle/name candidates
+        // or a transient provider error for one agent must not starve the
+        // rest — reconcile continues so remaining agents still get groups and
+        // the disable pass still runs. The caller sees the partial handle
+        // list and logs the gap; the next tick retries the failed agent.
+        const marker = slackAgentUsergroupMarker(candidate.serverId, candidate.agentId);
+        let group = managedByMarker.get(marker) ?? null;
+        if (group) {
+          occupied.delete(group.handle.toLocaleLowerCase("en-US"));
+          occupiedNames.delete(group.name.toLocaleLowerCase("en-US"));
+        }
+        const handle = chooseSlackAgentHandle(candidate, occupied);
+        const name = handle
+          ? chooseSlackAgentUsergroupName(candidate, occupiedNames)
+          : null;
+        if (!handle || !name) continue;
+
+        try {
+          if (!group) {
+            const created = await provisioningCall(authority, "usergroups.create", {
+              name,
+              handle,
+              description: marker,
+            });
+            if (created.kind !== "fact") continue;
+            group = parseSlackAgentUsergroup(created.fact.usergroup);
+            if (!group || group.description !== marker || group.handle !== handle) {
+              continue;
+            }
+          } else {
+            if (group.disabled) {
+              const enabled = await provisioningCall(authority, "usergroups.enable", {
+                usergroup: group.id,
+              });
+              if (enabled.kind !== "fact") continue;
+            }
+            if (group.name !== name || group.handle !== handle || group.description !== marker) {
+              const updated = await provisioningCall(authority, "usergroups.update", {
+                usergroup: group.id,
+                name,
+                handle,
+                description: marker,
+              });
+              if (updated.kind !== "fact") continue;
+              const observed = parseSlackAgentUsergroup(updated.fact.usergroup);
+              if (!observed || observed.description !== marker || observed.handle !== handle) {
+                continue;
+              }
+              group = observed;
+            }
+          }
+        } catch {
+          continue;
+        }
+        occupied.add(handle);
+        occupiedNames.add(name.toLocaleLowerCase("en-US"));
+        handles.push({
+          agentId: candidate.agentId,
+          providerUsergroupId: group.id,
+          handle,
+        });
+      }
+
+      for (const [marker, group] of managedByMarker) {
+        if (desiredMarkers.has(marker) || group.disabled) continue;
+        const disabled = await provisioningCall(authority, "usergroups.disable", {
+          usergroup: group.id,
+        });
+        if (disabled.kind !== "fact") return { kind: disabled.kind };
+      }
+      return { kind: "fact", fact: { handles } };
+    },
   };
 
   return {
@@ -1403,6 +1644,7 @@ export function createSlackBridgeProviderRuntime(
     quarantineSink,
     releaseCredential,
     resolveUsers,
+    resolveAgentMentionHandles,
     provisioningProvider,
     async stop() {
       if (stopped) return;

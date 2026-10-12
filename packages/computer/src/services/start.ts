@@ -24,6 +24,17 @@
 //     narrow-split): the service emits a structured `ready` event with the
 //     ready Map + managed targets; the adapter formats the user-visible
 //     line. Keeps service env-pure.
+import { describeDuplicateKeyHolder, findDuplicateKeyHolder } from "../duplicateKeyGuard";
+import { releaseHeldComputerMutationLock } from "../concurrency";
+import {
+  clearSupervisorRecord,
+  describeSupervisorUnreachable,
+  inspectSupervisor,
+  runSystemctl,
+  showUnitProperty,
+  type SupervisorInspection,
+  type SystemctlRunner,
+} from "../externalSupervisor";
 import { setTimeout as delay } from "node:timers/promises";
 
 import { currentTimeMs } from "@botiverse/raft-shared";
@@ -37,6 +48,8 @@ import {
 } from "../service";
 import { connectService } from "../lib/ipc-client";
 import {
+  describeRaftHomeConflict,
+  findRaftHomeConflictFor,
   serverRunnerLogReadFallback,
   serviceLogPath,
   serviceVersionPath,
@@ -127,6 +140,21 @@ export interface StartDeps {
   signal?: AbortSignal;
   convergeHostLifecycle?: typeof convergeCliHostLifecycle;
   hostLifecycleDeps?: MacosHostLifecycleDeps;
+  /** task #914: refuses to spawn when another live service on this host holds the same machine key. */
+  findDuplicateKeyHolder?: typeof findDuplicateKeyHolder;
+  /** task #917 seams: the systemd unit (if any) that owns the service, and systemctl. */
+  inspectSupervisor?: (slockHome: string) => Promise<SupervisorInspection | null>;
+  systemctl?: SystemctlRunner;
+  /**
+   * task #917: the foreground loop releases the calling command's mutation
+   * lock once the service has run startup recovery (just before it owns the
+   * IPC endpoint), so `stop`/`start` from another process are not refused
+   * with CONCURRENT_OPERATION for the service's whole lifetime. Default:
+   * release the lock this process holds for `slockHome`, if any.
+   */
+  releaseMutationLock?: (slockHome: string) => Promise<unknown>;
+  /** task #915: refuses when both default homes hold Raft data and no RAFT_HOME picks one. */
+  findRaftHomeConflict?: typeof findRaftHomeConflictFor;
 }
 
 export interface StartOptions extends StartDeps {
@@ -377,6 +405,13 @@ async function startInner(input: StartInput, options: StartOptions = {}): Promis
   options.signal?.throwIfAborted?.();
   const { slockHome } = input;
 
+  // task #915: before reading anything under the resolved home, make sure it
+  // is not a guess between two homes that both hold Raft data.
+  const homeConflict = (options.findRaftHomeConflict ?? findRaftHomeConflictFor)(slockHome);
+  if (homeConflict) {
+    throw new ComputerServiceError("RAFT_HOME_AMBIGUOUS", describeRaftHomeConflict(homeConflict));
+  }
+
   // 1. Validate attached set — service-axis throw, byte-identical message.
   const attached = await listAttachedServerIds(slockHome);
   options.signal?.throwIfAborted?.();
@@ -482,6 +517,16 @@ async function startInner(input: StartInput, options: StartOptions = {}): Promis
     };
   }
 
+  // task #914: a second service holding the same machine key on this host
+  // (an old install root still running, a stop that did not stop) is a second
+  // daemon on the same key; the server would send commands to either. Refuse
+  // before either start path (foreground loop or detached spawn) runs, and
+  // name the holder. Same-root duplicates were handled above (already_running).
+  const duplicateHolder = await (options.findDuplicateKeyHolder ?? findDuplicateKeyHolder)(slockHome);
+  if (duplicateHolder) {
+    throw new ComputerServiceError("DUPLICATE_KEY_HOLDER", describeDuplicateKeyHolder(duplicateHolder));
+  }
+
   // 4. Foreground path: run the service loop inline. Service emits
   // `running` event, then yields control to runService (which blocks
   // until SIGTERM / Ctrl-C). On return, we report status="running" with
@@ -496,8 +541,21 @@ async function startInner(input: StartInput, options: StartOptions = {}): Promis
     const service = options.runService ?? runService;
     const previousParentLockMarker = process.env[PARENT_LOCK_HELD_ENV_VAR];
     process.env[PARENT_LOCK_HELD_ENV_VAR] = "1";
+    const releaseMutationLock = options.releaseMutationLock ?? releaseHeldComputerMutationLock;
     try {
-      await service();
+      await service({
+        // Startup recovery (which honours the parent-lock marker) has run by
+        // the time the mutation surface exists; from here the service, not
+        // the command, is the single writer.
+        onMutationsReady: async () => {
+          await releaseMutationLock(slockHome);
+          // The marker told startup recovery that the parent held the lock;
+          // once released it must not be inherited by anything the service
+          // launches later (the installer, a replacement), or they would skip
+          // their own stale-lock cleanup (archer).
+          delete process.env[PARENT_LOCK_HELD_ENV_VAR];
+        },
+      });
     } finally {
       if (previousParentLockMarker === undefined) delete process.env[PARENT_LOCK_HELD_ENV_VAR];
       else process.env[PARENT_LOCK_HELD_ENV_VAR] = previousParentLockMarker;
@@ -520,12 +578,47 @@ async function startInner(input: StartInput, options: StartOptions = {}): Promis
   // is detached + has its own lifecycle — abort becomes a no-op.
   options.signal?.throwIfAborted?.();
 
+  // task #917: a systemd unit that exists for this install root owns the
+  // service. Starting beside it would leave a process systemd does not track
+  // and the next boot's unit start would collide with the duplicate-key guard.
+  // Delegation keys on the unit EXISTING (loaded), not on a live pid: after
+  // `systemctl stop` the unit is inactive and `raft-computer start` must still
+  // go through it. A unit file that is gone makes the record stale: clear it
+  // and fall through to the detached spawn.
   let pid: number;
-  try {
-    pid = await (options.spawnDetachedService ?? spawnDetachedService)(slockHome);
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    throw new ComputerServiceError("SUPERVISOR_SPAWN_FAILED", msg, err);
+  const supervision = await (options.inspectSupervisor ?? ((home: string) => inspectSupervisor(home, { systemctl: options.systemctl })))(slockHome);
+  if (supervision && !supervision.reachable) {
+    throw new ComputerServiceError(
+      "START_SUPERVISOR_UNREACHABLE",
+      describeSupervisorUnreachable(supervision.record, "systemctl did not answer"),
+    );
+  }
+  if (supervision && supervision.unitLoaded) {
+    const systemctl = options.systemctl ?? runSystemctl;
+    const { scope, unit } = supervision.record;
+    const result = await systemctl(scope, ["start", unit]);
+    if (result.code !== 0) {
+      throw new ComputerServiceError(
+        "START_SUPERVISOR_FAILED",
+        describeSupervisorUnreachable(supervision.record, `\`systemctl start ${unit}\` exited ${result.code ?? "without a code"}: ${result.stderr.trim() || result.stdout.trim() || "no output"}`),
+      );
+    }
+    const mainPid = await showUnitProperty(systemctl, scope, unit, "MainPID");
+    pid = Number(mainPid);
+    if (!Number.isInteger(pid) || pid <= 0) {
+      throw new ComputerServiceError(
+        "START_SUPERVISOR_FAILED",
+        describeSupervisorUnreachable(supervision.record, `the unit reports no main process after start (MainPID=${mainPid ?? "unknown"})`),
+      );
+    }
+  } else {
+    if (supervision) await clearSupervisorRecord(slockHome).catch(() => undefined);
+    try {
+      pid = await (options.spawnDetachedService ?? spawnDetachedService)(slockHome);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      throw new ComputerServiceError("SUPERVISOR_SPAWN_FAILED", msg, err);
+    }
   }
 
   emit(options, {

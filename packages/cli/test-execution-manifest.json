@@ -3,8 +3,8 @@
   "package": "@botiverse/raft",
   "runner": "vitest run",
   "testFileGlob": "src/**/*.test.ts",
-  "fileCount": 118,
-  "total": 1138,
+  "fileCount": 119,
+  "total": 1153,
   "files": [
     {
       "file": "src/agentApiNoBypass.test.ts",
@@ -2570,7 +2570,7 @@
     },
     {
       "file": "src/commands/message/send.test.ts",
-      "count": 96,
+      "count": 101,
       "cases": [
         {
           "name": "resolveSendContent reads multiline content from stdin"
@@ -2768,6 +2768,18 @@
           "name": "thread-context parent send confirmation warns before replacing an existing draft"
         },
         {
+          "name": "replacing a >400-character draft preserves the exact body in a private recovery file"
+        },
+        {
+          "name": "a recovery write failure does not block the replacement send"
+        },
+        {
+          "name": "JSON success reports the replaced draft and recovery file structurally"
+        },
+        {
+          "name": "replaced-draft recovery keeps a bounded history per target"
+        },
+        {
           "name": "thread-context parent send guard stays narrow around stale or exact thread targets"
         },
         {
@@ -2843,22 +2855,55 @@
           "name": "reviewer-isolation send error output never forwards upstream poison text"
         },
         {
-          "name": "replacing a non-empty draft names the target and prints the discarded body"
+          "name": "replacing a non-empty draft names the target, excerpt, and recovery file"
         },
         {
           "name": "the warning does not offer --send-draft, which would send the replacement"
         },
         {
-          "name": "a long discarded draft is truncated but reports its true length"
+          "name": "a long replaced draft is excerpted but reports its true length"
         },
         {
           "name": "a short draft is printed whole, with no truncation notice"
+        },
+        {
+          "name": "a failed local archive is explicit and never invents a recovery path"
         },
         {
           "name": "5xx guidance never lets reading authorise a resend"
         },
         {
           "name": "5xx guidance is only attached when a draft was actually saved"
+        }
+      ]
+    },
+    {
+      "file": "src/commands/message/senderElision.test.ts",
+      "count": 8,
+      "cases": [
+        {
+          "name": "gate off, no signal, or a runtime without compaction reports: every description is shown"
+        },
+        {
+          "name": "first message from each sender in a context keeps the description, later ones show the name only"
+        },
+        {
+          "name": "a new context, a changed description, or a same-name sender of another kind shows it again"
+        },
+        {
+          "name": "settle: output that never reached stdout does not count as shown"
+        },
+        {
+          "name": "claimObservation is one-shot per (rev, context): a concurrent second claimant loses"
+        },
+        {
+          "name": "message read: a second read in the same context prints @name only"
+        },
+        {
+          "name": "time zone: shown with the first message from a sender, then name only; a zone change shows it again"
+        },
+        {
+          "name": "time zone: with the gate off it is shown on every message"
         }
       ]
     },
@@ -3260,13 +3305,16 @@
     },
     {
       "file": "src/commands/server/_format.test.ts",
-      "count": 4,
+      "count": 5,
       "cases": [
         {
           "name": "formatServerInfo: full server with channels, agents, humans"
         },
         {
           "name": "formatChannelMembers: full channel member list"
+        },
+        {
+          "name": "formatChannelMembers: joint roster lists every server a person takes part through"
         },
         {
           "name": "formatChannelMembers: empty members"
@@ -3791,7 +3839,7 @@
     },
     {
       "file": "src/core/apiFailure.test.ts",
-      "count": 6,
+      "count": 7,
       "cases": [
         {
           "name": "upstream_http_response: next action sends the reader to the server side, not the proxy transport log"
@@ -3810,6 +3858,9 @@
         },
         {
           "name": "non-proxy 5xx gets no default next action"
+        },
+        {
+          "name": "post_response_local points at the local daemon, not the server (task #369)"
         }
       ]
     },

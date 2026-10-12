@@ -7,15 +7,7 @@
   "engines": {
     "node": ">=24.0.0"
   },
-  "packageManager": "pnpm@10.29.3",
-  "pnpm": {
-    "onlyBuiltDependencies": [
-      "argon2",
-      "esbuild",
-      "sharp",
-      "workerd"
-    ]
-  },
+  "packageManager": "pnpm@12.11.2",
   "scripts": {
     "check:misc": "bash scripts/check-misc.sh",
     "perf:boot-profile": "node scripts/perf/boot-profile.cjs",
@@ -28,10 +20,10 @@
     "test:ax-book": "vitest run scripts/visualize/ax-surfaces/book.test.mjs"
   },
   "devDependencies": {
-    "@oxc-node/core": "^0.1.3",
+    "@oxc-node/core": "^0.1.6",
     "marked": "^18.0.7",
-    "playwright": "^1.59.1",
+    "playwright": "^1.64.0",
     "typescript": "6.0.3",
-    "vitest": "^5.0.2"
+    "vitest": "^5.0.3"
   }
 }

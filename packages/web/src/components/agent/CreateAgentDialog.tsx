@@ -16,7 +16,7 @@ import { Card,
   Checkbox,
   Textarea } from "raft-ui";
 import CloseButton from "../ui/CloseButton";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { RefObject } from "react";
 import { X } from "lucide-react";
 import { useIntl } from "react-intl";
@@ -322,8 +322,8 @@ function OnboardingCreateCindyRuntimePanel({
         onCommandChange={onCommandChange}
         reasoningEffort={reasoningEffort}
         onReasoningEffortChange={onReasoningEffortChange}
-        envVarEntries={[]}
-        onEnvVarEntriesChange={() => undefined}
+        envVarEntries={EMPTY_ENV_VAR_ENTRIES}
+        onEnvVarEntriesChange={noopEnvVarEntriesChange}
         runtimeLabel={formatMessage({ id: "agent.runtimeConfig.runtime" })}
         runtimeHint={formatMessage({ id: "agent.create.runtimeHint" })}
         onRescanRuntimes={onRescanRuntimes}
@@ -348,6 +348,12 @@ function OnboardingCreateCindyRuntimePanel({
       />
     </div>
   );
+}
+
+const EMPTY_ENV_VAR_ENTRIES: never[] = [];
+
+function noopEnvVarEntriesChange(): void {
+  // Env vars are intentionally not editable in this dialog.
 }
 
 export default function CreateAgentDialog({
@@ -530,7 +536,9 @@ export default function CreateAgentDialog({
   );
   const selectedMachine = machines.find((m) => m.id === selectedMachineId);
   const selectedMachineMeetsDaemonRequirement = machineMeetsDaemonRequirement(selectedMachine, minimumDaemonVersion);
-  const machineOptions: SelectOption[] = machines.map((machine) => {
+  const createAgentSelectPortalProps = useMemo(() => ({ container: createAgentSelectPortalRef }), []);
+
+  const machineOptions: SelectOption[] = useMemo(() => machines.map((machine) => {
     const isOffline = machine.status !== "online";
     const blockedByRequired = prefilledMachineMode === "required" && machine.id !== prefilledMachineId;
     const daemonTooOld = !machineMeetsDaemonRequirement(machine, minimumDaemonVersion);
@@ -550,7 +558,7 @@ export default function CreateAgentDialog({
       label: machine.name + (machine.hostname ? ` (${machine.hostname})` : "") + (isOffline ? formatMessage({ id: "agent.create.offlineSuffix" }) : "") + daemonRequirementLabel,
       disabled: isOffline || blockedByRequired || daemonTooOld,
     };
-  });
+  }), [machines, prefilledMachineMode, prefilledMachineId, minimumDaemonVersion, formatMessage]);
   const machineRuntimeIds = selectedMachine?.runtimes ?? [];
   const runtimeSelectionCatalog = useNewAgentRuntimeOptions(
     previewOnly ? null : selectedMachineId,
@@ -665,17 +673,16 @@ export default function CreateAgentDialog({
   );
   const selectedProviderConnection = availableProviderConnections.find((connection) => connection.id === providerConnectionId) ?? null;
   // Protocol v2 (server-described form, rendered by field kind, submitted as
-  // field values). Behind a flag; managed provider connections and onboarding
-  // stay on v1 for now. A runtime opts in with its own `runtimeFormV2` marker,
-  // independent of the v1 `formDefinitionRef`; a v2 form that needs client
-  // capabilities this build lacks falls back to the legacy/v1 form.
+  // field values). Behind a flag; onboarding stays on v1. A runtime opts in
+  // with its own `runtimeFormV2` marker, independent of the v1
+  // `formDefinitionRef`; a v2 form that needs client capabilities this build
+  // lacks falls back to the legacy/v1 form. Builtin's saved Provider
+  // connections are native to v2 (`provider.saved_connection`, task #46): the
+  // former "builtin stays on v1" stopgap is gone — the v2 form carries the
+  // saved/direct picker itself.
   const runtimeFormV2Flag = useServerFeatureFlag(RUNTIME_FORM_V2_WEB_FLAG_KEY).enabled;
   const v2Eligible = runtimeFormV2Flag
     && selectedRuntimeAdmission?.runtimeFormV2?.protocolVersion === 2
-    // Builtin stays on the schema (v1) path: the saved Provider select — the
-    // unified saved/direct picker — only exists there. A v2 form would hide
-    // it, so a provider connection could never be chosen in create.
-    && runtime !== "builtin"
     && !selectedProviderConnection && !onboarding && !previewOnly;
   const runtimeFormV2 = useRuntimeFormV2(v2Eligible ? selectedMachineId : null, v2Eligible ? runtime : null);
   const v2Active = v2Eligible && runtimeFormV2.status !== "unsupported";
@@ -693,14 +700,21 @@ export default function CreateAgentDialog({
   // A required field whose option source is unavailable blocks like an empty one (option_source.status).
   const v2MissingRequired = Object.values(v2Errors).some((code) => code === "required" || code === "source_unavailable");
   const v2Malformed = Object.values(v2Errors).some((code) => code !== "required" && code !== "source_unavailable");
-  const changeV2Value = (key: string, value: RuntimeFormV2Value) => {
+  const changeV2Value = useCallback((key: string, value: RuntimeFormV2Value) => {
     if (runtimeFormV2.status !== "ready" || !v2Values) return;
     setV2ServerErrors({});
     setV2Draft({
       key: runtimeFormV2Key,
       values: applyRuntimeFormV2Change(runtimeFormV2.form, runtimeFormV2.sources, v2Values, key, value),
     });
-  };
+  }, [runtimeFormV2, v2Values, runtimeFormV2Key]);
+
+  const runtimeFormV2Prop = useMemo(() => (v2Active ? {
+    state: runtimeFormV2,
+    values: v2Values,
+    onChange: changeV2Value,
+    serverErrors: v2ServerErrors,
+  } : undefined), [v2Active, runtimeFormV2, v2Values, changeV2Value, v2ServerErrors]);
 
   // The definition's option sources, not client constants, own provider/model
   // defaults for schema-backed rows. Reconcile once the version-pinned
@@ -827,13 +841,16 @@ export default function CreateAgentDialog({
         }]
       : [];
   });
-  const modelOptions = runtimeModels.models.map((m) => ({ value: m.id, label: catalogModelLabel(useServerStore.getState().current?.id, selectedMachineId, runtimeModelSourceRuntime, m.id) ?? m.label }));
+  const modelOptions = useMemo(
+    () => runtimeModels.models.map((m) => ({ value: m.id, label: catalogModelLabel(useServerStore.getState().current?.id, selectedMachineId, runtimeModelSourceRuntime, m.id) ?? m.label })),
+    [runtimeModels.models, selectedMachineId, runtimeModelSourceRuntime],
+  );
 
   // Change the selected model and reconcile reasoning against the new model's
   // declared supportedReasoningEfforts: keep a still-valid value, otherwise fall
   // back to the model's default effort (e.g. switching to GPT-5.6 luna drops an
   // Ultra selection down to Medium).
-  const changeModel = (nextModel: string) => {
+  const changeModel = useCallback((nextModel: string) => {
     // Before the async admission catalog arrives, the legacy picker deliberately
     // renders the Claude fallback catalog. Anchor that explicit user choice to
     // Claude immediately. Otherwise the admission effect still sees runtime=""
@@ -850,9 +867,130 @@ export default function CreateAgentDialog({
       prev as import("@botiverse/raft-shared").ReasoningEffort | null,
       runtimeModels.models,
     ));
-  };
+  }, [runtime, runtimeModels.models]);
 
-  const changeProviderConnection = (connection: ProviderConnectionSummary | null) => {
+  const handleUpgradeToBilling = useCallback(() => {
+    onClose();
+    nav.toSettings("billing");
+  }, [onClose, nav]);
+
+  const handleConnectComputerClick = useCallback(() => {
+    onClose();
+    setShowAddMachine(true);
+  }, [onClose, setShowAddMachine]);
+
+  const handleRuntimeChange = useCallback((val: string) => {
+    setRuntime(val);
+    setModel(getDefaultModel(val) || "");
+    setReasoningEffort(reconcileReasoningEffort(val, getDefaultModel(val), null));
+    setCustomModelMode(false);
+    setProviderMode("default");
+    setProviderApiUrl("");
+    setProviderApiKey("");
+    setBuiltInProviderMode(BUILTIN_RUNTIME_DEFAULT_PROVIDER_ID);
+    setBuiltInProviderApiKey("");
+    setBuiltInProviderBaseUrl("");
+    setBuiltInProviderSupportsImageInput(false);
+    setLoadLocalPlugins(false);
+    setPiProviderMode(PI_PROVIDER_CONFIGURED);
+    setPiProviderApiKey("");
+    setFastMode(false);
+    setCommand("");
+    setAdvancedOpen(false);
+  }, []);
+
+  const handleRescanRuntimes = useCallback(() => {
+    if (!selectedMachineId) return;
+    setRuntimesRescanning(true);
+    void rescanRuntimes(selectedMachineId)
+      .catch(() => undefined)
+      // The fresh list lands on its own via the capabilities push; this
+      // only stops the spinner, it is not "the answer arriving".
+      .finally(() => setTimeout(() => setRuntimesRescanning(false), 1200));
+  }, [selectedMachineId, rescanRuntimes]);
+
+  const handleBuiltInProviderModeChange = useCallback((next: BuiltInProviderMode) => {
+    setBuiltInProviderMode(next);
+    if (isBuiltInGatewayProviderMode(next)) {
+      setModel("");
+      setCustomModelMode(true);
+      return;
+    }
+    setBuiltInProviderBaseUrl("");
+    const defaultModel = builtInProviderDefaultModel(next);
+    if (defaultModel) {
+      setModel(defaultModel);
+      setCustomModelMode(false);
+    }
+  }, []);
+
+  const handlePiProviderModeChange = useCallback((next: PiProviderMode) => {
+    setPiProviderMode(next);
+    // Switching to a builtin provider locks the Model picker to
+    // that provider's SDK first-class set; reset the selected
+    // model to the provider's default so the picker shows a
+    // coherent option instead of a stale one from another provider.
+    if (next !== PI_PROVIDER_CONFIGURED) {
+      const defaultModel = piBuiltinProviderDefaultModel(next);
+      if (defaultModel) {
+        setModel(defaultModel);
+        setCustomModelMode(false);
+      }
+    }
+  }, []);
+
+  const handleOnboardingStartOverClick = useCallback(() => {
+    if (onOnboardingStartOver) void onOnboardingStartOver();
+  }, [onOnboardingStartOver]);
+
+  const handleOnboardingLaterClick = useCallback(() => {
+    if (onOnboardingLater) void onOnboardingLater();
+  }, [onOnboardingLater]);
+
+  const handleMachineChange = useCallback((val: unknown) => {
+    if (typeof val !== "string") return;
+    setSelectedMachineId(val);
+    setRuntime("");
+    setModel(getDefaultModel("claude"));
+    setCustomModelMode(false);
+    setProviderMode("default");
+    setProviderApiUrl("");
+    setProviderApiKey("");
+    setBuiltInProviderMode(BUILTIN_RUNTIME_DEFAULT_PROVIDER_ID);
+    setBuiltInProviderApiKey("");
+    setBuiltInProviderBaseUrl("");
+    setBuiltInProviderSupportsImageInput(false);
+    setLoadLocalPlugins(false);
+    setPiProviderMode(PI_PROVIDER_CONFIGURED);
+    setPiProviderApiKey("");
+    setFastMode(false);
+    setCommand("");
+    setReasoningEffort(reconcileReasoningEffort("claude", getDefaultModel("claude"), null));
+  }, [setSelectedMachineId]);
+
+  const handleNameChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    setName(e.target.value);
+    if (error) setError("");
+  }, [error]);
+
+  const handleDescriptionChange = useCallback((e: React.ChangeEvent<HTMLTextAreaElement>) => {
+    setDescription(e.target.value);
+  }, []);
+
+  const handleHostedRuntimeChange = useCallback((checked: boolean | "indeterminate") => {
+    setRunOnHostedRuntime(checked === true);
+  }, []);
+
+  const handleCloseEditProviderConnection = useCallback(() => {
+    setEditingProviderConnection(null);
+  }, []);
+
+  const handleCompletedEditProviderConnection = useCallback(async () => {
+    setEditingProviderConnection(null);
+    await providerConnectionCatalog.refresh();
+  }, [providerConnectionCatalog]);
+
+  const changeProviderConnection = useCallback((connection: ProviderConnectionSummary | null) => {
     setProviderConnectionId(connection?.id ?? "");
     if (!connection) {
       if (providerConnectionId) {
@@ -873,7 +1011,7 @@ export default function CreateAgentDialog({
     });
     setModel(nextModel.model);
     setCustomModelMode(nextModel.customModelMode);
-  };
+  }, [providerConnectionId, runtimeFormDefinition.definition, model]);
 
   // One-shot prefill waiter: when the dialog opens with a `prefilledMachineId`
   // for an action-card-driven flow, the target machine may briefly be reported
@@ -1455,10 +1593,7 @@ export default function CreateAgentDialog({
                           <Button
                             key="upgrade"
                             type="button"
-                            onClick={() => {
-                              onClose();
-                              nav.toSettings("billing");
-                            }}
+                            onClick={handleUpgradeToBilling}
                             variant="link"
                             size="inline"
                             className="dark:!text-warning-strong"
@@ -1497,10 +1632,7 @@ export default function CreateAgentDialog({
                   <BannerAction>
                     <Button
                       type="button"
-                      onClick={() => {
-                        onClose();
-                        setShowAddMachine(true);
-                      }}
+                      onClick={handleConnectComputerClick}
                       variant="default"
                       size="lg"
                     >
@@ -1512,39 +1644,14 @@ export default function CreateAgentDialog({
               <OnboardingCreateCindyRuntimePanel
                 showValidationErrors={validationAttempted}
                 runtime={runtime}
-                onRuntimeChange={(val) => {
-                  setRuntime(val);
-                  setModel(getDefaultModel(val) || "");
-                  setReasoningEffort(reconcileReasoningEffort(val, getDefaultModel(val), null));
-                  setCustomModelMode(false);
-                  setProviderMode("default");
-                  setProviderApiUrl("");
-                  setProviderApiKey("");
-                  setBuiltInProviderMode(BUILTIN_RUNTIME_DEFAULT_PROVIDER_ID);
-                  setBuiltInProviderApiKey("");
-                  setBuiltInProviderBaseUrl("");
-                  setBuiltInProviderSupportsImageInput(false);
-                  setLoadLocalPlugins(false);
-                  setPiProviderMode(PI_PROVIDER_CONFIGURED);
-                  setPiProviderApiKey("");
-                  setFastMode(false);
-                  setCommand("");
-                  setAdvancedOpen(false);
-                }}
+                onRuntimeChange={handleRuntimeChange}
                 // Show every runtime, greying out the ones we did not detect (they
                 // carry a "(not installed)" suffix). Hiding them meant a user who
                 // simply forgot to install their tool saw no trace of it — and when
                 // nothing was detected at all, an empty list with no explanation.
                 runtimeOptions={runtimeOptions}
                 runtimesRescanning={runtimesRescanning}
-                onRescanRuntimes={selectedMachineId ? () => {
-                  setRuntimesRescanning(true);
-                  void rescanRuntimes(selectedMachineId)
-                    .catch(() => undefined)
-                    // The fresh list lands on its own via the capabilities push; this
-                    // only stops the spinner, it is not "the answer arriving".
-                    .finally(() => setTimeout(() => setRuntimesRescanning(false), 1200));
-                } : undefined}
+                onRescanRuntimes={selectedMachineId ? handleRescanRuntimes : undefined}
                 model={model}
                 onModelChange={changeModel}
                 customModelMode={customModelMode}
@@ -1558,20 +1665,7 @@ export default function CreateAgentDialog({
                 providerApiKey={providerApiKey}
                 onProviderApiKeyChange={setProviderApiKey}
                 builtInProviderMode={builtInProviderMode}
-                onBuiltInProviderModeChange={(next) => {
-                  setBuiltInProviderMode(next);
-                  if (isBuiltInGatewayProviderMode(next)) {
-                    setModel("");
-                    setCustomModelMode(true);
-                    return;
-                  }
-                  setBuiltInProviderBaseUrl("");
-                  const defaultModel = builtInProviderDefaultModel(next);
-                  if (defaultModel) {
-                    setModel(defaultModel);
-                    setCustomModelMode(false);
-                  }
-                }}
+                onBuiltInProviderModeChange={handleBuiltInProviderModeChange}
                 builtInProviderApiKey={builtInProviderApiKey}
                 onBuiltInProviderApiKeyChange={setBuiltInProviderApiKey}
                 builtInProviderBaseUrl={builtInProviderBaseUrl}
@@ -1581,16 +1675,7 @@ export default function CreateAgentDialog({
                 builtInProviderSupportsImageInput={builtInProviderSupportsImageInput}
                 onBuiltInProviderSupportsImageInputChange={setBuiltInProviderSupportsImageInput}
                 piProviderMode={piProviderMode}
-                onPiProviderModeChange={(next) => {
-                  setPiProviderMode(next);
-                  if (next !== PI_PROVIDER_CONFIGURED) {
-                    const defaultModel = piBuiltinProviderDefaultModel(next);
-                    if (defaultModel) {
-                      setModel(defaultModel);
-                      setCustomModelMode(false);
-                    }
-                  }
-                }}
+                onPiProviderModeChange={handlePiProviderModeChange}
                 piProviderApiKey={piProviderApiKey}
                 onPiProviderApiKeyChange={setPiProviderApiKey}
                 fastMode={fastMode}
@@ -1630,7 +1715,8 @@ export default function CreateAgentDialog({
                   </span>
                   <TextLink
                     variant="muted"
-                    onClick={() => void onOnboardingStartOver()}
+                    inline
+                    onClick={handleOnboardingStartOverClick}
                     disabled={submitting}
                     data-testid="create-agent-start-over"
                   >
@@ -1648,7 +1734,7 @@ export default function CreateAgentDialog({
                 {onOnboardingLater ? (
                   <TextLink
                     variant="muted"
-                    onClick={() => void onOnboardingLater()}
+                    onClick={handleOnboardingLaterClick}
                     disabled={submitting}
                     className="text-sm"
                   >
@@ -1663,7 +1749,7 @@ export default function CreateAgentDialog({
               disabled={createDisabled || submitting}
               variant="accent"
               size="lg"
-              className="w-full sm:w-auto dark:!text-foreground-inverse"
+              className="w-full sm:w-auto"
             >
               {submitting
                 ? (createdOnboardingAgent
@@ -1707,10 +1793,7 @@ export default function CreateAgentDialog({
             </Button>
             <Button
               type="button"
-              onClick={() => {
-                onClose();
-                setShowAddMachine(true);
-              }}
+              onClick={handleConnectComputerClick}
               variant="accent"
                     size="lg"
             >
@@ -1790,10 +1873,7 @@ export default function CreateAgentDialog({
                       <Button
                         key="upgrade"
                         type="button"
-                        onClick={() => {
-                          onClose();
-                          nav.toSettings("billing");
-                        }}
+                        onClick={handleUpgradeToBilling}
                         variant="link"
                             size="inline"
                             className="dark:!text-warning-strong"
@@ -1815,10 +1895,7 @@ export default function CreateAgentDialog({
                     {" "}
                     <Button
                       type="button"
-                      onClick={() => {
-                        onClose();
-                        nav.toSettings("billing");
-                      }}
+                      onClick={handleUpgradeToBilling}
                       variant="link"
                             size="inline"
                     >
@@ -1837,33 +1914,14 @@ export default function CreateAgentDialog({
                 <Select
                   chrome="field"
                   value={selectedMachineId}
-                  onValueChange={(val) => {
-                    if (val == null) return;
-                    setSelectedMachineId(val);
-                    setRuntime("");
-                    setModel(getDefaultModel("claude"));
-                    setCustomModelMode(false);
-                    setProviderMode("default");
-                    setProviderApiUrl("");
-                    setProviderApiKey("");
-                    setBuiltInProviderMode(BUILTIN_RUNTIME_DEFAULT_PROVIDER_ID);
-                    setBuiltInProviderApiKey("");
-                    setBuiltInProviderBaseUrl("");
-                    setBuiltInProviderSupportsImageInput(false);
-                    setLoadLocalPlugins(false);
-                    setPiProviderMode(PI_PROVIDER_CONFIGURED);
-                    setPiProviderApiKey("");
-                    setFastMode(false);
-                    setCommand("");
-                    setReasoningEffort(reconcileReasoningEffort("claude", getDefaultModel("claude"), null));
-                  }}
+                  onValueChange={handleMachineChange}
                   items={machineOptions}
                 >
                   <FieldSelectTrigger className="w-full">
                     <SelectValue placeholder={formatMessage({ id: "agent.create.selectPlaceholder" })} />
                     <SelectIcon />
                   </FieldSelectTrigger>
-                  <SelectContent portalProps={{ container: createAgentSelectPortalRef }}>
+                  <SelectContent portalProps={createAgentSelectPortalProps}>
                     <SelectList>
                       {renderSelectItems(machineOptions)}
                     </SelectList>
@@ -1914,10 +1972,7 @@ export default function CreateAgentDialog({
               id="create-agent-name"
               type="text"
               value={name}
-              onChange={(e) => {
-                setName(e.target.value);
-                if (error) setError("");
-              }}
+              onChange={handleNameChange}
               className={`w-full ${nameLocked ? lockedFieldClass : ""}`}
               placeholder={formatMessage({ id: "agent.create.namePlaceholder" })}
               required
@@ -1945,7 +2000,7 @@ export default function CreateAgentDialog({
           >
             <Textarea
               value={description}
-              onChange={(e) => setDescription(e.target.value)}
+              onChange={handleDescriptionChange}
               className={`w-full ${descriptionLocked ? lockedFieldClass : ""}`}
               placeholder={formatMessage({ id: "agent.create.descriptionPlaceholder" })}
               rows={3}
@@ -1964,7 +2019,7 @@ export default function CreateAgentDialog({
             <label className="flex items-start gap-3 border border-line-muted px-3 py-2 theme-brutal:border-2 theme-brutal:border-black" data-testid="create-agent-hosted-runtime">
               <Checkbox
                 checked={runOnHostedRuntime}
-                onCheckedChange={(checked) => setRunOnHostedRuntime(checked === true)}
+                onCheckedChange={handleHostedRuntimeChange}
                 aria-label={formatMessage({ id: "agent.create.hostedRuntime.label" })}
               />
               <span className="min-w-0">
@@ -1977,33 +2032,9 @@ export default function CreateAgentDialog({
             <>
             <RuntimeConfigFields
               showValidationErrors={validationAttempted}
-              runtimeFormV2={v2Active ? {
-                state: runtimeFormV2,
-                values: v2Values,
-                onChange: changeV2Value,
-                serverErrors: v2ServerErrors,
-              } : undefined}
+              runtimeFormV2={runtimeFormV2Prop}
               runtime={runtime}
-              onRuntimeChange={(val) => {
-                setRuntime(val);
-                setModel(getDefaultModel(val));
-                setReasoningEffort(reconcileReasoningEffort(val, getDefaultModel(val), null));
-                setCustomModelMode(false);
-                setProviderMode("default");
-                setProviderApiUrl("");
-                setProviderApiKey("");
-                setBuiltInProviderMode(BUILTIN_RUNTIME_DEFAULT_PROVIDER_ID);
-                setBuiltInProviderApiKey("");
-                setBuiltInProviderBaseUrl("");
-                setBuiltInProviderSupportsImageInput(false);
-                setLoadLocalPlugins(false);
-                setProviderConnectionId("");
-                setPiProviderMode(PI_PROVIDER_CONFIGURED);
-                setPiProviderApiKey("");
-                setFastMode(false);
-                setCommand("");
-                setAdvancedOpen(false);
-              }}
+              onRuntimeChange={handleRuntimeChange}
               runtimeOptions={runtimeOptions}
               model={model}
               onModelChange={changeModel}
@@ -2019,20 +2050,7 @@ export default function CreateAgentDialog({
               providerApiKey={providerApiKey}
               onProviderApiKeyChange={setProviderApiKey}
               builtInProviderMode={builtInProviderMode}
-              onBuiltInProviderModeChange={(next) => {
-                setBuiltInProviderMode(next);
-                if (isBuiltInGatewayProviderMode(next)) {
-                  setModel("");
-                  setCustomModelMode(true);
-                  return;
-                }
-                setBuiltInProviderBaseUrl("");
-                const defaultModel = builtInProviderDefaultModel(next);
-                if (defaultModel) {
-                  setModel(defaultModel);
-                  setCustomModelMode(false);
-                }
-              }}
+              onBuiltInProviderModeChange={handleBuiltInProviderModeChange}
               builtInProviderApiKey={builtInProviderApiKey}
               onBuiltInProviderApiKeyChange={setBuiltInProviderApiKey}
               builtInProviderBaseUrl={builtInProviderBaseUrl}
@@ -2042,21 +2060,7 @@ export default function CreateAgentDialog({
               builtInProviderSupportsImageInput={builtInProviderSupportsImageInput}
               onBuiltInProviderSupportsImageInputChange={setBuiltInProviderSupportsImageInput}
               piProviderMode={piProviderMode}
-              onPiProviderModeChange={(next) => {
-                setPiProviderMode(next);
-                // Switching to a builtin provider locks the Model picker to
-                // that provider's SDK first-class set; reset the selected
-                // model to the provider's default so the picker shows a
-                // valid value. Switching back to "Configured" lets the
-                // host-discovered list (and any prior selection) recover.
-                if (next !== PI_PROVIDER_CONFIGURED) {
-                  const defaultModel = piBuiltinProviderDefaultModel(next);
-                  if (defaultModel) {
-                    setModel(defaultModel);
-                    setCustomModelMode(false);
-                  }
-                }
-              }}
+              onPiProviderModeChange={handlePiProviderModeChange}
               piProviderApiKey={piProviderApiKey}
               onPiProviderApiKeyChange={setPiProviderApiKey}
               fastMode={fastMode}
@@ -2100,7 +2104,6 @@ export default function CreateAgentDialog({
               type="submit"
               disabled={createDisabled}
               variant="accent"
-              className="dark:!text-foreground-inverse"
               size="lg"
             >
               {submitLabel}
@@ -2113,11 +2116,8 @@ export default function CreateAgentDialog({
           key={editingProviderConnection.id}
           connection={editingProviderConnection}
           providerOptions={providerConnectionCatalog.providerOptions}
-          onClose={() => setEditingProviderConnection(null)}
-          onCompleted={async () => {
-            setEditingProviderConnection(null);
-            await providerConnectionCatalog.refresh();
-          }}
+          onClose={handleCloseEditProviderConnection}
+          onCompleted={handleCompletedEditProviderConnection}
         />
       )}
     </>

@@ -864,7 +864,7 @@ test("Connected Apps detail modal renders cataloged zh-cn headings and App Notif
   fireEvent.click(await screen.findByText("Pending Notes"));
   const pendingModal = (await screen.findByText("新增的应用权限正在等待审核，原有已批准的访问保持可用。")).closest('[data-slot="card"]') as HTMLElement;
   assert.ok(pendingModal, "pending marketplace app detail should open in a modal card");
-  assert.ok(within(pendingModal).getByText("App Review 待审核"));
+  assert.ok(within(pendingModal).getByText("权限更新待审核"));
 });
 
 test("Connected Apps gives members the full read surface without management actions", async () => {

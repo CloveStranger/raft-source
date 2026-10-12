@@ -213,7 +213,8 @@ const BATCH_3B_FORMS: Record<string, string[]> = {
   "claude.edit.json": ["select.custom_value", "choice.labels", "option_source.status"],
   "cursor.form.json": ["select.custom_value", "option_source.status"],
   "cursor.edit.json": ["select.custom_value", "option_source.status"],
-  "copilot.form.json": ["select.custom_value", "choice.labels", "option_source.status"],
+  // Copilot CLI is deprecated: edit-only, so it ships an edit fixture and no create form.
+  "copilot.edit.json": ["select.custom_value", "choice.labels", "option_source.status"],
 };
 const BATCH_3B_SOURCES: Record<string, { status?: string; reason?: string; retryable?: boolean; custom: boolean; efforts: boolean }> = {
   "claude.option-source.provider.json": { custom: false, efforts: false },

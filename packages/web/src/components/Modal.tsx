@@ -39,7 +39,10 @@ export default function Modal({
   useEffect(() => {
     if (!closeOnEscape) return;
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
+      // A child that already handled Escape (an open mention/autocomplete
+      // list, a nested picker) marks it with preventDefault; that Escape is
+      // theirs, so the modal must stay open and keep what the user typed.
+      if (e.key === "Escape" && !e.defaultPrevented) onClose();
     };
     // keydown-focus-on-open
     document.addEventListener("keydown", handleKeyDown);

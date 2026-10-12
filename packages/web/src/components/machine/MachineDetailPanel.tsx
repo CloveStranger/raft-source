@@ -1,18 +1,24 @@
-import { Input, Textarea, Card, Badge, Button, CopyableCodeRoot, CopyableCode, CopyableCodeAction } from "raft-ui";
-import { useEffect, useId, useRef, useState } from "react";
+import { Input, Textarea, Card, Badge, Button, CopyableCode, CopyableCodeAction, PanelTitle, Spinner } from "raft-ui";
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
+import type { ChangeEvent, KeyboardEvent } from "react";
 import { useIntl } from "react-intl";
-import { Trash2, Monitor, Check, RefreshCw, FolderOpen, Play, Plus, X, Pencil, Square, RotateCcw, CheckCircle, AlertCircle, Terminal, ChevronRight } from "lucide-react";
+import { Trash2, Monitor, Check, RefreshCw, FolderOpen, Play, Plus, X, Pencil, Square, RotateCcw, CheckCircle, AlertCircle, Terminal, ChevronRight, ArrowLeftRight } from "lucide-react";
 import DialogCard from "../ui/DialogCard";
 import Banner from "../ui/Banner";
 import { machineDiskLowPresentation } from "../../utils/machineDiskPresentation";
 import ProgressBar from "../ui/ProgressBar";
-import { compareComputerVersions, getMachineRuntimeDisplayOptions, isComputerSemver, isRemoteUpgradeSupported, runtimeAvailabilitySuffix } from "@botiverse/raft-shared";
+import { clearClockTimeout, compareComputerVersions, currentTimeMs, getMachineRuntimeDisplayOptions, isComputerSemver, isRemoteUpgradeSupported, runtimeAvailabilitySuffix, setClockTimeout } from "@botiverse/raft-shared";
 import { formatRuntimeAvailabilitySuffix, formatRuntimeLabelWithStatus } from "../../utils/runtimeAvailabilityLabel";
-import { agentModelLabel } from "../../utils/agentModelName";
 import { useMachineStore } from "../../store/machineStore";
-import { REMOTE_COMPUTER_UPGRADE_V2_FLAG_KEY, useServerFeatureFlag } from "../../store/serverFeatureFlags";
-import type { Machine, MachineWorkspaceEntry } from "../../store/machineStore";
+import { BULK_CHANGE_MODEL_WEB_FLAG_KEY, REMOTE_COMPUTER_UPGRADE_V2_FLAG_KEY, useServerFeatureFlag } from "../../store/serverFeatureFlags";
+import { useBulkChangeModelReceiptStore } from "../../store/bulkChangeModelReceiptStore";
+import type { BulkChangeReceipt, BulkUnfinishedAgent } from "../../store/bulkChangeModelReceiptStore";
+import { formatBulkModelLabel } from "./bulkChangeModelPlan";
+import type { BulkModelTarget } from "./bulkChangeModelPlan";
+import BulkChangeModelDialog from "./BulkChangeModelDialog";
+import type { Machine, MachineUpgradeRequest, MachineWorkspaceEntry } from "../../store/machineStore";
 import { computeAgentDisplayState, selectAgentActivitiesSlice, useAgentStore } from "../../store/agentStore";
+import type { Agent } from "../../store/agentStore";
 import { useServerStore } from "../../store/serverStore";
 import { useProfileStore } from "../../store/profileStore";
 import { useAuthStore } from "../../store/authStore";
@@ -23,6 +29,7 @@ import { getServerUrl } from "../../utils/server";
 import { formatRelativeTime } from "../../utils/relativeTime";
 import { getComputerCommands } from "../../utils/computerSetupCommand";
 import { getComputerVersionFact } from "../../utils/computerVersionFact";
+import { useComputerUpgradeReconnect } from "../../hooks/useComputerUpgradeReconnect";
 import { canViewMachineRuntimeAccountUsage } from "../../utils/machineRuntimeUsageVisibility";
 import ConfirmDialog from "../ConfirmDialog";
 import { trackAgentCreateOpened } from "../../analytics/journey";
@@ -35,14 +42,18 @@ import SectionHeader from "../ui/SectionHeader";
 import KeyValueRow from "../ui/KeyValueRow";
 import AvatarSlot from "../ui/AvatarSlot";
 import SurfaceListItem from "../ui/SurfaceListItem";
-import AvatarListRow from "../ui/AvatarListRow";
-import CheckMarker from "../ui/CheckMarker";
-import { formatActivityText } from "../../utils/activity";
 import { RuntimeAccountUsageGateChip } from "./RuntimeAccountUsageChip";
 import ComputerReleaseNotesAffordance from "./ComputerReleaseNotesAffordance";
 import { formatFileSizeBytes } from "../../utils/fileSizePresentation";
+import { CommandCopyRoot } from "./CommandCopyRoot";
+import { WorkspaceDeleteButton } from "./WorkspaceDeleteButton";
+import { BulkResetOptionCard } from "./BulkResetOptionCard";
+import { MachineAgentRow } from "./MachineAgentRow";
 
 const EMPTY_WORKSPACES: MachineWorkspaceEntry[] = [];
+
+/** The "cannot delete" notice has nothing to confirm; OK only closes it. */
+function acknowledgeCannotDelete() {}
 
 /** A refused Upgrade click, mapped from the server's code (never its text). */
 type UpgradeRefusal = "web_upgrade_off" | "too_old" | "not_allowed" | "unknown";
@@ -59,13 +70,19 @@ function upgradeRefusalFromCode(code: string | undefined): UpgradeRefusal {
       return "unknown";
   }
 }
-type CommandCopyTarget =
+export type CommandCopyTarget =
   | "computer-install"
   | "computer-setup"
   | "computer-install-restart"
   | "terminal-status"
   | "terminal-doctor"
   | "terminal-restart";
+
+// A filesystem path, not prose. Daemons before 1.0.46 do not report it and
+// only ever kept workspaces under ~/.slock/agents/.
+function workspaceLocation(ws: MachineWorkspaceEntry): string {
+  return ws.displayPath ?? `~/.slock/agents/${ws.directoryName}/`;
+}
 
 function WorkspacesSection({ machineId, canManageMachines }: { machineId: string; canManageMachines: boolean }) {
   const { formatDate, formatMessage } = useIntl();
@@ -80,16 +97,17 @@ function WorkspacesSection({ machineId, canManageMachines }: { machineId: string
     ? workspaces.find((w: MachineWorkspaceEntry) => w.directoryName === deleteTarget)
     : null;
 
-  const handleScan = async () => {
+  const handleScan = useCallback(async () => {
     await scanMachineWorkspaces(machineId);
     setScanned(true);
-  };
+  }, [machineId, scanMachineWorkspaces]);
 
-  const handleDelete = async () => {
+  const handleDelete = useCallback(async () => {
     if (!deleteTarget) return;
     await deleteMachineWorkspace(machineId, deleteTarget);
     setDeleteTarget(null);
-  };
+  }, [deleteMachineWorkspace, deleteTarget, machineId]);
+  const closeDeleteDialog = useCallback(() => setDeleteTarget(null), []);
 
   const formatWorkspaceStatus = (status: MachineWorkspaceEntry["status"]) => {
     switch (status) {
@@ -191,7 +209,7 @@ function WorkspacesSection({ machineId, canManageMachines }: { machineId: string
                   </Badge>
                 </div>
                 <div className="mt-0.5 text-[10px] text-foreground-muted theme-brutal:text-black/40 font-mono break-all">
-                  ~/.slock/agents/{ws.directoryName}/
+                  {workspaceLocation(ws)}
                 </div>
                 {ws.status === "deleted" && (
                   <div className="mt-0.5 text-[10px] font-bold uppercase tracking-wide text-foreground-muted theme-brutal:text-black/60">
@@ -199,7 +217,7 @@ function WorkspacesSection({ machineId, canManageMachines }: { machineId: string
                   </div>
                 )}
                 {ws.status === "orphan" && (
-                  <div className="mt-0.5 text-[10px] font-bold uppercase tracking-wide text-brutal-orange">
+                  <div className="mt-0.5 text-[10px] font-bold uppercase tracking-wide text-warning-strong theme-brutal:text-brutal-orange">
                     {formatMessage({ id: "machine.detail.noMatchingAgentRecord" })}
                   </div>
                 )}
@@ -220,16 +238,7 @@ function WorkspacesSection({ machineId, canManageMachines }: { machineId: string
                 </div>
               </div>
               {canManageMachines && (
-                <Tooltip content={formatMessage({ id: "machine.detail.deleteWorkspace" })}>
-                <Button size="sm"
-                  variant="danger"
-                  onClick={() => setDeleteTarget(ws.directoryName)}
-                  className="shrink-0 p-1"
-                  aria-label={formatMessage({ id: "machine.detail.deleteWorkspace" })}
-                >
-                  <Trash2 size={12} />
-                </Button>
-                </Tooltip>
+                <WorkspaceDeleteButton directoryName={ws.directoryName} onRequestDelete={setDeleteTarget} />
               )}
             </div>
           ))}
@@ -246,16 +255,26 @@ function WorkspacesSection({ machineId, canManageMachines }: { machineId: string
           confirmLabel={formatMessage({ id: "machine.detail.deleteWorkspaceTitle" })}
           loadingLabel={formatMessage({ id: "machine.detail.deleting" })}
           onConfirm={handleDelete}
-          onClose={() => setDeleteTarget(null)}
+          onClose={closeDeleteDialog}
         />
       )}
     </div>
   );
 }
 
+type BulkAgentAction = "start" | "stop" | "restart" | "session" | "full";
+export type BulkResetMode = "restart" | "session" | "full";
+
+export interface BulkResetOption {
+  mode: BulkResetMode;
+  label: string;
+  desc: string;
+  selectedClass: string;
+}
+
 // Isolated component — subscribes to current display-state projections only for agents on this machine,
 // preventing activity changes from re-rendering the entire MachineDetailPanel.
-function MachineAgentList({ machine, canManageMachines }: { machine: Machine; canManageMachines: boolean }) {
+function MachineAgentList({ machine, canManageMachines, canViewRuntimeAccountUsage }: { machine: Machine; canManageMachines: boolean; canViewRuntimeAccountUsage: boolean }) {
   const { formatMessage } = useIntl();
   const allAgents = useAgentStore((s) => s.agents);
   const startAgent = useAgentStore((s) => s.startAgent);
@@ -265,34 +284,63 @@ function MachineAgentList({ machine, canManageMachines }: { machine: Machine; ca
   const [showCreateAgent, setShowCreateAgent] = useState(false);
   const [selectionMode, setSelectionMode] = useState(false);
   const [selectedAgentIds, setSelectedAgentIds] = useState<Set<string>>(() => new Set());
-  const [bulkAction, setBulkAction] = useState<"start" | "stop" | "restart" | "session" | "full" | null>(null);
+  const [bulkAction, setBulkAction] = useState<BulkAgentAction | null>(null);
   const [bulkError, setBulkError] = useState("");
   const [showResetOptions, setShowResetOptions] = useState(false);
   const [showStopConfirm, setShowStopConfirm] = useState(false);
-  const [bulkResetMode, setBulkResetMode] = useState<"restart" | "session" | "full">("restart");
+  const [bulkResetMode, setBulkResetMode] = useState<BulkResetMode>("restart");
+  const bulkChangeModelEnabled = useServerFeatureFlag(BULK_CHANGE_MODEL_WEB_FLAG_KEY).enabled;
+  const [bulkModelDialog, setBulkModelDialog] = useState<
+    { agentIds: string[]; retry?: { target: BulkModelTarget; unfinished: BulkUnfinishedAgent[] } } | null
+  >(null);
+  const bulkReceipt = useBulkChangeModelReceiptStore((s) => s.receipts[machine.id]);
+  const bulkHighlight = useBulkChangeModelReceiptStore((s) => s.highlights[machine.id]);
+  const recordBulkReceipt = useBulkChangeModelReceiptStore((s) => s.record);
+  const clearBulkReceipt = useBulkChangeModelReceiptStore((s) => s.clear);
+  // One-shot deadlines (success banner 5 s, row highlight 3 s): re-render once
+  // when the nearest one passes; a remount after it shows nothing.
+  const [bulkClock, setBulkClock] = useState(() => currentTimeMs());
+  const nextBulkDeadline = Math.min(
+    bulkReceipt?.kind === "success" && bulkReceipt.bannerUntil > bulkClock ? bulkReceipt.bannerUntil : Infinity,
+    bulkHighlight && bulkHighlight.until > bulkClock ? bulkHighlight.until : Infinity,
+  );
+  useEffect(() => {
+    if (!Number.isFinite(nextBulkDeadline)) return;
+    const timer = setClockTimeout(() => setBulkClock(currentTimeMs()), Math.max(0, nextBulkDeadline - currentTimeMs()) + 20);
+    return () => clearClockTimeout(timer);
+  }, [nextBulkDeadline]);
 
-  const machineAgents = allAgents.filter((a) => !a.deletedAt && a.machineId === machine.id);
+  const machineAgents = useMemo(
+    () => allAgents.filter((a) => !a.deletedAt && a.machineId === machine.id),
+    [allAgents, machine.id],
+  );
   // Subscribe via the store's named stable slice selector and compute display
   // states in render. Building this map inside a store selector returned
   // fresh objects per snapshot -> useShallow never equal -> React #185
   // (2026-07-07 prod incident). The slice values are store-held objects, so
   // this subscription only fires on real activity changes.
   const activitiesSlice = useAgentStore(selectAgentActivitiesSlice);
-  const displayStateFor = (agent: (typeof machineAgents)[number]) =>
-    computeAgentDisplayState(allAgents, activitiesSlice, agent.id, agent);
-  const selectedAgents = machineAgents.filter((a) => selectedAgentIds.has(a.id));
-  const selectedOfflineAgents = selectedAgents.filter((a) => !displayStateFor(a).isOnline);
-  const selectedOnlineAgents = selectedAgents.filter((a) => displayStateFor(a).isOnline);
+  const displayStateFor = useCallback(
+    (agent: Agent) => computeAgentDisplayState(allAgents, activitiesSlice, agent.id, agent),
+    [activitiesSlice, allAgents],
+  );
+  const selectedAgents = useMemo(
+    () => machineAgents.filter((a) => selectedAgentIds.has(a.id)),
+    [machineAgents, selectedAgentIds],
+  );
+  const selectedOfflineAgents = useMemo(
+    () => selectedAgents.filter((a) => !displayStateFor(a).isOnline),
+    [displayStateFor, selectedAgents],
+  );
+  const selectedOnlineAgents = useMemo(
+    () => selectedAgents.filter((a) => displayStateFor(a).isOnline),
+    [displayStateFor, selectedAgents],
+  );
   const machineAgentIdKey = machineAgents.map((a) => a.id).join("\0");
   const selectedCount = selectedAgents.length;
   const allSelected = machineAgents.length > 0 && selectedCount === machineAgents.length;
   const canStartLike = machine.status === "online";
-  const bulkResetOptions: {
-    mode: "restart" | "session" | "full";
-    label: string;
-    desc: string;
-    selectedClass: string;
-  }[] = [
+  const bulkResetOptions = useMemo<BulkResetOption[]>(() => [
     {
       mode: "restart",
       label: formatMessage({ id: "machine.detail.bulkRestart" }),
@@ -311,9 +359,8 @@ function MachineAgentList({ machine, canManageMachines }: { machine: Machine; ca
       desc: formatMessage({ id: "machine.detail.bulkFullResetDescription" }),
       selectedClass: "border-line-muted theme-brutal:border-black bg-danger-soft theme-brutal:bg-brutal-red/20 theme-brutal:shadow-brutal-sm",
     },
-  ];
+  ], [formatMessage]);
 
-  // oxlint-disable react-hooks/exhaustive-deps -- reconcile the selection against the current agent set keyed by the stable `machineAgentIdKey`; depending on the `machineAgents` array (a fresh ref every render) would re-run every render.
   // `selectedAgentIds` is a user-driven multi-select Set; this effect cleans
   // stale ids when the underlying agent set shrinks (socket-pushed). The
   // functional updater reads `current` and computes the next Set against
@@ -321,8 +368,10 @@ function MachineAgentList({ machine, canManageMachines }: { machine: Machine; ca
   // stale-cleanup. react-doctor's no-derived-state suggested fix
   // (compute during render) can't express "drop ids that have disappeared
   // since last user selection."
+  // Keyed on `machineAgentIdKey`, not `machineAgents`: the id key only changes when the
+  // set of agents on this machine does, while the array follows every agent-store update.
   useEffect(() => {
-    const validIds = new Set(machineAgents.map((a) => a.id));
+    const validIds = new Set(machineAgentIdKey.split("\0"));
     // oxlint-disable-next-line react-doctor/no-derived-state
     setSelectedAgentIds((current) => {
       let changed = false;
@@ -337,29 +386,30 @@ function MachineAgentList({ machine, canManageMachines }: { machine: Machine; ca
       return changed ? next : current;
     });
   }, [machineAgentIdKey]);
-  // oxlint-enable react-hooks/exhaustive-deps
 
-  const toggleAgentSelection = (agentId: string) => {
+  const toggleAgentSelection = useCallback((agentId: string) => {
     setSelectedAgentIds((current) => {
       const next = new Set(current);
       if (next.has(agentId)) next.delete(agentId);
       else next.add(agentId);
       return next;
     });
-  };
+  }, []);
 
-  const selectAllAgents = () => {
+  const selectAllAgents = useCallback(() => {
     setSelectionMode(true);
     setSelectedAgentIds(new Set(machineAgents.map((a) => a.id)));
-  };
+  }, [machineAgents]);
 
-  const clearSelection = () => {
+  const clearAllAgents = useCallback(() => setSelectedAgentIds(new Set()), []);
+
+  const clearSelection = useCallback(() => {
     setSelectionMode(false);
     setSelectedAgentIds(new Set());
     setBulkError("");
-  };
+  }, []);
 
-  const runBulkAction = async (action: "start" | "stop" | "restart" | "session" | "full") => {
+  const runBulkAction = useCallback(async (action: BulkAgentAction) => {
     const targets =
       action === "start"
         ? selectedOfflineAgents
@@ -388,7 +438,60 @@ function MachineAgentList({ machine, canManageMachines }: { machine: Machine; ca
     } finally {
       setBulkAction(null);
     }
-  };
+  }, [
+    clearSelection,
+    formatMessage,
+    resetAgent,
+    selectedAgents,
+    selectedOfflineAgents,
+    selectedOnlineAgents,
+    startAgent,
+    stopAgent,
+  ]);
+  const startSelectedAgents = useCallback(() => runBulkAction("start"), [runBulkAction]);
+  const stopSelectedAgents = useCallback(() => runBulkAction("stop"), [runBulkAction]);
+  const resetSelectedAgents = useCallback(() => runBulkAction(bulkResetMode), [bulkResetMode, runBulkAction]);
+  const openAgent = useCallback((agentId: string) => nav.toAgent(agentId), [nav]);
+  const enterSelectionMode = useCallback(() => setSelectionMode(true), []);
+  const openCreateAgent = useCallback(() => {
+    trackAgentCreateOpened("computer_detail");
+    setShowCreateAgent(true);
+  }, []);
+  const closeCreateAgent = useCallback(() => setShowCreateAgent(false), []);
+  const openStopConfirm = useCallback(() => setShowStopConfirm(true), []);
+  const closeStopConfirm = useCallback(() => setShowStopConfirm(false), []);
+  const openResetOptions = useCallback(() => setShowResetOptions(true), []);
+  const closeResetOptions = useCallback(() => setShowResetOptions(false), []);
+  const isAgentRunning = useCallback((agent: Agent) => displayStateFor(agent).isOnline, [displayStateFor]);
+  const openBulkModel = useCallback(() => {
+    setBulkModelDialog({ agentIds: selectedAgents.map((a) => a.id) });
+  }, [selectedAgents]);
+  const closeBulkModel = useCallback(() => setBulkModelDialog(null), []);
+  const retryBulkModel = useCallback(() => {
+    if (bulkReceipt?.kind !== "partial") return;
+    setBulkModelDialog({
+      agentIds: bulkReceipt.unfinished.map((item) => item.agentId),
+      retry: { target: bulkReceipt.target, unfinished: bulkReceipt.unfinished },
+    });
+  }, [bulkReceipt]);
+  const finishBulkModel = useCallback((receipt: BulkChangeReceipt, highlightedAgentIds: string[]) => {
+    const now = currentTimeMs();
+    recordBulkReceipt(machine.id, receipt, highlightedAgentIds, now);
+    setBulkClock(now);
+    setBulkModelDialog(null);
+    clearSelection();
+  }, [clearSelection, machine.id, recordBulkReceipt]);
+  const dismissBulkReceipt = useCallback(() => clearBulkReceipt(machine.id), [clearBulkReceipt, machine.id]);
+  const bulkModelAgents = useMemo(
+    () => (bulkModelDialog ? machineAgents.filter((a) => bulkModelDialog.agentIds.includes(a.id)) : []),
+    [bulkModelDialog, machineAgents],
+  );
+  const highlightedIds = bulkHighlight && bulkHighlight.until > bulkClock ? bulkHighlight.agentIds : null;
+  const showBulkSuccess = bulkReceipt?.kind === "success" && bulkReceipt.bannerUntil > bulkClock;
+  const bulkTargetLabel = bulkReceipt
+    ? formatBulkModelLabel(bulkReceipt.target.runtime, bulkReceipt.target.model, true)
+    : "";
+
 
   return (
     <>
@@ -405,7 +508,7 @@ function MachineAgentList({ machine, canManageMachines }: { machine: Machine; ca
                     <Button size="sm"
                       variant="outline"
                       type="button"
-                      onClick={allSelected ? () => setSelectedAgentIds(new Set()) : selectAllAgents}
+                      onClick={allSelected ? clearAllAgents : selectAllAgents}
                       className="px-2 py-1 text-xs flex items-center gap-1"
                     >
                       <Check size={12} />
@@ -427,7 +530,7 @@ function MachineAgentList({ machine, canManageMachines }: { machine: Machine; ca
                   <Button size="sm"
                     variant="outline"
                     type="button"
-                    onClick={() => setSelectionMode(true)}
+                    onClick={enterSelectionMode}
                     className="px-2 py-1 text-xs flex items-center gap-1"
                   >
                     <Check size={12} />
@@ -438,10 +541,7 @@ function MachineAgentList({ machine, canManageMachines }: { machine: Machine; ca
               {canManageMachines && !selectionMode && (
                 <Button size="sm"
                   variant="accent"
-                  onClick={() => {
-                    trackAgentCreateOpened("computer_detail");
-                    setShowCreateAgent(true);
-                  }}
+                  onClick={openCreateAgent}
                   className="px-2 py-1 text-xs flex items-center gap-1"
                 >
                   <Plus size={12} />
@@ -457,6 +557,50 @@ function MachineAgentList({ machine, canManageMachines }: { machine: Machine; ca
           </div>
         ) : (
           <div className="space-y-2">
+            {bulkChangeModelEnabled && showBulkSuccess && bulkReceipt?.kind === "success" && (
+              <Banner
+                intent="success"
+                density="sm"
+                withIcon
+                data-testid="bulk-model-success-banner"
+                actions={
+                  <Button size="icon-xs" variant="ghost" type="button" onClick={dismissBulkReceipt} aria-label={formatMessage({ id: "machine.detail.bulkModel.dismiss" })}>
+                    <X size={12} />
+                  </Button>
+                }
+              >
+                <span className="font-bold">
+                  {formatMessage({ id: "machine.detail.bulkModel.successBanner" }, { count: bulkReceipt.changedAgentIds.length, target: bulkTargetLabel })}
+                </span>
+                {bulkReceipt.skippedAgentIds.length > 0 && (
+                  <> {formatMessage({ id: "machine.detail.bulkModel.successSkipped" }, { count: bulkReceipt.skippedAgentIds.length })}</>
+                )}
+              </Banner>
+            )}
+            {bulkChangeModelEnabled && bulkReceipt?.kind === "partial" && (
+              <Banner
+                intent="warning"
+                density="sm"
+                withIcon
+                data-testid="bulk-model-partial-banner"
+                actions={
+                  <div className="flex items-center gap-1.5">
+                    {canManageMachines && (
+                      <Button size="xs" variant="outline" type="button" onClick={retryBulkModel} data-testid="bulk-model-try-again">
+                        {formatMessage({ id: "machine.detail.bulkModel.tryAgain" })}
+                      </Button>
+                    )}
+                    <Button size="icon-xs" variant="ghost" type="button" onClick={dismissBulkReceipt} aria-label={formatMessage({ id: "machine.detail.bulkModel.dismiss" })}>
+                      <X size={12} />
+                    </Button>
+                  </div>
+                }
+              >
+                <span className="font-bold">
+                  {formatMessage({ id: "machine.detail.bulkModel.partialBanner" }, { failed: bulkReceipt.unfinished.length, total: bulkReceipt.total })}
+                </span>
+              </Banner>
+            )}
             {canManageMachines && selectedCount > 0 && (
               <SurfaceListItem selected interactive={false} className="bg-layer-canvas-muted px-3 py-2 theme-brutal:bg-gray-100">
                 <div className="flex flex-wrap items-center gap-2">
@@ -471,7 +615,7 @@ function MachineAgentList({ machine, canManageMachines }: { machine: Machine; ca
                   <Button size="sm"
                     variant="success"
                     type="button"
-                    onClick={() => runBulkAction("start")}
+                    onClick={startSelectedAgents}
                     disabled={bulkAction !== null || selectedOfflineAgents.length === 0 || !canStartLike}
                     className="flex items-center gap-1 px-2 py-1 text-xs disabled:cursor-not-allowed theme-brutal:disabled:bg-gray-200"
                   >
@@ -485,7 +629,7 @@ function MachineAgentList({ machine, canManageMachines }: { machine: Machine; ca
                   <Button size="sm"
                     variant="outline"
                     type="button"
-                    onClick={() => setShowStopConfirm(true)}
+                    onClick={openStopConfirm}
                     disabled={bulkAction !== null || selectedOnlineAgents.length === 0}
                     className="flex items-center gap-1 px-2 py-1 text-xs disabled:cursor-not-allowed theme-brutal:disabled:bg-gray-200"
                   >
@@ -501,7 +645,7 @@ function MachineAgentList({ machine, canManageMachines }: { machine: Machine; ca
                   <Button size="sm"
                     variant="outline"
                     type="button"
-                    onClick={() => setShowResetOptions(true)}
+                    onClick={openResetOptions}
                     disabled={bulkAction !== null || !canStartLike}
                     className="flex items-center gap-1 px-2 py-1 text-xs disabled:cursor-not-allowed theme-brutal:disabled:bg-gray-200"
                   >
@@ -509,6 +653,21 @@ function MachineAgentList({ machine, canManageMachines }: { machine: Machine; ca
                     {formatMessage({ id: "machine.detail.restartReset" })}
                   </Button>
                   </Tooltip>
+                  {bulkChangeModelEnabled && (
+                    <Tooltip content={formatMessage({ id: "machine.detail.bulkModel.tooltip" })}>
+                    <Button size="sm"
+                      variant="outline"
+                      type="button"
+                      onClick={openBulkModel}
+                      disabled={bulkAction !== null || selectedCount === 0}
+                      className="flex items-center gap-1 px-2 py-1 text-xs disabled:cursor-not-allowed theme-brutal:disabled:bg-gray-200"
+                      data-testid="bulk-change-model-button"
+                    >
+                      <ArrowLeftRight size={12} />
+                      {formatMessage({ id: "machine.detail.bulkModel.button" })}
+                    </Button>
+                    </Tooltip>
+                  )}
                 </div>
                 {bulkError && (
                   <Banner intent="warning" density="sm" className="mt-2 font-bold">
@@ -517,97 +676,19 @@ function MachineAgentList({ machine, canManageMachines }: { machine: Machine; ca
                 )}
               </SurfaceListItem>
             )}
-            {machineAgents.map((agent) => {
-              const displayState = displayStateFor(agent);
-              // A Computer page is where these agent identities are managed:
-              // show the model alongside the runtime (artin 2026-09-27), not
-              // only the chat-side "Show agent model" preference.
-              const agentIdentityLabel = [
-                formatRuntimeLabelWithStatus(agent.runtime, formatMessage),
-                agentModelLabel(agent),
-              ].filter(Boolean).join(" · ");
-              const activityText = formatActivityText(
-                formatMessage,
-                displayState.activity,
-                displayState.activityDetail,
-                displayState.activityDetailKind,
-              );
-              const selected = selectedAgentIds.has(agent.id);
-              const avatar = <AvatarSlot context="surface-list" type="agent" agentAvatarUrl={agent.avatarUrl} />;
-              const rightStatus = (
-                <>
-                  <StatusDot activity={displayState.activity} title={activityText} />
-                  <Tooltip content={activityText}><span
-                    className="hidden max-w-[min(32rem,42vw)] truncate align-middle text-xs font-mono text-foreground-muted theme-brutal:text-black/50 sm:inline-block"
-                  >
-                    {activityText}
-                  </span></Tooltip>
-                </>
-              );
-              if (selectionMode) {
-                // Selection mode adds a leading CheckMarker column that
-                // is outside AvatarListRow's slot contract. Keep the inline
-                // SurfaceListItem here — the row body still mirrors the
-                // primitive's avatar / name / subtitle / rightContent layout
-                // so the visual is identical to the normal-mode AvatarListRow.
-                return (
-                  <SurfaceListItem
-                    key={agent.id}
-                    selected={canManageMachines && selected}
-                    className={`group px-3 py-2 ${selected ? "" : "bg-layer-canvas-muted hover:bg-layer-panel theme-brutal:bg-gray-100 theme-brutal:hover:bg-white"}`}
-                  >
-                    <Tooltip content={
-                        selected
-                          ? formatMessage({ id: "machine.detail.deselectAgent" })
-                          : formatMessage({ id: "machine.detail.selectAgent" })
-                      }>
-                    <button
-                      type="button"
-                      onClick={() => toggleAgentSelection(agent.id)}
-                      className="flex w-full min-w-0 items-center gap-3 text-left"
-                      aria-label={
-                        selected
-                          ? formatMessage({ id: "machine.detail.deselectAgentName" }, { name: agent.displayName || agent.name })
-                          : formatMessage({ id: "machine.detail.selectAgentName" }, { name: agent.displayName || agent.name })
-                      }
-                    >
-                      <CheckMarker
-                        checked={selected}
-                        size="lg"
-                        tone="yellow-fill"
-                        previewOnHover
-                        className="mt-0"
-                      />
-                      {avatar}
-                      <div className="min-w-0 flex-1">
-                        <div className="flex min-w-0 flex-wrap items-baseline gap-x-2">
-                          <span className="truncate text-sm font-bold text-foreground-strong theme-brutal:text-black">
-                            {agent.displayName || agent.name}
-                          </span>
-                          <span className="text-xs font-mono text-foreground-muted theme-brutal:text-black/50">
-                            {agentIdentityLabel}
-                          </span>
-                        </div>
-                      </div>
-                      <div className="flex shrink-0 items-center gap-1.5">{rightStatus}</div>
-                    </button>
-                    </Tooltip>
-                  </SurfaceListItem>
-                );
-              }
-              return (
-                <AvatarListRow
-                  key={agent.id}
-                  avatar={avatar}
-                  name={agent.displayName || agent.name}
-                  subtitle={agentIdentityLabel}
-                  rightContent={rightStatus}
-                  onClick={() => nav.toAgent(agent.id)}
-                  selected={false}
-                  className="bg-layer-canvas-muted hover:bg-layer-panel theme-brutal:bg-gray-100 theme-brutal:hover:bg-white"
-                />
-              );
-            })}
+            {machineAgents.map((agent) => (
+              <MachineAgentRow
+                key={agent.id}
+                agent={agent}
+                displayState={displayStateFor(agent)}
+                selectionMode={selectionMode}
+                selected={selectedAgentIds.has(agent.id)}
+                canManageMachines={canManageMachines}
+                onToggleSelection={toggleAgentSelection}
+                onOpenAgent={openAgent}
+                highlighted={!!highlightedIds?.includes(agent.id)}
+              />
+            ))}
           </div>
         )}
       </div>
@@ -615,27 +696,34 @@ function MachineAgentList({ machine, canManageMachines }: { machine: Machine; ca
       {canManageMachines && showCreateAgent && (
         <CreateAgentDialog
           defaultMachineId={machine.id}
-          onClose={() => setShowCreateAgent(false)}
+          onClose={closeCreateAgent}
+        />
+      )}
+
+      {bulkModelDialog && bulkModelAgents.length > 0 && (
+        <BulkChangeModelDialog
+          machine={machine}
+          agents={bulkModelAgents}
+          isRunning={isAgentRunning}
+          canViewUsage={canViewRuntimeAccountUsage}
+          retry={bulkModelDialog.retry}
+          onClose={closeBulkModel}
+          onOpenAgent={openAgent}
+          onFinished={finishBulkModel}
         />
       )}
 
       {showResetOptions && (
-        <DialogCard title={formatMessage({ id: "machine.detail.restartAgentCount" }, { count: selectedCount })} onClose={() => setShowResetOptions(false)}>
+        <DialogCard title={formatMessage({ id: "machine.detail.restartAgentCount" }, { count: selectedCount })} onClose={closeResetOptions}>
             <div className="space-y-3">
               {bulkResetOptions.map((opt) => (
-                <Card
+                <BulkResetOptionCard
                   key={opt.mode}
-                  render={<button type="button" aria-pressed={bulkResetMode === opt.mode} disabled={bulkAction !== null} />}
-                  onClick={() => setBulkResetMode(opt.mode)}
-                  className={`w-full theme-brutal:border-2 p-4 text-left transition-colors disabled:cursor-not-allowed disabled:opacity-60 ${
- bulkResetMode === opt.mode
- ? opt.selectedClass
- : "border-line-muted theme-brutal:border-black/30 bg-layer-panel theme-brutal:bg-white hover:border-line-strong theme-brutal:hover:border-black"
- }`}
-                >
-                  <div className="text-sm font-bold uppercase">{opt.label}</div>
-                  <p className="mt-1 text-xs text-foreground-muted theme-brutal:text-black/60">{opt.desc}</p>
-                </Card>
+                  option={opt}
+                  selected={bulkResetMode === opt.mode}
+                  disabled={bulkAction !== null}
+                  onSelect={setBulkResetMode}
+                />
               ))}
             </div>
             {bulkResetMode === "full" && (
@@ -647,7 +735,7 @@ function MachineAgentList({ machine, canManageMachines }: { machine: Machine; ca
               <Button size="sm"
                 variant="outline"
                 type="button"
-                onClick={() => setShowResetOptions(false)}
+                onClick={closeResetOptions}
                 className="px-4 py-2 text-sm"
               >
                 {formatMessage({ id: "common.confirm.cancel" })}
@@ -655,7 +743,7 @@ function MachineAgentList({ machine, canManageMachines }: { machine: Machine; ca
               <Button size="sm"
                 variant={bulkResetMode === "full" ? "danger" : bulkResetMode === "session" ? "warning" : "information"}
                 type="button"
-                onClick={() => runBulkAction(bulkResetMode)}
+                onClick={resetSelectedAgents}
                 disabled={bulkAction !== null}
                 className="flex items-center gap-1.5 px-4 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-60"
               >
@@ -675,8 +763,8 @@ function MachineAgentList({ machine, canManageMachines }: { machine: Machine; ca
           confirmLabel={formatMessage({ id: "machine.detail.stopAgentsTitle" })}
           loadingLabel={formatMessage({ id: "machine.detail.stopping" })}
           confirmColor="bg-brutal-orange"
-          onConfirm={() => runBulkAction("stop")}
-          onClose={() => setShowStopConfirm(false)}
+          onConfirm={stopSelectedAgents}
+          onClose={closeStopConfirm}
         />
       )}
     </>
@@ -685,11 +773,11 @@ function MachineAgentList({ machine, canManageMachines }: { machine: Machine; ca
 
 export default function MachineDetailPanel({
   machine,
-  workspaceEmbedded = false,
+  hideHeader = false,
   deploymentEnv = import.meta.env?.VITE_DEPLOYMENT_ENV,
 }: {
   machine: Machine;
-  workspaceEmbedded?: boolean;
+  hideHeader?: boolean;
   deploymentEnv?: string;
 }) {
   const { formatDate, formatMessage, locale } = useIntl();
@@ -822,17 +910,19 @@ export default function MachineDetailPanel({
     capabilities.migrateAgents,
     ].some(Boolean);
   const canViewRuntimeAccountUsage = canViewMachineRuntimeAccountUsage(machine, currentUserId, capabilities);
-  const handleDelete = async () => {
+  const handleDelete = useCallback(async () => {
     await deleteMachine(machine.id);
     setShowDeleteConfirm(false);
-  };
+  }, [deleteMachine, machine.id]);
+  const openDeleteConfirm = useCallback(() => setShowDeleteConfirm(true), []);
+  const closeDeleteConfirm = useCallback(() => setShowDeleteConfirm(false), []);
 
-  const handleCopy = (target: CommandCopyTarget) => {
+  const handleCopy = useCallback((target: CommandCopyTarget) => {
     setCopiedCommand(target);
     setTimeout(() => {
       setCopiedCommand((current) => (current === target ? null : current));
     }, 2000);
-  };
+  }, []);
 
 
 
@@ -843,7 +933,16 @@ export default function MachineDetailPanel({
   // Restart uses an indeterminate bar until the machine comes back online.
   const remoteUpgradeV2Enabled = useServerFeatureFlag(REMOTE_COMPUTER_UPGRADE_V2_FLAG_KEY).enabled;
   const upgradeRequest = machine.upgradeRequest ?? null;
-  const upgradePending = upgradeRequest?.state === "pending";
+  // A web upgrade restarts the Computer, so it drops offline until the new
+  // version reconnects. While the upgrade is in flight that is the restart,
+  // not an outage: say so instead of "Offline", for UPGRADE_RECONNECT_GRACE_MS.
+  // Past the grace the plain offline card returns with a "didn't reconnect"
+  // note; the server's verdict still lands later. Shared with the sidebar row.
+  const {
+    inFlight: upgradeInFlight,
+    reconnecting: upgradeReconnecting,
+    overdue: upgradeReconnectOverdue,
+  } = useComputerUpgradeReconnect(machine);
   // Below the first v2-capable Computer release (or version unknown) the web
   // cannot drive the upgrade; the same fail-closed shape as the server guard.
   const remoteUpgradeSupported = (machine.remoteUpgradeSupported ?? isRemoteUpgradeSupported(machine.computerVersion)) === true;
@@ -875,28 +974,60 @@ export default function MachineDetailPanel({
   const upgradeRefusal = upgradeRefusalState?.availabilityKey === upgradeAvailabilityKey
     ? upgradeRefusalState.refusal
     : null;
-  const handleRemoteUpgradeV2 = async () => {
+  const consentedTargetVersion = machine.computerBroadcastPolicy?.targetVersion ?? null;
+  // The last request's outcome only while the Computer is still below that
+  // request's target: a later manual upgrade makes a failure / no-response
+  // line stale.
+  const requestOutcomeStillTrue = Boolean(
+    upgradeRequest
+    && (upgradeRequest.state === "failed" || upgradeRequest.state === "no_response")
+    && machine.computerVersion
+    && isComputerSemver(machine.computerVersion)
+    && isComputerSemver(upgradeRequest.targetVersion)
+    && compareComputerVersions(machine.computerVersion, upgradeRequest.targetVersion) < 0,
+  );
+  const statusCommandText = machineComputerCommands?.status ?? "raft-computer status";
+  const statusCommand = <code className="font-mono">{statusCommandText}</code>;
+  // Click → POST → refreshed row with `upgradeRequest.state === "pending"`
+  // takes a moment; without this the button gave no feedback until then.
+  // Per-machine store slice (not component state) so a remount mid-request
+  // still shows the request in flight and cannot submit it twice.
+  // oxlint-disable-next-line react-doctor/no-event-handler -- per-machine hot-slice selector (docs/frontend/render-cost-contract.md), same shape as computerOperationProgress above.
+  const upgradeSubmittingVersion = useMachineStore((s) => s.computerUpgradeSubmitting[machine.id] ?? null);
+  const handleRemoteUpgradeV2 = useCallback(async () => {
     const serverId = useServerStore.getState().current?.id;
-    const consentedTargetVersion = machine.computerBroadcastPolicy?.targetVersion ?? null;
     if (!serverId || !consentedTargetVersion) return;
+    const store = useMachineStore.getState();
+    if (store.computerUpgradeSubmitting[machine.id]) return;
+    store.setComputerUpgradeSubmitting(machine.id, consentedTargetVersion);
     setUpgradeRefusalState(null);
     try {
-      await api.post(
+      const { data } = await api.post<{ upgradeRequest?: MachineUpgradeRequest }>(
         `/servers/${serverId}/machines/${machine.id}/computer/upgrade`,
         { targetVersion: consentedTargetVersion },
         { headers: { "X-Server-Id": serverId } },
       );
+      // Keep the accepted request: the page says "upgrading" from this answer,
+      // not from whichever later refresh happens to carry the pending row.
+      if (data?.upgradeRequest) useMachineStore.getState().setComputerUpgradeAccepted(machine.id, data.upgradeRequest);
+      // Hold the in-flight state until the refreshed row (with the server's
+      // pending request) lands, so the button doesn't flash back meanwhile.
+      await useMachineStore.getState().loadMachines();
     } catch (err) {
       const code = (err as { response?: { data?: { code?: unknown } } })?.response?.data?.code;
       setUpgradeRefusalState({
         availabilityKey: upgradeAvailabilityKey,
         refusal: upgradeRefusalFromCode(typeof code === "string" ? code : undefined),
       });
-    } finally {
       void useMachineStore.getState().loadMachines();
+    } finally {
+      useMachineStore.getState().setComputerUpgradeSubmitting(machine.id, null);
     }
-  };
-  const handleComputerRestart = async () => {
+  }, [consentedTargetVersion, machine.id, upgradeAvailabilityKey]);
+  const handleRemoteUpgradeV2Click = useCallback(() => {
+    void handleRemoteUpgradeV2();
+  }, [handleRemoteUpgradeV2]);
+  const handleComputerRestart = useCallback(async () => {
     const serverId = useServerStore.getState().current?.id;
     if (!serverId) return;
     // Optimistically enter progress state before the POST returns.
@@ -925,7 +1056,10 @@ export default function MachineDetailPanel({
       // Auto-clear error after 4s so the button reappears.
       setTimeout(() => setComputerOperation(machine.id, null), 4000);
     }
-  };
+  }, [formatMessage, machine.id, setComputerOperation]);
+  const handleComputerRestartClick = useCallback(() => {
+    void handleComputerRestart();
+  }, [handleComputerRestart]);
   // Clear terminal operation state after a display pause.
   useEffect(() => {
     if (computerOperationProgress?.done) {
@@ -956,7 +1090,7 @@ export default function MachineDetailPanel({
     setEditingName(true);
   };
 
-  const handleSaveRename = async () => {
+  const handleSaveRename = useCallback(async () => {
     const nextName = draftName.trim();
     if (!nextName) {
       setNameError(formatMessage({ id: "machine.detail.computerNameRequired" }));
@@ -977,13 +1111,32 @@ export default function MachineDetailPanel({
     } finally {
       setSavingName(false);
     }
-  };
+  }, [draftName, formatMessage, machine.id, machine.name, renameMachine]);
+  const handleSaveRenameClick = useCallback(() => {
+    void handleSaveRename();
+  }, [handleSaveRename]);
 
-  const handleCancelRename = () => {
+  const handleCancelRename = useCallback(() => {
     setDraftName(machine.name);
     setNameError("");
     setEditingName(false);
-  };
+  }, [machine.name]);
+
+  const handleNameChange = useCallback((e: ChangeEvent<HTMLInputElement>) => {
+    setDraftName(e.target.value.replace(/[\r\n]+/g, " "));
+    if (nameError) setNameError("");
+  }, [nameError]);
+
+  const handleNameKeyDown = useCallback((e: KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      void handleSaveRename();
+    }
+    if (e.key === "Escape") {
+      e.preventDefault();
+      handleCancelRename();
+    }
+  }, [handleCancelRename, handleSaveRename]);
 
   const handleStartEditDescription = () => {
     setDraftDescription(machine.description ?? "");
@@ -991,7 +1144,7 @@ export default function MachineDetailPanel({
     setEditingDescription(true);
   };
 
-  const handleSaveDescription = async () => {
+  const handleSaveDescription = useCallback(async () => {
     const nextDescription = draftDescription.trim();
     if (nextDescription.length > 500) {
       setDescriptionError(formatMessage({ id: "machine.detail.descriptionTooLong" }));
@@ -1013,13 +1166,37 @@ export default function MachineDetailPanel({
     } finally {
       setSavingDescription(false);
     }
-  };
+  }, [draftDescription, formatMessage, machine.description, machine.id, updateMachineDetails]);
+  const handleSaveDescriptionClick = useCallback(() => {
+    void handleSaveDescription();
+  }, [handleSaveDescription]);
 
-  const handleCancelDescription = () => {
+  const handleCancelDescription = useCallback(() => {
     setDraftDescription(machine.description ?? "");
     setDescriptionError("");
     setEditingDescription(false);
-  };
+  }, [machine.description]);
+
+  const handleDescriptionChange = useCallback((e: ChangeEvent<HTMLTextAreaElement>) => {
+    setDraftDescription(e.target.value);
+    if (descriptionError) setDescriptionError("");
+  }, [descriptionError]);
+
+  const handleDescriptionKeyDown = useCallback((e: KeyboardEvent<HTMLTextAreaElement>) => {
+    if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
+      e.preventDefault();
+      void handleSaveDescription();
+    }
+    if (e.key === "Escape") {
+      e.preventDefault();
+      handleCancelDescription();
+    }
+  }, [handleCancelDescription, handleSaveDescription]);
+
+  const mobileBackProps = useMemo(() => ({
+    "data-testid": "machine-mobile-back",
+    title: formatMessage({ id: "common.announcement.back" }),
+  }), [formatMessage]);
 
   const createdDate = formatDate(machine.createdAt, {
     year: "numeric",
@@ -1032,18 +1209,15 @@ export default function MachineDetailPanel({
     : "";
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col">
-      {!workspaceEmbedded && (
+    <div className="flex min-h-0 flex-1 flex-col font-sans">
+      {!hideHeader && (
         <PanelHeader
           title={machine.name}
           icon={<Monitor size={18} />}
           iconBg="bg-primary-soft theme-brutal:bg-soft-signal text-foreground-strong theme-brutal:text-black"
           iconAlwaysVisible
           onMobileBack={onMobileBack}
-          mobileBackProps={{
-            "data-testid": "machine-mobile-back",
-            title: formatMessage({ id: "common.announcement.back" }),
-          }}
+          mobileBackProps={mobileBackProps}
         />
       )}
 
@@ -1053,16 +1227,18 @@ export default function MachineDetailPanel({
           <Card className="flex size-16 shrink-0 items-center justify-center p-0"><Monitor size={28} />
           </Card>
           <div className="min-w-0 flex-1">
-            <div className="min-w-0 truncate text-lg font-bold leading-tight text-foreground-strong theme-brutal:text-black">{machine.name}</div>
+            <PanelTitle className="min-w-0 text-foreground-muted theme-brutal:text-black theme-brutal:text-lg">{machine.name}</PanelTitle>
             <div className="flex min-w-0 items-center gap-2">
               <StatusDot
-                tone={machine.status === "online" ? "bg-brutal-lime" : "bg-gray-400"}
+                tone={machine.status === "online" ? "bg-brutal-lime" : upgradeReconnecting ? "bg-brutal-cyan" : "bg-gray-400"}
                 className="shrink-0"
               />
-              <span className="shrink-0 text-sm text-foreground-muted theme-brutal:text-black/60 font-mono">
+              <span className="shrink-0 text-sm text-foreground-muted theme-brutal:text-black/60 font-mono" data-testid="machine-connection-status">
                 {machine.status === "online"
                   ? formatMessage({ id: "machine.detail.connected" })
-                  : formatMessage({ id: "machine.detail.offline" })}
+                  : upgradeReconnecting
+                    ? formatMessage({ id: "machine.detail.upgradeV2.inProgress" })
+                    : formatMessage({ id: "machine.detail.offline" })}
               </span>
             </div>
             {machine.hostname && (
@@ -1115,20 +1291,8 @@ export default function MachineDetailPanel({
               <Input
                 ref={nameInputRef}
                 value={draftName}
-                onChange={(e) => {
-                  setDraftName(e.target.value.replace(/[\r\n]+/g, " "));
-                  if (nameError) setNameError("");
-                }}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") {
-                    e.preventDefault();
-                    void handleSaveRename();
-                  }
-                  if (e.key === "Escape") {
-                    e.preventDefault();
-                    handleCancelRename();
-                  }
-                }}
+                onChange={handleNameChange}
+                onKeyDown={handleNameKeyDown}
                 className="w-full text-sm"
                 placeholder={formatMessage({ id: "machine.detail.computerName" })}
                 autoFocus
@@ -1137,7 +1301,7 @@ export default function MachineDetailPanel({
             <div className="flex items-center gap-1.5">
               <Button size="sm"
                   variant="accent"
-                  onClick={() => void handleSaveRename()}
+                  onClick={handleSaveRenameClick}
                   disabled={savingName}
                   className="px-2 py-1 text-xs disabled:opacity-50 disabled:cursor-not-allowed"
                 >
@@ -1153,13 +1317,13 @@ export default function MachineDetailPanel({
               </Button>
             </div>
             {nameError && (
-              <div className="text-xs font-bold text-brutal-orange">
+              <div className="text-xs font-bold text-danger-strong theme-brutal:text-brutal-red">
                 {nameError}
               </div>
             )}
             </div>
           ) : (
-            <p className="text-sm text-foreground-strong theme-brutal:text-black">{machine.name}</p>
+            <p className="text-sm text-foreground-muted theme-brutal:text-black">{machine.name}</p>
           )}
         </div>
 
@@ -1187,20 +1351,8 @@ export default function MachineDetailPanel({
               <Textarea
                 ref={descriptionInputRef}
                 value={draftDescription}
-                onChange={(e) => {
-                  setDraftDescription(e.target.value);
-                  if (descriptionError) setDescriptionError("");
-                }}
-                onKeyDown={(e) => {
-                  if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
-                    e.preventDefault();
-                    void handleSaveDescription();
-                  }
-                  if (e.key === "Escape") {
-                    e.preventDefault();
-                    handleCancelDescription();
-                  }
-                }}
+                onChange={handleDescriptionChange}
+                onKeyDown={handleDescriptionKeyDown}
                 className="min-h-20 w-full resize-y text-sm leading-relaxed"
                 placeholder={formatMessage({ id: "machine.detail.descriptionPlaceholder" })}
                 maxLength={500}
@@ -1211,7 +1363,7 @@ export default function MachineDetailPanel({
                 <div className="flex items-center gap-1.5">
                   <Button size="sm"
                     variant="accent"
-                    onClick={() => void handleSaveDescription()}
+                    onClick={handleSaveDescriptionClick}
                     disabled={savingDescription}
                     className="px-2 py-1 text-xs disabled:opacity-50 disabled:cursor-not-allowed"
                   >
@@ -1231,13 +1383,13 @@ export default function MachineDetailPanel({
                 </span>
               </div>
               {descriptionError && (
-                <div className="text-xs font-bold text-brutal-orange">
+                <div className="text-xs font-bold text-danger-strong theme-brutal:text-brutal-red">
                   {descriptionError}
                 </div>
               )}
             </div>
           ) : (
-            <p className={`whitespace-pre-wrap text-sm leading-relaxed ${machine.description ? "text-foreground-strong theme-brutal:text-black" : "text-foreground-muted theme-brutal:text-black/40 italic"}`}>
+            <p className={`whitespace-pre-wrap text-sm leading-relaxed ${machine.description ? "text-foreground-muted theme-brutal:text-black" : "text-foreground-placeholder theme-brutal:text-black/40 italic"}`}>
               {machine.description || formatMessage({ id: "machine.detail.noDescription" })}
             </p>
           )}
@@ -1262,7 +1414,7 @@ export default function MachineDetailPanel({
                 value={
                   machine.computerVersion ? (
                     <div>
-                      <span className={`text-sm font-mono ${computerVersionFact.kind === "outdated" ? "text-brutal-orange font-bold" : "text-foreground-strong theme-brutal:text-black"}`}>
+                      <span className={`text-sm font-mono ${computerVersionFact.kind === "outdated" ? "text-warning-strong theme-brutal:text-brutal-orange font-bold" : "text-foreground-strong theme-brutal:text-black"}`}>
                         v{machine.computerVersion}
                       </span>
                       {computerVersionFact.kind === "current" && (
@@ -1276,7 +1428,7 @@ export default function MachineDetailPanel({
                       {computerVersionFact.kind === "outdated" && (
                         <>
                           {" "}
-                          <span className="text-xs text-brutal-orange font-bold">
+                          <span className="text-xs text-warning-strong theme-brutal:text-brutal-orange font-bold">
                             · {formatMessage(
                               { id: "machine.detail.versionAvailable" },
                               { version: computerVersionFact.availableVersion },
@@ -1340,7 +1492,11 @@ export default function MachineDetailPanel({
             />
             <div className="flex flex-wrap gap-x-8 gap-y-3">
               {/* Created */}
-              <KeyValueRow label={formatMessage({ id: "machine.detail.created" })} value={createdDate} mono />
+              <KeyValueRow
+                label={formatMessage({ id: "machine.detail.created" })}
+                value={createdDate}
+                valueClassName="tabular-nums theme-brutal:font-mono"
+              />
               {/* Creator — managed Computers only; raw daemon rows preserve
                   their existing Created-only presentation. */}
               {machine.isComputer && (
@@ -1414,10 +1570,7 @@ export default function MachineDetailPanel({
                     ] as const).map(([target, label, command]) => (
                       <div key={target}>
                         <div className="mb-1 text-xs font-bold text-foreground-muted theme-brutal:text-black/60">{label}</div>
-                        <CopyableCodeRoot
-                          copied={copiedCommand === target}
-                          onCopy={() => handleCopy(target)}
-                        >
+                        <CommandCopyRoot target={target} copied={copiedCommand === target} onCopy={handleCopy}>
                           <CopyableCode className="min-w-0 flex-1 px-3 py-2 font-mono text-xs break-all">
                             {command}
                           </CopyableCode>
@@ -1427,7 +1580,7 @@ export default function MachineDetailPanel({
                               className="shrink-0"
                             />
                           </Tooltip>
-                        </CopyableCodeRoot>
+                        </CommandCopyRoot>
                       </div>
                     ))}
                   </div>
@@ -1446,15 +1599,64 @@ export default function MachineDetailPanel({
             </div>
           )}
 
-          {machine.isComputer && machine.status !== "online" && (
+          {upgradeReconnecting && (
+            <Card className="p-4" data-testid="computer-upgrade-reconnecting">
+              <div className="flex items-start gap-2">
+                <Spinner size="xs" aria-hidden="true" className="mt-1 shrink-0" />
+                <div className="min-w-0 space-y-1">
+                  <p className="text-sm font-bold text-foreground-strong theme-brutal:text-black">
+                    {formatMessage(
+                      { id: "machine.detail.upgradeStatus.reconnecting" },
+                      { version: upgradeInFlight?.targetVersion ?? "" },
+                    )}
+                  </p>
+                  {canManageMachines && (
+                    <p className="text-xs leading-5 text-foreground-muted theme-brutal:text-black/60">
+                      {formatMessage(
+                        { id: "machine.detail.upgradeStatus.reconnectingHint" },
+                        { command: statusCommand },
+                      )}
+                    </p>
+                  )}
+                </div>
+              </div>
+            </Card>
+          )}
+
+          {machine.isComputer && machine.status !== "online" && !upgradeReconnecting && (
             <div data-testid="computer-recovery-card">
               <div className="mb-2 flex items-center gap-2">
                 <Terminal size={16} className="text-foreground-strong theme-brutal:text-black" />
                 <SectionEyebrow as="div">{formatMessage({ id: "machine.detail.bringComputerOnline" })}</SectionEyebrow>
               </div>
 
+              {upgradeReconnectOverdue && (
+                <p className="mb-2 text-xs leading-5 text-warning-strong theme-brutal:text-brutal-orange" data-testid="computer-upgrade-reconnect-overdue">
+                  {formatMessage(
+                    { id: "machine.detail.upgradeStatus.reconnectOverdue" },
+                    { version: upgradeInFlight?.targetVersion ?? "" },
+                  )}
+                </p>
+              )}
+
               {canManageMachines ? (
                 <div className="space-y-4">
+                  {/* The server already settled the last web upgrade as
+                      failed / no response: say so here too, not only on the
+                      online card. */}
+                  {requestOutcomeStillTrue && (
+                    <p className="text-xs leading-5 text-warning-strong theme-brutal:text-brutal-orange" data-testid="computer-upgrade-request-outcome">
+                      {upgradeRequest?.state === "failed"
+                        ? formatMessage(
+                            { id: "machine.detail.upgradeStatus.failed" },
+                            { version: machine.computerVersion, command: statusCommand },
+                          )
+                        : formatMessage(
+                            { id: "machine.detail.upgradeStatus.noResponse" },
+                            { command: statusCommand },
+                          )}
+                    </p>
+                  )}
                   {/* Primary remedy — a local command, platform-independent.
                       Web remote restart/upgrade only works while online (live
                       WS relay), so an offline Computer cannot get a web button. */}
@@ -1463,10 +1665,7 @@ export default function MachineDetailPanel({
                       <p className="mb-2 text-xs leading-5 text-foreground-muted theme-brutal:text-black/60">
                         {formatMessage({ id: "machine.detail.recoveryRestartDescription" }, { serverSlug })}
                       </p>
-                      <CopyableCodeRoot
-                        copied={copiedCommand === "terminal-restart"}
-                        onCopy={() => handleCopy("terminal-restart")}
-                      >
+                      <CommandCopyRoot target="terminal-restart" copied={copiedCommand === "terminal-restart"} onCopy={handleCopy}>
                         <CopyableCode
                           className="min-w-0 flex-1 px-3 py-2 font-mono text-xs break-all"
                           data-testid="computer-recovery-restart"
@@ -1479,7 +1678,7 @@ export default function MachineDetailPanel({
                             className="shrink-0"
                           />
                         </Tooltip>
-                      </CopyableCodeRoot>
+                      </CommandCopyRoot>
                     </div>
                   )}
 
@@ -1490,11 +1689,7 @@ export default function MachineDetailPanel({
                     </p>
                     <div className="space-y-2">
                       {terminalStatusCommands.map(({ command, target }) => (
-                        <CopyableCodeRoot
-                          key={command}
-                          copied={copiedCommand === target}
-                          onCopy={() => handleCopy(target)}
-                        >
+                        <CommandCopyRoot key={command} target={target} copied={copiedCommand === target} onCopy={handleCopy}>
                           <CopyableCode
                             className="min-w-0 flex-1 px-3 py-2 font-mono text-xs break-all"
                             data-testid={`computer-recovery-${target === "terminal-status" ? "status" : "doctor"}`}
@@ -1507,7 +1702,7 @@ export default function MachineDetailPanel({
                               className="shrink-0"
                             />
                           </Tooltip>
-                        </CopyableCodeRoot>
+                        </CommandCopyRoot>
                       ))}
                     </div>
                   </div>
@@ -1549,10 +1744,7 @@ export default function MachineDetailPanel({
                         ] as const).map(([target, label, command]) => (
                           <div key={target}>
                             <div className="mb-1 text-xs font-bold text-foreground-muted theme-brutal:text-black/60">{label}</div>
-                            <CopyableCodeRoot
-                              copied={copiedCommand === target}
-                              onCopy={() => handleCopy(target)}
-                            >
+                            <CommandCopyRoot target={target} copied={copiedCommand === target} onCopy={handleCopy}>
                               <CopyableCode
                                 className="min-w-0 flex-1 px-3 py-2 font-mono text-xs break-all"
                                 data-testid={target === "computer-install" ? "computer-recovery-install" : "computer-recovery-setup"}
@@ -1573,7 +1765,7 @@ export default function MachineDetailPanel({
                                   className="shrink-0"
                                 />
                               </Tooltip>
-                            </CopyableCodeRoot>
+                            </CommandCopyRoot>
                           </div>
                         ))}
                       </div>
@@ -1592,7 +1784,7 @@ export default function MachineDetailPanel({
           )}
 
           {/* Agents on this machine — isolated to prevent activity re-renders */}
-          <MachineAgentList machine={machine} canManageMachines={canManageMachines} />
+          <MachineAgentList machine={machine} canManageMachines={canManageMachines} canViewRuntimeAccountUsage={canViewRuntimeAccountUsage} />
 
           {/* Agent Workspaces — only when machine is online */}
           {machine.status === "online" && (
@@ -1673,7 +1865,8 @@ export default function MachineDetailPanel({
                         if (fact.kind === "cannotCheck") return { kind: "cannotCheck" };
                         if (fact.kind === "current") return { kind: "upToDate" };
                         const version = fact.availableVersion;
-                        if (upgradePending) return { kind: "upgrading", version: upgradeRequest?.targetVersion ?? version };
+                        if (upgradeInFlight) return { kind: "upgrading", version: upgradeInFlight.targetVersion };
+                        if (upgradeSubmittingVersion) return { kind: "upgrading", version: upgradeSubmittingVersion };
                         if (upgradeRefusal === "not_allowed") return { kind: "commands", version, sentence: "refusedNotAllowed" };
                         // Web upgrade off or refused, or this version too old for
                         // it: the same "run these two commands" state.
@@ -1705,16 +1898,6 @@ export default function MachineDetailPanel({
                       // still below that request's target: a later manual
                       // upgrade makes a failure / no-response line stale.
                       const machineVersion = machine.computerVersion ?? null;
-                      const requestOutcomeStillTrue = Boolean(
-                        upgradeRequest
-                        && (upgradeRequest.state === "failed" || upgradeRequest.state === "no_response")
-                        && machineVersion
-                        && isComputerSemver(machineVersion)
-                        && isComputerSemver(upgradeRequest.targetVersion)
-                        && compareComputerVersions(machineVersion, upgradeRequest.targetVersion) < 0,
-                      );
-                      const statusCommandText = machineComputerCommands?.status ?? "raft-computer status";
-                      const statusCommand = <code className="font-mono">{statusCommandText}</code>;
                       const outcomeLine = cardState.kind === "oneClick" && upgradeRefusal === "unknown"
                         ? formatMessage({ id: "machine.detail.upgradeStatus.refusedUnknown" })
                         : cardState.kind !== "upgrading" && cardState.kind !== "upToDate" && requestOutcomeStillTrue
@@ -1738,7 +1921,7 @@ export default function MachineDetailPanel({
                               <Tooltip content={formatMessage({ id: "machine.detail.restartTooltip" })}>
                               <Button size="sm"
                                 variant="outline"
-                                onClick={() => handleComputerRestart()}
+                                onClick={handleComputerRestartClick}
                                 className="px-3 py-2 text-sm font-bold flex items-center gap-1.5"
                               >
                                 <RotateCcw size={14} />
@@ -1762,7 +1945,7 @@ export default function MachineDetailPanel({
                               <Tooltip content={formatMessage({ id: "machine.detail.upgradeToVersion" }, { version: cardState.version })}>
                               <Button size="sm"
                                 variant="accent"
-                                onClick={() => { void handleRemoteUpgradeV2(); }}
+                                onClick={handleRemoteUpgradeV2Click}
                                 className="px-3 py-2 text-sm font-bold flex items-center gap-1.5"
                               >
                                 <Play size={14} />
@@ -1776,14 +1959,14 @@ export default function MachineDetailPanel({
                                 disabled
                                 className="px-3 py-2 text-sm font-bold flex items-center gap-1.5 disabled:opacity-40"
                               >
-                                <Play size={14} />
+                                <Spinner size="xs" aria-hidden="true" />
                                 {formatMessage({ id: "machine.detail.upgradeV2.inProgress" })}
                               </Button>
                             )}
                             {releaseNotesForUpdate && <ComputerReleaseNotesAffordance notes={releaseNotesForUpdate} />}
                           </div>
                           {outcomeLine && (
-                            <p className="mt-2 text-xs leading-5 text-brutal-orange" data-testid="computer-upgrade-request-outcome">
+                            <p className="mt-2 text-xs leading-5 text-warning-strong theme-brutal:text-brutal-orange" data-testid="computer-upgrade-request-outcome">
                               {outcomeLine}
                             </p>
                           )}
@@ -1793,10 +1976,7 @@ export default function MachineDetailPanel({
                                 <div className="mb-1 text-xs font-bold text-foreground-muted theme-brutal:text-black/60">
                                   {formatMessage({ id: "machine.detail.upgradeCommands.installStep" })}
                                 </div>
-                                <CopyableCodeRoot
-                                  copied={copiedCommand === "computer-install"}
-                                  onCopy={() => handleCopy("computer-install")}
-                                >
+                                <CommandCopyRoot target="computer-install" copied={copiedCommand === "computer-install"} onCopy={handleCopy}>
                                   <CopyableCode
                                     className="min-w-0 flex-1 break-all px-3 py-2 font-mono text-xs"
                                     data-testid="computer-upgrade-fresh-install"
@@ -1809,16 +1989,13 @@ export default function MachineDetailPanel({
                                       className="shrink-0"
                                     />
                                   </Tooltip>
-                                </CopyableCodeRoot>
+                                </CommandCopyRoot>
                               </li>
                               <li>
                                 <div className="mb-1 text-xs font-bold text-foreground-muted theme-brutal:text-black/60">
                                   {formatMessage({ id: "machine.detail.upgradeCommands.restartStep" })}
                                 </div>
-                                <CopyableCodeRoot
-                                  copied={copiedCommand === "computer-install-restart"}
-                                  onCopy={() => handleCopy("computer-install-restart")}
-                                >
+                                <CommandCopyRoot target="computer-install-restart" copied={copiedCommand === "computer-install-restart"} onCopy={handleCopy}>
                                   <CopyableCode
                                     className="min-w-0 flex-1 break-all px-3 py-2 font-mono text-xs"
                                     data-testid="computer-upgrade-fresh-restart"
@@ -1831,7 +2008,7 @@ export default function MachineDetailPanel({
                                       className="shrink-0"
                                     />
                                   </Tooltip>
-                                </CopyableCodeRoot>
+                                </CommandCopyRoot>
                               </li>
                             </ol>
                           )}
@@ -1851,11 +2028,7 @@ export default function MachineDetailPanel({
                     </p>
                     <div className="space-y-2">
                       {terminalStatusCommands.map(({ command, target }) => (
-                        <CopyableCodeRoot
-                          key={command}
-                          copied={copiedCommand === target}
-                          onCopy={() => handleCopy(target)}
-                        >
+                        <CommandCopyRoot key={command} target={target} copied={copiedCommand === target} onCopy={handleCopy}>
                           <CopyableCode className="min-w-0 flex-1 px-3 py-2 font-mono text-xs break-all">
                             {command}
                           </CopyableCode>
@@ -1865,7 +2038,7 @@ export default function MachineDetailPanel({
                               className="shrink-0"
                             />
                           </Tooltip>
-                        </CopyableCodeRoot>
+                        </CommandCopyRoot>
                       ))}
                     </div>
                     {terminalRestartCommand && (
@@ -1873,10 +2046,7 @@ export default function MachineDetailPanel({
                         <p className="mb-2 mt-3 text-xs leading-5 text-foreground-muted theme-brutal:text-black/60">
                           {formatMessage({ id: "machine.detail.webButtonsNotResponding" })}
                         </p>
-                        <CopyableCodeRoot
-                          copied={copiedCommand === "terminal-restart"}
-                          onCopy={() => handleCopy("terminal-restart")}
-                        >
+                        <CommandCopyRoot target="terminal-restart" copied={copiedCommand === "terminal-restart"} onCopy={handleCopy}>
                           <CopyableCode className="min-w-0 flex-1 px-3 py-2 font-mono text-xs break-all">
                             {terminalRestartCommand}
                           </CopyableCode>
@@ -1886,7 +2056,7 @@ export default function MachineDetailPanel({
                               className="shrink-0"
                             />
                           </Tooltip>
-                        </CopyableCodeRoot>
+                        </CommandCopyRoot>
                       </>
                     )}
                   </div>
@@ -1938,10 +2108,7 @@ export default function MachineDetailPanel({
                               {formatMessage({ id: "machine.detail.restartStepDescription" })}
                             </p>
                           </div>
-                          <CopyableCodeRoot
-                            copied={copiedCommand === "terminal-restart"}
-                            onCopy={() => handleCopy("terminal-restart")}
-                          >
+                          <CommandCopyRoot target="terminal-restart" copied={copiedCommand === "terminal-restart"} onCopy={handleCopy}>
                             <CopyableCode
                               className="min-w-0 flex-1 px-3 py-2 font-mono text-xs break-all"
                               data-testid="computer-recovery-guide-restart"
@@ -1954,7 +2121,7 @@ export default function MachineDetailPanel({
                                 className="shrink-0"
                               />
                             </Tooltip>
-                          </CopyableCodeRoot>
+                          </CommandCopyRoot>
                         </li>
                         <li>
                           <div className="mb-2">
@@ -1968,10 +2135,7 @@ export default function MachineDetailPanel({
                               {formatMessage({ id: "machine.computer.recovery.freshInstallDescription" })}
                             </p>
                           </div>
-                          <CopyableCodeRoot
-                            copied={copiedCommand === "computer-install"}
-                            onCopy={() => handleCopy("computer-install")}
-                          >
+                          <CommandCopyRoot target="computer-install" copied={copiedCommand === "computer-install"} onCopy={handleCopy}>
                             <CopyableCode
                               className="min-w-0 flex-1 px-3 py-2 font-mono text-xs break-all"
                               data-testid="computer-recovery-guide-install"
@@ -1984,7 +2148,7 @@ export default function MachineDetailPanel({
                                 className="shrink-0"
                               />
                             </Tooltip>
-                          </CopyableCodeRoot>
+                          </CommandCopyRoot>
                         </li>
                         <li>
                           <div className="mb-2">
@@ -1995,10 +2159,7 @@ export default function MachineDetailPanel({
                               {formatMessage({ id: "machine.computer.recovery.restartAfterInstallDescription" })}
                             </p>
                           </div>
-                          <CopyableCodeRoot
-                            copied={copiedCommand === "computer-install-restart"}
-                            onCopy={() => handleCopy("computer-install-restart")}
-                          >
+                          <CommandCopyRoot target="computer-install-restart" copied={copiedCommand === "computer-install-restart"} onCopy={handleCopy}>
                             <CopyableCode
                               className="min-w-0 flex-1 break-all px-3 py-2 font-mono text-xs"
                               data-testid="computer-recovery-guide-restart-after-install"
@@ -2011,7 +2172,7 @@ export default function MachineDetailPanel({
                                 className="shrink-0"
                               />
                             </Tooltip>
-                          </CopyableCodeRoot>
+                          </CommandCopyRoot>
                         </li>
                       </ol>
                     </div>
@@ -2030,7 +2191,7 @@ export default function MachineDetailPanel({
                   </div>
                   <Button size="sm"
                     variant="danger"
-                    onClick={() => setShowDeleteConfirm(true)}
+                    onClick={openDeleteConfirm}
                     className="px-4 py-2 text-sm font-bold flex items-center gap-1.5 shrink-0 ml-4"
                   >
                     <Trash2 size={14} />
@@ -2051,8 +2212,8 @@ export default function MachineDetailPanel({
             confirmLabel={formatMessage({ id: "common.announcement.ok" })}
             confirmVariant="outline"
             hideCancel
-            onConfirm={() => {}}
-            onClose={() => setShowDeleteConfirm(false)}
+            onConfirm={acknowledgeCannotDelete}
+            onClose={closeDeleteConfirm}
           />
         ) : (
           <ConfirmDialog
@@ -2061,7 +2222,7 @@ export default function MachineDetailPanel({
             confirmLabel={formatMessage({ id: "machine.detail.deleteComputer" })}
             loadingLabel={formatMessage({ id: "machine.detail.deleting" })}
             onConfirm={handleDelete}
-            onClose={() => setShowDeleteConfirm(false)}
+            onClose={closeDeleteConfirm}
           />
         )
       )}

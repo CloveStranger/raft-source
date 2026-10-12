@@ -2,6 +2,10 @@ import { Button, Card, CardContent, CardHeader, CardTitle } from "raft-ui";
 import { useIntl } from "react-intl";
 import RootFallbackScroller from "./RootFallbackScroller";
 
+function reloadApp() {
+  window.location.reload();
+}
+
 export default function RootErrorFallback({
   error,
   componentStack,
@@ -59,7 +63,7 @@ export default function RootErrorFallback({
             <Button
               variant="accent"
               size="md"
-              onClick={() => window.location.reload()}
+              onClick={reloadApp}
               className="font-bold"
             >
               {formatMessage({ id: "errorBoundary.reloadApp" })}

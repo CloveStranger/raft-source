@@ -5,6 +5,7 @@ import type { Server as SocketServer } from "socket.io";
 import { getDb } from "../db/index";
 import { agents, channels, messages, serverMembers, servers, users } from "../db/schema";
 import { UUID_RE } from "../lib/messageId";
+import { guardUuidPathParams } from "../lib/uuidPathParams";
 import { requireAuth, requireVerified } from "../middleware/auth";
 import * as channelService from "../services/channelService";
 import * as onboardingService from "../services/onboardingService";
@@ -44,6 +45,8 @@ import { sendJsonServerError } from "./errorResponse";
  *     tokens plus expiry and is separate work.
  */
 export const publicServerRouter: ExpressRouter = Router();
+// Uniform 404 for non-UUID path params (task #12); `slug` is not a uuid.
+guardUuidPathParams(publicServerRouter, { channelId: "Channel", threadChannelId: "Thread" });
 
 // A browser/CDN cache would outlive the database decision and violate the
 // next-request revocation contract even if every request handler re-queries it.

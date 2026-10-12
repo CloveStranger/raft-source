@@ -8,6 +8,7 @@ import { attachments, messages, serverMembers, servers, users } from "../db/sche
 import { createChannel, getOrCreateThread, addHuman, listChannelFiles } from "../services/channelService";
 import { createMessage } from "../services/messageService";
 import { createServer } from "../services/serverService";
+import { createAgent } from "../services/agentService";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 
@@ -154,4 +155,30 @@ test("GET /api/channels/:id/files rejects private channel non-members", async ({
   // stranger by the ruling's definition and must not learn it exists.
   // Denial itself is unchanged; only the disclosure is.
   assert.equal(res.status, 404);
+});
+
+test("listChannelFiles resolves user and agent uploaders by id and tolerates non-uuid uploader ids", async ({ app }) => {
+  void app; // initializes the database
+  const db = getDb();
+  const owner = await seedUser("files-uploaders-owner@slock.test", "files-uploaders-owner");
+  const server = await createServer("Files Uploaders", "files-uploaders", owner.id);
+  await db.update(servers).set({ plan: "founder" }).where(eq(servers.id, server.id));
+  const channel = await createChannel(server.id, "files-uploaders-room");
+  const agent = await createAgent(server.id, "files-uploaders-agent", { runtime: "codex" });
+  const message = await createMessage(channel.id, "user", owner.id, "three uploads");
+  const at = (minute: number) => new Date(`2026-05-10T10:0${minute}:00Z`);
+  await db.insert(attachments).values([
+    { messageId: message.id, channelId: channel.id, uploaderId: owner.id, uploaderType: "user", filename: "by-user.pdf", mimeType: "application/pdf", sizeBytes: 1, storageKey: "attachments/by-user.pdf", createdAt: at(1) },
+    { messageId: message.id, channelId: channel.id, uploaderId: agent.id, uploaderType: "agent", filename: "by-agent.pdf", mimeType: "application/pdf", sizeBytes: 1, storageKey: "attachments/by-agent.pdf", createdAt: at(2) },
+    // Uploader ids are stored as text; a non-uuid one must not fail the uuid comparison.
+    { messageId: message.id, channelId: channel.id, uploaderId: "legacy-uploader", uploaderType: "user", filename: "by-legacy.pdf", mimeType: "application/pdf", sizeBytes: 1, storageKey: "attachments/by-legacy.pdf", createdAt: at(3) },
+  ]);
+
+  const files = await listChannelFiles(channel.id);
+  const byName = new Map(files.map((file) => [file.filename, file]));
+  assert.deepEqual(files.map((file) => file.filename), ["by-legacy.pdf", "by-agent.pdf", "by-user.pdf"]);
+  assert.equal(byName.get("by-user.pdf")?.uploaderName, "files-uploaders-owner");
+  assert.equal(byName.get("by-agent.pdf")?.uploaderName, agent.name);
+  assert.equal(byName.get("by-legacy.pdf")?.uploaderId, "legacy-uploader");
+  assert.equal(byName.get("by-legacy.pdf")?.uploaderName, null);
 });

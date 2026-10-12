@@ -161,7 +161,6 @@ test("runtime catalog is derived from the shared registry with Screen B filterin
   const catalog = getServerSetupRuntimeCatalog(setupRuntimeOptions([]));
   assert.deepEqual(catalog.recommended.map((runtime) => runtime.displayName), ["Claude Code", "Codex CLI"]);
   assert.deepEqual(catalog.supported.map((runtime) => runtime.displayName), [
-    "Copilot CLI",
     "Cursor CLI",
     "Grok Build",
     "Kimi Code",
@@ -172,7 +171,10 @@ test("runtime catalog is derived from the shared registry with Screen B filterin
   assert.equal([...catalog.recommended, ...catalog.supported].some((runtime) => runtime.id === "kimi"), false);
   assert.equal([...catalog.recommended, ...catalog.supported].some((runtime) => runtime.id === "gemini"), false);
 
-  const detectedLegacy = getServerSetupRuntimeCatalog(setupRuntimeOptions(["kimi", "gemini"]));
+  assert.equal([...catalog.recommended, ...catalog.supported].some((runtime) => runtime.id === "copilot"), false);
+
+  const detectedLegacy = getServerSetupRuntimeCatalog(setupRuntimeOptions(["kimi", "gemini", "copilot"]));
+  assert.equal([...detectedLegacy.recommended, ...detectedLegacy.supported].some((runtime) => runtime.id === "copilot"), false);
   assert.equal([...detectedLegacy.recommended, ...detectedLegacy.supported].some((runtime) => runtime.id === "kimi"), false);
   assert.equal([...detectedLegacy.recommended, ...detectedLegacy.supported].some((runtime) => runtime.id === "gemini"), false);
 });
@@ -197,11 +199,12 @@ test("flag-off Grok capability is absent from the server-owned setup catalog", (
 });
 
 test("deprecated detected runtimes stay out of the setup log and readiness path", () => {
-  renderStep({ runtimeIds: ["gemini", "kimi"], runtimeStatus: "not_ready" });
+  renderStep({ runtimeIds: ["gemini", "kimi", "copilot"], runtimeStatus: "not_ready" });
 
   assert.deepEqual(logLines().at(-1), { key: "runtime", state: "failed", text: "No usable runtime found on this computer." });
   assert.equal(screen.queryByText(/Gemini CLI/i), null);
   assert.equal(screen.queryByText(/Kimi CLI/i), null);
+  assert.ok(screen.queryByText(/Copilot CLI/i) === null);
   assert.equal((screen.getByRole("button", { name: "Next" }) as HTMLButtonElement).disabled, true);
 });
 

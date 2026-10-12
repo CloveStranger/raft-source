@@ -13,6 +13,8 @@ import {
   type OAuthClientCategory,
   isRaftOAuthScope,
   raftOAuthScopeRequiresResource,
+  APP_WHEN_TO_USE_MAX_CODE_POINTS,
+  countAppWhenToUseCharacters,
   renderThirdPartyInertText,
   type AgentInstalledAppCatalogEntry,
 } from "@botiverse/raft-shared";
@@ -22,6 +24,7 @@ import {
   integrationAuditEvents,
   oauthClientInstalls,
   oauthClientShareLinks,
+  oauthAppPermissionRevisions,
   oauthAccessRequests,
   oauthAccessTokens,
   oauthClientMaintainers,
@@ -50,6 +53,7 @@ import {
 } from "./oauthClientManagementPolicy";
 import {
   projectOfficialAppDiscovery,
+  projectOfficialAppDiscoveryMany,
   prepareExplicitUserInstallState,
   recordExplicitUserInstallState,
   recordExplicitUserUninstallState,
@@ -625,6 +629,17 @@ export type ThirdPartyAgentEventRead =
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const SHORT_ID_RE = /^[0-9a-f]{8}$/;
 
+/**
+ * The app identity of an event row: the OAuth client's key and name, or for a
+ * Raft system app's row (client_id NULL, RFC 074 doorbell) the fixed system
+ * app name. Pair with `.leftJoin(oauthClients, ...)`: an inner join would drop
+ * system rows from every agent-side read.
+ */
+export const THIRD_PARTY_EVENT_APP_COLUMNS = {
+  clientKey: sql<string>`coalesce(${oauthClients.clientId}, ${thirdPartyAgentEvents.systemApp})`,
+  clientName: sql<string>`coalesce(${oauthClients.name}, ${thirdPartyAgentEvents.systemApp})`,
+};
+
 export async function readThirdPartyAgentEventForAgent(input: {
   agentId: string;
   ref: string;
@@ -636,11 +651,10 @@ export async function readThirdPartyAgentEventForAgent(input: {
   const db = getDbForService();
   const rows = await db.select({
     event: thirdPartyAgentEvents,
-    clientKey: oauthClients.clientId,
-    clientName: oauthClients.name,
+    ...THIRD_PARTY_EVENT_APP_COLUMNS,
   })
     .from(thirdPartyAgentEvents)
-    .innerJoin(oauthClients, eq(oauthClients.id, thirdPartyAgentEvents.clientId))
+    .leftJoin(oauthClients, eq(oauthClients.id, thirdPartyAgentEvents.clientId))
     .where(and(
       // Scoped in SQL for BOTH forms. Filtering after the query would let "not
       // yours" and "no such event" diverge, and this route is addressed by id:
@@ -695,14 +709,14 @@ export function buildThirdPartyAgentMessage(input: {
     channel_id: `third-party-agent-events:${input.event.agentId}`,
     channel_name: `third-party-agent-events:${input.event.agentId}`,
     channel_type: "dm",
-    sender_id: input.event.clientId,
+    sender_id: input.event.clientId ?? input.clientKey,
     sender_name: input.clientKey,
     sender_description: input.clientName,
     sender_type: "third_party_app",
     message_id: eventId,
     timestamp: input.event.createdAt.toISOString(),
     content: [
-      `Third-party ${input.event.kind}: ${input.event.summary}`,
+      `${input.event.systemApp ? "System" : "Third-party"} ${input.event.kind}: ${input.event.summary}`,
       "",
       `event_id: ${eventId}`,
       `payload_hash: ${input.event.payloadHash}`,
@@ -720,7 +734,7 @@ export function buildThirdPartyAgentMessage(input: {
       source: {
         client_id: input.clientKey,
         client_name: input.clientName,
-        oauth_client_id: input.event.clientId,
+        oauth_client_id: input.event.clientId ?? input.clientKey,
         access_token_id_hash: hashStableSourceId(input.event.accessTokenId),
         resource: input.event.resource,
       },
@@ -909,7 +923,7 @@ function normalizeCategory(raw: unknown): OAuthClientCategory {
 //    hint to wrap it in backticks, because the prompt renderer would turn the
 //    leading `@` into a reference-shaped line. Backticked or otherwise
 //    code-wrapped occurrences are stored as-is.
-const WHEN_TO_USE_MAX_CODE_POINTS = 160;
+const WHEN_TO_USE_MAX_CODE_POINTS = APP_WHEN_TO_USE_MAX_CODE_POINTS;
 const WHEN_TO_USE_BARE_SCOPED_PACKAGE = /(?<=^|[\s(])@[a-z0-9][a-z0-9-]*\/[a-z0-9._-]+/gi;
 
 function stripInlineCode(value: string): string {
@@ -924,7 +938,7 @@ function stripInlineCode(value: string): string {
 export function normalizeWhenToUse(raw: string | null | undefined): string | null {
   const value = raw?.trim() || null;
   if (value === null) return null;
-  const codePoints = [...value].length;
+  const codePoints = countAppWhenToUseCharacters(value);
   if (codePoints > WHEN_TO_USE_MAX_CODE_POINTS) {
     throw new Error(`whenToUse must be at most ${WHEN_TO_USE_MAX_CODE_POINTS} characters`);
   }
@@ -1554,12 +1568,21 @@ export async function listMarketplaceOAuthClients(serverId: string) {
     appNotificationGroups: oauthClients.outboundCurrentGroups,
     appNotificationEvents: oauthClients.outboundCurrentEvents,
     appNotificationReviewPending: sql<boolean>`${oauthClients.outboundPendingRevisionId} is not null`,
+    // Alias required: oauthAppPermissionRevisions.id would emit a duplicate
+    // "id" column that collides with oauth_clients.id in the row mapping.
+    appNotificationPendingRevisionId: sql<string | null>`${oauthAppPermissionRevisions.id}`.as("app_notification_pending_revision_id"),
+    appNotificationPendingGroups: oauthAppPermissionRevisions.requestedGroups,
+    appNotificationPendingEvents: oauthAppPermissionRevisions.requestedEvents,
   })
     .from(oauthClients)
     .innerJoin(servers, eq(servers.id, oauthClients.serverId))
     .leftJoin(oauthClientInstalls, and(
       eq(oauthClientInstalls.clientId, oauthClients.id),
       eq(oauthClientInstalls.serverId, serverId),
+    ))
+    .leftJoin(oauthAppPermissionRevisions, and(
+      eq(oauthAppPermissionRevisions.id, oauthClients.outboundPendingRevisionId),
+      eq(oauthAppPermissionRevisions.state, "pending_review"),
     ))
     .leftJoin(users, eq(users.id, oauthClients.createdByUserId))
     .where(and(
@@ -1583,9 +1606,13 @@ export async function listMarketplaceOAuthClients(serverId: string) {
     .orderBy(asc(oauthClients.category), asc(oauthClients.name));
 
   const now = currentDate();
+  const discovery = await projectOfficialAppDiscoveryMany(
+    clients.map((client) => ({ clientId: client.id, sourceServerId: client.serverId, clientKey: client.clientId })),
+    db,
+  );
   return Promise.all(clients.map(async ({ effectiveInstallCount, publishedAt, ...client }) => ({
     ...client,
-    ...await projectOfficialAppDiscovery({ clientId: client.id, sourceServerId: client.serverId, clientKey: client.clientId }, db),
+    ...discovery.get(client.id)!,
     marketplaceInstallBadge: isPublicMarketplaceLifecycle(client.publishStatus) && client.humanMarketplaceVisible
       ? projectMarketplaceInstallBadge({ effectiveInstallCount, publishedAt, now })
       : { kind: "none" as const },
@@ -4047,11 +4074,10 @@ async function selectPendingThirdPartyAgentEvents(input: {
 
   return db.select({
     event: thirdPartyAgentEvents,
-    clientKey: oauthClients.clientId,
-    clientName: oauthClients.name,
+    ...THIRD_PARTY_EVENT_APP_COLUMNS,
   })
     .from(thirdPartyAgentEvents)
-    .innerJoin(oauthClients, eq(oauthClients.id, thirdPartyAgentEvents.clientId))
+    .leftJoin(oauthClients, eq(oauthClients.id, thirdPartyAgentEvents.clientId))
     .where(and(...whereClauses))
     .orderBy(asc(thirdPartyAgentEvents.createdAt), asc(thirdPartyAgentEvents.id))
     .limit(input.limit ?? 100);

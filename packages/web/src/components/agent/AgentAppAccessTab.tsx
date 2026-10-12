@@ -1,4 +1,4 @@
-import { Badge, Button, Checkbox } from "raft-ui";
+import { Badge, Button } from "raft-ui";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useIntl } from "react-intl";
 import type {
@@ -12,6 +12,10 @@ import SectionHeader from "../ui/SectionHeader";
 import SurfaceListItem from "../ui/SurfaceListItem";
 import { useTimeFormatter } from "../../hooks/useTimeFormatter";
 import type { MessageId } from "../../i18n/messages";
+import { AppEventFilterButton } from "./AppEventFilterButton";
+import { GrantableAppOption } from "./GrantableAppOption";
+import { GrantScopeCheckbox } from "./GrantScopeCheckbox";
+import { IntegrationActionButton } from "./IntegrationActionButton";
 
 interface AgentIntegrationItem {
   id: string;
@@ -26,7 +30,7 @@ interface AgentIntegrationItem {
   grantSource: "person" | "agent_login" | "app_request" | null;
 }
 
-interface GrantableApp {
+export interface GrantableApp {
   clientId: string;
   clientKey: string;
   name: string;
@@ -40,6 +44,9 @@ const GRANT_SOURCE_LABEL: Record<NonNullable<AgentIntegrationItem["grantSource"]
   agent_login: "agent.apps.grantSource.agentLogin",
   app_request: "agent.apps.grantSource.appRequest",
 };
+
+const APPROVE_REQUEST_BODY = { remember: true };
+const EMPTY_BODY = {};
 
 const EVENT_STATUS_VARIANT: Record<AgentAppEventSummary["status"], "success" | "warning" | "muted"> = {
   delivered: "success",
@@ -81,12 +88,16 @@ function GrantAccessForm({ agentId, onDone, onCancel }: { agentId: string; onDon
     return () => { canceled = true; };
   }, [agentId, formatMessage]);
 
-  const choose = (app: GrantableApp) => {
+  const choose = useCallback((app: GrantableApp) => {
     setSelected(app);
     setScopes(app.scopes);
-  };
+  }, []);
 
-  const submit = async () => {
+  const toggleScope = useCallback((scope: string, checked: boolean) => {
+    setScopes((prev) => checked ? [...prev, scope] : prev.filter((s) => s !== scope));
+  }, []);
+
+  const submit = useCallback(async () => {
     if (!selected || scopes.length === 0) return;
     setSaving(true);
     setError("");
@@ -98,7 +109,9 @@ function GrantAccessForm({ agentId, onDone, onCancel }: { agentId: string; onDon
     } finally {
       setSaving(false);
     }
-  };
+  }, [agentId, selected, scopes, onDone, formatMessage]);
+
+  const handleSubmit = useCallback(() => { void submit(); }, [submit]);
 
   return (
     <SurfaceListItem className="space-y-3" interactive={false} data-testid="agent-grant-access-form">
@@ -112,16 +125,7 @@ function GrantAccessForm({ agentId, onDone, onCancel }: { agentId: string; onDon
       ) : (
         <div className="grid gap-2">
           {apps.map((app) => (
-            <button
-              key={app.clientId}
-              type="button"
-              onClick={() => choose(app)}
-              aria-pressed={selected?.clientId === app.clientId}
-              className={`border-2 p-2.5 text-left ${selected?.clientId === app.clientId ? "border-accent bg-accent-soft theme-brutal:border-black theme-brutal:bg-brutal-lime/20" : "border-line-muted bg-layer-panel theme-brutal:border-black/15 theme-brutal:bg-white"}`}
-            >
-              <span className="block text-xs font-black text-foreground-strong">{app.name}</span>
-              {app.description && <span className="mt-0.5 block text-[11px] text-foreground-muted">{app.description}</span>}
-            </button>
+            <GrantableAppOption key={app.clientId} app={app} selected={selected?.clientId === app.clientId} onChoose={choose} />
           ))}
         </div>
       )}
@@ -129,19 +133,12 @@ function GrantAccessForm({ agentId, onDone, onCancel }: { agentId: string; onDon
         <div className="space-y-2">
           <div className="text-xs font-bold text-foreground-strong">{formatMessage({ id: "agent.apps.grantScopes" })}</div>
           {selected.scopes.map((scope) => (
-            <label key={scope} className="flex items-center gap-2 font-mono text-xs text-foreground-strong">
-              <Checkbox
-                size="sm"
-                checked={scopes.includes(scope)}
-                onCheckedChange={(checked) => setScopes((prev) => checked ? [...prev, scope] : prev.filter((s) => s !== scope))}
-              />
-              {scope}
-            </label>
+            <GrantScopeCheckbox key={scope} scope={scope} checked={scopes.includes(scope)} onToggle={toggleScope} />
           ))}
         </div>
       )}
       <div className="flex flex-wrap gap-2">
-        <Button size="sm" onClick={() => void submit()} disabled={!selected || scopes.length === 0 || saving}>
+        <Button size="sm" onClick={handleSubmit} disabled={!selected || scopes.length === 0 || saving}>
           {formatMessage({ id: "agent.apps.grantConfirm" })}
         </Button>
         <Button variant="outline" size="sm" onClick={onCancel}>{formatMessage({ id: "agent.detail.cancel" })}</Button>
@@ -243,13 +240,16 @@ function AgentAppEventsSection({ agentId }: { agentId: string }) {
     void load(null);
   }, [load]);
 
+  const reload = useCallback(() => { void load(null); }, [load]);
+  const loadMore = useCallback(() => { void load(nextCursor); }, [load, nextCursor]);
+
   return (
     <div className="space-y-3" data-testid="agent-app-events">
       <div>
         <SectionHeader
           label={formatMessage({ id: "agent.apps.eventsTitle" })}
           action={
-            <Button variant="outline" size="sm" onClick={() => void load(null)} disabled={loading} className="text-[11px]">
+            <Button variant="outline" size="sm" onClick={reload} disabled={loading} className="text-[11px]">
               {loading ? formatMessage({ id: "common.loading" }) : formatMessage({ id: "agent.apps.refresh" })}
             </Button>
           }
@@ -258,13 +258,13 @@ function AgentAppEventsSection({ agentId }: { agentId: string }) {
       </div>
       {apps.length > 1 && (
         <div className="flex flex-wrap gap-1.5">
-          <Button size="sm" variant={appFilter === null ? "default" : "outline"} onClick={() => setAppFilter(null)} className="text-[11px]">
+          <AppEventFilterButton clientId={null} active={appFilter === null} onSelect={setAppFilter}>
             {formatMessage({ id: "agent.apps.allApps" })}
-          </Button>
+          </AppEventFilterButton>
           {apps.map((app) => (
-            <Button key={app.clientId} size="sm" variant={appFilter === app.clientId ? "default" : "outline"} onClick={() => setAppFilter(app.clientId)} className="text-[11px]">
+            <AppEventFilterButton key={app.clientId} clientId={app.clientId} active={appFilter === app.clientId} onSelect={setAppFilter}>
               {app.name}
-            </Button>
+            </AppEventFilterButton>
           ))}
         </div>
       )}
@@ -277,7 +277,7 @@ function AgentAppEventsSection({ agentId }: { agentId: string }) {
         </div>
       )}
       {nextCursor && (
-        <Button variant="outline" size="sm" onClick={() => void load(nextCursor)} disabled={loading}>
+        <Button variant="outline" size="sm" onClick={loadMore} disabled={loading}>
           {formatMessage({ id: "agent.apps.loadMore" })}
         </Button>
       )}
@@ -319,7 +319,7 @@ export default function AgentAppAccessTab({ agentId, canManageAgentAccess }: { a
     void load();
   }, [load]);
 
-  const act = async (path: string, body: unknown, fallbackId: MessageId) => {
+  const act = useCallback(async (path: string, body: unknown, fallbackId: MessageId) => {
     setError("");
     try {
       await api.post(path, body);
@@ -327,7 +327,14 @@ export default function AgentAppAccessTab({ agentId, canManageAgentAccess }: { a
     } catch (err) {
       setError(errorText(err, formatMessage({ id: fallbackId })));
     }
-  };
+  }, [load, formatMessage]);
+
+  const startGranting = useCallback(() => setGranting(true), []);
+  const cancelGranting = useCallback(() => setGranting(false), []);
+  const finishGranting = useCallback(() => {
+    setGranting(false);
+    void load();
+  }, [load]);
 
   const pending = items.filter((item) => item.type === "pending");
   const active = items.filter((item) => item.type === "active");
@@ -353,12 +360,12 @@ export default function AgentAppAccessTab({ agentId, canManageAgentAccess }: { a
               <ScopeChips scopes={item.scopes} />
               {canManageAgentAccess && (
                 <div className="flex flex-wrap gap-2">
-                  <Button size="sm" onClick={() => void act(`/integrations/requests/${item.id}/approve`, { remember: true }, "agent.apps.approveFailed")}>
+                  <IntegrationActionButton path={`/integrations/requests/${item.id}/approve`} body={APPROVE_REQUEST_BODY} failureMessageId="agent.apps.approveFailed" onAct={act}>
                     {formatMessage({ id: "agent.apps.approve" })}
-                  </Button>
-                  <Button variant="outline" size="sm" onClick={() => void act(`/integrations/requests/${item.id}/deny`, {}, "agent.apps.denyFailed")}>
+                  </IntegrationActionButton>
+                  <IntegrationActionButton variant="outline" path={`/integrations/requests/${item.id}/deny`} body={EMPTY_BODY} failureMessageId="agent.apps.denyFailed" onAct={act}>
                     {formatMessage({ id: "agent.apps.deny" })}
-                  </Button>
+                  </IntegrationActionButton>
                 </div>
               )}
             </SurfaceListItem>
@@ -373,7 +380,7 @@ export default function AgentAppAccessTab({ agentId, canManageAgentAccess }: { a
             action={loading
               ? <span className="text-xs font-bold text-foreground-muted">{formatMessage({ id: "common.loading" })}</span>
               : canManageAgentAccess && !granting
-                ? <Button variant="outline" size="sm" onClick={() => setGranting(true)} className="text-[11px]">{formatMessage({ id: "agent.apps.grantAccess" })}</Button>
+                ? <Button variant="outline" size="sm" onClick={startGranting} className="text-[11px]">{formatMessage({ id: "agent.apps.grantAccess" })}</Button>
                 : null}
           />
           <div className="mt-1 text-xs text-foreground-muted">
@@ -383,8 +390,8 @@ export default function AgentAppAccessTab({ agentId, canManageAgentAccess }: { a
         {granting && (
           <GrantAccessForm
             agentId={agentId}
-            onCancel={() => setGranting(false)}
-            onDone={() => { setGranting(false); void load(); }}
+            onCancel={cancelGranting}
+            onDone={finishGranting}
           />
         )}
         {active.length === 0 ? (
@@ -414,9 +421,9 @@ export default function AgentAppAccessTab({ agentId, canManageAgentAccess }: { a
                 <ScopeChips scopes={item.scopes} />
                 <div className="flex flex-wrap gap-2">
                   {canManageAgentAccess && (
-                    <Button variant="outline" size="sm" onClick={() => void act(`/integrations/grants/${item.id}/revoke`, {}, "agent.detail.revokeIntegrationFailed")}>
+                    <IntegrationActionButton variant="outline" path={`/integrations/grants/${item.id}/revoke`} body={EMPTY_BODY} failureMessageId="agent.detail.revokeIntegrationFailed" onAct={act}>
                       {formatMessage({ id: "agent.detail.revoke" })}
-                    </Button>
+                    </IntegrationActionButton>
                   )}
                   {item.clientHomepageUrl && (
                     <a href={item.clientHomepageUrl} target="_blank" rel="noreferrer" className="text-xs font-bold underline text-foreground-muted self-center">

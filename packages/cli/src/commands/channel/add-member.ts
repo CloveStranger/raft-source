@@ -1,5 +1,5 @@
 // `raft channel add-member --target <#channel> (--user <@handle> | --agent <@handle>)`
-// -> POST /internal/agent/:id/channels/:channelId/members
+// -> POST /internal/agent-api/channels/:channelId/members
 
 import type { Command } from "commander";
 
@@ -93,11 +93,7 @@ export const channelAddMemberCommand = defineCommand(
     }
 
     const body = user ? { user } : { agent };
-    const addRes = await client.request<AddMemberResponse>(
-      "POST",
-      `/internal/agent/${encodeURIComponent(agentContext.agentId)}/channels/${encodeURIComponent(channel.id)}/members`,
-      body,
-    );
+    const addRes = await createAgentApiSurfaceClient(client).channels.addMember({ channelId: channel.id as never }, body);
     if (!addRes.ok) {
       throw new CliError({
         code: addRes.status >= 500 ? "SERVER_5XX" : "MEMBERS_FAILED",

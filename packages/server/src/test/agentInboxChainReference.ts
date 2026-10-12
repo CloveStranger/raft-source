@@ -3,23 +3,25 @@
  *
  * Agent resume recovery (channelService.getAgentUnreadCounts and
  * messageService.getAgentResumeCatchupMessages) reads ONE source: the agent inbox
- * view of the unified RisingWave chain (`rw_agent_inbox_v5`, read through
+ * view of the unified RisingWave chain (`rw_agent_inbox_v6`, read through
  * channelService.readAgentInboxChainRows). CI has no RisingWave, so this derives
  * the same rows from Postgres with the SAME semantics as the view, and tests pass
  * them as the chain.
  *
  * This is a stand-in for the RW view, not a product path. KEEP IT IN SYNC with the
  * SQL it mirrors:
- *   - infra/risingwave/sql/068-chain-mention-v6-consumers.sql
- *                                                rw_agent_inbox_v5 (065's rw_agent_inbox_v4 on mention v6)
+ *   - infra/risingwave/sql/076-cursor-decouple-consumers.sql
+ *                                                rw_agent_inbox_v6 (065's rw_agent_inbox_v4 on mention v6)
  *   - infra/risingwave/sql/067-mention-v6.sql    rw_inbox_mention_v6
  *   - infra/risingwave/sql/064-agent-inbox-v3.sql
  *                                                rw_agent_inbox_v3
- *   - infra/risingwave/sql/063-chain-v5.sql      rw_muted_subs_v1, rw_inbox_muted_prefix_v1
+ *   - infra/risingwave/sql/075-inbox-cursor-decouple.sql
+ *                                                rw_inbox_normal_v5, rw_inbox_muted_prefix_v2
+ *   - infra/risingwave/sql/063-chain-v5.sql      rw_muted_subs_v1
  *   - infra/risingwave/sql/063-unified-inbox-chain.sql
  *                                                rw_message_target_v3, rw_target_latest_v4,
  *                                                rw_target_eligible_v1, rw_receiver_cursors_v1,
- *                                                rw_subs_v2, rw_inbox_normal_v4
+ *                                                rw_subs_v2
  *   - infra/risingwave/sql/061-inbox-derivation-chain.sql
  *                                                rw_thread_parent_v3
  * Each CTE below is named after the view it mirrors, restricted to one agent.
@@ -47,7 +49,7 @@
  *     the thread's own channels.parent_message_id) -- the canonical parent for a
  *     joint local thread projection; parent_channel_* is the LOCAL parent as
  *     rw_thread_parent_v3 resolves it.
- *   - offered rows only (rw_agent_inbox_v5): the agent is joined (membership or
+ *   - offered rows only (rw_agent_inbox_v6): the agent is joined (membership or
  *     active follow, joined_at not null) and the row offers unread: the admitted
  *     stream has unread (subscribed and unread_count > 0), OR mention_unread > 0 and
  *     the mention lies beyond the admitted stream (not subscribed, or
@@ -133,7 +135,7 @@ export async function referenceAgentInboxChain(agentId: string): Promise<AgentIn
         ON mu.receiver_type = 'agent' AND mu.receiver_id = ca.agent_id
        AND mu.source_channel_id = c.id AND mu.activity_muted
       WHERE ca.agent_id::text = ${agent}
-    ), normal AS (                  -- rw_inbox_normal_v4
+    ), normal AS (                  -- rw_inbox_normal_v5
       SELECT s.kind, s.target_id, s.server_id,
              MAX(m.seq) AS latest_seq,
              COUNT(*) FILTER (WHERE ${unreadPredicate}) AS unread_count,
@@ -143,7 +145,7 @@ export async function referenceAgentInboxChain(agentId: string): Promise<AgentIn
       LEFT JOIN receiver_cursors AS rc ON rc.channel_id = s.target_id
       LEFT JOIN message_target AS m ON m.target_id = s.target_id
       GROUP BY s.kind, s.target_id, s.server_id, rc.last_read_seq
-    ), muted_prefix AS (            -- rw_inbox_muted_prefix_v1
+    ), muted_prefix AS (            -- rw_inbox_muted_prefix_v2
       SELECT s.kind, s.target_id, s.server_id,
              MAX(m.seq) AS latest_seq,
              COUNT(*) FILTER (WHERE ${unreadPredicate}) AS unread_count,

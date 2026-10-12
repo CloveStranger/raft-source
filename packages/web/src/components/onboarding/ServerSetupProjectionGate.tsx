@@ -35,6 +35,19 @@ import type {
   ServerSetupProjection,
 } from "./serverSetupProjection";
 
+type RuntimeOptions = NonNullable<ServerSetupProjection["runtimeOptions"]>;
+type OfflineComputers = NonNullable<ServerSetupProjection["offlineComputers"]>;
+const NO_RUNTIME_OPTIONS: RuntimeOptions = [];
+const NO_OFFLINE_COMPUTERS: OfflineComputers = [];
+
+/** Onboarding steps are blocking: the modal shell has no dismiss path. */
+function ignoreModalClose() {}
+
+// Copying says so where the click happened: the button turns into a tick.
+function copyInstallCommand(_runtimeId: string, command: string) {
+  void navigator.clipboard.writeText(command).catch(() => undefined);
+}
+
 function StepContainer({ children }: { children: ReactNode }) {
   return (
     <div className="flex min-h-full w-full overflow-y-auto p-4">
@@ -259,7 +272,7 @@ export default function ServerSetupProjectionGate({
   useEffect(() => {
     if (gateStep !== "computer_runtime") return;
     void refreshProjection(true);
-  }, [machineSignature, gateStep]); // oxlint-disable-line react-hooks/exhaustive-deps -- refreshProjection is stable per serverId; adding it would re-fire on every render.
+  }, [machineSignature, gateStep, refreshProjection]);
 
   // The computer this setup attempt is bringing online, resolved by the same
   // state machine the Add Computer dialog uses. The old code here just grabbed
@@ -278,6 +291,56 @@ export default function ServerSetupProjectionGate({
       ? { id: machine.id, name: machine.name, status: machine.status, runtimeIds: machine.runtimes, isComputer: machine.isComputer }
       : null;
   }, [connectionProgress.machine]);
+
+  // Every handler is declared here, above the early returns below, so the hook order
+  // is the same on every render.
+  const refreshProjectionInBackground = useCallback(() => {
+    void refreshProjection();
+  }, [refreshProjection]);
+
+  const handleResume = useCallback(async () => {
+    if (loading) return;
+    setLoading(true);
+    setError("");
+    try {
+      setProjection(await transitionServerSetup(serverId, "start"));
+    } catch (nextError) {
+      setError(responseErrorMessage(nextError, formatMessage));
+    } finally {
+      setLoading(false);
+    }
+  }, [formatMessage, loading, serverId]);
+  const handleResumeClick = useCallback(() => {
+    void handleResume();
+  }, [handleResume]);
+
+  // Read on every render now, including the completed-setup surfaces, which may omit
+  // `allowedExits` entirely.
+  const canResetSetup = projection?.allowedExits?.includes("reset") ?? false;
+  const handleStartOver = useCallback(async () => {
+    if (!canResetSetup || loading) return;
+    setLoading(true);
+    setError("");
+    try {
+      setProjection(await resetServerSetup(serverId));
+      setConfirmStartOver(false);
+    } catch (nextError) {
+      setError(responseErrorMessage(nextError, formatMessage));
+    } finally {
+      setLoading(false);
+    }
+  }, [canResetSetup, formatMessage, loading, serverId]);
+  const openStartOverConfirm = useCallback(() => setConfirmStartOver(true), []);
+  const closeStartOverConfirm = useCallback(() => setConfirmStartOver(false), []);
+
+  const handleComputerRuntimeNext = useCallback(() => {
+    if (pendingCreateAgentProjection) {
+      setProjection(pendingCreateAgentProjection);
+      setPendingCreateAgentProjection(null);
+      return;
+    }
+    void refreshProjection();
+  }, [pendingCreateAgentProjection, refreshProjection]);
 
   if (!projectionResolved) {
     if (!dedicatedSurface) return null;
@@ -318,9 +381,9 @@ export default function ServerSetupProjectionGate({
   // apply once setup itself is done.
   const setupComplete = projection.surface === "complete";
   if (setupComplete && surveyPending) {
-    const step = <ServerSetupSurveyStep onDone={() => void refreshProjection()} />;
+    const step = <ServerSetupSurveyStep onDone={refreshProjectionInBackground} />;
     if (!dedicatedSurface) {
-      return <Modal onClose={() => undefined} layer={1} closeOnEscape={false}>{step}</Modal>;
+      return <Modal onClose={ignoreModalClose} layer={1} closeOnEscape={false}>{step}</Modal>;
     }
     return <StepContainer>{step}</StepContainer>;
   }
@@ -328,29 +391,14 @@ export default function ServerSetupProjectionGate({
     const step = (
       <ServerSetupHandoffStep
         serverId={serverId}
-        onDone={() => void refreshProjection()}
+        onDone={refreshProjectionInBackground}
       />
     );
     if (!dedicatedSurface) {
-      return <Modal onClose={() => undefined} layer={1} closeOnEscape={false}>{step}</Modal>;
+      return <Modal onClose={ignoreModalClose} layer={1} closeOnEscape={false}>{step}</Modal>;
     }
     return <StepContainer>{step}</StepContainer>;
   }
-  // Declared before the deferred branch below uses it: the early return means the later
-  // handler declarations never execute on that path.
-  const handleResume = async () => {
-    if (loading) return;
-    setLoading(true);
-    setError("");
-    try {
-      setProjection(await transitionServerSetup(serverId, "start"));
-    } catch (nextError) {
-      setError(responseErrorMessage(nextError, formatMessage));
-    } finally {
-      setLoading(false);
-    }
-  };
-
   if (!projection.blocksChat) {
     if (dedicatedSurface && !effectiveWakeGeneration) {
       return <Navigate to={`/s/${serverSlug}`} replace />;
@@ -383,7 +431,7 @@ export default function ServerSetupProjectionGate({
           </p>
           <Button
             type="button"
-            onClick={() => void handleResume()}
+            onClick={handleResumeClick}
             disabled={loading}
             size="md"
             variant="outline"
@@ -418,25 +466,6 @@ export default function ServerSetupProjectionGate({
   // omit the Computer credential revocation it is about to perform. Keep the larger known
   // count so a stale local projection cannot weaken the destructive-action warning.
   const startOverMachineCount = Math.max(machines.length, projection.offlineComputers?.length ?? 0);
-  const handleStartOver = async () => {
-    if (!projection.allowedExits.includes("reset") || loading) return;
-    setLoading(true);
-    setError("");
-    try {
-      setProjection(await resetServerSetup(serverId));
-      setConfirmStartOver(false);
-    } catch (nextError) {
-      setError(responseErrorMessage(nextError, formatMessage));
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  // Copying says so where the click happened: the button turns into a tick.
-  const handleCopyInstallCommand = async (_runtimeId: string, command: string) => {
-    await navigator.clipboard.writeText(command).catch(() => undefined);
-  };
-
   const serverUrl = getServerUrl();
   const deploymentEnv = import.meta.env?.VITE_DEPLOYMENT_ENV;
   const computerCommands = getComputerCommands(serverSlug, deploymentEnv, serverUrl);
@@ -462,7 +491,7 @@ export default function ServerSetupProjectionGate({
           )
         : formatMessage({ id: "layout.onboarding.startOverMessageEmpty" })}
       onConfirm={handleStartOver}
-      onClose={() => setConfirmStartOver(false)}
+      onClose={closeStartOverConfirm}
     />
   ) : null;
 
@@ -474,9 +503,9 @@ export default function ServerSetupProjectionGate({
       <CreateAgentDialog
         onboarding
         onboardingShell={dedicatedSurface ? "page" : "step"}
-        onClose={() => void refreshProjection()}
+        onClose={refreshProjectionInBackground}
         onOnboardingComplete={closeCompletedSetup}
-        onOnboardingStartOver={projection.allowedExits.includes("reset") ? () => setConfirmStartOver(true) : undefined}
+        onOnboardingStartOver={canResetSetup ? openStartOverConfirm : undefined}
       />
     );
     return (
@@ -484,7 +513,7 @@ export default function ServerSetupProjectionGate({
       {startOverConfirm}
       {dedicatedSurface
         ? <StepContainer>{createAgentStep}</StepContainer>
-        : <Modal onClose={() => undefined} layer={1} closeOnEscape={false}>{createAgentStep}</Modal>}
+        : <Modal onClose={ignoreModalClose} layer={1} closeOnEscape={false}>{createAgentStep}</Modal>}
       </>
     );
   }
@@ -504,28 +533,22 @@ export default function ServerSetupProjectionGate({
       <ServerSetupComputerRuntimeStep
         computer={computer}
         runtimeStatus={runtimeStatusFromProjection}
-        runtimeOptions={authoritative.runtimeOptions ?? []}
+        runtimeOptions={authoritative.runtimeOptions ?? NO_RUNTIME_OPTIONS}
         hasConnectedComputer={authoritative.hasConnectedComputer ?? false}
-        offlineComputers={authoritative.offlineComputers ?? []}
+        offlineComputers={authoritative.offlineComputers ?? NO_OFFLINE_COMPUTERS}
         serverSlug={serverSlug}
         showOwnApiKey={false}
         loading={loading}
         error={error || gateMessage(projection.gateReason, formatMessage)}
         setupCommand={computerCommands?.setup ?? null}
         computerInstallCommand={computerCommands?.install}
+        computerInstallAndSetupCommand={computerCommands?.installAndSetup ?? null}
         windowsComputerSetupCommand={windowsComputerCommands?.setup ?? null}
         windowsComputerInstallCommand={windowsComputerCommands?.install}
-        onCopyInstallCommand={(runtimeId, command) => void handleCopyInstallCommand(runtimeId, command)}
-        canReset={projection.allowedExits.includes("reset")}
-        onStartOver={() => setConfirmStartOver(true)}
-        onNext={() => {
-          if (pendingCreateAgentProjection) {
-            setProjection(pendingCreateAgentProjection);
-            setPendingCreateAgentProjection(null);
-            return;
-          }
-          void refreshProjection();
-        }}
+        onCopyInstallCommand={copyInstallCommand}
+        canReset={canResetSetup}
+        onStartOver={openStartOverConfirm}
+        onNext={handleComputerRuntimeNext}
       />
   );
 
@@ -534,7 +557,7 @@ export default function ServerSetupProjectionGate({
     {startOverConfirm}
     {dedicatedSurface
       ? <StepContainer>{computerRuntimeStep}</StepContainer>
-      : <Modal onClose={() => undefined} layer={1} closeOnEscape={false}>{computerRuntimeStep}</Modal>}
+      : <Modal onClose={ignoreModalClose} layer={1} closeOnEscape={false}>{computerRuntimeStep}</Modal>}
     </>
   );
 }

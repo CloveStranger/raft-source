@@ -6,6 +6,7 @@ import {
   deleteWorkspaceDirectory,
   resolveWorkspaceDirectoryPath,
   scanWorkspaceDirectories,
+  workspaceDisplayPath,
 } from "./workspaces";
 
 test("scanWorkspaceDirectories summarizes workspace directories recursively", async () => {
@@ -36,6 +37,7 @@ test("scanWorkspaceDirectories summarizes workspace directories recursively", as
     assert.ok(second);
     assert.equal(second.fileCount, 1);
     assert.equal(second.totalSizeBytes, 1);
+    assert.equal(second.displayPath, workspaceDisplayPath(secondDir));
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -106,4 +108,12 @@ test("deleteWorkspaceDirectory leaves the root intact when asked to delete '.'",
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("workspace display paths are ~-relative under the user's home, absolute elsewhere", () => {
+  assert.equal(workspaceDisplayPath("/home/alice/.raft/agents/a1", "/home/alice"), "~/.raft/agents/a1/");
+  assert.equal(workspaceDisplayPath("/home/alice/.slock/agents/a1", "/home/alice"), "~/.slock/agents/a1/");
+  assert.equal(workspaceDisplayPath("/srv/raft/agents/a1", "/home/alice"), "/srv/raft/agents/a1/");
+  // A sibling that merely shares the prefix is not under the home.
+  assert.equal(workspaceDisplayPath("/home/alice2/agents/a1", "/home/alice"), "/home/alice2/agents/a1/");
 });

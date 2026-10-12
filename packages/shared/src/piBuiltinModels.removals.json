@@ -15,6 +15,23 @@
       "replacement": "openrouter/deepseek/deepseek-v4-flash-0731",
       "note": "0.86.1 dropped the free-tier VARIANT of this model. The base id is still offered on the SAME provider (openrouter), so the model itself is still available -- what is gone is the ':free' variant. Label changes from '...0731 (free)' to '...0731', hence labelChangeAcknowledged: this is the same model id without the free tier, not a different model wearing the same name. No in-repo consumer pins the ':free' id (checked packages/ fixtures and configs). NEW in 0.86.1; separate from the 33 ids removed in 0.86.0 (#8026), tracked on task #322.",
       "labelChangeAcknowledged": true
+    },
+    {
+      "id": "openrouter/kwaipilot/kat-coder-pro-v2.5",
+      "disposition": "no-replacement",
+      "note": "Dropped from Pi's openrouter catalog in @earendil-works/pi-ai 1.1.0 (bump 1.0.2 -> 1.1.0, task #1235). No in-repo consumer pins this id (git grep over packages/ and apps/: only the generated catalog). No kwaipilot / KAT-Coder id of any version remains on openrouter in 1.1.0; the vendor is gone from the catalog rather than superseded."
+    },
+    {
+      "id": "openrouter/qwen/qwen3.8-27b:free",
+      "disposition": "replaced-by",
+      "replacement": "openrouter/qwen/qwen3.8-27b",
+      "note": "Dropped from Pi's openrouter catalog in @earendil-works/pi-ai 1.1.0 (bump 1.0.2 -> 1.1.0, task #1235). No in-repo consumer pins this id (git grep over packages/ and apps/: only the generated catalog). Same model, free-tier VARIANT dropped; the base id stays on the same provider (openrouter). Same shape as the deepseek-v4-flash-0731:free removal above.",
+      "labelChangeAcknowledged": true
+    },
+    {
+      "id": "openrouter/stealth/space-bunny-alpha",
+      "disposition": "no-replacement",
+      "note": "Dropped from Pi's openrouter catalog in @earendil-works/pi-ai 1.1.0 (bump 1.0.2 -> 1.1.0, task #1235). No in-repo consumer pins this id (git grep over packages/ and apps/: only the generated catalog). Stealth/alpha preview id with no successor in the 1.1.0 catalog (no 'stealth/' id remains)."
     }
   ]
 }

@@ -1,21 +1,13 @@
 import assert from "node:assert/strict";
 import {
   DEFAULT_COMMUNITY_SERVER_SLUG,
-  languageListPrefersChineseCommunity,
   recommendedCommunitySlug,
-  shouldShowChineseCommunityEntryForLanguages,
+  shouldShowChineseCommunityEntry,
 } from "../src/utils/communityServers";
 
-test("community recommendation detects Chinese browser language", () => {
-  assert.equal(languageListPrefersChineseCommunity(["en-US", "zh-CN"]), true);
-  assert.equal(languageListPrefersChineseCommunity(["zh-Hans-CN"]), true);
-  assert.equal(languageListPrefersChineseCommunity(["en-US", "ja-JP"]), false);
-});
-
-test("Chinese community entry is gated by browser language", () => {
-  assert.equal(shouldShowChineseCommunityEntryForLanguages(["zh-CN"]), true);
-  assert.equal(shouldShowChineseCommunityEntryForLanguages(["en-US", "zh-Hant-TW"]), true);
-  assert.equal(shouldShowChineseCommunityEntryForLanguages(["en-US", "ja-JP"]), false);
+test("Chinese community entry is gated by the active display locale", () => {
+  assert.equal(shouldShowChineseCommunityEntry("zh-cn"), true);
+  assert.equal(shouldShowChineseCommunityEntry("en"), false);
 });
 
 test("community recommendation keeps the default internal community server", () => {

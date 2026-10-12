@@ -275,7 +275,12 @@ export function parseFeedbackMachineState(raw: unknown): FeedbackMachineState {
  * one feedback transcript request. Filed outside trace-bundles/ and never
  * ingested as traces; see feedbackTranscriptOutcome.ts.
  */
-export const FEEDBACK_ATTACHMENT_KINDS = ["session_transcript", "machine_log_tail", "machine_evidence", "transcript_outcome"] as const;
+/**
+ * `agent_event_tail` (task #1230): a bounded, whitelisted projection of one
+ * agent's daemon trace events; see feedbackAgentEventTail.ts. Also filed
+ * outside trace-bundles/ and never ingested as traces.
+ */
+export const FEEDBACK_ATTACHMENT_KINDS = ["session_transcript", "machine_log_tail", "machine_evidence", "transcript_outcome", "agent_event_tail"] as const;
 export type FeedbackAttachmentKind = (typeof FEEDBACK_ATTACHMENT_KINDS)[number];
 
 export function isFeedbackAttachmentKind(value: unknown): value is FeedbackAttachmentKind {

@@ -1,4 +1,5 @@
 import type { ComponentProps, ReactElement, ReactNode } from "react";
+import { useMemo } from "react";
 import { TooltipProvider } from "raft-ui";
 import Tooltip from "../ui/Tooltip";
 import { useLightboxPortalContainer } from "../ui/Lightbox";
@@ -28,11 +29,15 @@ export default function AttachmentTooltip({
   contentProps?: Omit<AttachmentTooltipContentProps, "className">;
 }) {
   const container = useLightboxPortalContainer();
+  const mergedContentProps = useMemo(
+    () => ({ container: container ?? undefined, ...contentProps }),
+    [container, contentProps],
+  );
   return (
     <TooltipProvider delay={ATTACHMENT_TOOLTIP_DELAY_MS}>
       <Tooltip
         content={content}
-        contentProps={{ container: container ?? undefined, ...contentProps }}
+        contentProps={mergedContentProps}
       >
         {children}
       </Tooltip>

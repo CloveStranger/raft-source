@@ -2,7 +2,7 @@
 // verbatim from the CLI's commands/server/_format.ts; the CLI wraps these in
 // its axSurface registrations and pins the bytes with its snapshot tests).
 
-import { formatHint, formatHintName, RAFT_HINTS, RAFT_NO_TOOL_WORDING, type RaftHintStyle } from "../agentOps/hint";
+import { formatHint, formatHintName, RAFT_HINTS, type RaftHintStyle } from "../agentOps/hint";
 
 export interface AgentChannelInfo {
   id?: string | null;
@@ -48,6 +48,8 @@ export interface AgentMemberHumanInfo {
   channelRole?: "admin" | "member" | string | null;
   effectiveChannelRole?: "owner" | "admin" | "member" | string | null;
   channelAdminBasis?: "server_role" | "channel_role" | "both" | string | null;
+  /** Joint channels only: every server the person participates through. */
+  servers?: Array<{ name: string; slug: string; yours?: boolean }> | null;
   description?: string | null;
 }
 
@@ -138,6 +140,22 @@ function channelMemberRoleDetail(member: {
   return details.length > 0 ? ` [${details.join(", ")}]` : "";
 }
 
+/**
+ * Joint rosters: the servers a person participates through, by display name
+ * ("this server" for the agent's own; the slug when two listed servers share a
+ * name).
+ */
+function memberServersDetail(servers?: ReadonlyArray<{ name: string; slug: string; yours?: boolean }> | null): string {
+  if (!servers || servers.length === 0) return "";
+  const nameCounts = new Map<string, number>();
+  for (const server of servers) nameCounts.set(server.name, (nameCounts.get(server.name) ?? 0) + 1);
+  const labels = servers.map((server) => {
+    if (server.yours) return "this server";
+    return (nameCounts.get(server.name) ?? 0) > 1 || !server.name ? server.slug : server.name;
+  });
+  return ` [servers: ${labels.join(", ")}]`;
+}
+
 export function agentStatusLabel(agent: { status?: string | null; activity?: string | null; activityDetail?: string | null }): string {
   const lifecycle = agent.status?.trim() || "unknown";
   const activity = agent.activity?.trim();
@@ -170,11 +188,11 @@ export function formatAgentServerInfo(data: AgentServerData, style: RaftHintStyl
   text += "### Channels\n";
   text += "Visible public channels may appear even when `joined=false`. Private channels are shown only when you are a member; do not disclose private-channel names, membership, or content outside that channel. ";
   text += style === "cli"
-    ? `Use channel attention commands (\`${formatHintName(RAFT_HINTS.channelJoinName())}\`, \`leave\`, \`mute\`, \`unmute\`; \`${formatHintName(RAFT_HINTS.threadUnfollowName())}\`) for your own delivery state. Existing channel management commands (\`${formatHintName(RAFT_HINTS.channelCreateName())}\`, \`update\`, \`archive\`, \`unarchive\`, \`add-member\`, \`remove-member\`) are authorized per channel; a channel-admin role never grants delete, visibility, federation, or server-profile actions. There is no Agent command for changing channel roles. Run any subcommand with \`--help\` for syntax.\n`
-    : `Use the channel attention tools (${[RAFT_HINTS.channelJoinName(), RAFT_HINTS.channelLeaveName(), RAFT_HINTS.channelMuteName(), RAFT_HINTS.channelUnmuteName()].map((hint) => `\`${formatHintName(hint, style)}\``).join(", ")}; \`${formatHintName(RAFT_HINTS.threadUnfollowName(), style)}\`) for your own delivery state. Channel management (create, update, archive, unarchive, add-member, remove-member) has no tool: ${RAFT_NO_TOOL_WORDING}; a channel-admin role never grants delete, visibility, federation, or server-profile actions. There is no tool for changing channel roles.\n`;
+    ? `Use channel attention commands (\`${formatHintName(RAFT_HINTS.channelJoinName())}\`, \`leave\`, \`mute\`, \`unmute\`; \`${formatHintName(RAFT_HINTS.threadUnfollowName())}\`) for your own delivery state. Existing channel management commands (\`${formatHintName(RAFT_HINTS.channelCreateName())}\`, \`update\`, \`archive\`, \`unarchive\`, \`add-member\`, \`remove-member\`) work when your server role allows them, or, for update, archive, unarchive and remove-member, your channel-admin role in that channel; the Server checks on each call, and a refusal says what is missing. A channel-admin role never grants delete, visibility, federation, or server-profile actions. There is no Agent command for changing channel roles. Run any subcommand with \`--help\` for syntax.\n`
+    : `Use the channel attention tools (${[RAFT_HINTS.channelJoinName(), RAFT_HINTS.channelLeaveName(), RAFT_HINTS.channelMuteName(), RAFT_HINTS.channelUnmuteName()].map((hint) => `\`${formatHintName(hint, style)}\``).join(", ")}; \`${formatHintName(RAFT_HINTS.threadUnfollowName(), style)}\`) for your own delivery state. Channel management tools (${[RAFT_HINTS.channelCreateName(), RAFT_HINTS.channelUpdateName(), RAFT_HINTS.channelArchiveName(), RAFT_HINTS.channelUnarchiveName(), RAFT_HINTS.channelAddMemberName(), RAFT_HINTS.channelRemoveMemberName()].map((hint) => `\`${formatHintName(hint, style)}\``).join(", ")}) work when your server role allows them, or, for update, archive, unarchive and remove-member, your channel-admin role in that channel; the Server checks on each call, and a refusal says what is missing. A channel-admin role never grants delete, visibility, federation, or server-profile actions. There is no tool for changing channel roles.\n`;
   text += style === "cli"
     ? `Server-profile changes still use ${formatHintName(RAFT_HINTS.serverUpdateName())} and remain server-role gated.\n`
-    : `Server-profile changes have no tool and remain server-role gated: ${RAFT_NO_TOOL_WORDING}.\n`;
+    : `Server-profile changes use \`${formatHintName(RAFT_HINTS.serverUpdateName(), style)}\` and remain server-role gated.\n`;
   text += "Mute state is shown when the server provides it; otherwise it is omitted.\n";
   if (channels.length > 0) {
     for (const t of channels) {
@@ -312,6 +330,7 @@ export function formatAgentServerSummary(data: AgentServerData, style: RaftHintS
     `Channels: ${channels.length} visible (${joined} joined)`,
     `Agents: ${agents.length}`,
     `Humans: ${humans.length}`,
+    ...(data.serverRole ? [`Your role: ${data.serverRole}`] : []),
     "",
     "Narrow queries:",
     ...[
@@ -444,11 +463,15 @@ export function formatAgentChannelMembers(data: AgentChannelMembersData): string
 
   text += "\n### Humans\n";
   text += "Server and stored channel roles are shown separately when available.\n";
+  if (humans.some((human) => (human.servers?.length ?? 0) > 0)) {
+    text += "`[servers: ...]` marks people in this joint channel who take part through another server, and lists each server they come through (\"this server\" is yours). People without it are only on this server. For someone not on this server, the role shown is their role on their own server; it gives them no rights here.\n";
+  }
   if (humans.length > 0) {
     for (const u of humans) {
       const role = roleLabel(u.role);
       const channelRole = channelMemberRoleDetail(u);
-      text += u.description ? `  - @${u.name}${role}${channelRole} — ${u.description}\n` : `  - @${u.name}${role}${channelRole}\n`;
+      const servers = memberServersDetail(u.servers);
+      text += u.description ? `  - @${u.name}${role}${channelRole}${servers} — ${u.description}\n` : `  - @${u.name}${role}${channelRole}${servers}\n`;
     }
   } else {
     text += "  (none)\n";

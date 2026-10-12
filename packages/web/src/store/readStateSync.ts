@@ -104,6 +104,8 @@ export type ReadStateUpdate = {
   scopeId: string;
   maxReadSeq: number;
   readStateVersion: number;
+  /** Unread left after the read, when the server computed it (older servers omit it). */
+  unreadCount?: number;
 };
 
 export type ReadStateApplyResult = "accepted" | "stale";
@@ -167,7 +169,11 @@ function normalizeReadStateScope(payload: unknown): ReadStateScope | null {
   if (!isNonNegativeSafeInteger(readStateVersion)) {
     return reportReadStateIngressCorrupt("readStateVersion", "read_state_version_invalid");
   }
-  return { scopeId, maxReadSeq, readStateVersion };
+  // Optional hint: a malformed count is dropped, never the read fact it rides on.
+  const { unreadCount } = payload as Record<string, unknown>;
+  return isNonNegativeSafeInteger(unreadCount)
+    ? { scopeId, maxReadSeq, readStateVersion, unreadCount }
+    : { scopeId, maxReadSeq, readStateVersion };
 }
 
 export function normalizeReadStateUpdated(payload: unknown): ReadStateUpdate | null {

@@ -61,6 +61,10 @@ export const DOCUMENT_PREVIEW_LABEL_ID = {
   pdf: "message.messageItem.docPreviewPdf",
 } as const;
 
+// Header tooltips all sit under their buttons; one shared object keeps the
+// prop referentially stable for AttachmentTooltip.
+const TOOLTIP_SIDE_BOTTOM_PROPS = { side: "bottom" } as const;
+
 export type PreviewCommentsContext = {
   attachmentId: string;
   filename: string;
@@ -144,12 +148,12 @@ export function AttachmentPreviewShell({
   // (>= sm) ignores this entirely — the aside/right-drawer behavior is
   // unchanged.
   const [sheetState, setSheetState] = useState<"collapsed" | "half">("collapsed");
-  const closeComments = () => {
+  const closeComments = useCallback(() => {
     setMode("preview");
     commitPendingAnchor(null);
     setCommentsOpen(false);
     setSheetState("collapsed");
-  };
+  }, [commitPendingAnchor]);
   const openComments = () => {
     captureSelectionContext();
     setPanelMounted(true);
@@ -223,11 +227,31 @@ export function AttachmentPreviewShell({
     setPanelMounted(true);
     setCommentsOpen(true);
   }, []);
+  // Stryker disable next-line ArrowFunction: anchor-clear sync is covered by attachment comment Playwright flows.
+  const clearPendingAnchor = useCallback(() => commitPendingAnchor(null), [commitPendingAnchor]);
+  const handleCopyError = useCallback((error: unknown) => {
+    onCopyError?.(error instanceof Error ? error : new Error(String(error)));
+  }, [onCopyError]);
   const previewCommentCtx = useMemo(
     // Stryker disable next-line ArrowFunction,ObjectLiteral: video timestamp pending-anchor propagation is covered by document attachment Playwright e2e.
     () => ({ commentMode, pendingAnchor, pushAnchor, getPendingAnchor, openPanel }),
     // Stryker disable next-line ArrayDeclaration: dependency freshness is exercised by the paused video timestamp Playwright flow.
     [commentMode, pendingAnchor, pushAnchor, getPendingAnchor, openPanel],
+  );
+  const sheetControls = useMemo(
+    () => ({
+      expanded: sheetState === "half",
+      onToggle: () => {
+        if (sheetState === "collapsed") {
+          setPanelMounted(true);
+          setCommentsOpen(true);
+          setSheetState("half");
+        } else {
+          closeComments();
+        }
+      },
+    }),
+    [sheetState, closeComments],
   );
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -301,9 +325,7 @@ export function AttachmentPreviewShell({
             {copyText ? (
               <CopyableCodeRoot
                 size="sm"
-                onError={(error) =>
-                  onCopyError?.(error instanceof Error ? error : new Error(String(error)))
-                }
+                onError={handleCopyError}
                 className="w-auto shrink-0"
                 data-slot="copyable-code-root"
               >
@@ -315,12 +337,12 @@ export function AttachmentPreviewShell({
                 />
               </CopyableCodeRoot>
             ) : null}
-            <AttachmentTooltip content={formatMessage({ id: "common.lightbox.download" })} contentProps={{ side: "bottom" }}>
+            <AttachmentTooltip content={formatMessage({ id: "common.lightbox.download" })} contentProps={TOOLTIP_SIDE_BOTTOM_PROPS}>
               <Button type="button" size="icon-sm" variant="outline" onClick={onDownload} aria-label={formatMessage({ id: "common.lightbox.download" })}>
                 <Download size={14} />
               </Button>
             </AttachmentTooltip>
-            <AttachmentTooltip content={formatMessage({ id: "common.lightbox.close" })} contentProps={{ side: "bottom" }}>
+            <AttachmentTooltip content={formatMessage({ id: "common.lightbox.close" })} contentProps={TOOLTIP_SIDE_BOTTOM_PROPS}>
               <CloseButton type="button"   onClick={onClose} aria-label={formatMessage({ id: "common.lightbox.close" })}>
                 <X size={14} />
               </CloseButton>
@@ -378,8 +400,7 @@ export function AttachmentPreviewShell({
                     parentMessage={comments.parentMessage}
                     pendingAnchor={pendingAnchor}
                     getPendingAnchor={getPendingAnchor}
-                    // Stryker disable next-line ArrowFunction: anchor-clear sync is covered by attachment comment Playwright flows.
-                    onAnchorCleared={() => commitPendingAnchor(null)}
+                    onAnchorCleared={clearPendingAnchor}
                   />
                 ) : null}
               </div>
@@ -414,8 +435,7 @@ export function AttachmentPreviewShell({
               parentMessage={comments.parentMessage}
               pendingAnchor={pendingAnchor}
               getPendingAnchor={getPendingAnchor}
-              // Stryker disable next-line ArrowFunction: anchor-clear sync is covered by attachment comment Playwright flows.
-              onAnchorCleared={() => commitPendingAnchor(null)}
+              onAnchorCleared={clearPendingAnchor}
             />
           ) : null}
         </div>
@@ -444,24 +464,12 @@ export function AttachmentPreviewShell({
             parentMessage={comments.parentMessage}
             pendingAnchor={pendingAnchor}
             getPendingAnchor={getPendingAnchor}
-            // Stryker disable next-line ArrowFunction: anchor-clear sync is covered by attachment comment Playwright flows.
-            onAnchorCleared={() => commitPendingAnchor(null)}
+            onAnchorCleared={clearPendingAnchor}
             // A chip jump on mobile means "show me the artifact": run the
             // full session boundary (Dozy review of a3a79538).
             onAnchorJump={closeComments}
             collapsedBody={sheetState === "collapsed"}
-            sheetControls={{
-              expanded: sheetState === "half",
-              onToggle: () => {
-                if (sheetState === "collapsed") {
-                  setPanelMounted(true);
-                  setCommentsOpen(true);
-                  setSheetState("half");
-                } else {
-                  closeComments();
-                }
-              },
-            }}
+            sheetControls={sheetControls}
           />
         </div>
       ) : null}
@@ -523,6 +531,8 @@ export function CsvPreviewPane({ preview, truncated }: { preview: Extract<Docume
 export function XlsxPreviewPane({ preview, truncated }: { preview: Extract<DocumentAttachmentPreview, { kind: "xlsx" }>; truncated: boolean }) {
   const { formatMessage } = useIntl();
   const [activeSheet, setActiveSheet] = useState(0);
+  // Declared before the !selected early return: hooks must not trail it.
+  const handleSheetChange = useCallback((next: string) => setActiveSheet(Number(next)), []);
   const selected = preview.sheets[Math.min(activeSheet, Math.max(0, preview.sheets.length - 1))];
   if (!selected) {
     return <div className="w-full bg-layer-canvas-muted theme-brutal:bg-brutal-cream/45 p-4 text-xs font-bold text-foreground-muted theme-brutal:text-black/60">{formatMessage({ id: "message.messageItem.xlsxEmpty" })}</div>;
@@ -538,7 +548,7 @@ export function XlsxPreviewPane({ preview, truncated }: { preview: Extract<Docum
       {preview.sheets.length > 1 ? (
         <Tabs<string>
           value={String(activeSheet)}
-          onValueChange={(next) => setActiveSheet(Number(next))}
+          onValueChange={handleSheetChange}
           className="mb-3 max-w-full overflow-x-auto pb-1"
         >
           <TabsList aria-label={formatMessage({ id: "message.messageItem.xlsxSheetTabs" })}>
@@ -905,6 +915,12 @@ function HtmlPreviewBody({
     if (openAttachmentPreviewExternalLink(link)) updatePendingExternalLink(null);
     else updatePendingExternalLink(link);
   }, [updatePendingExternalLink]);
+  const dismissPendingExternalLink = useCallback(() => updatePendingExternalLink(null), [updatePendingExternalLink]);
+  const openPendingExternalLink = useCallback(() => {
+    if (pendingExternalLink && openAttachmentPreviewExternalLink(pendingExternalLink)) {
+      updatePendingExternalLink(null);
+    }
+  }, [pendingExternalLink, updatePendingExternalLink]);
   // Drag rect in overlay-local px while capturing; flash region in CONTENT px
   // (it must track the document as the bridge reports scrolling).
   const [drag, setDrag] = useState<{ x0: number; y0: number; x1: number; y1: number } | null>(null);
@@ -1052,11 +1068,7 @@ function HtmlPreviewBody({
             type="button"
             size="sm"
             variant="outline"
-            onClick={() => {
-              if (openAttachmentPreviewExternalLink(pendingExternalLink)) {
-                updatePendingExternalLink(null);
-              }
-            }}
+            onClick={openPendingExternalLink}
           >
             {formatMessage({ id: "message.messageItem.openLink" })}
           </Button>
@@ -1064,7 +1076,7 @@ function HtmlPreviewBody({
             type="button"
 
 
-            onClick={() => updatePendingExternalLink(null)}
+            onClick={dismissPendingExternalLink}
             aria-label={formatMessage({ id: "message.messageItem.dismissExternalLink" })}
           >
             <X size={14} />
@@ -1188,6 +1200,10 @@ function VideoPreviewBody({
     const time = Math.round(video.currentTime * 1000) / 1000;
     if (time > 0) ctx.pushAnchor({ type: "video-timestamp", data: { time } });
   }, [ctx]);
+  const handleAddTimestampClick = useCallback((event: React.MouseEvent) => {
+    event.stopPropagation();
+    pushCurrentTimeAnchor();
+  }, [pushCurrentTimeAnchor]);
 
   // Coalesce timestamp jumps onto the latest target (see videoTimestampSeekCoalesce).
   // Rapid currentTime writes thrash Chromium media (Aw Snap / error code 11).
@@ -1278,10 +1294,7 @@ function VideoPreviewBody({
             size="sm"
             variant="outline"
             data-message-affordance="video-comment-add-timestamp"
-            onClick={(event) => {
-              event.stopPropagation();
-              pushCurrentTimeAnchor();
-            }}
+            onClick={handleAddTimestampClick}
             className="absolute bottom-5 left-1/2 -translate-x-1/2"
           >
             <Plus size={12} />

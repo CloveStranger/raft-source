@@ -2,6 +2,9 @@ import pg from "pg";
 import { attachPoolClientErrorHandler } from "./pgPoolErrorHandler";
 import { performance } from "node:perf_hooks";
 import { recordExternalSinkInsideTransaction } from "./ambientTransaction";
+import { isPoolAcquireTimeoutError, observeStatement, recordStatementError, statementKindFromText } from "./statementMetrics";
+
+export { isPoolAcquireTimeoutError };
 
 export const RISINGWAVE_UNREAD_INBOX_CONTRACT_VERSION = 2;
 /**
@@ -16,8 +19,9 @@ export const RISINGWAVE_UNREAD_INBOX_CONTRACT_VERSION = 2;
  * definitionally the sum of what its list shows. Rebuild scripts must carry this
  * dependent.
  *
- * The set is the chain on mention v6 (infra/risingwave/sql/067-mention-v6.sql and
- * 068-chain-mention-v6-consumers.sql), carrying the v5 semantics
+ * The set is the chain on mention v6 (infra/risingwave/sql/067-mention-v6.sql;
+ * consumers first in 068-chain-mention-v6-consumers.sql, now
+ * 076-cursor-decouple-consumers.sql), carrying the v5 semantics
  * (infra/risingwave/sql/063-chain-v5.sql: mute acts at admission, the watermark is
  * per (receiver, server), every (user, server) membership has a totals row).
  * message_mentions.channel_id of a joint conversation is the SENDER's local
@@ -32,18 +36,123 @@ export const RISINGWAVE_UNREAD_INBOX_CONTRACT_VERSION = 2;
  * offered_unread / activity_seq), and the app reads its columns without
  * re-deriving them.
  *
- * conversationUnread (rw_conversation_unread_v2; rw_inbox_muted_full_v1 in
- * infra/risingwave/sql/066-conversation-unread-v1.sql) is the sidebar's unread
+ * conversationUnread (rw_conversation_unread_v3; rw_inbox_muted_full_v2 in
+ * infra/risingwave/sql/075-inbox-cursor-decouple.sql) is the sidebar's unread
  * source -- GET /channels/unread (bare and summary) and the per-server pink badge
  * (GET /servers/unread-summary).
+ *
+ * The set is the cursor-decoupled generation (075 arms, 076 consumers): same
+ * columns and semantics as 068's, but a read-cursor move no longer rewrites
+ * every message of the conversation in the arm views.
  */
-export const CONVERSATION_UNREAD_VIEW = "rw_conversation_unread_v2";
+export const CONVERSATION_UNREAD_VIEW = "rw_conversation_unread_v3";
 export const UNIFIED_CHAIN_VIEWS = {
-  serving: "rw_inbox_serving_v6",
-  totals: "rw_activity_totals_v4",
-  agentInbox: "rw_agent_inbox_v5",
+  serving: "rw_inbox_serving_v8",
+  totals: "rw_activity_totals_v6",
+  agentInbox: "rw_agent_inbox_v6",
   conversationUnread: CONVERSATION_UNREAD_VIEW,
 } as const;
+/**
+ * TRANSITION: a read that finds a current view missing reads the newest older
+ * generation that exists instead of failing the endpoint
+ * (withUnifiedChainTransition); the columns are identical across generations.
+ * Each entry lists the older generations, newest first.
+ *   - serving/totals: 077 (task #333) -> 076 -> 068. An environment that has not
+ *     built 077 reads 076's serving v7 / totals v5, which still show threads
+ *     below a deleted parent, as before 077; one that has not built 076 either
+ *     reads 068's v6 / v4. Drop the 068 step once 076 is built everywhere, and
+ *     the whole entry once 077 is built everywhere and traces show no fallback.
+ *   - agent inbox/conversation unread (076): 068's v5 / v2. Remove with the 068
+ *     views.
+ */
+export const UNIFIED_CHAIN_TRANSITION_VIEWS: ReadonlyMap<string, readonly string[]> = new Map([
+  [UNIFIED_CHAIN_VIEWS.serving, ["rw_inbox_serving_v7", "rw_inbox_serving_v6"]],
+  [UNIFIED_CHAIN_VIEWS.totals, ["rw_activity_totals_v5", "rw_activity_totals_v4"]],
+  [UNIFIED_CHAIN_VIEWS.agentInbox, ["rw_agent_inbox_v5"]],
+  [UNIFIED_CHAIN_VIEWS.conversationUnread, ["rw_conversation_unread_v2"]],
+]);
+// A missing generation is remembered for this long, so the read path does not pay
+// a failed round-trip per request while an environment is still building it.
+const UNIFIED_CHAIN_TRANSITION_MEMO_MS = 60_000;
+const unifiedChainViewMissingUntil = new Map<string, number>();
+
+/**
+ * "relation does not exist": RisingWave answers SQLSTATE 42704 with "table or
+ * source not found: <name>"; Postgres 42P01 with "relation ... does not exist".
+ */
+export function isMissingRelationError(error: unknown, relation: string): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  const code = (error as { code?: unknown } | null)?.code;
+  return message.includes(relation)
+    && (code === "42P01" || code === "42704" || /does not exist|not found/i.test(message));
+}
+
+/**
+ * Every generation of a unified-chain view was found missing within the memo
+ * window. Thrown instead of running SQL with no relation to name, so the error
+ * says which view and which generations, not `relation "null"` (Rill, #9463).
+ */
+export class UnifiedChainViewUnavailableError extends Error {
+  readonly code = "UNIFIED_CHAIN_VIEW_UNAVAILABLE";
+  constructor(readonly view: string, readonly generations: readonly string[]) {
+    super(`RisingWave has none of the generations of ${view}: ${generations.join(", ")}`);
+    this.name = "UnifiedChainViewUnavailableError";
+  }
+}
+
+/** The newest generation of `view` not remembered as missing, or null if none is left. */
+function unifiedChainReadName(view: string, at: number): string | null {
+  for (const name of [view, ...UNIFIED_CHAIN_TRANSITION_VIEWS.get(view)!]) {
+    if ((unifiedChainViewMissingUntil.get(name) ?? 0) <= at) return name;
+  }
+  return null;
+}
+
+/**
+ * Runs `run` with `queryText`; if that fails because a view of the unified chain
+ * is missing, remembers that generation as missing for a minute and reruns with
+ * the next older one, until a run succeeds, fails for another reason, or a view
+ * has no older generation left (then the last error is thrown). Every rerun on
+ * older generations reports to `onFallback`: the current views it replaced and
+ * the names it read instead (for a trace event).
+ */
+export async function withUnifiedChainTransition<T>(
+  queryText: string,
+  run: (queryText: string) => Promise<T>,
+  onFallback: (missingViews: string[], readViews: string[]) => void = () => {},
+  now: () => number = Date.now,
+): Promise<T> {
+  const named = [...UNIFIED_CHAIN_TRANSITION_VIEWS.keys()]
+    .filter((view) => new RegExp(`\\b${view}\\b`).test(queryText));
+  if (named.length === 0) return run(queryText);
+  for (;;) {
+    const at = now();
+    const chosen = named.map((view) => [view, unifiedChainReadName(view, at)] as const);
+    const exhausted = chosen.find(([, name]) => name === null);
+    if (exhausted) {
+      const view = exhausted[0];
+      throw new UnifiedChainViewUnavailableError(view, [view, ...UNIFIED_CHAIN_TRANSITION_VIEWS.get(view)!]);
+    }
+    const swapped = chosen.filter(([view, name]) => name !== view);
+    let text = queryText;
+    for (const [view, name] of swapped) text = text.replace(new RegExp(`\\b${view}\\b`, "g"), name!);
+    if (swapped.length > 0) onFallback(swapped.map(([view]) => view), swapped.map(([, name]) => name!));
+    try {
+      return await run(text);
+    } catch (error) {
+      const missing = chosen.map(([, name]) => name!).filter((name) => isMissingRelationError(error, name));
+      if (missing.length === 0) throw error;
+      for (const name of missing) unifiedChainViewMissingUntil.set(name, at + UNIFIED_CHAIN_TRANSITION_MEMO_MS);
+      if (named.some((view) => unifiedChainReadName(view, at) === null)) throw error;
+    }
+  }
+}
+
+export const __testUnifiedChainTransition = {
+  reset() {
+    unifiedChainViewMissingUntil.clear();
+  },
+};
 export type RisingWaveInboxItemsServingVersion = 2 | 3;
 export type RisingWaveInboxRfc056ServingMode = "off" | "shadow" | "on";
 export const RISINGWAVE_UNREAD_INBOX_SERVING_VERSION: RisingWaveInboxItemsServingVersion = 2;
@@ -115,9 +224,35 @@ export class RisingWaveOverloadedError extends Error {
   }
 }
 
-/** pg-pool's "no client within connectionTimeoutMillis" error. */
-export function isPoolAcquireTimeoutError(error: unknown): boolean {
-  return error instanceof Error && /timeout exceeded when trying to connect/i.test(error.message);
+/** True when `error` (or its cause chain) is a RisingWaveOverloadedError. */
+export function isRisingWaveOverloadedError(error: unknown): boolean {
+  for (let current = error, depth = 0; current && depth < 5; depth += 1) {
+    if (current instanceof RisingWaveOverloadedError) return true;
+    current = (current as { cause?: unknown }).cause;
+  }
+  return false;
+}
+
+/**
+ * A RisingWave read failed for a reason other than overload or missing
+ * configuration (connection refused, query error, ...). The original error is
+ * the `cause`. Routes that adopted the typed contract (task #162) answer it
+ * with 502 rw_read_failed instead of 500, which would read as a server bug.
+ */
+export class RisingWaveReadError extends Error {
+  constructor(cause: unknown) {
+    super(`RisingWave read failed: ${cause instanceof Error ? cause.message : String(cause)}`, { cause });
+    this.name = "RisingWaveReadError";
+  }
+}
+
+/** Wrap a RisingWave read failure as RisingWaveReadError unless it is already typed. */
+export function asRisingWaveReadError(error: unknown): unknown {
+  return error instanceof RisingWaveNotConfiguredError
+    || error instanceof RisingWaveReadError
+    || isRisingWaveOverloadedError(error)
+    ? error
+    : new RisingWaveReadError(error);
 }
 
 /** Rethrow a RisingWave pool acquire timeout as RisingWaveOverloadedError. */
@@ -153,13 +288,19 @@ export async function queryRisingWave<T extends pg.QueryResultRow = any>(
   try {
     client = await pool.connect();
   } catch (error) {
+    recordStatementError("risingwave", error);
     throw asRisingWaveOverload(error);
   }
   const acquireWaitMs = performance.now() - acquireStartedAt;
   const poolState = getRisingWavePoolState(pool);
+  const statementStartMs = Date.now();
   try {
     const result = await client.query<T>(queryText, values);
+    observeStatement("risingwave", statementKindFromText(queryText), statementStartMs);
     return { result, acquireWaitMs, poolState };
+  } catch (error) {
+    observeStatement("risingwave", statementKindFromText(queryText), statementStartMs, error);
+    throw error;
   } finally {
     client.release();
   }

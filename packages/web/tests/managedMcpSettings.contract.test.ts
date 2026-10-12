@@ -16,7 +16,12 @@ test("Server MCP configuration lives in global Settings while Agent MCP shows re
   const settingsPanel = readSource("src/components/settings/SettingsPanel.tsx");
   const sidebar = readSource("src/components/layout/Sidebar.tsx");
   const agentPanel = readSource("src/components/agent/AgentDetailPanel.tsx");
-  const mcpPanel = readSource("src/components/agent/AgentMcpTab.tsx");
+  const mcpPanel = [
+    readSource("src/components/agent/AgentMcpTab.tsx"),
+    readSource("src/components/agent/McpServerListItem.tsx"),
+    readSource("src/components/agent/McpRecommendationItem.tsx"),
+    readSource("src/components/agent/McpHeaderRow.tsx"),
+  ].join("\n");
 
   assert.match(navigation, /id: "integrations", label: "Applications", title: "Applications"[\s\S]*id: "mcp", label: "MCP Servers", title: "MCP Servers"/u);
   assert.match(englishMessages, /"settings\.tabs\.mcp": "MCP Servers"/u);
@@ -40,7 +45,7 @@ test("Server MCP configuration lives in global Settings while Agent MCP shows re
   assert.doesNotMatch(mcpPanel, /pendingCount|Apply &amp; restart|assignmentDrafts/u);
   assert.doesNotMatch(mcpPanel, /<select/u);
   assert.match(mcpPanel, /<SelectTrigger className="w-full">/u);
-  assert.match(mcpPanel, /const added = catalog\.servers\.some/u);
+  assert.match(mcpPanel, /added=\{catalog\.servers\.some\(\(server\) => server\.provider === recommendation\.provider\)\}/u);
   assert.match(mcpPanel, /disabled=\{added\}/u);
   assert.match(mcpPanel, /id: added \? "agent\.mcp\.added" : "agent\.mcp\.add"/u);
   assert.match(englishMessages, /"agent\.mcp\.added": "Added"/u);

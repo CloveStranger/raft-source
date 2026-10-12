@@ -54,7 +54,10 @@ export async function drainAgentManagerForTests(
     ensureManagedRunnerCredential: "function",
   });
   const agentStarts = requireMembers<StartCoordinatorInternals>("agentStarts", m.agentStarts, { cancelAllQueued: "function", snapshot: "function" });
-  const lifecycleRecords = requireMembers<{ clearRestartSnapshots(): void }>("lifecycleRecords", m.lifecycleRecords, { clearRestartSnapshots: "function" });
+  const lifecycleRecords = requireMembers<{
+    clearRestartSnapshots(): void;
+    activeSpawnFailBackoffs: Map<string, { timer?: ReturnType<typeof setTimeout> | null }>;
+  }>("lifecycleRecords", m.lifecycleRecords, { clearRestartSnapshots: "function", activeSpawnFailBackoffs: "object" });
 
   if (m.coldIdleSweepTimer) clearInterval(m.coldIdleSweepTimer);
   m.coldIdleSweepTimer = null;
@@ -64,6 +67,13 @@ export async function drainAgentManagerForTests(
   for (const item of agentStarts.cancelAllQueued()) item.resolve();
   for (const wait of [...m.capabilityHolds.values()]) wait.cancel();
   lifecycleRecords.clearRestartSnapshots();
+  // Mirror stopAll (task #357): with the restart configs gone, a still-active
+  // spawn-fail cooldown would trip the residency invariant in the stopAll
+  // that follows this drain.
+  for (const state of lifecycleRecords.activeSpawnFailBackoffs.values()) {
+    if (state.timer) clearTimeout(state.timer);
+  }
+  lifecycleRecords.activeSpawnFailBackoffs.clear();
   for (const timer of m.runtimeErrorProcessRestartTimers.values()) clearTimeout(timer);
   m.runtimeErrorProcessRestartTimers.clear();
 

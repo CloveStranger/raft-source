@@ -72,7 +72,7 @@ test("create channel command posts normalized channel payload", async () => {
   assert.deepEqual(requests, [
     {
       method: "POST",
-      path: "/internal/agent/agent-1/channels",
+      path: "/internal/agent-api/channels",
       body: {
         name: "engineering",
         description: "Build work",

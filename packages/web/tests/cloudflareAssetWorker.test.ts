@@ -59,6 +59,16 @@ describe("Cloudflare Pages built-asset worker", () => {
     assert.equal(await stylesheet.text(), "body {}");
   });
 
+  test("protects feedback assets from cached HTML fallbacks while caching real files", async () => {
+    const real = await runWorker("/feedback/assets/index-current.js", new Response("export const ready = true;", { headers: { "Content-Type": "application/javascript" } }));
+    assert.equal(real.status, 200);
+    assert.equal(real.headers.get("cache-control"), "public, max-age=31536000, immutable");
+    const missing = await runWorker("/feedback/assets/index-missing.js", new Response("<!doctype html>", { headers: { "Content-Type": "text/html" } }));
+    assert.equal(missing.status, 404);
+    assert.equal(missing.headers.get("cache-control"), "no-store");
+    assert.equal(await missing.text(), "");
+  });
+
   test("turns Pages SPA HTML fallback into an empty non-cacheable 404", async () => {
     const response = await runWorker("/assets/index-stale.js", new Response("<!doctype html><title>Raft</title>", {
       status: 200,

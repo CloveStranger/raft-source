@@ -5,7 +5,7 @@ import path from "node:path";
 import { errorClassOf, errorCodeOf } from "@botiverse/raft-shared";
 import type { Tracer } from "@botiverse/raft-shared";
 import { uploadWithSignedCapability } from "./directUploadCapability";
-import { bucketDelayMs, computeTraceJitter, NO_JITTER, type TraceJitter } from "@botiverse/raft-trace-client";
+import { bucketDelayMs, computeTraceJitter, NO_JITTER, traceFileFamily, type TraceJitter } from "@botiverse/raft-trace-client";
 
 const TRACE_UPLOAD_SCOPE = "daemon-trace-bundle:create";
 const DEFAULT_UPLOAD_INTERVAL_MS = 5 * 60 * 1000;
@@ -174,6 +174,39 @@ function readServerUploadIdentity(metadata: Record<string, unknown> | undefined)
   };
 }
 const DEFAULT_MAX_FILES_PER_RUN = 4;
+// Task #364: one pass of 4 files per 5 min sustains ~20 MiB (rotating files are
+// 5 MiB) while prune keeps 8 per family, so a busy machine's backlog was pruned
+// before upload. While a pass leaves files deferred and made progress, run more
+// passes shortly after, bounded per interval so the upload server sees at most
+// (1 + max) x 4 files per machine per interval.
+const DEFAULT_CATCHUP_DELAY_MS = 15 * 1000;
+const DEFAULT_MAX_CATCHUP_PASSES_PER_INTERVAL = 4;
+
+/**
+ * Pick this pass's files oldest-first within each family, taking one family at
+ * a time in turn. A plain sorted slice puts every rotating file
+ * (`daemon-trace-2…`) ahead of `cli-transport-` and `diag-`, so under a
+ * rotating backlog those families never got a slot and were pruned unsent.
+ */
+export function selectFilesForPass(sortedFiles: readonly string[], maxFiles: number): string[] {
+  const byFamily = new Map<string, string[]>();
+  for (const file of sortedFiles) {
+    const family = traceFileFamily(path.basename(file));
+    const list = byFamily.get(family);
+    if (list) list.push(file);
+    else byFamily.set(family, [file]);
+  }
+  const queues = [...byFamily.values()];
+  const selected: string[] = [];
+  while (selected.length < maxFiles && queues.some((queue) => queue.length > 0)) {
+    for (const queue of queues) {
+      if (selected.length >= maxFiles) break;
+      const next = queue.shift();
+      if (next) selected.push(next);
+    }
+  }
+  return selected;
+}
 
 /**
  * Closed-set of `deployment.environment` values this daemon may self-declare
@@ -202,7 +235,7 @@ type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
 type TickFn = "setTimeout" | "setInterval" | "clearTimeout" | "clearInterval";
 type Timers = Pick<typeof globalThis, TickFn>;
 
-export type UploadTrigger = "initial" | "interval" | "manual";
+export type UploadTrigger = "initial" | "interval" | "manual" | "catchup";
 
 export interface DaemonTraceBundleUploaderOptions {
   machineDir: string;
@@ -214,6 +247,10 @@ export interface DaemonTraceBundleUploaderOptions {
   intervalMs?: number;
   minFileAgeMs?: number;
   maxFilesPerRun?: number;
+  /** Delay before a catch-up pass while a backlog remains (task #364). */
+  catchupDelayMs?: number;
+  /** Catch-up passes allowed between two interval ticks (task #364). */
+  maxCatchupPassesPerInterval?: number;
   currentFileProvider?: () => string | null;
   /**
    * Write-failure counters from the local sink.
@@ -255,6 +292,10 @@ export class DaemonTraceBundleUploader {
   private readonly timers: Timers;
   private initialDelayTimer: ReturnType<typeof setTimeout> | null = null;
   private intervalTimer: ReturnType<typeof setTimeout> | null = null;
+  private catchupTimer: ReturnType<typeof setTimeout> | null = null;
+  private catchupPassesThisInterval = 0;
+  /** A scheduled pass still uploading; at most one runs at a time. */
+  private scheduledPassInFlight = false;
   private stopped = false;
 
   constructor(options: DaemonTraceBundleUploaderOptions) {
@@ -277,7 +318,7 @@ export class DaemonTraceBundleUploader {
     this.initialDelayTimer = this.timers.setTimeout(() => {
       this.initialDelayTimer = null;
       if (this.stopped) return;
-      void this.uploadOnce("initial");
+      void this.runScheduledPass("initial");
       this.scheduleNextTick();
     }, initialDelayMs);
   }
@@ -292,13 +333,57 @@ export class DaemonTraceBundleUploader {
       this.timers.clearTimeout(this.intervalTimer);
       this.intervalTimer = null;
     }
+    if (this.catchupTimer) {
+      this.timers.clearTimeout(this.catchupTimer);
+      this.catchupTimer = null;
+    }
+  }
+
+  /**
+   * A scheduled pass, followed by a bounded catch-up pass while it left files
+   * deferred and uploaded at least one (a failing upload does not retry faster;
+   * the interval tick picks it up again).
+   */
+  private async runScheduledPass(trigger: UploadTrigger): Promise<void> {
+    // One pass at a time. A file is skipped only once its receipt exists, and
+    // the receipt is written after its upload finishes, so two overlapping
+    // passes would both pick the same oldest files and upload them twice. On a
+    // slow, backlogged machine a catch-up chain can still be running when the
+    // next interval tick fires; that tick is skipped and the chain carries on
+    // (review of #9105, HaoHao).
+    if (this.scheduledPassInFlight) return;
+    if (trigger !== "catchup") {
+      this.catchupPassesThisInterval = 0;
+      if (this.catchupTimer) {
+        this.timers.clearTimeout(this.catchupTimer);
+        this.catchupTimer = null;
+      }
+    }
+    let result: { uploaded: number; deferred: number };
+    this.scheduledPassInFlight = true;
+    try {
+      result = await this.uploadOnce(trigger);
+    } catch {
+      return;
+    } finally {
+      this.scheduledPassInFlight = false;
+    }
+    const maxCatchup = this.options.maxCatchupPassesPerInterval ?? DEFAULT_MAX_CATCHUP_PASSES_PER_INTERVAL;
+    if (this.stopped || result.deferred === 0 || result.uploaded === 0) return;
+    if (this.catchupPassesThisInterval >= maxCatchup || this.catchupTimer) return;
+    this.catchupPassesThisInterval += 1;
+    this.catchupTimer = this.timers.setTimeout(() => {
+      this.catchupTimer = null;
+      if (this.stopped) return;
+      void this.runScheduledPass("catchup");
+    }, this.options.catchupDelayMs ?? DEFAULT_CATCHUP_DELAY_MS);
   }
 
   /**
    * Drive a single upload pass. `trigger` is surfaced as a span attribute so
    * we can distinguish startup drain vs steady-state ticks in ScopeDB.
    */
-  async uploadOnce(trigger: UploadTrigger = "manual"): Promise<{ attempted: number; uploaded: number }> {
+  async uploadOnce(trigger: UploadTrigger = "manual"): Promise<{ attempted: number; uploaded: number; deferred: number }> {
     // A span for the PASS, not just for each file. Today a pass that finds
     // nothing emits no span at all, so "scanned and found zero" and "never ran"
     // are the same absence — and #408 is a machine that quietly stopped
@@ -319,7 +404,7 @@ export class DaemonTraceBundleUploader {
     try {
       report = this.options.sinkReportProvider?.drain() ?? null;
       const { files, readdirFailed } = await this.findUploadCandidates();
-      const considered = files.slice(0, this.options.maxFilesPerRun ?? DEFAULT_MAX_FILES_PER_RUN);
+      const considered = selectFilesForPass(files, this.options.maxFilesPerRun ?? DEFAULT_MAX_FILES_PER_RUN);
       const prunedWithoutReceipt = report
         ? await this.countPrunedWithoutReceipt(report.attrDrops.prunedNames ?? [])
         : 0;
@@ -361,7 +446,7 @@ export class DaemonTraceBundleUploader {
           ...traceWriteFailureAttrs(report?.writeFailures ?? null),
         },
       });
-      return { attempted: files.length, uploaded };
+      return { attempted: files.length, uploaded, deferred: files.length - considered.length };
     } catch (err) {
       // The pass still gets a record, carrying the window it already drained.
       delivered = span !== undefined;
@@ -392,7 +477,7 @@ export class DaemonTraceBundleUploader {
     this.intervalTimer = this.timers.setTimeout(() => {
       this.intervalTimer = null;
       if (this.stopped) return;
-      void this.uploadOnce("interval");
+      void this.runScheduledPass("interval");
       this.scheduleNextTick();
     }, nextMs);
   }

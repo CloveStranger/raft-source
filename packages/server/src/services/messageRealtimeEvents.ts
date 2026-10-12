@@ -32,7 +32,9 @@ export type MessageRealtimeTarget = {
   serverId: string;
 };
 
-type StorageOnlyMessageSocketKey = "agentSendKey" | "searchText" | "searchVector" | "senderHandle" | "serverId";
+// `senderTimezone` is agent-facing only: a human's browser zone must not reach
+// other humans' clients.
+type StorageOnlyMessageSocketKey = "agentSendKey" | "searchText" | "searchVector" | "senderHandle" | "serverId" | "senderTimezone";
 
 type MessageAudience = {
   emit(event: "message:new" | "message:updated" | "task:created" | "task:updated" | "task:deleted", payload: unknown): unknown;
@@ -85,6 +87,7 @@ export function projectRichMessageSocketPayload<T extends Record<string, unknown
     searchVector: _searchVector,
     senderHandle: _senderHandle,
     serverId: _serverId,
+    senderTimezone: _senderTimezone,
     ...projected
   } = payload;
   return projected;

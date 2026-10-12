@@ -1,6 +1,6 @@
 {
   "name": "@botiverse/raft",
-  "version": "0.0.33",
+  "version": "0.0.36",
   "license": "FSL-1.1-ALv2",
   "description": "Canonical Raft agent-facing CLI. Provides raft plus the legacy slock alias over the same CLI core. Invoked by daemon-spawned agent processes via injected env vars.",
   "type": "module",
@@ -32,17 +32,17 @@
     "lint:publish-package": "node scripts/check-publish-package.mjs"
   },
   "dependencies": {
-    "ajv": "^8.18.0",
+    "ajv": "^8.20.0",
     "commander": "^12.1.0",
     "safe-regex2": "5.1.1",
-    "undici": "^7.29.1"
+    "undici": "^7.30.0"
   },
   "devDependencies": {
     "@botiverse/raft-shared": "workspace:*",
-    "@oxc-node/core": "^0.1.3",
+    "@oxc-node/core": "^0.1.6",
     "@types/node": "^25.5.0",
     "tsdown": "^0.23.0",
     "typescript": "^6.0.3",
-    "vitest": "^5.0.2"
+    "vitest": "^5.0.3"
   }
 }

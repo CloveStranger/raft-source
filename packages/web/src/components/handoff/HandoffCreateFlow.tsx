@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
+import type { ChangeEvent } from "react";
 import { useIntl } from "react-intl";
 import { useNavigate } from "react-router-dom";
 import { FolderOpen, Search, TriangleAlert } from "lucide-react";
@@ -19,9 +20,6 @@ import {
   InputGroupAddon,
   InputGroupInput,
   SegmentedControl,
-  SegmentedControlCount,
-  SegmentedControlItem,
-  SegmentedControlLabel,
   Spinner,
 } from "raft-ui";
 import {
@@ -33,6 +31,7 @@ import {
   TOOL_LABEL,
 } from "./handoffSessions";
 import type { LocalIdentity, LocalSession, SessionExcerpt } from "./handoffSessions";
+import { HandoffToolTab } from "./HandoffToolTab";
 
 // Desktop-only Handoff flow (#kabi-desktop task #13; design: raft-artifacts
 // desktop-handoff-design v2). Since task #104 it is the "start from a local
@@ -54,6 +53,8 @@ export interface HandoffFlowState {
   /** The agent exists but the briefing has not been delivered; a retry is offered. */
   retryPending: boolean;
 }
+
+const HANDOFF_TOOLS = ["claude-code", "codex"] as const;
 
 export default function HandoffCreateFlow({ onClose, onStateChange }: {
   /** Closes the hosting Create Agent dialog (Cancel, and after a successful handoff). */
@@ -121,6 +122,8 @@ export default function HandoffCreateFlow({ onClose, onStateChange }: {
   useEffect(() => () => { onStateChange?.({ creating: false, retryPending: false }); }, [onStateChange]);
 
   useEffect(() => {
+    // The bridge is a stable global in the desktop shell, so this runs once.
+    const bridge = getHandoffBridge();
     if (!bridge) return;
     let alive = true;
     bridge.listSessions()
@@ -128,8 +131,6 @@ export default function HandoffCreateFlow({ onClose, onStateChange }: {
       .catch(() => { if (alive) setLoadError(true); });
     void getLocalIdentity().then((identity) => { if (alive) setLocalIdentity(identity); });
     return () => { alive = false; };
-    // The bridge is a stable global in the desktop shell.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const localMachine = useMemo(
@@ -141,7 +142,8 @@ export default function HandoffCreateFlow({ onClose, onStateChange }: {
   // generation (discards stale results) AND the main-process scan self-cancels
   // because each call bumps its own generation there. No-op without bridge support.
   useEffect(() => {
-    const searchFn = bridge?.searchContent;
+    // bridge is a stable global in the desktop shell; only `query` changes.
+    const searchFn = getHandoffBridge()?.searchContent;
     if (!searchFn) return;
     const q = query.trim();
     // Clearing the box: discard any pending resolve AND cancel the in-flight
@@ -164,15 +166,15 @@ export default function HandoffCreateFlow({ onClose, onStateChange }: {
         });
     }, 250);
     return () => clearTimeout(timer);
-    // bridge is a stable global in the desktop shell.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [query]);
 
   // On unmount, cancel any in-flight scan so it stops reading transcripts.
-  useEffect(() => () => {
-    searchGenRef.current += 1;
-    void bridge?.searchContent?.("").catch(() => {});
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    const bridge = getHandoffBridge();
+    return () => {
+      searchGenRef.current += 1;
+      void bridge?.searchContent?.("").catch(() => {});
+    };
   }, []);
 
   const filtered = useMemo(() => {
@@ -249,8 +251,7 @@ export default function HandoffCreateFlow({ onClose, onStateChange }: {
           }
         });
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [reportState]);
+  }, [bridge, reportState]);
 
   const briefing = useMemo(() => {
     if (!selected) return "";
@@ -336,6 +337,18 @@ export default function HandoffCreateFlow({ onClose, onStateChange }: {
     }
   }, [selected, localMachine, creating, createdAgent, createAgent, agentName, formatMessage, openDM, sendMessage, briefing, serverSlug, navigate, onClose, reportState]);
 
+  const handleConfirmClick = useCallback(() => {
+    void confirm();
+  }, [confirm]);
+
+  const handleAgentNameChange = useCallback((event: ChangeEvent<HTMLInputElement>) => {
+    setAgentName(event.target.value);
+  }, []);
+
+  const handleQueryChange = useCallback((event: ChangeEvent<HTMLInputElement>) => {
+    setQuery(event.target.value);
+  }, []);
+
   if (!bridge) {
     return (
       <div className="flex items-center justify-center p-8 text-sm text-foreground-muted theme-brutal:text-black/50" data-testid="handoff-desktop-only">
@@ -395,7 +408,7 @@ export default function HandoffCreateFlow({ onClose, onStateChange }: {
         <Input
           id="handoff-agent-name"
           value={agentName}
-          onChange={(event) => setAgentName(event.target.value)}
+          onChange={handleAgentNameChange}
           data-testid="handoff-agent-name-input"
           className="mb-3 w-full"
         />
@@ -437,7 +450,7 @@ export default function HandoffCreateFlow({ onClose, onStateChange }: {
             type="button"
             variant="primary"
             disabled={creating || excerpt === null || !localMachine}
-            onClick={() => void confirm()}
+            onClick={handleConfirmClick}
             data-testid="handoff-confirm-button"
           >
             {creating
@@ -459,7 +472,7 @@ export default function HandoffCreateFlow({ onClose, onStateChange }: {
         </InputGroupAddon>
         <InputGroupInput
           value={query}
-          onChange={(event) => setQuery(event.target.value)}
+          onChange={handleQueryChange}
           placeholder={formatMessage({ id: "handoff.searchPlaceholder" })}
           aria-label={formatMessage({ id: "handoff.searchPlaceholder" })}
           data-testid="handoff-search-input"
@@ -501,20 +514,13 @@ export default function HandoffCreateFlow({ onClose, onStateChange }: {
           aria-label={formatMessage({ id: "handoff.toolSwitcher" })}
           className="mb-3"
         >
-          {(["claude-code", "codex"] as const).map((tool) => (
-            <SegmentedControlItem
+          {HANDOFF_TOOLS.map((tool) => (
+            <HandoffToolTab
               key={tool}
-              value={tool}
-              data-testid={`handoff-tool-tab-${tool}`}
-              // Explicit activation must stick even when the item is ALREADY the
-              // value (RadioGroup fires no onValueChange then): record mouse and
-              // keyboard activation of the current item too (review of #8205).
-              onClick={() => setToolChoice(tool)}
-              onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") setToolChoice(tool); }}
-            >
-              <SegmentedControlLabel>{TOOL_LABEL[tool]}</SegmentedControlLabel>
-              <SegmentedControlCount>{grouped[tool].length}</SegmentedControlCount>
-            </SegmentedControlItem>
+              tool={tool}
+              count={grouped[tool].length}
+              onChoose={setToolChoice}
+            />
           ))}
         </SegmentedControl>
       )}

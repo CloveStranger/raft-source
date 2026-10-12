@@ -37,7 +37,10 @@ test("agent and machine residue slice adopts FormatJS ids without re-hardcoding 
   const agentWorkspace = readSource("src/components/agent/AgentWorkspace.tsx");
   const pixelAvatar = readSource("src/components/agent/PixelAvatar.tsx");
   const addMachineDialog = readSource("src/components/machine/AddMachineDialog.tsx");
-  const computerCommandGuide = readSource("src/components/machine/ComputerCommandGuide.tsx");
+  const computerCommandGuide = [
+    readSource("src/components/machine/ComputerCommandGuide.tsx"),
+    readSource("src/components/machine/CommandRow.tsx"),
+  ].join("\n");
 
   assertContainsIds(agentSkills, [
     "agent.skills.loadFailed",

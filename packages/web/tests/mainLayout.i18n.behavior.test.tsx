@@ -35,8 +35,6 @@ test("catalog pins main-layout MessageIds", () => {
   assert.equal(en["layout.main.computerNotFound"], "Computer not found");
   assert.equal(en["layout.main.humanNotFound"], "Human not found");
   assert.equal(en["layout.main.threadNotInActivity"], "Thread is no longer in Activity");
-  assert.equal(en["layout.main.settingsAria"], "Settings");
-  assert.equal(en["layout.main.closeSettingsAria"], "Close Settings");
   assert.match(zh["layout.main.loadingChannel"], /\p{Script=Han}/u);
   assert.match(zh["layout.main.threadNotInActivity"], /\p{Script=Han}/u);
 });
@@ -48,10 +46,6 @@ test("main-layout ids format under zh-cn", () => {
     messages: mergedMessages("zh-cn"),
   });
   assert.doesNotMatch(zhIntl.formatMessage({ id: "layout.main.agentNotFound" }), /Agent not found/);
-  assert.equal(
-    zhIntl.formatMessage({ id: "layout.main.closeSettingsAria" }),
-    zh["layout.main.closeSettingsAria"],
-  );
 });
 
 test("mounted Activity thread slot shows Chinese missing-thread copy, not English residue", () => {

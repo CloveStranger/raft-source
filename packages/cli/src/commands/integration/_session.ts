@@ -1,9 +1,9 @@
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 
 import type { AgentContext } from "../../auth/env";
 import { cliError } from "../../core/errors";
+import { resolveRaftHome } from "../../state/raftHome";
 import {
   CanonicalFetchTransportError,
   credentialFreeDiagnosticUrl,
@@ -52,10 +52,7 @@ function safeUrl(value: string, label: string): URL {
 }
 
 function resolveStateRoot(env: NodeJS.ProcessEnv): string {
-  const configured = env.RAFT_HOME?.trim() || env.SLOCK_HOME?.trim();
-  if (configured) return configured;
-  const home = env.HOME ?? os.homedir();
-  return path.join(home, ".slock");
+  return resolveRaftHome(env);
 }
 
 export function integrationSessionFilePath(input: {

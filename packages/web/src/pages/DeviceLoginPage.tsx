@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import type { FormEvent } from "react";
 import { useIntl } from "react-intl";
 import { Button } from "raft-ui";
@@ -59,12 +59,13 @@ export default function DeviceLoginPage() {
     }
   }
 
-  if (approved) {
-    function closePage() {
-      setCloseAttempted(true);
-      window.close();
-    }
+  const closePage = useCallback(() => {
+    setCloseAttempted(true);
+    window.close();
+  }, []);
+  const handleUseAnotherAccount = useCallback(() => logout(), [logout]);
 
+  if (approved) {
     return (
       <AuthPageFrame>
         <div className="w-full">
@@ -133,7 +134,7 @@ export default function DeviceLoginPage() {
 
         <Button
           type="button"
-          onClick={() => logout()}
+          onClick={handleUseAnotherAccount}
           size="md"
           variant="outline"
           className="mt-3 w-full"

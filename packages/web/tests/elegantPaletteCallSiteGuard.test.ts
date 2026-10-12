@@ -32,9 +32,6 @@ const INTENTIONAL: ReadonlyArray<readonly [file: string, reason: string]> = [
   ["components/auth/AccountIdentitySetupPage.tsx", "onboarding brutal mock (A1)"],
   ["components/onboarding/ServerSetupHandoffStep.tsx", "onboarding brutal mock (A1)"],
   ["pages/PaletteAuditPage.tsx", "brutal palette audit page — the yellow is the content"],
-  ["components/workspace/WorkspaceGridDemo.tsx", "workspace grid demo palette"],
-  ["components/workspace/WorkspaceGridRealPanel.tsx", "workspace grid palette"],
-  ["components/workspace/WorkspaceGridDemo.css", "workspace grid demo palette"],
   ["components/ConfirmDialog.tsx", "legacy class-string → rui variant map (keys are identifiers, not rendered)"],
   ["index.css", "token table (definitions + global ::selection now on the semantic pair)"],
 ];

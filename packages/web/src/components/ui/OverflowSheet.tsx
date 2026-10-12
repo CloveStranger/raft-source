@@ -1,4 +1,5 @@
-import type { ReactNode } from "react";
+import { useCallback } from "react";
+import type { ComponentProps, ReactNode } from "react";
 import { useIntl } from "react-intl";
 import { ArrowLeft, MoreHorizontal, X } from "lucide-react";
 import type { ButtonProps } from "raft-ui";
@@ -104,20 +105,24 @@ export function OverflowSheet({
   children: ReactNode;
 }) {
   const { formatMessage } = useIntl();
+  const handleOpenChange = useCallback<NonNullable<ComponentProps<typeof Drawer>["onOpenChange"]>>(
+    (nextOpen, eventDetails) => {
+      if (!nextOpen && closeGuardRef?.current) {
+        eventDetails.cancel();
+        onCloseGuarded?.();
+        return;
+      }
+      onOpenChange(nextOpen);
+    },
+    [closeGuardRef, onCloseGuarded, onOpenChange],
+  );
   const headerClassName = "flex h-panel-header shrink-0 items-center border-b border-line-muted bg-layer-panel px-4 text-foreground-strong theme-brutal:border-b-2 theme-brutal:border-black theme-brutal:bg-soft-signal theme-brutal:text-black";
   return (
     <Drawer
       open={open}
       modal
       swipeDirection="right"
-      onOpenChange={(nextOpen, eventDetails) => {
-        if (!nextOpen && closeGuardRef?.current) {
-          eventDetails.cancel();
-          onCloseGuarded?.();
-          return;
-        }
-        onOpenChange(nextOpen);
-      }}
+      onOpenChange={handleOpenChange}
     >
       <DrawerContent
         data-testid={testId}

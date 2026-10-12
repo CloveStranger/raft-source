@@ -65,3 +65,27 @@ test("route binding pins the root, binds before upstream work, and caches only e
   );
   assert.equal(calls, 1, "root swap must fail before Hands traffic");
 });
+
+test("route binding failures carry a fixed reason code for the operator log", async () => {
+  await seed();
+  const reasonOf = async (env: NodeJS.ProcessEnv, fetchImpl: typeof fetch): Promise<string> => {
+    resetProductFeedbackRouteBindingCacheForTest();
+    try {
+      await ensureProductFeedbackRouteBinding({ userId: USER_ID, env, fetchImpl });
+    } catch (error) {
+      assert.ok(error instanceof ProductFeedbackRouteBindingError);
+      return error.reason;
+    }
+    throw new Error("expected a route binding failure");
+  };
+  const ok = (async () => Response.json({ changed: true, subject_version: "v1" }, { status: 201 })) as typeof fetch;
+  assert.equal(await reasonOf({ ...ENV, HANDS_FEEDBACK_APP_ID: "not-a-uuid" }, ok), "config_invalid");
+  assert.equal(await reasonOf({ ...ENV, HANDS_FEEDBACK_ROUTE_SUBJECT_ROOT: "a".repeat(64) }, ok), "root_invalid");
+  const rejected = (async () => new Response("no", { status: 403 })) as typeof fetch;
+  assert.equal(await reasonOf(ENV, rejected), "hands_status_403");
+  const odd = (async () => Response.json({ changed: true }, { status: 201 })) as typeof fetch;
+  assert.equal(await reasonOf(ENV, odd), "hands_unexpected_body");
+  await ensureProductFeedbackRouteBinding({ userId: USER_ID, env: ENV, fetchImpl: ok });
+  const swapped = { ...ENV, HANDS_FEEDBACK_ROUTE_SUBJECT_ROOT: Buffer.alloc(32, 9).toString("base64url") };
+  assert.equal(await reasonOf(swapped, ok), "root_commitment_mismatch");
+});

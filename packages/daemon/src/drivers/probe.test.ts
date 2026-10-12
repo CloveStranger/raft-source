@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import type { execFileSync } from "node:child_process";
 
 import {
+  WINDOWS_COMMAND_RESOLVE_TIMEOUT_MS,
+  lookupCommandOnPath,
   readCommandVersion,
   resolveCommandOnPath,
   withWindowsUserEnvironment,
@@ -172,7 +174,7 @@ test("resolveCommandOnPath passes the runtime name directly to powershell on Win
     "-NoProfile",
     "-NonInteractive",
     "-Command",
-    "& {$cmd = Get-Command -Name $args[0] -ErrorAction Stop | Select-Object -First 1; if ($cmd.Path) { $cmd.Path } elseif ($cmd.Source) { $cmd.Source } elseif ($cmd.Definition) { $cmd.Definition } }",
+    "& {try { $cmd = Get-Command -Name $args[0] -ErrorAction Stop | Select-Object -First 1 } catch [System.Management.Automation.CommandNotFoundException] { exit 3 }; if ($cmd.Path) { $cmd.Path } elseif ($cmd.Source) { $cmd.Source } elseif ($cmd.Definition) { $cmd.Definition } }",
     "codex",
   ]);
 });
@@ -282,6 +284,80 @@ test("resolveCommandOnPath bounds a slow Windows probe and retries fresh after a
   assert.equal(resolveCommandOnPath("codex", deps), null);
   assert.equal(resolveCommandOnPath("codex", deps), "C:\\Program Files\\Codex\\codex.exe");
   assert.deepEqual(capturedTimeouts, [1000, 1000]);
+});
+
+// task #1240: the Windows lookup must say *why* it has no command. Only the
+// locator's reserved exit (3, CommandNotFoundException) is "not installed";
+// a timeout, a denied spawn, or any other exit is an undecided lookup.
+function windowsLookupDeps(failure: { code?: string; status?: number }) {
+  const execFileSyncFn: typeof execFileSync = (() => {
+    throw Object.assign(new Error(`lookup failed: ${JSON.stringify(failure)}`), failure);
+  }) as typeof execFileSync;
+  return {
+    platform: "win32" as const,
+    env: { PATH: "C:\\Windows\\System32" },
+    execFileSyncFn,
+    windowsEnvironmentReaderFn: noWindowsEnvironment,
+  };
+}
+
+test("lookupCommandOnPath on Windows reports a timed-out lookup as probe_timeout, never as not_installed", () => {
+  const lookup = lookupCommandOnPath("codex", windowsLookupDeps({ code: "ETIMEDOUT" }));
+  assert.equal(lookup.command, null);
+  assert.equal(lookup.missReason, "probe_timeout");
+  assert.notEqual(lookup.missReason, "not_installed");
+});
+
+test("lookupCommandOnPath on Windows distinguishes not_installed (exit 3) from probe_failed and permission_denied", () => {
+  assert.equal(lookupCommandOnPath("codex", windowsLookupDeps({ status: 3 })).missReason, "not_installed");
+  assert.equal(lookupCommandOnPath("codex", windowsLookupDeps({ status: 1 })).missReason, "probe_failed");
+  assert.equal(lookupCommandOnPath("codex", windowsLookupDeps({ code: "EACCES" })).missReason, "permission_denied");
+  assert.equal(lookupCommandOnPath("codex", windowsLookupDeps({ code: "ENOENT" })).missReason, "probe_failed", "a missing powershell.exe is not evidence the runtime is missing");
+  const empty = lookupCommandOnPath("codex", {
+    ...windowsLookupDeps({}),
+    execFileSyncFn: (() => Buffer.from("\r\n")) as unknown as typeof execFileSync,
+  });
+  assert.equal(empty.command, null);
+  assert.equal(empty.missReason, "probe_failed", "a lookup that prints nothing is undecided, not a miss");
+});
+
+test("the Windows lookup budget is the exported constant the launch message quotes", () => {
+  assert.equal(WINDOWS_COMMAND_RESOLVE_TIMEOUT_MS, 1000);
+});
+
+// Cold-start measurement for task #1240 (Windows CI only; never asserts a
+// budget). Logs how long powershell.exe takes to answer Get-Command for a
+// command that exists and for one that does not, so the budget can be set
+// from a measured number rather than guessed. Read the values in the job log
+// under "windows-command-probe-timing".
+test.skipIf(process.platform !== "win32")("measures real powershell.exe Get-Command latency on this Windows host", async () => {
+  const { execFileSync: realExecFileSync } = await import("node:child_process");
+  const { performance } = await import("node:perf_hooks");
+  const script =
+    "& {try { $cmd = Get-Command -Name $args[0] -ErrorAction Stop | Select-Object -First 1 } " +
+    "catch [System.Management.Automation.CommandNotFoundException] { exit 3 }; " +
+    "if ($cmd.Path) { $cmd.Path } elseif ($cmd.Source) { $cmd.Source } elseif ($cmd.Definition) { $cmd.Definition } }";
+  const timings: Array<{ target: string; run: number; ms: number; outcome: string }> = [];
+  for (const target of ["powershell", "raft-task-1240-definitely-missing"]) {
+    for (let run = 1; run <= 4; run += 1) {
+      const started = performance.now();
+      let outcome = "ok";
+      try {
+        realExecFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script, target], {
+          stdio: ["ignore", "pipe", "ignore"],
+          timeout: 30_000,
+        });
+      } catch (error) {
+        const details = error as { status?: unknown; code?: unknown };
+        outcome = details.status === 3 ? "not_found_exit_3" : `error:${String(details.code ?? details.status)}`;
+      }
+      timings.push({ target, run, ms: Math.round(performance.now() - started), outcome });
+    }
+  }
+  for (const row of timings) {
+    console.log(`windows-command-probe-timing target=${row.target} run=${row.run} ms=${row.ms} outcome=${row.outcome} budget_ms=${WINDOWS_COMMAND_RESOLVE_TIMEOUT_MS}`);
+  }
+  assert.equal(timings.length, 8);
 });
 
 test("resolveCommandOnPath on Windows prefers .cmd over .ps1 from Get-Command", () => {

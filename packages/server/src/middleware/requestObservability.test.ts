@@ -460,3 +460,87 @@ test("requestObservabilityMiddleware records a route's error_code on the root sp
   assert.equal(overloadedSpan!.events.find((event) => event.name === "http.response.finished")?.attrs?.error_code, "rw_overloaded");
   assert.equal(plainSpan!.attrs?.error_code, undefined);
 });
+
+// #proj-o11y task #6: an outside client's traceparent is recorded, not
+// continued, so one reused client span cannot fold unrelated requests into
+// one trace. Internal sources (daemon proxy, web session) keep their parent.
+function runWithInboundHeaders(headers: Record<string, string>, afterAuth?: (req: any) => void) {
+  const sink = new MemoryTraceSink();
+  const tracer = new BasicTracer({
+    sink,
+    traceIdGenerator: () => "d".repeat(32),
+    spanIdGenerator: () => "c".repeat(16),
+  });
+  const req: any = {
+    method: "GET",
+    originalUrl: "/internal/agent-api/events",
+    url: "/internal/agent-api/events",
+    baseUrl: "/internal/agent-api",
+    route: { path: "/events" },
+    header: (name: string) => headers[name.toLowerCase()],
+    app: {
+      get: (key: string) => (key === "serverTracer" ? tracer : undefined),
+    },
+  };
+  const res: any = new EventEmitter();
+  res.statusCode = 200;
+  res.locals = {};
+  requestObservabilityMiddleware(req, res, () => {});
+  afterAuth?.(req);
+  res.emit("finish");
+  const [span] = sink.getAllSpans();
+  return span!;
+}
+
+const CLIENT_TRACEPARENT = `00-${"a".repeat(32)}-${"b".repeat(16)}-01`;
+
+test("an external agent credential's traceparent is recorded, not continued", () => {
+  const span = runWithInboundHeaders({ authorization: "Bearer sk_agent_external", traceparent: CLIENT_TRACEPARENT });
+  assert.equal(span.context.traceId, "d".repeat(32));
+  assert.equal(span.context.parentSpanId, null);
+  assert.equal(span.attrs?.trace_parent_policy, "linked");
+  assert.equal(span.attrs?.client_trace_id, "a".repeat(32));
+  assert.equal(span.attrs?.client_parent_span_id, "b".repeat(16));
+});
+
+test("third-party app and share tokens start a new trace too", () => {
+  for (const token of ["slock_at_app", "raft_share_link"]) {
+    const span = runWithInboundHeaders({ authorization: `Bearer ${token}`, traceparent: CLIENT_TRACEPARENT });
+    assert.equal(span.context.parentSpanId, null, token);
+    assert.equal(span.attrs?.trace_parent_policy, "linked", token);
+  }
+});
+
+test("the daemon proxy and web sessions keep continuing their traceparent", () => {
+  const daemon = runWithInboundHeaders({
+    authorization: "Bearer sk_agent_hosted",
+    "x-slock-agent-active-capabilities": "read,send",
+    traceparent: CLIENT_TRACEPARENT,
+  });
+  assert.equal(daemon.context.traceId, "a".repeat(32));
+  assert.equal(daemon.context.parentSpanId, "b".repeat(16));
+  assert.equal(daemon.attrs?.trace_parent_policy, "continued");
+  assert.equal(daemon.attrs?.client_trace_id, undefined);
+
+  const web = runWithInboundHeaders({ authorization: "Bearer eyJhbGciOiJIUzI1NiJ9.e30.sig", traceparent: CLIENT_TRACEPARENT });
+  assert.equal(web.context.traceId, "a".repeat(32));
+  assert.equal(web.attrs?.trace_parent_policy, "continued");
+});
+
+test("an external client's malformed traceparent is never written raw", () => {
+  const span = runWithInboundHeaders({ authorization: "Bearer sk_agent_external", traceparent: "00-not-a-valid-parent" });
+  assert.equal(span.context.parentSpanId, null);
+  assert.equal(span.attrs?.trace_parent_policy, "absent");
+  assert.equal(span.attrs?.client_traceparent_invalid, true);
+  assert.equal(span.attrs?.client_trace_id, undefined);
+  assert.doesNotMatch(JSON.stringify(span.attrs), /not-a-valid-parent/);
+});
+
+test("a daemon claim from an agent that auth finds external is flagged", () => {
+  const span = runWithInboundHeaders(
+    { authorization: "Bearer sk_agent_external", "x-slock-agent-active-capabilities": "read", traceparent: CLIENT_TRACEPARENT },
+    (req) => { req.actingAgentIsExternal = true; },
+  );
+  assert.equal(span.attrs?.trace_parent_policy, "continued");
+  assert.equal(span.attrs?.trace_parent_claim_mismatch, true);
+});

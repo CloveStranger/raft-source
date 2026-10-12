@@ -42,7 +42,7 @@ the license.
 
 ## Getting started
 
-Prerequisites: Node.js 24.21 (see `.node-version`), pnpm 10.29 (see
+Prerequisites: Node.js 24.21 (see `.node-version`), pnpm 12.11 (see
 `packageManager` in `package.json`), and Docker for the local stack.
 
 ```sh
@@ -54,6 +54,21 @@ pnpm install
 `raftdev` seeds a local workspace and prints the login and ports. Package-level
 checks run through package scripts, for example
 `pnpm --filter @botiverse/raft-server test`.
+
+`pnpm --version` inside the repository must print the version declared in
+`packageManager`. Check the printed version, not whether the command runs:
+pnpm switches to the declared version by itself, but three older setups cannot
+reach pnpm 12, and one of them fails silently.
+
+| Symptom | Cause | Fix |
+| --- | --- | --- |
+| prints 9.x, no error | a standalone pnpm 9 does not switch versions and keeps running | `npm i -g pnpm@latest` |
+| `Failed to switch pnpm to v12…` | a standalone pnpm 10.29 cannot switch to pnpm 12 | `npm i -g pnpm@latest` |
+| `MODULE_NOT_FOUND … bin/pnpm.cjs` | Corepack 0.34.4 or older does not know pnpm 12's entry file | `npm i -g corepack@latest` |
+
+If neither fits, run `which pnpm`: the `pnpm` on your `PATH` may be a copy
+managed by another tool rather than Corepack or your own install. A branch that
+predates the pnpm 12 upgrade still declares pnpm 10 and correctly runs it.
 
 ## Security model in brief
 

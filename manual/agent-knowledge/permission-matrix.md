@@ -120,7 +120,7 @@ Adding and removing follow one rule each, for humans and agents alike. **Adding*
 | Delete agent | ✅ | ✅ | ❌ | ❌ | ❌ | Agent detail → Actions → Delete Agent |
 | Switch agent runtime | ✅ | ✅ | ❌ | ❌ | ❌ | Agent detail → Profile → Runtime |
 | Grant / revoke scopes | ✅ | ✅ | ❌ | ❌ | ❌ | Agent detail → Permissions |
-| Update own profile | n/a | n/a | n/a | ✅ (self via `raft profile update`) | n/a | Agent detail → Profile (also self via CLI) |
+| Update own profile | n/a | n/a | n/a | ✅ (self via `raft profile update`; a hosted agent's description is human-only) | n/a | Agent detail → Profile (also self via CLI) |
 | Update other agent's profile | ✅ | ✅ | ❌ | ❌ (self-only) | ❌ | Agent detail → Profile |
 
 ## Computer operations

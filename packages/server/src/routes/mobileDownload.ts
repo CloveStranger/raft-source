@@ -138,6 +138,7 @@ export function platformFromUserAgent(userAgent: string | undefined): MobilePlat
 export type LatestLookup =
   | { outcome: "asset"; downloadUrl: string; version: string; expiresIn: number }
   | { outcome: "no_active_release" }
+  | { outcome: "no_installable_build"; detail: string }
   | { outcome: "not_configured"; detail: string }
   | { outcome: "upstream_error"; detail: string };
 
@@ -202,16 +203,32 @@ export async function lookupLatestAsset(
 
   const payload = await response.json().catch(() => null) as {
     build?: { version?: string };
-    assets?: Array<{ platform?: string; download_url?: string }>;
+    assets?: Array<{ platform?: string; filetype?: string; download_url?: string }>;
     expires_in?: number;
   } | null;
 
-  const asset = payload?.assets?.find((candidate) => candidate.platform === platform);
+  // Direct install acquires an APK. The AAB is a store bundle: served to a
+  // phone it installs as nothing and fails invisibly — exactly the failure
+  // mode this route exists to prevent. So an APK is the only installable
+  // artifact here, and a release shipping only the store bundle reads as
+  // "no installable build" (product ruling 2026-10-12). Kept strict rather
+  // than falling back to whatever the release carries: a silent wrong
+  // artifact is the outcome this route must never produce.
+  const asset = payload?.assets?.find(
+    (candidate) => candidate.platform === platform && candidate.filetype === "apk",
+  );
   if (!asset?.download_url) {
-    // 200 guarantees a non-empty `assets`, so a missing match means this
-    // platform genuinely has no artifact in the active release — a
-    // configuration gap, not an empty channel.
-    return { outcome: "not_configured", detail: `no ${platform} asset in active release` };
+    const platformAssets = payload?.assets?.filter((candidate) => candidate.platform === platform) ?? [];
+    if (platformAssets.length === 0) {
+      // 200 guarantees a non-empty `assets`, so a missing platform match means
+      // this platform genuinely has no artifact in the active release — a
+      // configuration gap, not an empty channel.
+      return { outcome: "not_configured", detail: `no ${platform} asset in active release` };
+    }
+    return {
+      outcome: "no_installable_build",
+      detail: `${platform} assets present but none installable: ${platformAssets.map((candidate) => candidate.filetype ?? "unknown").join(", ")}`,
+    };
   }
 
   return {
@@ -269,6 +286,13 @@ mobileDownloadRouter.get("/", async (req, res) => {
       return;
     case "no_active_release":
       res.status(404).json({ error: "No build available yet", code: "no_active_release" });
+      return;
+    case "no_installable_build":
+      // A release exists but carries no directly installable artifact (e.g.
+      // store-only AAB). Distinct from an empty channel and from a
+      // misconfiguration: the user-facing read is "nothing to install yet".
+      console.warn("[mobile-download] active release has no installable artifact", { platform, detail: result.detail });
+      res.status(404).json({ error: "No installable build available yet", code: "no_installable_build" });
       return;
     case "not_configured":
       console.error("[mobile-download] upstream configuration problem", { platform, detail: result.detail });

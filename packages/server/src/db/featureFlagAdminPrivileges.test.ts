@@ -67,6 +67,7 @@ function oracle(options: {
       assert.deepEqual(values[1], [
         "announcements",
         "announcement_audit_events",
+        "announcement_image_assets",
         "feature_flag_audiences",
         "feature_flag_audience_members",
         "users",
@@ -151,6 +152,32 @@ function oracle(options: {
 
 test("privilege verifier accepts only the complete operator route matrix", async () => {
   await verifyFeatureFlagAdminPrivileges(oracle());
+});
+
+test("announcement image routes receive exactly their four table operations", () => {
+  const object = "public.announcement_image_assets";
+  assert.deepEqual(
+    REQUIRED_FEATURE_FLAG_ADMIN_PRIVILEGES.filter((entry) => entry.object === object),
+    ["SELECT", "INSERT", "UPDATE", "DELETE"].map((privilege) => ({
+      kind: "table",
+      object,
+      privilege,
+    })),
+  );
+  assert.deepEqual(
+    FORBIDDEN_FEATURE_FLAG_ADMIN_PRIVILEGES
+      .filter((entry) => entry.object === object)
+      .map((entry) => entry.privilege),
+    [
+      "SELECT WITH GRANT OPTION",
+      "INSERT WITH GRANT OPTION",
+      "UPDATE WITH GRANT OPTION",
+      "DELETE WITH GRANT OPTION",
+      "TRUNCATE",
+      "REFERENCES",
+      "TRIGGER",
+    ],
+  );
 });
 
 // Regression tooth for the batched matrix: the readiness probe's latency is

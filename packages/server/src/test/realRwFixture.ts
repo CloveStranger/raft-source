@@ -147,22 +147,22 @@ export async function waitForRealRwFixture(
       expected: 3,
     },
     {
-      label: "rw_conversation_unread_v2 (receiver unread rows)",
-      sql: `SELECT count(*) AS n FROM rw_conversation_unread_v2
+      label: "rw_conversation_unread_v3 (receiver unread rows)",
+      sql: `SELECT count(*) AS n FROM rw_conversation_unread_v3
             WHERE receiver_type = 'user' AND receiver_id = $1 AND server_id = $2 AND unread_count = 1`,
       values: [f.receiver.id, f.receiverServer.id],
       expected: 3,
     },
     {
-      label: "rw_inbox_serving_v6 (receiver Activity rows)",
-      sql: `SELECT count(*) AS n FROM rw_inbox_serving_v6
+      label: "rw_inbox_serving_v8 (receiver Activity rows)",
+      sql: `SELECT count(*) AS n FROM rw_inbox_serving_v8
             WHERE receiver_type = 'user' AND receiver_id = $1 AND server_id = $2`,
       values: [f.receiver.id, f.receiverServer.id],
       expected: 3,
     },
     {
-      label: "rw_agent_inbox_v5 (agent rows with a mention)",
-      sql: "SELECT count(*) AS n FROM rw_agent_inbox_v5 WHERE agent_id = $1 AND mention_unread = 1",
+      label: "rw_agent_inbox_v6 (agent rows with a mention)",
+      sql: "SELECT count(*) AS n FROM rw_agent_inbox_v6 WHERE agent_id = $1 AND mention_unread = 1",
       values: [f.agent.id],
       expected: 2,
     },

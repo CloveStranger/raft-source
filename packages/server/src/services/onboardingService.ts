@@ -1154,6 +1154,11 @@ export async function deliverOwnerFactsContext(
     timestamp: new Date().toISOString(),
     seq: 0,
     message_id: `onboarding-owner-facts-${serverId}`,
+  }, {
+    // Context about the agent's own server, not a channel's content: there is
+    // no target channel to check visibility of ("onboarding-context" is a
+    // label, not a channel id), and the agent cannot opt out of its own setup.
+    intrinsic: true,
   }).catch((err: unknown) => {
     const message = err instanceof Error ? err.message : String(err);
     console.warn(`[Onboarding] Owner facts context failed for agent ${onboardingAgentId}: ${message}`);

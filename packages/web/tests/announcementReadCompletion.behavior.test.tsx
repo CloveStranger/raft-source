@@ -1,3 +1,4 @@
+import { MemoryRouter } from "react-router-dom";
 /**
  * Client half of oldest-unread-first announcements.
  *
@@ -7,9 +8,8 @@
  * decision, not a regression — do not "fix" this suite back to newest-only.
  *
  * Two contracts live here:
- *   §2 read-complete requires explicit confirmation on the LAST PAGE. Merely
- *      rendering a single-page announcement or navigating to the last page
- *      must never write account-level dismissal state.
+ *   §2 confirmation and closing record account-wide dismissal; merely
+ *      rendering an announcement never records dismissal.
  *   §4 a FAILED read-complete write is held in memory for the session so the
  *      queue keeps advancing (option B, Cindy, 2026-08-09) — but it is never
  *      persisted, so the row returns on the next load.
@@ -33,13 +33,6 @@ const onePage = {
   locale: "en" as const,
 };
 
-const threePages = {
-  ...onePage,
-  id: "10000000-0000-4000-8000-000000000002",
-  title: "Triple",
-  pages: [{ body: "Page one" }, { body: "Page two" }, { body: "Page three" }],
-};
-
 const newer = {
   ...onePage,
   id: "10000000-0000-4000-8000-000000000003",
@@ -49,9 +42,9 @@ const newer = {
 
 function renderModal() {
   return render(
-    <TestIntlProvider>
+    <MemoryRouter><TestIntlProvider>
       <AnnouncementModal />
-    </TestIntlProvider>,
+    </TestIntlProvider></MemoryRouter>,
   );
 }
 
@@ -76,84 +69,16 @@ test("a single-page announcement is read-complete only after explicit confirmati
   fireEvent.click(screen.getByTestId("announcement-ok"));
   await waitFor(() => assert.equal(posted.length, 1));
   assert.match(posted[0], new RegExp(`${onePage.id}/dismiss$`));
-  assert.equal(screen.queryByTestId("announcement-modal"), null);
+  assert.ok(screen.queryByTestId("announcement-modal") === null);
 });
 
-test("a multi-page announcement parked on page 1 is NOT read-complete", async () => {
-  const posted: string[] = [];
-  vi.spyOn(api, "post").mockImplementation(async (url: string) => {
-    posted.push(url);
-    return { data: {} };
-  });
-  useAnnouncementStore.setState({ pending: [threePages], loaded: true });
-
-  renderModal();
-  await waitFor(() => assert.ok(screen.getByTestId("announcement-modal")));
-
-  // The easiest cell to get wrong: rendering a page is not reading the row.
-  assert.deepEqual(posted, [], "page 1 of 3 must not report the row as read");
-  assert.deepEqual(useAnnouncementStore.getState().markedReadIds, []);
-});
-
-test("reaching the last page waits for explicit confirmation before read-complete", async () => {
-  const posted: string[] = [];
-  vi.spyOn(api, "post").mockImplementation(async (url: string) => {
-    posted.push(url);
-    return { data: {} };
-  });
-  useAnnouncementStore.setState({ pending: [threePages], loaded: true });
-
-  renderModal();
-  fireEvent.click(screen.getByTestId("announcement-next"));
-  fireEvent.click(screen.getByTestId("announcement-next"));
-
-  await waitFor(() => assert.ok(screen.getByTestId("announcement-ok")));
-  assert.deepEqual(posted, [], "navigation alone must not dismiss the announcement");
-
-  fireEvent.click(screen.getByTestId("announcement-ok"));
-  await waitFor(() => assert.equal(posted.length, 1));
-  assert.equal(screen.queryByTestId("announcement-modal"), null);
-});
-
-test("leaving the last page and returning still waits for one explicit confirmation", async () => {
-  const posted: string[] = [];
-  vi.spyOn(api, "post").mockImplementation(async (url: string) => {
-    posted.push(url);
-    return { data: {} };
-  });
-  useAnnouncementStore.setState({ pending: [threePages], loaded: true });
-
-  renderModal();
-  fireEvent.click(screen.getByTestId("announcement-next"));
-  fireEvent.click(screen.getByTestId("announcement-next"));
-  await waitFor(() => assert.ok(screen.getByTestId("announcement-ok")));
-
-  fireEvent.click(screen.getByTestId("announcement-back"));
-  fireEvent.click(screen.getByTestId("announcement-next"));
-
-  await waitFor(() => assert.ok(screen.getByTestId("announcement-ok")));
-  assert.equal(posted.length, 0, "re-entering the last page must remain read-only");
-
-  fireEvent.click(screen.getByTestId("announcement-ok"));
-  await waitFor(() => assert.equal(posted.length, 1));
-});
-
-test("closing before the last page does not record read-complete", async () => {
-  const posted: string[] = [];
-  vi.spyOn(api, "post").mockImplementation(async (url: string) => {
-    posted.push(url);
-    return { data: {} };
-  });
-  useAnnouncementStore.setState({ pending: [threePages], loaded: true });
-
+test("closing the dialog records the same account dismissal as confirmation", async () => {
+  const post = vi.spyOn(api, "post").mockResolvedValue({ data: {} });
+  useAnnouncementStore.setState({ pending: [onePage], loaded: true });
   renderModal();
   fireEvent.click(screen.getByRole("button", { name: "Dismiss" }));
-
-  await waitFor(() => assert.equal(useAnnouncementStore.getState().pending.length, 0));
-  // Closes locally, but the server keeps no record, so it comes back. If ✕
-  // counted as read-complete, the "parked on page 1" rule above would be
-  // bypassable with a single click.
-  assert.deepEqual(posted, [], "closing early must not report the row as read");
+  await waitFor(() => assert.equal(post.mock.calls.length, 1));
+  assert.match(post.mock.calls[0][0], new RegExp(`${onePage.id}/dismiss$`));
 });
 
 test("a failed read-complete write skips the row for this session so the queue advances", async () => {

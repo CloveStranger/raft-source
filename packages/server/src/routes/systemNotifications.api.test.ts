@@ -5,8 +5,18 @@ import { randomUUID } from "node:crypto";
 
 import { and, eq } from "drizzle-orm";
 import { getDb } from "../db/index";
-import { agents, computers, machines, serverMembers, users } from "../db/schema";
+import {
+  agents,
+  computers,
+  featureFlagRules,
+  featureFlags,
+  machines,
+  serverMembers,
+  systemAttentionIncidents,
+  users,
+} from "../db/schema";
 import { createServer } from "../services/serverService";
+import { USAGE_LIMIT_ATTENTION_FEATURE_FLAG_KEY } from "@botiverse/raft-shared";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 
@@ -186,4 +196,128 @@ test("system-notification feed follows viewMachines and excludes managed Compute
     .set({ role: "admin" })
     .where(and(eq(serverMembers.serverId, server.id), eq(serverMembers.userId, member.id)));
   assert.equal((await read(memberToken)).notifications[0]?.type, "machine.offline", "promotion grants the canonical feed");
+});
+
+test("usage-limit attention syncs per-recipient seen/dismiss and resurfaces on a new activation", async ({ app }) => {
+  const owner = await createVerifiedUser("attention-owner@slock.test");
+  const admin = await createVerifiedUser("attention-admin@slock.test");
+  const member = await createVerifiedUser("attention-member@slock.test");
+  const server = await createServer("Usage attention", "usage-attention", owner.id);
+  await getDb().insert(serverMembers).values([
+    { serverId: server.id, userId: admin.id, role: "admin" },
+    { serverId: server.id, userId: member.id, role: "member" },
+  ]);
+  await getDb().insert(featureFlags).values({
+    key: USAGE_LIMIT_ATTENTION_FEATURE_FLAG_KEY,
+    description: "test",
+    randomizationUnit: "server",
+    defaultEnabled: false,
+    salt: USAGE_LIMIT_ATTENTION_FEATURE_FLAG_KEY,
+  }).onConflictDoNothing();
+  await getDb().insert(featureFlagRules).values({
+    flagKey: USAGE_LIMIT_ATTENTION_FEATURE_FLAG_KEY,
+    stage: "server",
+    decision: "allow",
+    values: [server.id],
+  });
+  const [machine] = await getDb().insert(machines).values({
+    serverId: server.id,
+    userId: owner.id,
+    name: "Cindy MacBook",
+    apiKeyHash: "unused-attention-machine-hash",
+  }).returning();
+  const activatedAt = new Date("2026-10-11T08:00:00.000Z");
+  const [first] = await getDb().insert(systemAttentionIncidents).values({
+    serverId: server.id,
+    machineId: machine.id,
+    kind: "usage_limit_reached",
+    provider: "codex",
+    accountKeyHash: "a".repeat(64),
+    windowKey: "primary",
+    activationGeneration: 1,
+    affectedAgentIds: [randomUUID(), randomUUID()],
+    activatedAt,
+    lastObservedAt: activatedAt,
+  }).returning();
+
+  const ownerToken = await tokenForHuman(owner.email);
+  const adminToken = await tokenForHuman(admin.email);
+  const memberToken = await tokenForHuman(member.email);
+  const headers = (token: string) => ({ Authorization: `Bearer ${token}`, "X-Server-Id": server.id });
+  const read = async (token: string) => {
+    const response = await fetch(`${app.baseUrl}/api/servers/${server.id}/system-notifications-v2`, {
+      headers: headers(token),
+    });
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get("cache-control"), "private, no-store");
+    return await response.json() as {
+      contractVersion: string;
+      unseenCount: number;
+      notifications: Array<{ id: string; seenAt: string | null; machine: { id: string; name: string }; affectedAgentIds: string[] }>;
+    };
+  };
+  const mutate = async (token: string, incidentId: string, action: "seen" | "dismiss") => {
+    const response = await fetch(
+      `${app.baseUrl}/api/servers/${server.id}/system-notifications-v2/${incidentId}/${action}`,
+      { method: "POST", headers: headers(token) },
+    );
+    assert.equal(response.status, 200);
+  };
+
+  const ownerInitial = await read(ownerToken);
+  assert.equal(ownerInitial.contractVersion, "server-system-attention-v1");
+  assert.equal(ownerInitial.unseenCount, 1);
+  assert.deepEqual(ownerInitial.notifications.map((notification) => ({
+    id: notification.id,
+    seenAt: notification.seenAt,
+    machine: notification.machine,
+    affectedAgentCount: notification.affectedAgentIds.length,
+  })), [{
+    id: first.id,
+    seenAt: null,
+    machine: { id: machine.id, name: "Cindy MacBook" },
+    affectedAgentCount: 2,
+  }]);
+  assert.equal((await read(adminToken)).unseenCount, 1, "another recipient owns an independent receipt");
+  assert.deepEqual((await read(memberToken)).notifications, [], "ordinary members are not recipients");
+
+  await getDb().update(featureFlags).set({ killSwitch: true })
+    .where(eq(featureFlags.key, USAGE_LIMIT_ATTENTION_FEATURE_FLAG_KEY));
+  assert.deepEqual((await read(ownerToken)).notifications, [], "kill switch empties the replace snapshot");
+  const gatedMutation = await fetch(
+    `${app.baseUrl}/api/servers/${server.id}/system-notifications-v2/${first.id}/seen`,
+    { method: "POST", headers: headers(ownerToken) },
+  );
+  assert.equal(gatedMutation.status, 404, "kill switch also closes direct receipt writes");
+  await getDb().update(featureFlags).set({ killSwitch: false })
+    .where(eq(featureFlags.key, USAGE_LIMIT_ATTENTION_FEATURE_FLAG_KEY));
+
+  await mutate(ownerToken, first.id, "seen");
+  assert.equal((await read(ownerToken)).unseenCount, 0, "a second device reads the server-backed seen receipt");
+  assert.equal((await read(adminToken)).unseenCount, 1, "owner seen does not mark admin seen");
+  await mutate(ownerToken, first.id, "dismiss");
+  assert.deepEqual((await read(ownerToken)).notifications, []);
+  assert.equal((await read(adminToken)).notifications.length, 1);
+
+  const recoveredAt = new Date("2026-10-11T09:00:00.000Z");
+  await getDb().update(systemAttentionIncidents).set({
+    state: "resolved",
+    resolvedAt: recoveredAt,
+    lastObservedAt: recoveredAt,
+  }).where(eq(systemAttentionIncidents.id, first.id));
+  const [second] = await getDb().insert(systemAttentionIncidents).values({
+    serverId: server.id,
+    machineId: machine.id,
+    kind: "usage_limit_reached",
+    provider: "codex",
+    accountKeyHash: "a".repeat(64),
+    windowKey: "primary",
+    activationGeneration: 2,
+    affectedAgentIds: [randomUUID()],
+    activatedAt: new Date("2026-10-11T10:00:00.000Z"),
+    lastObservedAt: new Date("2026-10-11T10:00:00.000Z"),
+  }).returning();
+  const ownerReactivated = await read(ownerToken);
+  assert.equal(ownerReactivated.unseenCount, 1);
+  assert.deepEqual(ownerReactivated.notifications.map((notification) => notification.id), [second.id]);
 });

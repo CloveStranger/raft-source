@@ -3,6 +3,7 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-li
 import { MemoryRouter } from "react-router-dom";
 
 import "./helpers/domSetup";
+import { comboboxText } from "./helpers/combobox";
 import { TestIntlProvider } from "./helpers/intl";
 import type { Locale } from "../src/i18n/locale";
 import AgentDetailPanel from "../src/components/agent/AgentDetailPanel";
@@ -222,13 +223,13 @@ for (const source of [
     renderPanel(agent, "en");
     const save = await openRuntimeEditor("en");
     const trigger = await waitFor(() => {
-      const result = screen.getAllByRole("combobox").find((el) => el.textContent?.includes(original.label));
+      const result = screen.getAllByRole("combobox").find((el) => comboboxText(el).includes(original.label));
       assert.ok(result, "stored model stays visible");
       return result;
     });
     assert.equal(document.body.textContent?.includes(en["agent.runtimeModels.builtInUpgradeRequired"]), false);
     await clickSelectOption(trigger, next.label);
-    await waitFor(() => assert.ok(trigger.textContent?.includes(next.label), "the actual select accepts the new preset"));
+    await waitFor(() => assert.ok(comboboxText(trigger).includes(next.label), "the actual select accepts the new preset"));
     await waitFor(() => assert.equal(save.disabled, false, "the edit page permits saving without a target catalog"));
     assert.equal(configWrites, 0, "editing must not persist config before confirmation");
     assert.equal(JSON.stringify(agent.runtimeConfig), storedBefore, "readback preserves stored identity while editing");
@@ -312,12 +313,12 @@ for (const locale of ["en", "zh-cn"] as const) {
 
     const save = await openRuntimeEditor(locale);
     const modelTrigger = await waitFor(() => {
-      const select = screen.getAllByRole("combobox").find((el) => (el.textContent ?? "").includes("Grok 4"));
+      const select = screen.getAllByRole("combobox").find((el) => comboboxText(el).includes("Grok 4"));
       assert.ok(select);
       return select;
     });
     await clickSelectOption(modelTrigger, "Composer Fast");
-    await waitFor(() => assert.match(modelTrigger.textContent ?? "", /Composer Fast/));
+    await waitFor(() => assert.match(comboboxText(modelTrigger), /Composer Fast/));
     await saveEnabledConfig(save);
 
     const dialog = confirmDialog();
@@ -337,12 +338,12 @@ for (const locale of ["en", "zh-cn"] as const) {
 
     const save = await openRuntimeEditor(locale);
     const modelTrigger = await waitFor(() => {
-      const select = screen.getAllByRole("combobox").find((el) => (el.textContent ?? "").includes("GPT Sol"));
+      const select = screen.getAllByRole("combobox").find((el) => comboboxText(el).includes("GPT Sol"));
       assert.ok(select);
       return select;
     });
     await clickSelectOption(modelTrigger, "GPT Terra");
-    await waitFor(() => assert.match(modelTrigger.textContent ?? "", /GPT Terra/));
+    await waitFor(() => assert.match(comboboxText(modelTrigger), /GPT Terra/));
     await saveEnabledConfig(save);
 
     const dialog = confirmDialog();

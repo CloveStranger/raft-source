@@ -239,6 +239,60 @@ test("claude edit: the stored key is never in the values; a blank key is valid a
   assert.equal(submitted.reasoningEffort, "high");
 });
 
+test("writeOnlyKeepRequiresUnchanged: the fixtures declare which fields each stored secret is bound to", () => {
+  assert.deepEqual(claudeEdit.writeOnlyKeepRequiresUnchanged, { apiKey: ["provider", "apiUrl"] });
+  assert.deepEqual(parseRuntimeFormV2(fixture("pi.edit.json"))!.writeOnlyKeepRequiresUnchanged, { apiKey: ["provider"] });
+  assert.deepEqual(parseRuntimeFormV2(fixture("builtin.edit.json"))!.writeOnlyKeepRequiresUnchanged, { apiKey: ["providerId", "baseUrl"] });
+  // Create forms never carry it.
+  for (const name of ["claude.form.json", "pi.form.json", "builtin.form.json"]) {
+    assert.equal(fixture(name).writeOnlyKeepRequiresUnchanged, undefined, name);
+  }
+});
+
+test("claude edit: a changed API URL with a blank key needs a new key; restoring it (or a trailing slash) or typing a key clears that", () => {
+  const values = initialRuntimeFormV2Values(claudeEdit, claudeSources);
+  const changed = { ...values, apiUrl: "https://other.example.test" };
+  assert.deepEqual(validateRuntimeFormV2(claudeEdit, claudeSources, changed, { editing: true }), { apiKey: "secret_reentry_required" });
+  assert.deepEqual(validateRuntimeFormV2(claudeEdit, claudeSources, { ...changed, apiKey: "sk-new" }, { editing: true }), {});
+  for (const same of ["https://gateway.example.test/", "  https://gateway.example.test//  "]) {
+    assert.deepEqual(validateRuntimeFormV2(claudeEdit, claudeSources, { ...values, apiUrl: same }, { editing: true }), {}, same);
+  }
+  // Create has no stored key to keep: a blank key is plainly optional/required per the schema, never this code.
+  assert.deepEqual(validateRuntimeFormV2(claudeEdit, claudeSources, changed), {});
+  // Default provider: the key field is hidden, nothing to ask for.
+  assert.deepEqual(validateRuntimeFormV2(claudeEdit, claudeSources, { ...values, provider: "default" }, { editing: true }), {});
+});
+
+test("claude edit from a Default provider: switching to Custom needs a key", () => {
+  const fromDefault = parseRuntimeFormV2({ ...fixture("claude.edit.json"), values: { provider: "default", model: "sonnet", envVars: {} } })!;
+  const values = applyRuntimeFormV2Change(fromDefault, claudeSources, initialRuntimeFormV2Values(fromDefault, claudeSources), "provider", "custom");
+  assert.deepEqual(
+    validateRuntimeFormV2(fromDefault, claudeSources, { ...values, apiUrl: "https://gateway.example.test" }, { editing: true }),
+    { apiKey: "secret_reentry_required" },
+  );
+});
+
+test("builtin edit: a hidden bound field is not compared (a preset provider has no base URL)", () => {
+  const builtinEdit = parseRuntimeFormV2(fixture("builtin.edit.json"))!;
+  const values = { ...initialRuntimeFormV2Values(builtinEdit, piSources), apiKey: "" };
+  assert.deepEqual(validateRuntimeFormV2(builtinEdit, piSources, values, { editing: true }), {});
+  assert.deepEqual(
+    validateRuntimeFormV2(builtinEdit, piSources, { ...values, baseUrl: "https://other.example.test/v1" }, { editing: true }),
+    { apiKey: "secret_reentry_required" },
+  );
+  const preset = parseRuntimeFormV2({ ...fixture("builtin.edit.json"), values: { providerId: "deepseek", model: "deepseek/v4", envVars: {} } })!;
+  const presetValues = initialRuntimeFormV2Values(preset, piSources);
+  assert.deepEqual(validateRuntimeFormV2(preset, piSources, { ...presetValues, baseUrl: "https://typed-then-hidden.example.test" }, { editing: true }), {});
+});
+
+test("writeOnlyKeepRequiresUnchanged is tolerant: malformed entries and unknown pointers are ignored", () => {
+  for (const bad of [null, 1, "x", [], { "/apiKey": "not-a-list" }, { "/nope": ["/provider"] }, { "/apiKey": [1, "/nope"] }]) {
+    const form = parseRuntimeFormV2({ ...fixture("claude.edit.json"), writeOnlyKeepRequiresUnchanged: bad })!;
+    const values = { ...initialRuntimeFormV2Values(form, claudeSources), apiUrl: "https://other.example.test" };
+    assert.deepEqual(validateRuntimeFormV2(form, claudeSources, values, { editing: true }), {}, JSON.stringify(bad));
+  }
+});
+
 test("cursor: no effort field; a typed model is kept", () => {
   const cursorForm = parseRuntimeFormV2(fixture("cursor.form.json"))!;
   const sources: RuntimeFormV2Sources = { model: fixture("cursor.option-source.fallback.json") as RuntimeFormV2Sources[string] };
@@ -246,4 +300,95 @@ test("cursor: no effort field; a typed model is kept", () => {
   const values = initialRuntimeFormV2Values(cursorForm, sources);
   assert.deepEqual(validateRuntimeFormV2(cursorForm, sources, { ...values, model: "my-org/typed" }), {});
   assert.deepEqual(runtimeFormV2SourceStatus(field(cursorForm, "model"), sources), { status: "fallback", reason: "missing_config", retryable: false });
+});
+
+// --- provider.saved_connection: saved provider connections inside a v2 form ---
+
+const connFormJson = (): FormJsonish => {
+  const raw = toRuntimeFormV2(releasedRuntimeFormDefinition("builtin-pi.create.v3")!) as unknown as FormJsonish;
+  raw.requiredClientCapabilities = ["provider.saved_connection"];
+  raw.revision = "rev-1";
+  for (const key of ["apiKey", "baseUrl", "supportsImageInput"]) {
+    raw.dataSchema.properties[key]!["x-connectionOwned"] = true;
+  }
+  return raw;
+};
+type FormJsonish = {
+  [key: string]: unknown;
+  dataSchema: { required: string[]; properties: Record<string, Record<string, unknown>> };
+};
+const conn = parseRuntimeFormV2(connFormJson())!;
+const connSources: RuntimeFormV2Sources = {
+  provider: {
+    sourceId: "provider", kind: "select", pointer: "/providerId",
+    options: [
+      { value: "connection:conn-1", label: "DeepSeek · Team", group: "saved", connectionId: "conn-1", underlyingProviderId: "deepseek", providerKind: "preset" },
+      { value: "connection:conn-2", label: "DeepSeek · Old", group: "saved", connectionId: "conn-2", underlyingProviderId: "deepseek", providerKind: "preset", unavailable: true, unavailableReason: "disabled" },
+      { value: "deepseek", label: "DeepSeek", group: "direct", providerKind: "preset" },
+      { value: "openai-compatible", label: "OpenAI compatible", group: "direct", providerKind: "gateway" },
+    ],
+    defaultValue: "deepseek",
+  },
+  model: {
+    sourceId: "model", kind: "dependent_select", pointer: "/model", dependsOn: "/providerId",
+    optionsByValue: {
+      "connection:conn-1": [{ value: "deepseek/v4", label: "V4" }],
+      "connection:conn-2": [{ value: "deepseek/v4", label: "V4" }],
+      deepseek: [{ value: "deepseek/v4", label: "V4" }],
+      "openai-compatible": [],
+    },
+    defaultValueByValue: { "connection:conn-1": "deepseek/v4", deepseek: "deepseek/v4" },
+    customValueAllowedByValue: { "connection:conn-1": false, "connection:conn-2": false, deepseek: false, "openai-compatible": true },
+  },
+};
+
+test("saved connection: parser keeps revision and x-connectionOwned", () => {
+  assert.equal(conn.revision, "rev-1");
+  assert.deepEqual(conn.requiredClientCapabilities, ["provider.saved_connection"]);
+  const byKey = Object.fromEntries(conn.fields.map((candidate) => [candidate.key, candidate]));
+  assert.equal(byKey.apiKey.connectionOwned, true);
+  assert.equal(byKey.baseUrl.connectionOwned, true);
+  assert.equal(byKey.supportsImageInput.connectionOwned, true);
+  assert.equal(byKey.model.connectionOwned, undefined);
+  assert.equal(pi.revision, undefined, "a form without the capability carries no revision");
+});
+
+test("saved connection: selecting one clears owned fields, lifts their required rule, and submits without them", () => {
+  let values = initialRuntimeFormV2Values(conn, connSources);
+  values = { ...values, apiKey: "sk-direct" };
+  values = applyRuntimeFormV2Change(conn, connSources, values, "providerId", "connection:conn-1");
+  assert.equal(values.apiKey, "", "switching to a connection clears the field it owns");
+  assert.equal(values.model, "deepseek/v4", "the model follows the connection's own list");
+  assert.deepEqual(validateRuntimeFormV2(conn, connSources, values), {}, "connection-owned fields are not the user's to fill");
+  const submitted = runtimeFormV2Submission(conn, values, connSources);
+  assert.equal("apiKey" in submitted, false, "owned fields never enter formValues, not even as empty strings");
+  assert.equal("baseUrl" in submitted, false);
+  assert.equal("supportsImageInput" in submitted, false);
+  assert.equal(submitted.providerId, "connection:conn-1");
+  assert.equal(submitted.model, "deepseek/v4");
+});
+
+test("saved connection: an unavailable binding stays visible and blocks the save", () => {
+  const values = { ...initialRuntimeFormV2Values(conn, connSources), providerId: "connection:conn-2", model: "deepseek/v4" };
+  assert.deepEqual(validateRuntimeFormV2(conn, connSources, values), { providerId: "connection_unavailable" });
+});
+
+test("saved connection: switching back to direct restores the schema's own rules", () => {
+  let values = applyRuntimeFormV2Change(conn, connSources, initialRuntimeFormV2Values(conn, connSources), "providerId", "connection:conn-1");
+  assert.deepEqual(validateRuntimeFormV2(conn, connSources, values), {});
+  values = applyRuntimeFormV2Change(conn, connSources, values, "providerId", "openai-compatible");
+  assert.deepEqual(validateRuntimeFormV2(conn, connSources, values), { apiKey: "required", model: "required" }, "the direct schema's own required rules are back once no connection is selected");
+  const submitted = runtimeFormV2Submission(conn, { ...values, apiKey: "sk-direct", model: "any/model" }, connSources);
+  assert.equal(submitted.apiKey, "sk-direct", "direct mode submits its own secret as before");
+});
+
+// Independent review: the gateway schema remains visible when managed by a connection.
+test("review: saved gateway retains its endpoint and image-capability fields", () => {
+  const sources: RuntimeFormV2Sources = structuredClone(connSources);
+  sources.provider.options!.unshift({ value: "connection:gw", label: "Gateway", connectionId: "gw", underlyingProviderId: "openai-compatible", providerKind: "gateway", group: "saved" });
+  const values = { ...initialRuntimeFormV2Values(conn, sources), providerId: "connection:gw", model: "any/model" };
+  for (const key of ["baseUrl", "supportsImageInput"]) {
+    assert.equal(isRuntimeFormV2FieldVisible(field(conn, key), { ...values, providerId: "openai-compatible" }, sources), true);
+    assert.equal(isRuntimeFormV2FieldVisible(field(conn, key), values, sources), true, `${key} must stay visible as a disabled managed field`);
+  }
 });

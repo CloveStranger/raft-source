@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useCallback, useState } from "react";
 import { useIntl } from "react-intl";
 import AvatarSlot from "../ui/AvatarSlot";
 import { Button } from "raft-ui";
@@ -36,7 +36,7 @@ export default function ServerSetupHandoffStep({
   //
   // If the call fails we still let them through: a door that will not open is worse than a
   // handoff we record on the next attempt.
-  const handleDone = async () => {
+  const handleDone = useCallback(async () => {
     setHandingOff(true);
     try {
       await acknowledgeSetupHandoff(serverId);
@@ -44,7 +44,10 @@ export default function ServerSetupHandoffStep({
       // fall through
     }
     onDone();
-  };
+  }, [onDone, serverId]);
+  const handleDoneClick = useCallback(() => {
+    void handleDone();
+  }, [handleDone]);
   return (
     <section
       className="flex w-full max-w-[560px] flex-col overflow-hidden border border-line-muted bg-layer-panel shadow-raft-md theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white theme-brutal:shadow-brutal"
@@ -86,7 +89,7 @@ export default function ServerSetupHandoffStep({
         <SetupSessionFooter disabled={handingOff} />
         <Button
           type="button"
-          onClick={() => void handleDone()}
+          onClick={handleDoneClick}
           disabled={handingOff}
           size="lg"
           variant="accent"

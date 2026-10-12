@@ -60,6 +60,8 @@ export type ProductionSystemMessageProducer = Exclude<
 export const SYSTEM_MESSAGE_BORN_READ_CLASSIFICATION = {
   // Self-caused system messages: actor born-read, everyone else unread.
   "agent.join_channel": "born-read",
+  // The human who changed the role reads it; the agent gets it unread.
+  "agent.server_role_changed": "born-read",
   // The migrated agent is the intended reader; keep the completed receipt unread.
   "agent.migration_completed_receipt": "notify-exclude",
   "agent.migration_canceled_receipt": "notify-exclude",

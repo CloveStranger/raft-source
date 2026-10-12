@@ -4,6 +4,8 @@ import {
   clearClockTimeout,
   currentTimeMs,
   errorClassOf,
+  MACHINE_DUPLICATE_CONNECTION_CLOSE_CODE,
+  MACHINE_DUPLICATE_CONNECTION_CLOSE_REASON,
   noopTracer,
   setClockTimeout,
   type ActiveSpan,
@@ -186,6 +188,17 @@ export class DaemonConnection {
   private connectTimeoutTimer: unknown = null;
   private reconnectDelay: number;
   private readonly maxReconnectDelay = 30000;
+  /**
+   * Task #374: the server closed this connection as the older of two that use
+   * the same machine key. Reconnecting every few seconds would only be refused
+   * again (or, against an older server, kick the other process off), so wait
+   * this long instead; never stop reconnecting, the other process may exit.
+   */
+  static readonly DUPLICATE_RECONNECT_DELAY_MS = 5 * 60_000;
+  /** How long a duplicate close keeps "refused while the other holds the key" on the long delay. */
+  static readonly DUPLICATE_MEMORY_MS = 30 * 60_000;
+  private duplicateClosedAt: number | null = null;
+  private nextReconnectDelayOverrideMs: number | null = null;
   private shouldConnect = true;
   private reconnectAttempt = 0;
   private connectAttempt: ConnectAttemptSpan | null = null;
@@ -440,6 +453,7 @@ export class DaemonConnection {
         last_inbound_message_kind: this.lastInboundMessageKind,
         last_inbound_age_ms_bucket: this.lastInboundAgeBucket(),
       }, this.shouldConnect ? "cancelled" : "ok");
+      if (code === MACHINE_DUPLICATE_CONNECTION_CLOSE_CODE) this.noteDuplicateMachineClose(reason);
       this.options.onDisconnect();
       this.scheduleReconnect();
     });
@@ -526,12 +540,46 @@ export class DaemonConnection {
     }, ms);
   }
 
+  /**
+   * Task #374. Closed as the duplicate: log it once (this close) and wait the
+   * long delay. Refused because the other connection still holds the key: wait
+   * the long delay only if this process was itself closed as the duplicate
+   * recently; otherwise this is a winner whose own socket dropped, which keeps
+   * the normal backoff so it is back within the server's hold window.
+   */
+  private noteDuplicateMachineClose(reason: string) {
+    const now = this.clock.now();
+    if (reason === MACHINE_DUPLICATE_CONNECTION_CLOSE_REASON) {
+      this.duplicateClosedAt = now;
+      logger.error(
+        "[Daemon] The server closed this connection: the same machine key is connected from another process. "
+        + "Stop the other daemon or give this one its own machine key. "
+        + `Reconnecting in ${Math.round(DaemonConnection.DUPLICATE_RECONNECT_DELAY_MS / 60_000)} minutes.`,
+      );
+      this.nextReconnectDelayOverrideMs = DaemonConnection.DUPLICATE_RECONNECT_DELAY_MS;
+    } else {
+      const recentlyClosedAsDuplicate = this.duplicateClosedAt !== null
+        && now - this.duplicateClosedAt < DaemonConnection.DUPLICATE_MEMORY_MS;
+      logger.warn(
+        "[Daemon] The server refused this connection: another process holds this machine key"
+        + (recentlyClosedAsDuplicate ? "; keeping the long reconnect delay." : "."),
+      );
+      if (recentlyClosedAsDuplicate) this.nextReconnectDelayOverrideMs = DaemonConnection.DUPLICATE_RECONNECT_DELAY_MS;
+    }
+    this.trace("daemon.connection.duplicate_machine_close", {
+      close_reason: reason === MACHINE_DUPLICATE_CONNECTION_CLOSE_REASON ? "closed_as_duplicate" : "refused_held",
+      long_delay: this.nextReconnectDelayOverrideMs !== null,
+    });
+  }
+
   private scheduleReconnect() {
     if (!this.shouldConnect) return;
     if (this.reconnectTimer) return;
 
     this.reconnectAttempt += 1;
-    const delayMs = (this.options.reconnectDelayFor ?? jitteredReconnectDelay)(this.reconnectDelay);
+    const override = this.nextReconnectDelayOverrideMs;
+    this.nextReconnectDelayOverrideMs = null;
+    const delayMs = override ?? (this.options.reconnectDelayFor ?? jitteredReconnectDelay)(this.reconnectDelay);
     logger.info(`[Daemon] Reconnecting to server in ${delayMs}ms (attempt ${this.reconnectAttempt})`);
     this.trace("daemon.connection.reconnect_scheduled", {
       reconnect_attempt: this.reconnectAttempt,

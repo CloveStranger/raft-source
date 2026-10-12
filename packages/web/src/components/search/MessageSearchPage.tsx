@@ -1,11 +1,11 @@
 import { getEffectiveLimits } from "@botiverse/raft-shared";
 import type { ServerPlan } from "@botiverse/raft-shared";
 import { Component, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { KeyboardEvent as ReactKeyboardEvent, MouseEvent as ReactMouseEvent, ReactNode } from "react";
+import type { ChangeEvent as ReactChangeEvent, CompositionEvent as ReactCompositionEvent, KeyboardEvent as ReactKeyboardEvent, MouseEvent as ReactMouseEvent, ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { useIntl } from "react-intl";
 import type { IntlShape } from "react-intl";
-import { ArrowDownUp, AtSign, CalendarRange, ChevronDown, Clock3, FolderOpen, Hash, Monitor, Search, Star, UserCircle2, X } from "lucide-react";
+import { ArrowDownUp, AtSign, CalendarRange, ChevronDown, Clock3, FolderOpen, Hash, Search, Star, UserCircle2, X } from "lucide-react";
 import {
   Badge,
   Button,
@@ -36,14 +36,7 @@ import {
   SearchEntityResultIcon,
   SearchEntityResultLeading,
   SearchEntityResultTitle,
-  SearchMessageResult,
-  SearchMessageResultBody,
-  SearchMessageResultHeader,
   SearchMessageResultMatch,
-  SearchMessageResultMeta,
-  SearchMessageResultSender,
-  SearchMessageResultThreadMeta,
-  SearchMessageResultTimestamp,
   SearchResultsList,
   SearchResultsSection,
   SearchResultsSectionHeading,
@@ -51,7 +44,6 @@ import {
   SearchShellFilters,
   SearchShellRoot,
   SearchShellViewport,
-  SearchThreadMessageResult,
   SearchThreadResult,
   SearchThreadResultHeader,
   SearchThreadResultMessages,
@@ -71,6 +63,7 @@ import {
   SelectTrigger,
   ThreadIcon,
 } from "raft-ui";
+import type { ComboboxProps } from "raft-ui";
 import { useLocation, useNavigate } from "react-router-dom";
 import api from "../../api/client";
 import { useAuthStore } from "../../store/authStore";
@@ -89,19 +82,12 @@ import { conversationChannelIdFromPath } from "./recentConversations";
 import { useRecentConversationEntities, useSearchEntityCatalog } from "./useRecentConversationEntities";
 import { useAppNavigate, useMobileBack } from "../../hooks/useAppNavigate";
 import { useLiveSearchParams } from "../../hooks/useLiveSearchParams";
-import AgentActivityDot from "../agent/AgentActivityDot";
 import PanelHeader from "../ui/PanelHeader";
 import Skeleton from "../ui/Skeleton";
 import SectionEyebrow from "../ui/SectionEyebrow";
 import AvatarSlot from "../ui/AvatarSlot";
 import DismissBackdrop from "../ui/DismissBackdrop";
 import MenuItem from "../ui/MenuItem";
-import {
-  ARCHIVED_CHANNEL_ICON_CLASS,
-  ARCHIVED_CHANNEL_MUTED_TEXT_CLASS,
-  ARCHIVED_CHANNEL_TEXT_CLASS,
-} from "../channel/channelArchiveVisual";
-import { ChannelKindIcon } from "../channel/channelKindIcon";
 import { resolveMessageSenderMemberFromList } from "../../utils/messageSenderMember";
 import {
   buildTimeRangeParams,
@@ -125,7 +111,6 @@ import { getGlobalSearchShortcutLabel } from "../../utils/keyboardShortcuts";
 import { useRankedComposerSuggestions } from "../../hooks/useRankedComposerSuggestions";
 import { useMediaQuery } from "../../hooks/effectPrimitives";
 import { placeContextMenu } from "../ui/contextMenuPosition";
-import type { WorkspacePanelRef } from "../workspace/workspaceGridDemoConfig";
 import {
   buildSearchEntityEntriesWhenQueryPresent,
   filterSearchEntityEntriesForQuery,
@@ -153,6 +138,9 @@ import {
   searchParamsHaveExplicitState,
   selectFrequentSearchEntities,
 } from "./searchHome";
+import { EntityResultRow } from "./EntityResultRow";
+import { MessageHitRow } from "./MessageHitRow";
+import { SearchHomeEntityRow } from "./SearchHomeEntityRow";
 import { fullPageSearchHopState, resolveSearchOverlayBackground, SEARCH_PRESENTATION_PAGE, SEARCH_PRESENTATION_PARAM } from "./searchOverlayLocation";
 
 // Server entities (channels, people, agents, machines) are a ranked list, not a
@@ -169,7 +157,7 @@ const ENTITY_RESULTS_SCROLL_CLASS = "-m-1.5 max-h-[24rem] overflow-y-auto oversc
 const OVERLAY_MESSAGE_PREVIEW_LIMIT = 5;
 const OVERLAY_ALL_RESULTS_KEY = "action:view-all-results";
 // Return-key glyph for the overlay's "view all results" row (not translatable copy).
-const RETURN_KEY_GLYPH = "↵";
+export const RETURN_KEY_GLYPH = "↵";
 
 type SelectableSearchResult =
   | { key: string; kind: "entity"; result: SearchEntityRecord }
@@ -268,7 +256,7 @@ function getScopeChipLabel(scopes: readonly SearchScope[], formatMessage: IntlSh
 
 // Localize an entity-result subtitle descriptor at render time (real @handles /
 // descriptions pass through as-is; fallback labels format with the app locale).
-function formatEntitySubtitle(subtitle: SearchEntitySubtitle, formatMessage: IntlShape["formatMessage"]): string {
+export function formatEntitySubtitle(subtitle: SearchEntitySubtitle, formatMessage: IntlShape["formatMessage"]): string {
   switch (subtitle.kind) {
     case "channel":
       return formatMessage({ id: "search.channel" });
@@ -292,7 +280,7 @@ function getExclusiveSenderTypeScope(scopes: readonly SearchScope[]): "user" | "
   return hasHumans ? "user" : "agent";
 }
 
-interface MessageSearchResult {
+export interface MessageSearchResult {
   id: string;
   channelId: string;
   threadId: string | null;
@@ -378,7 +366,7 @@ function getTimeRangeLabelId(range: SearchTimeRange): "search.timeToday" | "sear
   }
 }
 
-function SearchHighlight({ text, query }: { text: string; query: string }) {
+export function SearchHighlight({ text, query }: { text: string; query: string }) {
   const tokens = useMemo(() => {
     const parts = query
       .trim()
@@ -494,9 +482,20 @@ class SearchResultsBoundary extends Component<SearchResultsBoundaryProps, Search
   }
 }
 
-export default function MessageSearchPage({ onOpenPanelRef, onDragPanelRef, activateResultsInChat = false, overlayChrome = false }: {
-  onOpenPanelRef?: (ref: WorkspacePanelRef, source?: { title?: string; subtitle?: string }) => void;
-  onDragPanelRef?: (event: React.DragEvent<HTMLButtonElement>, ref: WorkspacePanelRef, source?: { title?: string; subtitle?: string }) => void;
+export type SearchSenderMember = ReturnType<typeof resolveMessageSenderMemberFromList>;
+
+// Focus the context menu's first item when it mounts, so keyboard users land
+// inside the menu they just opened.
+function focusFirstMenuButton(node: HTMLDivElement | null) {
+  node?.querySelector<HTMLButtonElement>("button")?.focus();
+}
+
+// Keep presses inside the context menu from reaching the dismiss backdrop.
+function stopMouseDownPropagation(event: ReactMouseEvent) {
+  event.stopPropagation();
+}
+
+export default function MessageSearchPage({ activateResultsInChat = false, overlayChrome = false }: {
   /**
    * Overlay mode (desktop ⌘K search overlay): a SINGLE click on a result jumps
    * straight to it in chat (openResultInChat) instead of opening the col-3
@@ -1460,78 +1459,7 @@ export default function MessageSearchPage({ onOpenPanelRef, onDragPanelRef, acti
     }
   }, [closeSearchContent, closeThread, nav, openDM, openUserDM, rememberCurrentSearchQuery, rememberSearchEntityOpen, slug, syncSelectedKey]);
 
-  const openEntityResultFromDoubleClick = useCallback((result: SearchEntityRecord) => {
-    if (!onOpenPanelRef) {
-      void openEntityResultInChat(result);
-      return;
-    }
-    rememberCurrentSearchQuery();
-    if (result.type === "channel" && result.channelId) {
-      onOpenPanelRef(
-        { kind: "channel", id: result.channelId },
-        { title: result.title, subtitle: formatEntitySubtitle(result.subtitle, formatMessageRef.current) },
-      );
-      rememberSearchEntityOpen(result.key);
-      return;
-    }
-    if (result.type === "computer" && result.machineId) {
-      onOpenPanelRef(
-        { kind: "machine", id: result.machineId },
-        { title: result.title, subtitle: formatEntitySubtitle(result.subtitle, formatMessageRef.current) },
-      );
-      return;
-    }
-    const openWorkspaceDm = async () => {
-      try {
-        const channelId = result.channelId
-          ?? (result.type === "agentDm" && result.agentId
-            ? (await openDM(result.agentId)).id
-            : result.type === "humanDm" && result.userId
-              ? (await openUserDM(result.userId)).id
-              : null);
-        if (channelId) {
-          onOpenPanelRef(
-            { kind: "dm", id: channelId },
-            { title: result.title, subtitle: formatEntitySubtitle(result.subtitle, formatMessageRef.current) },
-          );
-          rememberSearchEntityOpen(result.key);
-        }
-      } catch {
-        const detailRef = result.type === "agentDm" && result.agentId
-          ? { kind: "agent", id: result.agentId } as const
-          : result.type === "humanDm" && result.userId
-            ? { kind: "human", id: result.userId } as const
-            : null;
-        if (detailRef) {
-          onOpenPanelRef(detailRef, { title: result.title, subtitle: formatEntitySubtitle(result.subtitle, formatMessageRef.current) });
-        }
-      }
-    };
-    void openWorkspaceDm();
-  }, [onOpenPanelRef, openDM, openEntityResultInChat, openUserDM, rememberCurrentSearchQuery, rememberSearchEntityOpen]);
-
   const handleMessageResultClick = useCallback((event: ReactMouseEvent<HTMLButtonElement>, result: MessageSearchResult) => {
-    if (onOpenPanelRef) {
-      rememberMessageResultsSearchQuery();
-      if (result.channelType === "thread" && result.parentChannelId && result.parentMessageId) {
-        onOpenPanelRef(
-          {
-            kind: "thread",
-            channelId: result.parentChannelId,
-            threadRootId: result.parentMessageId,
-            threadChannelId: result.channelId,
-          },
-          { title: formatMessageRef.current({ id: "search.panelThreadTitle" }, { id: result.parentMessageId.slice(0, 8) }), subtitle: result.parentChannelName },
-        );
-        return;
-      }
-      onOpenPanelRef(
-        { kind: result.channelType === "dm" ? "dm" : "channel", id: result.channelId },
-        { title: result.channelType === "dm" ? `@${result.channelName}` : `#${result.channelName}`, subtitle: formatMessageRef.current({ id: "search.panelSubtitle" }) },
-      );
-      rememberOpenedChannel(result.channelId, result.channelType === "dm" ? "dm" : "channel");
-      return;
-    }
     // Overlay mode: a single click jumps to the message in chat (there is no col-3
     // preview to open). No double-click affordance / 220ms disambiguation needed.
     if (activateResultsInChat) {
@@ -1553,13 +1481,9 @@ export default function MessageSearchPage({ onOpenPanelRef, onDragPanelRef, acti
       resultClickTimerRef.current = null;
       void openResult(result);
     }, 220);
-  }, [activateResultsInChat, onOpenPanelRef, openResult, openResultInChat, rememberMessageResultsSearchQuery, rememberOpenedChannel]);
+  }, [activateResultsInChat, openResult, openResultInChat]);
 
   const handleEntityResultClick = useCallback((event: ReactMouseEvent<HTMLButtonElement>, result: SearchEntityRecord) => {
-    if (onOpenPanelRef) {
-      openEntityResultFromDoubleClick(result);
-      return;
-    }
     // Overlay mode: a single click jumps to the entity in chat (no col-3 preview).
     if (activateResultsInChat) {
       void openEntityResultInChat(result);
@@ -1571,7 +1495,7 @@ export default function MessageSearchPage({ onOpenPanelRef, onDragPanelRef, acti
         entityResultClickTimerRef.current = null;
       }
       pendingEntityResultRef.current = null;
-      openEntityResultFromDoubleClick(result);
+      void openEntityResultInChat(result);
       return;
     }
     if (entityResultClickTimerRef.current !== null) {
@@ -1592,7 +1516,7 @@ export default function MessageSearchPage({ onOpenPanelRef, onDragPanelRef, acti
         void openEntityResult(pendingResult);
       }
     }, 220);
-  }, [activateResultsInChat, onOpenPanelRef, openEntityResult, openEntityResultFromDoubleClick, openEntityResultInChat]);
+  }, [activateResultsInChat, openEntityResult, openEntityResultInChat]);
 
   const handleChannelResultContextMenu = useCallback((
     event: ReactMouseEvent,
@@ -1612,49 +1536,6 @@ export default function MessageSearchPage({ onOpenPanelRef, onDragPanelRef, acti
       y: position.y,
     });
   }, []);
-
-  const handleMessageResultDrag = useCallback((event: React.DragEvent<HTMLButtonElement>, result: MessageSearchResult) => {
-    if (!onDragPanelRef) return;
-    if (result.channelType === "thread" && result.parentChannelId && result.parentMessageId) {
-      onDragPanelRef(
-        event,
-        {
-          kind: "thread",
-          channelId: result.parentChannelId,
-          threadRootId: result.parentMessageId,
-          threadChannelId: result.channelId,
-        },
-        { title: formatMessageRef.current({ id: "search.panelThreadTitle" }, { id: result.parentMessageId.slice(0, 8) }), subtitle: result.parentChannelName },
-      );
-      return;
-    }
-    onDragPanelRef(
-      event,
-      { kind: result.channelType === "dm" ? "dm" : "channel", id: result.channelId },
-      { title: result.channelType === "dm" ? `@${result.channelName}` : `#${result.channelName}`, subtitle: formatMessageRef.current({ id: "search.panelSubtitle" }) },
-    );
-  }, [onDragPanelRef]);
-
-  const handleEntityResultDrag = useCallback((event: React.DragEvent<HTMLButtonElement>, result: SearchEntityRecord) => {
-    if (!onDragPanelRef) return;
-    if (result.type === "channel" && result.channelId) {
-      onDragPanelRef(event, { kind: "channel", id: result.channelId }, { title: result.title, subtitle: formatEntitySubtitle(result.subtitle, formatMessageRef.current) });
-      return;
-    }
-    if (result.type === "computer" && result.machineId) {
-      onDragPanelRef(event, { kind: "machine", id: result.machineId }, { title: result.title, subtitle: formatEntitySubtitle(result.subtitle, formatMessageRef.current) });
-      return;
-    }
-    if (result.channelId) {
-      onDragPanelRef(event, { kind: "dm", id: result.channelId }, { title: result.title, subtitle: formatEntitySubtitle(result.subtitle, formatMessageRef.current) });
-      return;
-    }
-    if (result.type === "agentDm" && result.agentId) {
-      onDragPanelRef(event, { kind: "agent", id: result.agentId }, { title: result.title, subtitle: formatEntitySubtitle(result.subtitle, formatMessageRef.current) });
-    } else if (result.type === "humanDm" && result.userId) {
-      onDragPanelRef(event, { kind: "human", id: result.userId }, { title: result.title, subtitle: formatEntitySubtitle(result.subtitle, formatMessageRef.current) });
-    }
-  }, [onDragPanelRef]);
 
   // Overlay mode previews only the first few hits (Slack "Recent messages"); the
   // full list, Load More and the col-3 preview live on the results page.
@@ -1779,7 +1660,7 @@ export default function MessageSearchPage({ onOpenPanelRef, onDragPanelRef, acti
   // and a regression in any of those guards would close the slot from
   // anywhere on the page. Scoping by DOM subtree removes the whole
   // attack surface: focus location is the source of truth.
-  const handleRailKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+  const handleRailKeyDown = useCallback((event: ReactKeyboardEvent<HTMLDivElement>) => {
     if (isSearchKeyboardComposing(event)) return;
     if (event.key === "Escape") {
       // Overlay mode: SearchOverlay owns Escape-to-dismiss. A plain Escape (no
@@ -1827,7 +1708,7 @@ export default function MessageSearchPage({ onOpenPanelRef, onDragPanelRef, acti
         }
       }
     }
-  };
+  }, [activateResultsInChat, closeSearchContent, handleSearchEscape, openAllResults, openEntityResult, openEntityResultInChat, openResult, openResultInChat, selectableResults, selectedIndex, slotOpen]);
 
   const totalResults = entityResults.length + results.length;
   const boundaryKey = `${queryParam}|${senderIdParam}|${scopes.join(",")}|${timeRange}|${sort}|${searchNonce}|${channelIdParam}`;
@@ -1908,63 +1789,21 @@ export default function MessageSearchPage({ onOpenPanelRef, onDragPanelRef, acti
     const member = result.senderType === "user"
       ? resolveMessageSenderMemberFromList(result, members, currentUser)
       : null;
-    const sourceLabel = getSourceLabel(result);
-    const resultKey = `message:${result.id}`;
-    const isSelected = selectedResultKey === resultKey;
-
-    const Result = nested ? SearchThreadMessageResult : SearchMessageResult;
-
     return (
-      <Result
+      <MessageHitRow
         key={result.id}
-        type="button"
-        draggable={!!onDragPanelRef}
-        onDragStart={(event) => handleMessageResultDrag(event, result)}
-        onClick={(event) => handleMessageResultClick(event, result)}
-        selected={isSelected}
-        className={nested ? "border-t-2" : undefined}
-      >
-        <SearchMessageResultHeader>
-          <SearchMessageResultMeta>{sourceLabel}</SearchMessageResultMeta>
-          {result.channelType === "thread" && (
-            <SearchMessageResultThreadMeta>
-              <ThreadIcon width={10} height={10} />
-              {formatMessage({ id: "search.threadInline" })}
-            </SearchMessageResultThreadMeta>
-          )}
-          {(result.channelType === "thread"
-            ? result.parentChannelArchivedAt
-            : result.channelArchivedAt) && (
-            <Badge appearance="soft" variant="warning" uppercase>
-              {formatMessage({ id: "search.archived" })}
-            </Badge>
-          )}
-          {historyCutoffMs !== null && new Date(result.createdAt).getTime() < historyCutoffMs && (
-            <Badge appearance="soft" variant="warning" data-testid="search-hit-beyond-history">
-              {formatMessage({ id: "search.beyondHistory" })}
-            </Badge>
-          )}
-          <SearchMessageResultSender>
-            {result.senderType === "agent" ? (
-              <AvatarSlot context="preview-mini" type="agent" agentAvatarUrl={agent?.avatarUrl ?? null} />
-            ) : result.senderType === "external_projection" ? (
-              <AvatarSlot context="preview-mini" type="app" appAvatarUrl={result.senderAvatarUrl} appInitials={result.senderName} />
-            ) : (
-              <AvatarSlot context="preview-mini" type="human" humanAvatarUrl={member?.avatarUrl} gravatarHash={member?.gravatarHash} />
-            )}
-            <span>{result.senderName}</span>
-          </SearchMessageResultSender>
-          <SearchMessageResultTimestamp>{(() => {
-            const parts = getSearchRelativeTimeParts(result.createdAt);
-            return parts ? formatRelativeTimeParts(parts.value, parts.unit, intl.locale) : formatMessage({ id: "search.grpUnknownTime" });
-          })()}</SearchMessageResultTimestamp>
-        </SearchMessageResultHeader>
-        <SearchMessageResultBody>
-          <SearchHighlight text={result.snippet} query={query} />
-        </SearchMessageResultBody>
-      </Result>
+        result={result}
+        nested={nested}
+        selected={selectedResultKey === `message:${result.id}`}
+        sourceLabel={getSourceLabel(result)}
+        agentAvatarUrl={agent?.avatarUrl ?? null}
+        senderMember={member}
+        historyCutoffMs={historyCutoffMs}
+        query={query}
+        onResultClick={handleMessageResultClick}
+      />
     );
-  }, [agents, currentUser, formatMessage, getSourceLabel, handleMessageResultClick, handleMessageResultDrag, historyCutoffMs, intl, members, onDragPanelRef, query, selectedResultKey]);
+  }, [agents, currentUser, getSourceLabel, handleMessageResultClick, historyCutoffMs, members, query, selectedResultKey]);
 
   const chooseSearchHistoryEntry = useCallback((historyQuery: string) => {
     setQuery(historyQuery);
@@ -1974,66 +1813,42 @@ export default function MessageSearchPage({ onOpenPanelRef, onDragPanelRef, acti
     });
   }, []);
 
+  // Same activation contract as the result list and the keyboard path: in the
+  // ⌘K overlay (activateResultsInChat) a click must jump to the entity in chat —
+  // openEntityResult only fills the col-3 content slot, which the overlay does
+  // not render, so the click looked dead (task #95).
+  const activateSearchHomeEntity = useCallback((result: SearchEntityRecord) => {
+    void (activateResultsInChat ? openEntityResultInChat(result) : openEntityResult(result));
+  }, [activateResultsInChat, openEntityResult, openEntityResultInChat]);
+
   const renderSearchHomeEntity = useCallback((result: SearchEntityRecord) => (
-    <SearchEntityResult
+    <SearchHomeEntityRow
       key={result.key}
-      type="button"
-      data-testid={`search-common-${result.key}`}
-      // Same activation contract as the result list and the keyboard path:
-      // in the ⌘K overlay (activateResultsInChat) a click must jump to the
-      // entity in chat — openEntityResult only fills the col-3 content slot,
-      // which the overlay does not render, so the click looked dead (task #95).
-      onClick={() => {
-        void (activateResultsInChat ? openEntityResultInChat(result) : openEntityResult(result));
-      }}
-    >
-      <SearchEntityResultLeading>
-        {result.type === "channel" ? (
-          <SearchEntityResultIcon>
-            <ChannelKindIcon type={result.channelType ?? "channel"} />
-          </SearchEntityResultIcon>
-        ) : result.type === "computer" ? (
-          <SearchEntityResultIcon>
-            <Monitor size={14} />
-          </SearchEntityResultIcon>
-        ) : result.type === "agentDm" ? (
-          <AvatarSlot
-            context="surface-list"
-            type="agent"
-            agentAvatarUrl={result.agentId
-              ? agents.find((entry) => entry.id === result.agentId)?.avatarUrl ?? null
-              : null}
-            badge={result.agentId ? <AgentActivityDot agentId={result.agentId} /> : undefined}
-          />
-        ) : (
-          (() => {
-            const member = resolveUserMember(result.userId);
-            return (
-              <AvatarSlot
-                context="surface-list"
-                type="human"
-                humanAvatarUrl={member?.avatarUrl}
-                gravatarHash={member?.gravatarHash}
-              />
-            );
-          })()
-        )}
-      </SearchEntityResultLeading>
-      <SearchEntityResultContent>
-        <SearchEntityResultHeader>
-          <SearchEntityResultTitle>{result.title}</SearchEntityResultTitle>
-        </SearchEntityResultHeader>
-        <SearchEntityResultDescription>
-          {formatEntitySubtitle(result.subtitle, formatMessage)}
-        </SearchEntityResultDescription>
-      </SearchEntityResultContent>
-    </SearchEntityResult>
-  ), [activateResultsInChat, agents, formatMessage, openEntityResult, openEntityResultInChat, resolveUserMember]);
+      result={result}
+      agentAvatarUrl={result.agentId
+        ? agents.find((entry) => entry.id === result.agentId)?.avatarUrl ?? null
+        : null}
+      humanMember={resolveUserMember(result.userId)}
+      onActivate={activateSearchHomeEntity}
+    />
+  ), [activateSearchHomeEntity, agents, resolveUserMember]);
 
   // The query input + clear button + Esc hint, shared by both the full-page
   // PanelHeader and the slim overlay header so the field behavior is identical.
   // Overlay: no ⌘K hint inside the field you just opened with ⌘K (Slack's
   // "Channels, people, files, and more").
+  const handleQueryChange = useCallback((event: ReactChangeEvent<HTMLInputElement>) => {
+    setQuery(event.target.value);
+  }, []);
+  const handleQueryCompositionStart = useCallback(() => {
+    setIsComposing(true);
+  }, []);
+  const handleQueryCompositionEnd = useCallback((event: ReactCompositionEvent<HTMLInputElement>) => {
+    setQuery(event.currentTarget.value);
+    setIsComposing(false);
+  }, []);
+  const clearQuery = useCallback(() => setQuery(""), []);
+
   const searchPlaceholder = overlayChrome
     ? formatMessage({ id: "search.overlay.placeholder" })
     : formatMessage({ id: "search.placeholder" }, { shortcutHint });
@@ -2042,16 +1857,9 @@ export default function MessageSearchPage({ onOpenPanelRef, onDragPanelRef, acti
       <InputGroupInput
         ref={inputRef}
         value={query}
-        onChange={(event) => {
-          setQuery(event.target.value);
-        }}
-        onCompositionStart={() => {
-          setIsComposing(true);
-        }}
-        onCompositionEnd={(event) => {
-          setQuery(event.currentTarget.value);
-          setIsComposing(false);
-        }}
+        onChange={handleQueryChange}
+        onCompositionStart={handleQueryCompositionStart}
+        onCompositionEnd={handleQueryCompositionEnd}
         placeholder={searchPlaceholder}
         aria-label={searchPlaceholder}
       />
@@ -2061,7 +1869,7 @@ export default function MessageSearchPage({ onOpenPanelRef, onDragPanelRef, acti
             type="button"
             variant="ghost"
             size="icon-xs"
-            onClick={() => setQuery("")}
+            onClick={clearQuery}
             aria-label={formatMessage({ id: "search.clearSearch" })}
           >
             <X aria-hidden size={12} />
@@ -2074,101 +1882,119 @@ export default function MessageSearchPage({ onOpenPanelRef, onDragPanelRef, acti
     </InputGroup>
   );
 
-  // Destination (entity) row — shared by the overlay's exact-match head row and
-  // the destinations section (task #102), so both render identically.
   const renderEntityResultRow = (result: SearchEntityRecord, options: { returnHint?: boolean } = {}) => {
-  const channelPinnedRef = result.type === "channel" && result.channelId
-    ? { kind: "channel", id: result.channelId } as const
-    : null;
-  const isArchivedChannelResult = result.type === "channel" && !!result.archivedAt;
-  const hasOpenChannelContextMenu = channelPinnedRef !== null
-    && channelContextMenu?.result.channelId === channelPinnedRef.id;
-  const isSelected = selectedResultKey === result.key || hasOpenChannelContextMenu;
-
-  // The card frame, hover and selected states belong to rui's
-  // SearchEntityResult. A second square frame on this wrapper showed its dark
-  // corners around rui's rounded selection ring (task #694).
-  return (
-    <div
-      key={result.key}
-      data-testid={channelPinnedRef ? `search-channel-result-${channelPinnedRef.id}` : undefined}
-      data-active={isSelected ? "true" : undefined}
-      onContextMenu={
-        channelPinnedRef && !result.archivedAt
-          ? (event) => handleChannelResultContextMenu(event, result)
-          : undefined
-      }
-      className="flex w-full"
-    >
-      <SearchEntityResult
-        type="button"
-        draggable={!!onDragPanelRef}
-        onDragStart={(event) => handleEntityResultDrag(event, result)}
-        onClick={(event) => handleEntityResultClick(event, result)}
-        selected={isSelected}
-        className="theme-brutal:hover:shadow-brutal-sm theme-brutal:active:shadow-brutal-sm theme-brutal:data-[selected=true]:shadow-brutal-sm"
-      >
-        <SearchEntityResultLeading>
-          {result.type === "channel" ? (
-            <SearchEntityResultIcon
-              className={isArchivedChannelResult ? ARCHIVED_CHANNEL_ICON_CLASS : undefined}
-            >
-              <ChannelKindIcon type={result.channelType ?? "channel"} />
-            </SearchEntityResultIcon>
-          ) : result.type === "computer" ? (
-            <SearchEntityResultIcon>
-              <Monitor size={14} />
-            </SearchEntityResultIcon>
-          ) : result.type === "agentDm" ? (
-            result.agentId ? (
-              <AvatarSlot
-                context="surface-list"
-                type="agent"
-                agentAvatarUrl={agents.find((entry) => entry.id === result.agentId)?.avatarUrl ?? null}
-                badge={<AgentActivityDot agentId={result.agentId} />}
-              />
-            ) : (
-              <AvatarSlot context="surface-list" type="agent" agentAvatarUrl={null} />
-            )
-          ) : result.userId ? (
-            (() => {
-              const member = resolveUserMember(result.userId);
-              return (
-                <AvatarSlot
-                  context="surface-list"
-                  type="human"
-                  humanAvatarUrl={member?.avatarUrl}
-                  gravatarHash={member?.gravatarHash}
-                />
-              );
-            })()
-          ) : (
-            <AvatarSlot context="surface-list" type="human" humanPlaceholder />
-          )}
-        </SearchEntityResultLeading>
-        <SearchEntityResultContent>
-          <SearchEntityResultHeader>
-            <span className={`truncate text-sm font-bold ${isArchivedChannelResult ? ARCHIVED_CHANNEL_TEXT_CLASS : "text-foreground-strong"}`}>
-              {result.title}
-            </span>
-            <Badge appearance="soft" variant="muted" uppercase>
-              {result.type === "channel" ? formatMessage({ id: "search.channel" }) : result.type === "computer" ? formatMessage({ id: "search.badgeComputer" }) : result.type === "agentDm" ? formatMessage({ id: "search.badgeAgent" }) : formatMessage({ id: "search.badgeHuman" })}
-            </Badge>
-            {result.archivedAt && (
-              <Badge appearance="soft" variant={isArchivedChannelResult ? "muted" : "warning"} uppercase>
-                {formatMessage({ id: "search.archived" })}
-              </Badge>
-            )}
-          </SearchEntityResultHeader>
-          <SearchEntityResultDescription className={isArchivedChannelResult ? ARCHIVED_CHANNEL_MUTED_TEXT_CLASS : undefined}>
-            {formatEntitySubtitle(result.subtitle, formatMessage)}
-          </SearchEntityResultDescription>
-        </SearchEntityResultContent>
-        {options.returnHint && isSelected ? <Kbd aria-hidden="true">{RETURN_KEY_GLYPH}</Kbd> : null}
-      </SearchEntityResult>
-    </div>
-  );
+    const hasOpenChannelContextMenu = result.type === "channel"
+      && !!result.channelId
+      && channelContextMenu?.result.channelId === result.channelId;
+    return (
+      <EntityResultRow
+        key={result.key}
+        result={result}
+        returnHint={options.returnHint ?? false}
+        selected={selectedResultKey === result.key || hasOpenChannelContextMenu}
+        agentAvatarUrl={result.agentId
+          ? agents.find((entry) => entry.id === result.agentId)?.avatarUrl ?? null
+          : null}
+        humanMember={resolveUserMember(result.userId)}
+        onResultContextMenu={handleChannelResultContextMenu}
+        onResultClick={handleEntityResultClick}
+      />
+    );
   };
+
+  const mobileBackProps = useMemo(
+    () => ({ "data-testid": "search-mobile-back", title: formatMessage({ id: "search.back" }) }),
+    [formatMessage],
+  );
+
+  // Filter menus render into the filters bar so they stay inside the overlay.
+  const filtersPortalProps = useMemo(() => ({ container: filtersPortalRef }), []);
+  const handleFromMenuOpenChange = useCallback((open: boolean) => setOpenFilterMenu(open ? "from" : null), []);
+  const handleScopeMenuOpenChange = useCallback((open: boolean) => setOpenFilterMenu(open ? "scope" : null), []);
+  const handleChannelMenuOpenChange = useCallback((open: boolean) => setOpenFilterMenu(open ? "channel" : null), []);
+  const handleTimeMenuOpenChange = useCallback((open: boolean) => setOpenFilterMenu(open ? "time" : null), []);
+  const handleSortMenuOpenChange = useCallback((open: boolean) => setOpenFilterMenu(open ? "sort" : null), []);
+
+  const senderItemIds = useMemo(() => filteredSenderOptions.map((item) => item.id), [filteredSenderOptions]);
+  const senderItemLabel = useCallback(
+    (id: string) => senderOptions.find((item) => item.id === id)?.label ?? id,
+    [senderOptions],
+  );
+  const handleSenderInputChange: NonNullable<ComboboxProps<string>["onInputValueChange"]> = useCallback((nextValue, details) => {
+    if (details.reason !== "item-press") setSenderFilterQuery(nextValue);
+  }, []);
+  const handleSenderChange = useCallback((nextValue: string | null) => {
+    const sender = senderOptions.find((item) => item.id === nextValue) ?? null;
+    setSenderFilter(sender);
+  }, [senderOptions, setSenderFilter]);
+  const clearSenderFilter = useCallback(() => updateSearchParam("senderId", null), [updateSearchParam]);
+
+  const scopeItems = useMemo(
+    () => SEARCH_SCOPE_OPTIONS.map((mode) => ({
+      label: formatMessage({ id: getScopeOptionLabelId(mode) }),
+      value: mode,
+    })),
+    [formatMessage],
+  );
+  const scopeValue = useMemo(() => [...scopes], [scopes]);
+
+  const clearChannelFilter = useCallback(() => updateSearchParam("channelId", null), [updateSearchParam]);
+  const channelItemIds = useMemo(() => filteredChannels.map((ch) => ch.id), [filteredChannels]);
+  const channelItemLabel = useCallback(
+    (id: string) => channels.find((ch) => ch.id === id)?.name ?? id,
+    [channels],
+  );
+  const handleChannelInputChange: NonNullable<ComboboxProps<string>["onInputValueChange"]> = useCallback((nextValue, details) => {
+    if (details.reason !== "item-press") setChannelFilterQuery(nextValue);
+  }, []);
+  const handleChannelChange = useCallback((nextValue: string | null) => {
+    if (nextValue) updateSearchParam("channelId", nextValue);
+  }, [updateSearchParam]);
+
+  const timeRangeItems = useMemo(
+    () => SEARCH_TIME_RANGES.map((range) => ({
+      label: formatMessage({ id: getTimeRangeLabelId(range) }),
+      value: range,
+    })),
+    [formatMessage],
+  );
+  const handleTimeRangeChange = useCallback((nextValue: SearchTimeRange | null) => {
+    if (nextValue) {
+      updateSearchParam("range", nextValue === "any" ? null : nextValue);
+    }
+  }, [updateSearchParam]);
+
+  const sortItems = useMemo(
+    () => SEARCH_SORTS.map((mode) => ({
+      label: mode === "relevance" ? formatMessage({ id: "search.sortRelevant" }) : formatMessage({ id: "search.sortRecent" }),
+      value: mode,
+    })),
+    [formatMessage],
+  );
+  const handleSortChange = useCallback((nextValue: SearchSort | null) => {
+    if (nextValue) {
+      updateSearchParam("sort", nextValue === "relevance" ? null : nextValue);
+    }
+  }, [updateSearchParam]);
+  const sortByRecent = useCallback(() => updateSearchParam("sort", "recent"), [updateSearchParam]);
+
+  const closeChannelContextMenu = useCallback(() => setChannelContextMenu(null), []);
+  const channelContextMenuStyle = useMemo(
+    () => (channelContextMenu ? { left: channelContextMenu.x, top: channelContextMenu.y } : undefined),
+    [channelContextMenu],
+  );
+  const handleChannelContextMenuKeyDown = useCallback((event: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      event.stopPropagation();
+      setChannelContextMenu(null);
+    }
+  }, []);
+  const openChannelFromContextMenu = useCallback(() => {
+    if (!channelContextMenu) return;
+    void openEntityResultInChat(channelContextMenu.result);
+    setChannelContextMenu(null);
+  }, [channelContextMenu, openEntityResultInChat]);
 
   const activeFilterClass =
     "border-line-strong bg-primary-soft text-foreground-strong shadow-raft-sm theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-soft-signal theme-brutal:text-black theme-brutal:shadow-brutal-sm";
@@ -2198,7 +2024,7 @@ export default function MessageSearchPage({ onOpenPanelRef, onDragPanelRef, acti
       ) : (
         <PanelHeader
           onMobileBack={handleBack}
-          mobileBackProps={{ "data-testid": "search-mobile-back", title: formatMessage({ id: "search.back" }) }}
+          mobileBackProps={mobileBackProps}
           titleSlot={
             <div className="flex min-w-0 flex-1 items-center gap-3">
               {/* Search icon — always visible on this surface (unlike other
@@ -2219,18 +2045,13 @@ export default function MessageSearchPage({ onOpenPanelRef, onDragPanelRef, acti
           <Combobox<string>
             autoHighlight
             open={openFilterMenu === "from"}
-            onOpenChange={(open) => setOpenFilterMenu(open ? "from" : null)}
+            onOpenChange={handleFromMenuOpenChange}
             inputValue={senderFilterQuery}
-            items={filteredSenderOptions.map((item) => item.id)}
-            itemToStringLabel={(id) => senderOptions.find((item) => item.id === id)?.label ?? id}
+            items={senderItemIds}
+            itemToStringLabel={senderItemLabel}
             value={senderIdParam ?? null}
-            onInputValueChange={(nextValue, details) => {
-              if (details.reason !== "item-press") setSenderFilterQuery(nextValue);
-            }}
-            onValueChange={(nextValue) => {
-              const sender = senderOptions.find((item) => item.id === nextValue) ?? null;
-              setSenderFilter(sender);
-            }}
+            onInputValueChange={handleSenderInputChange}
+            onValueChange={handleSenderChange}
           >
             <ComboboxTrigger
               aria-label={formatMessage({ id: "search.from" })}
@@ -2253,12 +2074,12 @@ export default function MessageSearchPage({ onOpenPanelRef, onDragPanelRef, acti
               align="start"
               finalFocus={false}
               initialFocus={false}
-              portalProps={{ container: filtersPortalRef }}
+              portalProps={filtersPortalProps}
             >
               <ComboboxHeader>
                 <ComboboxLabel>{formatMessage({ id: "search.from" })}</ComboboxLabel>
                 {senderIdParam && (
-                  <ComboboxClear onClick={() => updateSearchParam("senderId", null)}>
+                  <ComboboxClear onClick={clearSenderFilter}>
                     {formatMessage({ id: "ui.selectionPopover.clear" })}
                   </ComboboxClear>
                 )}
@@ -2298,15 +2119,10 @@ export default function MessageSearchPage({ onOpenPanelRef, onDragPanelRef, acti
           <Select<SearchScope, true>
             multiple
             open={openFilterMenu === "scope"}
-            onOpenChange={(open) => setOpenFilterMenu(open ? "scope" : null)}
-            items={SEARCH_SCOPE_OPTIONS.map((mode) => ({
-              label: formatMessage({ id: getScopeOptionLabelId(mode) }),
-              value: mode,
-            }))}
-            value={[...scopes]}
-            onValueChange={(nextScopes) => {
-              setScopeFilters(nextScopes);
-            }}
+            onOpenChange={handleScopeMenuOpenChange}
+            items={scopeItems}
+            value={scopeValue}
+            onValueChange={setScopeFilters}
           >
             <SelectTrigger
               aria-label={formatMessage({ id: "search.scope" })}
@@ -2318,7 +2134,7 @@ export default function MessageSearchPage({ onOpenPanelRef, onDragPanelRef, acti
                 <ChevronDown aria-hidden size={12} />
               </SelectIcon>
             </SelectTrigger>
-            <SelectContent align="start" portalProps={{ container: filtersPortalRef }}>
+            <SelectContent align="start" portalProps={filtersPortalProps}>
               <SelectList>
                 <SelectGroup>
                   <SelectGroupLabel>{formatMessage({ id: "search.scope" })}</SelectGroupLabel>
@@ -2342,7 +2158,7 @@ export default function MessageSearchPage({ onOpenPanelRef, onDragPanelRef, acti
                 type="button"
                 variant="outline"
                 size="sm"
-                onClick={() => updateSearchParam("channelId", null)}
+                onClick={clearChannelFilter}
                 className={activeFilterClass}
               >
                 <Hash size={12} />
@@ -2354,17 +2170,13 @@ export default function MessageSearchPage({ onOpenPanelRef, onDragPanelRef, acti
             <Combobox<string>
               autoHighlight
               open={openFilterMenu === "channel"}
-              onOpenChange={(open) => setOpenFilterMenu(open ? "channel" : null)}
+              onOpenChange={handleChannelMenuOpenChange}
               inputValue={channelFilterQuery}
-              items={filteredChannels.map((ch) => ch.id)}
-              itemToStringLabel={(id) => channels.find((ch) => ch.id === id)?.name ?? id}
+              items={channelItemIds}
+              itemToStringLabel={channelItemLabel}
               value={null}
-              onInputValueChange={(nextValue, details) => {
-                if (details.reason !== "item-press") setChannelFilterQuery(nextValue);
-              }}
-              onValueChange={(nextValue) => {
-                if (nextValue) updateSearchParam("channelId", nextValue);
-              }}
+              onInputValueChange={handleChannelInputChange}
+              onValueChange={handleChannelChange}
             >
               <ComboboxTrigger
                 aria-label={formatMessage({ id: "search.openChannelFilter" })}
@@ -2380,7 +2192,7 @@ export default function MessageSearchPage({ onOpenPanelRef, onDragPanelRef, acti
                 align="start"
                 finalFocus={false}
                 initialFocus={false}
-                portalProps={{ container: filtersPortalRef }}
+                portalProps={filtersPortalProps}
               >
                 <ComboboxHeader>
                   <ComboboxLabel>{formatMessage({ id: "search.channels" })}</ComboboxLabel>
@@ -2411,17 +2223,10 @@ export default function MessageSearchPage({ onOpenPanelRef, onDragPanelRef, acti
 
           <Select<SearchTimeRange>
             open={openFilterMenu === "time"}
-            onOpenChange={(open) => setOpenFilterMenu(open ? "time" : null)}
-            items={SEARCH_TIME_RANGES.map((range) => ({
-              label: formatMessage({ id: getTimeRangeLabelId(range) }),
-              value: range,
-            }))}
+            onOpenChange={handleTimeMenuOpenChange}
+            items={timeRangeItems}
             value={timeRange}
-            onValueChange={(nextValue) => {
-              if (nextValue) {
-                updateSearchParam("range", nextValue === "any" ? null : nextValue);
-              }
-            }}
+            onValueChange={handleTimeRangeChange}
           >
             <SelectTrigger
               aria-label={formatMessage({ id: "search.time" })}
@@ -2433,7 +2238,7 @@ export default function MessageSearchPage({ onOpenPanelRef, onDragPanelRef, acti
                 <ChevronDown aria-hidden size={12} />
               </SelectIcon>
             </SelectTrigger>
-            <SelectContent align="start" portalProps={{ container: filtersPortalRef }}>
+            <SelectContent align="start" portalProps={filtersPortalProps}>
               <SelectList>
                 <SelectGroup>
                   <SelectGroupLabel>{formatMessage({ id: "search.time" })}</SelectGroupLabel>
@@ -2461,17 +2266,10 @@ export default function MessageSearchPage({ onOpenPanelRef, onDragPanelRef, acti
           <Select<SearchSort>
             disabled={!query.trim()}
             open={openFilterMenu === "sort"}
-            onOpenChange={(open) => setOpenFilterMenu(open ? "sort" : null)}
-            items={SEARCH_SORTS.map((mode) => ({
-              label: mode === "relevance" ? formatMessage({ id: "search.sortRelevant" }) : formatMessage({ id: "search.sortRecent" }),
-              value: mode,
-            }))}
+            onOpenChange={handleSortMenuOpenChange}
+            items={sortItems}
             value={sort}
-            onValueChange={(nextValue) => {
-              if (nextValue) {
-                updateSearchParam("sort", nextValue === "relevance" ? null : nextValue);
-              }
-            }}
+            onValueChange={handleSortChange}
           >
             <SelectTrigger
               aria-label={formatMessage({ id: "search.sort" })}
@@ -2484,7 +2282,7 @@ export default function MessageSearchPage({ onOpenPanelRef, onDragPanelRef, acti
                 <ChevronDown aria-hidden size={12} />
               </SelectIcon>
             </SelectTrigger>
-            <SelectContent align="start" portalProps={{ container: filtersPortalRef }}>
+            <SelectContent align="start" portalProps={filtersPortalProps}>
               <SelectList>
                 <SelectGroup>
                   <SelectGroupLabel>{formatMessage({ id: "search.sort" })}</SelectGroupLabel>
@@ -2562,18 +2360,20 @@ export default function MessageSearchPage({ onOpenPanelRef, onDragPanelRef, acti
                 </div>
                 <div className="flex flex-wrap gap-2" data-testid="search-history-tags">
                   {searchHistory.map((historyQuery) => (
-                    <div
+                    <Badge
                       key={historyQuery.toLocaleLowerCase()}
-                      className="group inline-flex min-w-0 max-w-full items-center border border-line-muted bg-layer-card transition-colors hover:border-line-strong hover:bg-fill-muted focus-within:border-line-strong focus-within:bg-fill-muted theme-brutal:border-black/20 theme-brutal:bg-white theme-brutal:hover:border-black/35 theme-brutal:hover:bg-black/[0.03] theme-brutal:focus-within:border-black/35 theme-brutal:focus-within:bg-black/[0.03]"
+                      render={<div />}
+                      appearance="outline"
+                      className="group relative hover:bg-fill-muted focus-within:bg-fill-muted"
                       data-testid="search-history-tag"
                     >
                       <button
                         type="button"
                         onClick={() => chooseSearchHistoryEntry(historyQuery)}
-                        className="flex min-w-0 items-center gap-1.5 py-1.5 pl-2.5 pr-1 text-left"
+                        className="flex min-w-0 items-center gap-1 text-left after:absolute after:inset-0"
                       >
-                        <Clock3 size={12} className="shrink-0 text-foreground-muted theme-brutal:text-black/35" aria-hidden="true" />
-                        <span className="truncate text-xs font-medium text-foreground-strong theme-brutal:text-black">{historyQuery}</span>
+                        <Clock3 size={11} aria-hidden="true" />
+                        <span className="truncate">{historyQuery}</span>
                       </button>
                       {shouldRenderSearchHistoryRemove({
                         isTouchViewport: isTouchSearchHome,
@@ -2583,14 +2383,14 @@ export default function MessageSearchPage({ onOpenPanelRef, onDragPanelRef, acti
                           type="button"
                           onClick={() => forgetSearchQuery(historyQuery)}
                           className={searchHistoryEditing
-                            ? "mr-1 flex size-5 shrink-0 items-center justify-center text-foreground-muted transition-colors hover:bg-fill-muted hover:text-foreground-strong focus-visible:outline focus-visible:outline-1 focus-visible:outline-line-strong theme-brutal:text-black/45 theme-brutal:hover:bg-black/10 theme-brutal:hover:text-black/70 theme-brutal:focus-visible:outline-black/50"
-                            : "pointer-events-none mr-1 flex size-5 shrink-0 items-center justify-center text-foreground-placeholder opacity-0 transition-colors transition-opacity group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100 hover:bg-fill-muted hover:text-foreground-strong focus:pointer-events-auto focus:opacity-100 focus-visible:outline focus-visible:outline-1 focus-visible:outline-line-strong theme-brutal:text-black/30 theme-brutal:hover:bg-black/10 theme-brutal:hover:text-black/70 theme-brutal:focus-visible:outline-black/50"}
+                            ? "relative z-10 -my-1 -mr-1 flex shrink-0 items-center justify-center p-1"
+                            : "pointer-events-none relative z-10 -my-1 -mr-1 flex shrink-0 items-center justify-center p-1 opacity-0 group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100 focus:pointer-events-auto focus:opacity-100"}
                           aria-label={formatMessage({ id: "search.removeHistory" }, { query: historyQuery })}
                         >
-                          <X size={12} />
+                          <X size={11} aria-hidden="true" />
                         </button>
                       ) : null}
-                    </div>
+                    </Badge>
                   ))}
                 </div>
               </section>
@@ -2726,7 +2526,7 @@ export default function MessageSearchPage({ onOpenPanelRef, onDragPanelRef, acti
                           type="button"
                           variant="outline"
                           size="sm"
-                          onClick={() => updateSearchParam("sort", "recent")}
+                          onClick={sortByRecent}
                         >
                           {formatMessage({ id: "search.queryTooBroadSortRecent" })}
                         </Button>
@@ -2815,28 +2615,19 @@ export default function MessageSearchPage({ onOpenPanelRef, onDragPanelRef, acti
       </SearchShellViewport>
       {channelContextMenu && createPortal(
         <>
-          <DismissBackdrop onDismiss={() => setChannelContextMenu(null)} trapContextMenu />
+          <DismissBackdrop onDismiss={closeChannelContextMenu} trapContextMenu />
           <ContextMenuPopup
-            ref={(node) => node?.querySelector<HTMLButtonElement>("button")?.focus()}
+            ref={focusFirstMenuButton}
             role="menu"
             aria-label={formatMessage({ id: "search.channelMenuAria" }, { title: channelContextMenu.result.title })}
             className="fixed z-50 w-48 select-none"
-            style={{ left: channelContextMenu.x, top: channelContextMenu.y }}
-            onMouseDown={(event) => event.stopPropagation()}
-            onKeyDown={(event) => {
-              if (event.key === "Escape") {
-                event.preventDefault();
-                event.stopPropagation();
-                setChannelContextMenu(null);
-              }
-            }}
+            style={channelContextMenuStyle}
+            onMouseDown={stopMouseDownPropagation}
+            onKeyDown={handleChannelContextMenuKeyDown}
           >
             <MenuItem
               icon={<FolderOpen size={14} />}
-              onClick={() => {
-                openEntityResultFromDoubleClick(channelContextMenu.result);
-                setChannelContextMenu(null);
-              }}
+              onClick={openChannelFromContextMenu}
             >
               {formatMessage({ id: "search.open" })}
             </MenuItem>

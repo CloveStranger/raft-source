@@ -7,7 +7,7 @@ import { Input, Card,
   SidebarSectionCount,
   SidebarSectionDisclosure,
   SidebarSectionHeader,
-  SidebarSectionTitle, Spinner } from "raft-ui";
+  SidebarSectionTitle, Spinner, useThemeFamily } from "raft-ui";
 import CloseButton from "../ui/CloseButton";
 import { lazy, Suspense, useCallback, useMemo, useState } from "react";
 import type { ReactNode } from "react";
@@ -35,7 +35,6 @@ import FormField from "../ui/FormField";
 import AgentActivityDot from "./AgentActivityDot";
 import {
   ChannelMemberListShell,
-  ChannelMemberHoverActions,
   ChannelMemberRoleAndActions,
   ChannelMemberRow,
   ChannelMemberSectionHeader,
@@ -46,11 +45,13 @@ import ConfirmDialog from "../ConfirmDialog";
 import Tooltip from "../ui/Tooltip";
 import type { ProfilePanelTarget } from "../profile/ProfilePanel";
 import { primeHumanProfileFromChannelMember, setCachedAgentProfile } from "../profile/profileFallbackCache";
-import { isLocalProjectionMember } from "../../utils/channelLocalMembership";
+import { isLocalProjectionMember, memberServerBadgeLabels } from "../../utils/channelLocalMembership";
+import type { ServerBadgeMember } from "../../utils/channelLocalMembership";
 import { usePeopleSuggestionSearch } from "../../hooks/usePeopleSuggestionSearch";
 import type { PeopleSuggestionCandidate } from "../../utils/peopleSuggestionSearch";
 import { canUseChannelMemberAction } from "../../utils/channelMemberPermissions";
 import { formatAgentDisplayStateText } from "../../utils/activity";
+import { MemberRoleActions } from "./MemberRoleActions";
 
 const ProfilePanel = lazy(() => import("../profile/ProfilePanel"));
 
@@ -86,6 +87,18 @@ export function JointPeerBadge({ label }: { label: string }) {
     >
       {label}
     </Badge>
+  );
+}
+
+/** One JointPeerBadge per server, in roster order (viewed server first). */
+export function JointServerBadges({ labels }: { labels: readonly string[] }) {
+  if (labels.length === 0) return null;
+  return (
+    // Keeps #9527's layout: the name gets at least half the row and the
+    // badges never push it to nothing.
+    <span className="flex max-w-1/2 shrink-0 items-center gap-1 overflow-hidden">
+      {labels.map((label, index) => <JointPeerBadge key={`${index}:${label}`} label={label} />)}
+    </span>
   );
 }
 
@@ -215,6 +228,10 @@ export default function ChannelMembers({
   prefetchedMembers,
 }: ChannelMembersProps) {
   const { formatMessage } = useIntl();
+  // The confirm-add button is pink in Brutal and the primary yellow in
+  // Elegant; the colour comes from the Button variant, not a className.
+  const themeFamily = useThemeFamily();
+  const confirmAddVariant = themeFamily === "brutal" ? "accent" : "primary";
   const agents = useAgentStore((s) => s.agents);
   const channels = useChannelStore((s) => s.channels);
   const currentChannel = channels.find((c) => c.id === channelId) ?? null;
@@ -249,10 +266,10 @@ export default function ChannelMembers({
   const isPanel = presentation === "panel";
   const isPage = presentation === "page";
   const showPanel = open ?? internalShowPanel;
-  const setShowPanel = (next: boolean) => {
+  const setShowPanel = useCallback((next: boolean) => {
     if (onOpenChange) onOpenChange(next);
     else setInternalShowPanel(next);
-  };
+  }, [onOpenChange]);
   const [showAddSection, setShowAddSection] = useState(initialView === "add");
   // The add picker lists agents from the roster store. Ask for it when the
   // picker opens instead of relying on boot timing: the connect snapshot (or its
@@ -309,10 +326,12 @@ export default function ChannelMembers({
   const isArchived = !!currentChannel?.archivedAt;
   const isLocalMember = (serverId?: string) =>
     !currentChannel?.serverId || !serverId || serverId === currentChannel.serverId;
-  const jointPeerLabel = (serverId?: string, serverName?: string | null, serverSlug?: string | null) =>
-    currentChannel?.type === "joint" && !isLocalMember(serverId)
-      ? serverName || serverSlug || null
-      : null;
+  // Joint rosters badge every server a non-local member participates through
+  // (RFC 075 phase 1): a person on both sides shows both servers.
+  const jointServerLabels = (member: ServerBadgeMember) =>
+    currentChannel?.type === "joint"
+      ? memberServerBadgeLabels(member, currentChannel.serverId)
+      : [];
   const totalParticipants = channelAgents.length + channelHumans.length + channelExternalMembers.length;
   const { capabilities } = useServerPermissions();
   const canAddChannelMembers = canUseChannelMemberAction({
@@ -380,20 +399,21 @@ export default function ChannelMembers({
     return map;
   }, [agents, serverMembers]);
 
-  const resetAddFlow = () => {
+  const resetAddFlow = useCallback(() => {
     setShowAddSection(false);
     setMemberSearch("");
     setSelectedKeys(new Set());
     setFailedKeys(new Set());
     setAddError(null);
     setAdding(false);
-  };
-  const closePanel = () => {
+  }, []);
+  const closePanel = useCallback(() => {
     resetAddFlow();
     setRoleError(null);
     if (isPanel || isPage) onRequestClose?.();
     else setShowPanel(false);
-  };
+  }, [resetAddFlow, isPanel, isPage, onRequestClose, setShowPanel]);
+
 
   const toggleCandidate = (key: string) => {
     setSelectedKeys((prev) => {
@@ -413,7 +433,7 @@ export default function ChannelMembers({
     setAddError(null);
   };
 
-  const handleConfirmAdd = async () => {
+  const handleConfirmAdd = useCallback(async () => {
     if (adding || selectedKeys.size === 0) return;
     setAdding(true);
     setAddError(null);
@@ -449,7 +469,7 @@ export default function ChannelMembers({
     } finally {
       setAdding(false);
     }
-  };
+  }, [adding, selectedKeys, addMembers, resetAddFlow, pendingJoinAgent]);
 
   const showAddEntry = !membersLoading && canAddChannelMembers;
 
@@ -457,56 +477,24 @@ export default function ChannelMembers({
     targetType: "user" | "agent",
     member: ChannelHuman | ChannelAgent,
     removeAction?: () => void,
-  ) => {
-    const serverRole = member.serverRole ?? ("role" in member ? member.role : "member");
-    const effectiveRole = member.effectiveChannelRole
-      ?? (serverRole === "owner" || serverRole === "admin" || member.channelRole === "admin" ? "admin" : "member");
-    const protectedServerAdmin = serverRole === "owner" || serverRole === "admin";
-    const canExplainProtectedDemote = !isArchived
-      && !isAllChannel
-      && currentChannel?.channelCapabilities?.changeChannelMemberRoles === true
-      && member.id !== currentUserId
-      && protectedServerAdmin
-      && effectiveRole !== "member";
-    const canChangeRole = !isArchived && !isAllChannel && member.canChangeChannelRole;
-    const showRoleAction = channelManagerRoleActionsEnabled
-      && (canChangeRole || canExplainProtectedDemote);
-    if (!showRoleAction && !removeAction) return null;
-    const nextRole = effectiveRole === "member" ? "admin" : "member";
-    const key = `${targetType}:${member.id}`;
-    return (
-      <ChannelMemberHoverActions
-        roleAction={showRoleAction ? {
-          label: formatMessage({
-            id: nextRole === "admin"
-              ? "agent.channelMembers.makeAdminShort"
-              : "agent.channelMembers.removeAdminShort",
-          }),
-          ariaLabel: formatMessage({
-            id: nextRole === "admin"
-              ? "agent.channelMembers.makeAdmin"
-              : "agent.channelMembers.removeAdmin",
-          }, { name: member.name }),
-          disabled: roleChangingKey === key,
-          onClick: () => {
-            if (canExplainProtectedDemote) {
-              setProtectedDemoteTarget(member.displayName || member.name);
-              return;
-            }
-            setRoleError(null);
-            setRoleChangingKey(key);
-            void changeMemberRole(targetType, member.id, nextRole)
-              .catch(() => setRoleError(formatMessage({ id: "agent.channelMembers.updateRoleFailed" })))
-              .finally(() => setRoleChangingKey((current) => current === key ? null : current));
-          },
-        } : undefined}
-        removeAction={removeAction ? {
-          label: formatMessage({ id: "agent.channelMembers.removeName" }, { name: member.name }),
-          onClick: removeAction,
-        } : undefined}
-      />
-    );
-  };
+  ) => (
+    <MemberRoleActions
+      targetType={targetType}
+      member={member}
+      removeAction={removeAction}
+      isArchived={isArchived}
+      isAllChannel={isAllChannel}
+      roleCapabilitiesEnabled={currentChannel?.channelCapabilities?.changeChannelMemberRoles === true}
+      currentUserId={currentUserId}
+      roleActionsEnabled={channelManagerRoleActionsEnabled}
+      roleChangingKey={roleChangingKey}
+      changeMemberRole={changeMemberRole}
+      formatMessage={formatMessage}
+      onProtectedDemote={setProtectedDemoteTarget}
+      onRoleError={setRoleError}
+      onRoleChanging={setRoleChangingKey}
+    />
+  );
 
   /* Per-member row renderers, single-sourced between the modal/panel
      member list and the members page (page mode): the page makes the
@@ -514,7 +502,7 @@ export default function ChannelMembers({
      trailing slot; modal/panel keep the avatar-click affordance. */
   const renderAgentRow = (agent: ChannelAgent, pageMode: boolean) => {
     const canRemoveAgent = isLocalMember(agent.serverId);
-    const peerLabel = jointPeerLabel(agent.serverId, agent.serverName, agent.serverSlug);
+    const serverLabels = jointServerLabels(agent);
     const openAgentProfile = () => {
       setCachedAgentProfile(currentServerId, agent);
       if (isPage) {
@@ -541,8 +529,8 @@ export default function ChannelMembers({
         agentFallbackActivity={agentStatusFallbackActivity(agent.status)}
         name={(
           <span className="flex min-w-0 items-center gap-1.5">
-            <span className="truncate">{agent.displayName || agent.name}</span>
-            {peerLabel && <JointPeerBadge label={peerLabel} />}
+            <span className="min-w-0 truncate">{agent.displayName || agent.name}</span>
+            <JointServerBadges labels={serverLabels} />
           </span>
         )}
         secondary={<AgentActivityInfo agentId={agent.id} fallbackStatus={agent.status} />}
@@ -555,7 +543,7 @@ export default function ChannelMembers({
 
   const renderHumanRow = (human: ChannelHuman, pageMode: boolean) => {
     const canRemoveHuman = isLocalMember(human.serverId);
-    const peerLabel = jointPeerLabel(human.serverId, human.serverName, human.serverSlug);
+    const serverLabels = jointServerLabels(human);
     const openHumanProfile = () => {
       if (currentChannel?.serverId) {
         primeHumanProfileFromChannelMember(currentChannel.serverId, human);
@@ -583,8 +571,8 @@ export default function ChannelMembers({
         gravatarHash={human.gravatarHash}
         name={(
           <span className="flex min-w-0 items-center gap-1.5">
-            <span className="truncate">{human.displayName || human.name}</span>
-            {peerLabel && <JointPeerBadge label={peerLabel} />}
+            <span className="min-w-0 truncate">{human.displayName || human.name}</span>
+            <JointServerBadges labels={serverLabels} />
           </span>
         )}
         secondary={human.description ? <div className="truncate">{human.description}</div> : undefined}
@@ -623,7 +611,7 @@ export default function ChannelMembers({
   // the row's own label promises it. A generic「创建一个新 Agent」row must not
   // smuggle the search text into the dialog (Duoyu, PR #7372 design review).
   const createEntryPromoted = createAgentPrefillName.length > 0 && !hasFilteredResults;
-  const joinCreatedAgent = async (agent: { id: string; name: string }) => {
+  const joinCreatedAgent = useCallback(async (agent: { id: string; name: string }) => {
     setRetryingJoin(true);
     try {
       // Same atomic batch facade as「添加所选」(handleConfirmAdd) — ONE
@@ -649,7 +637,44 @@ export default function ChannelMembers({
     } finally {
       setRetryingJoin(false);
     }
-  };
+  }, [addMembers]);
+
+  const handleRetryJoin = useCallback(() => {
+    if (pendingJoinAgent) void joinCreatedAgent(pendingJoinAgent);
+  }, [joinCreatedAgent, pendingJoinAgent]);
+
+  const handleMemberSearchChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    setMemberSearch(e.target.value);
+  }, []);
+
+  const handleConfirmAddClick = useCallback(() => {
+    void handleConfirmAdd();
+  }, [handleConfirmAdd]);
+
+  const handleBackOrReset = useCallback(() => {
+    if (showAddSection) resetAddFlow();
+    else onBack?.();
+  }, [showAddSection, resetAddFlow, onBack]);
+
+  const handleRosterQueryChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    setRosterQuery(e.target.value);
+  }, []);
+
+  const handleOpenPanel = useCallback(() => {
+    setShowPanel(true);
+  }, [setShowPanel]);
+
+  const handleClearProtectedDemote = useCallback(() => {
+    setProtectedDemoteTarget(null);
+  }, []);
+
+  const handleCreatedAgent = useCallback((agent: { id: string; name: string }) => {
+    void joinCreatedAgent(agent);
+  }, [joinCreatedAgent]);
+
+  const handleCloseCreateAgent = useCallback(() => {
+    setShowCreateAgent(false);
+  }, []);
 
   const addCandidateRows = (multiSelect: boolean, fillAvailableHeight = false) => (
     <div
@@ -940,7 +965,7 @@ export default function ChannelMembers({
           </div>
           <Button size="sm" variant="outline"
             type="button"
-            onClick={() => { void joinCreatedAgent(pendingJoinAgent); }}
+            onClick={handleRetryJoin}
             disabled={retryingJoin || adding}
             className="mt-2 inline-flex items-center gap-1.5 px-2 py-1 text-xs font-bold disabled:cursor-not-allowed disabled:opacity-50"
             data-testid="add-member-create-agent-retry-join"
@@ -996,7 +1021,7 @@ export default function ChannelMembers({
             <Input
               type="text"
               value={memberSearch}
-              onChange={(e) => setMemberSearch(e.target.value)}
+              onChange={handleMemberSearchChange}
               className="input-member-search w-full pl-9"
               placeholder={formatMessage({ id: "agent.channelMembers.namePlaceholder" })}
               autoFocus
@@ -1012,10 +1037,10 @@ export default function ChannelMembers({
       <div className={`mt-4 ${isPage ? "shrink-0" : ""}`}>
         <Button
           type="button"
-          onClick={() => void handleConfirmAdd()}
+          onClick={handleConfirmAddClick}
           disabled={adding || selectedKeys.size === 0}
-          variant="primary"
-          className="flex w-full items-center justify-center gap-1.5 px-3 py-1.5 text-sm font-bold theme-brutal:bg-brutal-pink theme-brutal:!text-black"
+          variant={confirmAddVariant}
+          className="flex w-full items-center justify-center gap-1.5 px-3 py-1.5 text-sm font-bold"
           data-testid="add-member-confirm"
         >
           <Plus size={14} />
@@ -1134,7 +1159,7 @@ export default function ChannelMembers({
         type="button"
         variant="outline"
         size="icon-sm"
-        onClick={() => (showAddSection ? resetAddFlow() : onBack?.())}
+        onClick={handleBackOrReset}
         aria-label={formatMessage({
           id: showAddSection ? "agent.channelMembers.backToMembers" : "channel.membersPage.back",
         })}
@@ -1188,7 +1213,7 @@ export default function ChannelMembers({
           <Input
             type="text"
             value={rosterQuery}
-            onChange={(e) => setRosterQuery(e.target.value)}
+            onChange={handleRosterQueryChange}
             disabled={membersLoading}
             className="input-member-search w-full pl-9"
             placeholder={formatMessage({ id: "channel.membersPage.searchPlaceholder" })}
@@ -1308,7 +1333,7 @@ export default function ChannelMembers({
       {!isPanel && !isPage && !hideTrigger && (
         <Tooltip content={formatMessage({ id: "agent.channelMembers.viewParticipants" })}>
           <Button
-            onClick={() => setShowPanel(true)}
+            onClick={handleOpenPanel}
             size="sm"
             className="min-w-7 gap-1 px-1.5"
             aria-label={formatMessage({ id: "agent.channelMembers.viewParticipants" })}
@@ -1401,8 +1426,8 @@ export default function ChannelMembers({
           confirmColor="bg-white"
           hideCancel
           closeOnConfirm={false}
-          onConfirm={() => setProtectedDemoteTarget(null)}
-          onClose={() => setProtectedDemoteTarget(null)}
+          onConfirm={handleClearProtectedDemote}
+          onClose={handleClearProtectedDemote}
           layer={1}
           chromeLocale="active"
         />
@@ -1427,8 +1452,8 @@ export default function ChannelMembers({
           ].join(" ") || undefined : undefined}
           stayOnCreate
           autoJoinChannelName={currentChannel?.name}
-          onCreated={(agent) => { void joinCreatedAgent(agent); }}
-          onClose={() => setShowCreateAgent(false)}
+          onCreated={handleCreatedAgent}
+          onClose={handleCloseCreateAgent}
         />
       )}
     </>

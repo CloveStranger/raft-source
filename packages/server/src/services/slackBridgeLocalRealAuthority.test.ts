@@ -46,6 +46,7 @@ import {
   type SlackBridgeLocalManifestAuthorityInput,
   type SlackBridgeLocalRealAuthorityInput,
 } from "./slackBridgeLocalRuntime";
+import { withChannelDelivery } from "../test/orchestratorStub";
 
 
 const NOW = new Date("2026-08-06T08:30:00.000Z");
@@ -73,7 +74,7 @@ afterEach(async () => {
   await closeTestDatabase();
 });
 
-const noopOrchestrator = { deliverMessage: async () => undefined } as any;
+const noopOrchestrator = withChannelDelivery({ deliverMessage: async () => undefined }) as any;
 
 function createIo() {
   return {

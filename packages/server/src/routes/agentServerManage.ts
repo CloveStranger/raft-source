@@ -1,6 +1,7 @@
 import * as serverService from "../services/serverService";
 import { actorHasServerCapabilityInServer } from "../lib/actorPermissions";
 import { addTraceEvent } from "../tracing/semanticTrace";
+import { agentServerRoleRequiredBody } from "../lib/agentServerRoleRequired";
 
 export interface AgentServerManageActor {
   id: string;
@@ -39,7 +40,7 @@ export async function assertAgentCanManageServerProfile(input: {
       reason: "capability_required",
       status_code: 403,
     });
-    return { status: 403, body: { error: "Agent requires editServerSettings capability to edit the server profile" } };
+    return { status: 403, body: await agentServerRoleRequiredBody({ serverId, agentId: actor.id, capabilities: ["editServerSettings"], action: "edit the server profile" }) };
   }
   return null;
 }

@@ -6,6 +6,92 @@ follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.15.0] — 2026-10-11
+
+### Added
+
+- Server Labs operations: `labs.list`, `labs.setAccess` and
+  `labs.setEnrollment` (tools `labs_list`, `labs_set_access`,
+  `labs_set_enrollment`), and the routes `routes.labs.list`,
+  `routes.labs.setAccess` and `routes.labs.setEnrollment` (served before, now
+  in the route contract). Writes are guarded by the Labs `version`: pass the
+  one you read, or omit `expectedVersion` and the operation reads the current
+  one first; a concurrent change is still a 409
+  (`server_labs_version_conflict`). Turning Labs access on or off needs the
+  server owner; enrollment needs server settings authority. The Server
+  checks on every call. A Labs refusal without a Server next action gets one
+  for its code (owner or admin required, Labs access off, lab not open, lab
+  not found, version conflict).
+
+## [0.14.0] — 2026-10-11
+
+### Added
+
+- Channel and server administration operations (manifest, typed methods and
+  `invoke`): `channels.create`, `channels.update`, `channels.archive`,
+  `channels.unarchive`, `channels.addMember`, `channels.removeMember` and
+  `server.update` (tools `channels_create`, `channels_update`,
+  `channels_archive`, `channels_unarchive`, `channels_add_member`,
+  `channels_remove_member`, `server_update`). They call the existing Agent API
+  endpoints; the Server checks on every call, from the agent's server role
+  and, for update / archive / unarchive / removeMember, its channel-admin role
+  in that channel. A refusal carries the Server's `serverCode` and
+  `nextAction`. When a 403 has no next action: `channel_membership_required`
+  says to join the channel first, `all_channel_visibility_managed_separately`
+  says only a human can change #all's visibility, and a 403 with no code at
+  all says "Your role does not allow this here; ask a server owner or admin
+  to do it, or to change your role."
+- Routes `routes.channels.create`, `routes.channels.update`,
+  `routes.channels.addMember` and `routes.channels.removeMember` (the
+  endpoints were served before but were not in the route contract).
+
+### Changed
+
+- Tool-form hints no longer tell every agent to "ask a human via an action
+  card" for channel management and server-profile changes; they name the new
+  tools. The server overview (CLI and tool form) now says which role
+  authorizes channel management: the server role, or the channel-admin role
+  for update, archive, unarchive and remove-member.
+
+## [0.13.2] — 2026-10-10
+
+### Fixed
+
+- `messages.read` (and `invoke("messages.read")`) no longer drops every row
+  of a history page whose messages arrive as bare rows with the conversation
+  target only at the top level of the response: the rows now inherit that
+  target (`projectRaftMessagesInTarget`), so a non-empty server page stays
+  non-empty for `#channel`, `#channel:<8hex>`, `dm:@peer` and
+  `dm:@peer:<8hex>` alike. Fix in botiverse/slock#9295.
+
+## [0.13.1] — 2026-10-09
+
+### Fixed
+
+- `identity.whoami()` (and `invoke("identity.whoami")`) now returns
+  `agent.assistantOf` as 0.13.0 announced; 0.13.0 dropped it, so an assistant
+  looked like an ordinary agent there (`routes.agent.context()` had it). It is
+  `{ userId } | null`, null when the Server omits it.
+- A malformed `assistantOf.userId` no longer fails the whole context read: the
+  contract checks it as a string, not a UUID.
+
+## [0.13.0] — 2026-10-09
+
+### Added
+
+- Personal assistant reads (RFC 074 §2, v0), as routes only (no operations
+  yet). `routes.assistant.ownerInbox({ query: { filter?, limit?, offset? } })`
+  lists the owner's inbox minus DMs. `routes.assistant.ownerMessages({ query:
+  { channelId, before? | after? | around?, limit? } })` reads a channel or
+  thread the owner can see; messages use the `messages.read` envelope and the
+  paging fields are camelCase (`hasMore`, `hasOlder`, `hasNewer`). Both answer
+  `403 assistant_not_enabled` unless the credential's agent is someone's
+  assistant on a server where the feature is on (no server has it on yet); a
+  DM, or anything the owner cannot see, is `404 channel_not_found`. Neither
+  marks anything read.
+- `identity.whoami` returns `agent.assistantOf: { userId } | null` (absent on
+  older Servers).
+
 ## [0.12.1] — 2026-10-04
 
 ### Fixed

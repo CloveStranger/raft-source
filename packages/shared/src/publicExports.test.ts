@@ -11,6 +11,10 @@ const repoRoot = resolve(packageRoot, "../..");
 const packageName = "@botiverse/raft-shared";
 
 const expectedExports = {
+  "./announcement-presentation": {
+    types: "./announcement-presentation.ts",
+    default: "./announcement-presentation.ts",
+  },
   ".": {
     types: "./src/index.ts",
     default: "./src/index.ts",
@@ -102,6 +106,14 @@ const expectedExports = {
   "./src/attachmentUploadContract": {
     types: "./src/attachmentUploadContract.ts",
     default: "./src/attachmentUploadContract.ts",
+  },
+  "./src/tracing/index": {
+    types: "./src/tracing/index.ts",
+    default: "./src/tracing/index.ts",
+  },
+  "./src/tracing/eventRows": {
+    types: "./src/tracing/eventRows.ts",
+    default: "./src/tracing/eventRows.ts",
   },
   "./unread-activity-diagnostic": {
     types: "./src/unreadActivityDiagnostic.ts",

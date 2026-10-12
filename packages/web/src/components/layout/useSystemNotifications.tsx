@@ -44,6 +44,7 @@ import {
   summarizeComputerAttention,
 } from "../../utils/computerUpgradeIndicator";
 import { isJointChannelReadOnly } from "../../utils/jointChannelLimit";
+import { useUsageLimitAttention } from "./useUsageLimitAttention";
 export { compareNotificationKind, topNotificationKind } from "./notificationKind";
 export type { NotificationKind } from "./notificationKind";
 
@@ -74,6 +75,11 @@ export interface NotificationEntry {
   body: ReactNode;
   action?: NotificationAction;
   secondaryAction?: NotificationAction;
+  /** Server-backed unread state. Omitted entries retain the legacy behavior
+   *  of appearing unread while visible. */
+  unread?: boolean;
+  /** Called when the Notification Center opens; must be idempotent. */
+  onSeen?: () => void;
   /** When set, the row gets a Dismiss action that hides this notification until the
    *  fingerprint changes. The fingerprint must encode every dimension of
    *  the notification's state — e.g. for machine-offline include the sorted
@@ -95,6 +101,7 @@ export function useSystemNotifications(surface: SystemNotificationSurface = "des
   const { capabilities } = useServerPermissions();
   const nav = useAppNavigate();
   const feedbackUnread = useFeedbackUnread();
+  const usageLimitAttention = useUsageLimitAttention();
 
   const serverId = server?.id ?? null;
   const [pwaPlatform, setPwaPlatform] = useState<PwaInstallPlatform>("other");
@@ -237,6 +244,58 @@ export function useSystemNotifications(surface: SystemNotificationSurface = "des
 
   return useMemo<NotificationEntry[]>(() => {
     const out: NotificationEntry[] = [];
+
+    // ── 0. Authoritative runtime-account usage limits ───────────────────
+    // These rows come from the durable server projection. Never infer them
+    // from Agent error strings: only a newer normalized usage snapshot may
+    // activate or silently resolve an incident.
+    for (const notification of usageLimitAttention.notifications) {
+      const provider = notification.provider === "claude"
+        ? "Claude"
+        : notification.provider === "codex"
+          ? "Codex"
+          : notification.provider === "kimi"
+            ? "Kimi"
+            : "Grok";
+      const reset = notification.resetsAt
+        ? formatDate(new Date(notification.resetsAt), { dateStyle: "medium", timeStyle: "short" })
+        : null;
+      out.push({
+        id: `usage-limit:${notification.id}`,
+        kind: "warning",
+        icon: <AlertTriangle size={16} className="text-foreground-strong theme-brutal:text-black" />,
+        unread: notification.seenAt === null,
+        onSeen: () => { void usageLimitAttention.markSeen(notification.id); },
+        title: formatMessage(
+          { id: "layout.systemNotifications.usageLimitTitle" },
+          { provider },
+        ),
+        body: (
+          <span className="text-foreground-muted theme-brutal:text-black/60">
+            {formatMessage(
+              { id: reset
+                ? "layout.systemNotifications.usageLimitBodyWithReset"
+                : "layout.systemNotifications.usageLimitBody" },
+              {
+                count: notification.affectedAgentIds.length,
+                computer: notification.machine.name,
+                reset,
+              },
+            )}
+          </span>
+        ),
+        action: {
+          label: formatMessage({ id: "layout.systemNotifications.view" }),
+          onClick: () => nav.toComputer(notification.machine.id),
+          variant: "primary",
+        },
+        secondaryAction: {
+          label: formatMessage({ id: "common.announcement.dismiss" }),
+          onClick: () => { void usageLimitAttention.dismiss(notification.id); },
+          variant: "secondary",
+        },
+      });
+    }
 
     // ── 1. Plan downgrade ────────────────────────────────────────────────
     if (server && server.plan === "free" && server.planDowngradedAt) {
@@ -534,6 +593,7 @@ export function useSystemNotifications(surface: SystemNotificationSurface = "des
     surface,
     formatMessage,
     formatDate,
+    usageLimitAttention,
   ]);
 }
 

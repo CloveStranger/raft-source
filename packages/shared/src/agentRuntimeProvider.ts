@@ -64,6 +64,30 @@ export interface AgentHostedRuntimeSummary {
   activatedAt: string | null;
 }
 
+/** One model a hosted-runtime provider offers (its `USER_MODELS`): what to show and the id to store. */
+export interface HostedAgentModelOption {
+  id: string;
+  label: string;
+  provider: string;
+}
+
+/**
+ * `GET|PUT /api/agents/:id/hosted-runtime/model`: the models the provider
+ * offers and what this agent's next turn runs on. `model` is an offered id,
+ * or `<provider>/<model>` when an administrator set one no option names.
+ * `source`: `default` (nothing picked), `chosen` (a pick), `admin` (an
+ * administrator's row decides). While `locked`, a pick is refused (409).
+ */
+export interface HostedAgentModelView {
+  models: HostedAgentModelOption[];
+  default: string | null;
+  defaultLabel: string | null;
+  model: string | null;
+  label: string | null;
+  source: "default" | "chosen" | "admin";
+  locked: boolean;
+}
+
 /**
  * Account connections for provider-backed agents (raft-agent-provider.v1
  * connections extension). The provider owns the OAuth flow and the token;

@@ -1,4 +1,4 @@
-import { and, desc, eq, inArray } from "drizzle-orm";
+import { and, desc, eq, inArray, sql } from "drizzle-orm";
 import {
   isAgentActivity,
   normalizeActivityDetailKind,
@@ -106,6 +106,40 @@ export async function listRecentAgentTrajectory(
       const timestamp = new Date(row.createdAt).getTime();
       return (row.entries || []).map((entry) => ({ timestamp, entry }));
     });
+}
+
+/**
+ * getLatestAgentActivityHint for many agents in one query: one index probe per
+ * agent on (agent_id, created_at) through a LATERAL top-1, never a scan of the
+ * agents' whole history (the table is hundreds of millions of rows).
+ */
+export async function getLatestAgentActivityHints(
+  agentIds: readonly string[],
+): Promise<Map<string, PersistedAgentActivityHint | null>> {
+  const hints = new Map<string, PersistedAgentActivityHint | null>();
+  const ids = [...new Set(agentIds)];
+  if (ids.length === 0) return hints;
+  for (const id of ids) hints.set(id, null);
+  const result = await getDb().execute(sql`
+    SELECT input.agent_id::text AS "agentId", latest.activity, latest.detail, latest.entries, latest.created_at AS "createdAt"
+    FROM unnest(${sql`ARRAY[${sql.join(ids.map((id) => sql`${id}`), sql`, `)}]::uuid[]`}) AS input(agent_id)
+    CROSS JOIN LATERAL (
+      SELECT e.activity, e.detail, e.entries, e.created_at
+      FROM ${agentActivityEvents} e
+      WHERE e.agent_id = input.agent_id
+      ORDER BY e.created_at DESC
+      LIMIT 1
+    ) latest
+  `);
+  for (const row of result.rows as Array<{ agentId: string; activity: string; detail: string | null; entries: unknown; createdAt: Date | string }>) {
+    hints.set(row.agentId, projectAgentActivityHintFromPersistedEvent({
+      activity: row.activity as never,
+      detail: row.detail as never,
+      entries: row.entries as never,
+      createdAt: row.createdAt instanceof Date ? row.createdAt : new Date(row.createdAt),
+    }));
+  }
+  return hints;
 }
 
 export async function getLatestAgentActivityHint(

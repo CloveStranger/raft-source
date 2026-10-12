@@ -107,3 +107,40 @@ test("daemon proxy failure projection rejects hostile method and error-name valu
   assert.equal(attrs.error_class, "OtherError");
   assert.doesNotMatch(JSON.stringify(attrs), /SECRET|private-user/);
 });
+
+test("daemon proxy failure projection names a post-response local fault (task #369)", () => {
+  const attrs = daemonProxyFailureTraceAttrs({
+    method: "GET",
+    pathname: "/internal/agent-api/events",
+    queryKeys: [],
+    errorName: "Error",
+    errorMessage: "AgentVisibleDeliveryLedger target mismatch",
+    failureClass: "post_response_local",
+    responseStarted: true,
+    responseComplete: true,
+    causeCode: "LOCAL_POST_RESPONSE_FAILURE",
+  });
+
+  assert.equal(attrs.reason, "local_post_response");
+  assert.equal(attrs.error_excerpt, "Local daemon failed after the upstream response completed");
+  assert.equal(attrs.failure_class, "post_response_local");
+});
+
+test("normalized transport traces give a post-response local fault its own canned excerpt (task #369)", () => {
+  const excerpt = daemonTransportErrorExcerpt({
+    normalizedCode: "local_post_response_failure",
+    routeFamily: "agent-api/events",
+    failureClass: "post_response_local",
+    responseStarted: true,
+    responseComplete: true,
+    causeCode: "LOCAL_POST_RESPONSE_FAILURE",
+    upstreamLayer: "unknown",
+    originalMessage: "AgentVisibleDeliveryLedger target mismatch for secret target",
+    launchId: "launch-1",
+    targetHostClass: "local_daemon",
+    downstreamCaller: "cli",
+    upstream: "local_daemon",
+  });
+  assert.equal(excerpt, "Local daemon failed after the upstream response completed");
+  assert.doesNotMatch(excerpt, /secret|Ledger/);
+});

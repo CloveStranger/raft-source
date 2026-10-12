@@ -56,8 +56,12 @@ async function seedFixture() {
   // a test asks for a fresh one: only settled rows may move the read position.
   // `fresh` posts it a few seconds in the future, so it stays unsettled however
   // slow the test database is; a deferred check does not look at createdAt.
-  const post = async (content: string, opts: { fresh?: boolean } = {}) => {
-    const message = await createMessage(channel.id, "user", owner.id, content, "chat");
+  // `own` posts as the reading agent itself. createMessage does not move the
+  // agent's read position, as a send with others' unread below it does not.
+  const post = async (content: string, opts: { fresh?: boolean; own?: boolean } = {}) => {
+    const message = opts.own
+      ? await createMessage(channel.id, "agent", agent.id, content, "chat")
+      : await createMessage(channel.id, "user", owner.id, content, "chat");
     await getDb().update(messages)
       .set({ createdAt: new Date(Date.now() + (opts.fresh ? 5_000 : -120_000)) })
       .where(eq(messages.id, message.id));
@@ -139,6 +143,68 @@ test("--unread refuses an anchor, and plain reads do not echo unread_after_seq",
   const plain = await read(app.baseUrl, fx.apiKey, "limit=5");
   assert.equal(plain.status, 200);
   assert.equal("unread_after_seq" in plain.body, false, "old CLIs and plain reads see no new field");
+});
+
+test("--unread leaves out the agent's own messages, as the inbox count does, and reads past them", async ({ onTestFinished }) => {
+  const app = await openTestApp("pglite://", 0, { humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
+  onTestFinished(() => app.close());
+  const fx = await seedFixture();
+  await fx.post("question");
+  await fx.post("my answer", { own: true });
+  await fx.post("follow-up");
+  const secondAnswer = await fx.post("my second answer", { own: true });
+
+  const first = await read(app.baseUrl, fx.apiKey, "unread=true");
+  assert.deepEqual(first.contents, ["question", "follow-up"], "only others' messages are printed");
+  assert.equal(first.body.read_through_seq, Number(secondAnswer.seq), "the read position moves over the own messages too");
+
+  // A window holding only own messages prints nothing and still moves.
+  const ownOnly = await fx.post("my third answer", { own: true });
+  const second = await read(app.baseUrl, fx.apiKey, "unread=true");
+  assert.deepEqual(second.contents, []);
+  assert.equal(second.body.unread_after_seq, Number(secondAnswer.seq));
+  assert.equal(second.body.read_through_seq, Number(ownOnly.seq));
+  const third = await read(app.baseUrl, fx.apiKey, "unread=true");
+  assert.equal(third.body.unread_after_seq, Number(ownOnly.seq), "the next --unread does not scan them again");
+
+  // A plain read is history, not unread: it still shows everything.
+  const plain = await read(app.baseUrl, fx.apiKey, "limit=10");
+  assert.deepEqual(plain.contents, ["question", "my answer", "follow-up", "my second answer", "my third answer"]);
+});
+
+test("--unread: a full page followed only by own messages has no more unread", async ({ onTestFinished }) => {
+  const app = await openTestApp("pglite://", 0, { humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
+  onTestFinished(() => app.close());
+  const fx = await seedFixture();
+  await fx.post("a");
+  await fx.post("b");
+  await fx.post("mine", { own: true });
+
+  const page = await read(app.baseUrl, fx.apiKey, "unread=true&limit=2");
+  assert.deepEqual(page.contents, ["a", "b"]);
+  assert.equal(page.body.has_newer, false, "only an own message is left: no \"more unread\" hint");
+
+  await fx.post("c");
+  const next = await read(app.baseUrl, fx.apiKey, "unread=true&limit=2");
+  assert.deepEqual(next.contents, ["c"]);
+});
+
+test("the deferred check moves over an own message the read did not print", async ({ onTestFinished }) => {
+  const app = await openTestApp("pglite://", 0, { humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
+  onTestFinished(() => app.close());
+  onTestFinished(setReadPositionSettleMsForTests(300));
+  const fx = await seedFixture();
+  await fx.post("settled");
+  await fx.post("my reply", { own: true, fresh: true });
+  const fresh = await fx.post("just committed", { fresh: true });
+
+  const first = await read(app.baseUrl, fx.apiKey, "unread=true");
+  assert.deepEqual(first.contents, ["settled", "just committed"]);
+
+  await new Promise((resolve) => setTimeout(resolve, 1_500));
+  const after = await read(app.baseUrl, fx.apiKey, "unread=true");
+  assert.deepEqual(after.contents, [], "the hidden own message counts as returned, not as a late commit");
+  assert.equal(after.body.unread_after_seq, Number(fresh.seq));
 });
 
 test("a message too recent to settle is returned but does not move the read position (seq order is not commit order)", async ({ onTestFinished }) => {

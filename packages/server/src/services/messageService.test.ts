@@ -1,9 +1,10 @@
 import { dbTest as test } from "../test/integration/dbTest";
 import { closeTestDatabase, openTestDatabase } from "../test/integration/database";
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import { and, eq } from "drizzle-orm";
 import { BasicTracer, MemoryTraceSink, MESSAGE_REPLIES_SYNC_WINDOW_PRODUCER } from "@botiverse/raft-shared";
-import { buildNotificationPushProjectionTargets, buildNotificationPushSocketTargets, buildPushTargetsFromContext, broadcastAndDeliver, broadcastSystemMessage, createMessage, deliverMessageToAgent, deliverMessageToAgents, emitExternalProjectionMessageToFrontend, runExternalInboundCommitSideEffects, emitExternalReactionMessageUpdateToFrontend, getAgentResumeCatchupMessages, type AgentResumeCatchupResult, getSenderPendingMentionActions, getSenderReadReceiptInFlightCountForTests, planDirectMentionThreadFollow, registerSenderReadReceiptForTests, selectCanonicalWebPushProjectionTargets, __resetMessageServiceDepsForTests, __setMessageServiceDepsForTests } from "./messageService";
+import { buildNotificationPushProjectionTargets, buildNotificationPushSocketTargets, buildPushTargetsFromContext, broadcastAndDeliver, broadcastSystemMessage, createMessage, deliverExternalInboundCommittedMessageToAgents, deliverMessageToAgent, deliverMessageToAgents, emitExternalProjectionMessageToFrontend, runExternalInboundCommitSideEffects, emitExternalReactionMessageUpdateToFrontend, getAgentResumeCatchupMessages, type AgentResumeCatchupResult, getSenderPendingMentionActions, getSenderReadReceiptInFlightCountForTests, planDirectMentionThreadFollow, registerSenderReadReceiptForTests, selectCanonicalWebPushProjectionTargets, __resetMessageServiceDepsForTests, __setMessageServiceDepsForTests } from "./messageService";
 import { __resetAgentSendReplayDbForTests, __setAgentSendReplayDbForTests } from "./agentSendReplayService";
 import { CompatibilityReadMutationPendingError } from "./readMutationSequencer";
 import { recordInboxNotificationFacts } from "./inboxNotificationService";
@@ -12,11 +13,12 @@ import { socketClientKindRoom } from "../socket/platformScope";
 import { getActiveJointChannelProjectionsByLocalChannel, getActiveJointThreadProjectionsByCanonicalThread, getAgentLegacyReadCursor, getAgentUnreadCounts, markAgentLegacyAckCheckpoint, type AgentInboxChainRow, getJointThreadProjectionForMember, getOrCreateThread } from "./channelService";
 import * as taskService from "./taskService";
 import { closeDatabase, getDb } from "../db/index";
-import { agents, agentChannelReadCursors, attachments, channelAgents, channelHumans, channels, externalActorProjections, externalMessageLinks, externalProjectionAvatarArtifacts, externalReactionStates, inboxNotificationFacts, inboxTargetMuteStates, jointChannels, jointChannelServers, mentionDeliveryOccurrences, messageMentions, messages, serverMembers, servers, threadFollows, users } from "../db/schema";
+import { agents, agentChannelReadCursors, attachments, channelAgents, channelHumans, channels, externalActorProjections, externalAddressabilityProjections, externalAppInstalls, externalAppRegistrations, externalAppServerGrants, externalBindingAudienceSnapshots, externalChannelBindings, externalMentionFacts, externalMessageLinks, externalProjectionAvatarArtifacts, externalReactionStates, inboxNotificationFacts, inboxTargetMuteStates, jointChannels, jointChannelServers, mentionDeliveryOccurrences, messageMentions, messages, oauthClients, serverMembers, servers, threadFollows, users } from "../db/schema";
 import { insertCanonicalExternalMessage } from "./externalProjectionService";
 import { withTraceRoot } from "../tracing/semanticTrace";
 import { summarizePushBody } from "./pushDisplay";
 import { referenceAgentInboxChain } from "../test/agentInboxChainReference";
+import { withChannelDelivery } from "../test/orchestratorStub";
 
 
 afterEach(() => {
@@ -311,7 +313,7 @@ test("broadcastAndDeliver traces the failing persistence phase with safe Postgre
   const { io } = createIoRecorder();
   await assert.rejects(
     () => withTraceRoot(tracer, "server.http.request", { surface: "server", kind: "server" }, () =>
-      broadcastAndDeliver(io, { deliverMessage: async () => undefined } as any, {
+      broadcastAndDeliver(io, withChannelDelivery({ deliverMessage: async () => undefined }) as any, {
         channelId: "channel-1",
         senderType: "user",
         senderId: "user-1",
@@ -376,7 +378,7 @@ test("closeDatabase waits for broadcastAndDeliver sender read receipt before pgl
     });
 
     const { io } = createIoRecorder();
-    await broadcastAndDeliver(io, { deliverMessage: async () => undefined } as any, {
+    await broadcastAndDeliver(io, withChannelDelivery({ deliverMessage: async () => undefined }) as any, {
       channelId: "channel-1",
       senderType: "user",
       senderId: "user-1",
@@ -464,7 +466,7 @@ test("broadcastAndDeliver sender read receipt failures do not retain production 
     });
 
     const { io } = createIoRecorder();
-    await broadcastAndDeliver(io, { deliverMessage: async () => undefined } as any, {
+    await broadcastAndDeliver(io, withChannelDelivery({ deliverMessage: async () => undefined }) as any, {
       channelId: "channel-1",
       senderType: "user",
       senderId: "user-1",
@@ -530,7 +532,7 @@ test("broadcastAndDeliver swallows typed pending sender read receipts on the pro
     });
 
     const { io } = createIoRecorder();
-    await broadcastAndDeliver(io, { deliverMessage: async () => undefined } as any, {
+    await broadcastAndDeliver(io, withChannelDelivery({ deliverMessage: async () => undefined }) as any, {
       channelId: "channel-1",
       senderType: "user",
       senderId: "user-1",
@@ -600,7 +602,7 @@ test("broadcastAndDeliver continues after post-persist thread follower read fail
     tracer,
     "server.http.request",
     { surface: "server", kind: "server" },
-    () => broadcastAndDeliver(io, { deliverMessage: async () => undefined } as any, {
+    () => broadcastAndDeliver(io, withChannelDelivery({ deliverMessage: async () => undefined }) as any, {
       channelId: threadChannelId,
       senderType: "user",
       senderId: "user-1",
@@ -640,7 +642,7 @@ test("broadcastAndDeliver continues after post-persist thread follower read fail
       tracer,
       "server.http.request",
       { surface: "server", kind: "server" },
-      () => broadcastAndDeliver(io, { deliverMessage: async () => undefined } as any, {
+      () => broadcastAndDeliver(io, withChannelDelivery({ deliverMessage: async () => undefined }) as any, {
         channelId: threadChannelId,
         senderType: "user",
         senderId: "user-1",
@@ -749,11 +751,11 @@ test("broadcastAndDeliver reuses inbox-selected thread agents for wake delivery"
   const tracer = new BasicTracer({ sink });
   const { io } = createIoRecorder();
   await withTraceRoot(tracer, "server.http.request", { surface: "server", kind: "server" }, async () => {
-    const sent = await broadcastAndDeliver(io, {
+    const sent = await broadcastAndDeliver(io, withChannelDelivery({
       deliverMessage: async (agentId: string, payload: any) => {
         delivered.push({ agentId, messageId: payload.message_id, seq: payload.seq });
       },
-    } as any, {
+    }) as any, {
       channelId: thread.id,
       senderType: "user",
       senderId: replier.id,
@@ -875,11 +877,11 @@ test("broadcastAndDeliver repairs same-send mentioned agent follow when inbox fa
   const tracer = new BasicTracer({ sink });
   const { io } = createIoRecorder();
   await withTraceRoot(tracer, "server.http.request", { surface: "server", kind: "server" }, async () => {
-    await broadcastAndDeliver(io, {
+    await broadcastAndDeliver(io, withChannelDelivery({
       deliverMessage: async (agentId: string, payload: any) => {
         delivered.push({ agentId, payload });
       },
-    } as any, {
+    }) as any, {
       channelId: thread.id,
       senderType: "user",
       senderId: replier.id,
@@ -951,7 +953,7 @@ test("broadcastAndDeliver message:new does not emit storage-only message columns
   });
 
   const { io, events } = createIoRecorder();
-  await broadcastAndDeliver(io, { deliverMessage: async () => undefined } as any, {
+  await broadcastAndDeliver(io, withChannelDelivery({ deliverMessage: async () => undefined }) as any, {
     channelId: "channel-1",
     senderType: "agent",
     senderId: "agent-1",
@@ -1106,6 +1108,222 @@ test("a committed external projection emits one enriched message:new with its fr
   }]);
   assert.equal("searchText" in updated, false);
   assert.equal("searchVector" in updated, false);
+});
+
+test("a Slack root Agent mention is delivered into the exact linked Raft thread", async ({ db }) => {
+  const [owner] = await db.insert(users).values({
+    email: "external-root-mention-owner@test.com",
+    name: "external-root-mention-owner",
+    passwordHash: "x",
+    emailVerified: true,
+  }).returning();
+  const [server] = await db.insert(servers).values({
+    name: "External Root Mention",
+    slug: "external-root-mention",
+    ownerId: owner.id,
+  }).returning();
+  const [channel] = await db.insert(channels).values({
+    serverId: server.id,
+    name: "external-root-mention",
+    type: "channel",
+  }).returning();
+  const [agent] = await db.insert(agents).values({
+    serverId: server.id,
+    name: "external-root-agent",
+    runtime: "codex",
+  }).returning();
+  await db.insert(channelAgents).values({ channelId: channel.id, agentId: agent.id });
+  const [actor] = await db.insert(externalActorProjections).values({
+    provider: "slack",
+    appRegistrationId: "registration-root-mention",
+    installId: "install-root-mention",
+    workspaceId: "workspace-root-mention",
+    externalActorId: "UROOTMENTION",
+    displayName: "Slack Root Author",
+    handles: ["root-author"],
+    actorKind: "human",
+    state: "active",
+    deactivated: false,
+    projectionRevision: 1,
+    observedAt: new Date("2026-09-25T05:00:00.000Z"),
+  }).returning();
+  const created = await db.transaction((executor) => insertCanonicalExternalMessage({
+    executor,
+    channelId: channel.id,
+    content: `hello @${agent.name}`,
+    createdAt: new Date("2026-09-25T05:01:00.000Z"),
+    projectionId: actor.id,
+    provider: "slack",
+    appRegistrationId: actor.appRegistrationId,
+    installId: actor.installId,
+    workspaceId: actor.workspaceId,
+    externalActorId: actor.externalActorId,
+    externalConversationId: "CROOTMENTION",
+    externalMessageId: "provider-root-mention",
+    actorProjectionRevision: actor.projectionRevision,
+  }));
+  await db.insert(messageMentions).values({
+    messageId: created.message.id,
+    messageSeq: created.message.seq,
+    serverId: server.id,
+    channelId: channel.id,
+    targetType: "agent",
+    targetId: agent.id,
+    handleAtSendTime: agent.name,
+    source: "send_path",
+    confidence: "exact",
+    notifiableAtSend: true,
+  });
+  await db.insert(inboxNotificationFacts).values({
+    receiverType: "agent",
+    receiverId: agent.id,
+    serverId: server.id,
+    kind: "channel",
+    sourceChannelId: channel.id,
+    messageId: created.message.id,
+    messageSeq: created.message.seq,
+    activityAt: created.message.createdAt,
+    personalMention: true,
+    unreadEligible: true,
+  });
+
+  const deliveries: Array<{ agentId: string; payload: any }> = [];
+  await deliverExternalInboundCommittedMessageToAgents({
+    async deliverMessage(agentId: string, payload: any) {
+      deliveries.push({ agentId, payload });
+      return { status: "queued" };
+    },
+  } as any, created.message.id);
+
+  assert.equal(deliveries.length, 1);
+  assert.equal(deliveries[0]?.agentId, agent.id);
+  assert.equal(deliveries[0]?.payload.mentioned, true);
+  assert.equal(deliveries[0]?.payload.channel_type, "thread");
+  assert.equal(deliveries[0]?.payload.parent_channel_id, channel.id);
+  assert.notEqual(deliveries[0]?.payload.channel_id, channel.id);
+  const [thread] = await db.select().from(channels)
+    .where(eq(channels.id, deliveries[0]!.payload.channel_id));
+  assert.equal(thread?.type, "thread");
+  assert.equal(thread?.parentMessageId, created.message.id);
+});
+
+test("a Joint canonical commit keeps face-channel delivery and never takes the thread path", async ({ db }) => {
+  // Joint canonical channels also have type "channel", so `channel.type`
+  // alone must not gate the thread route — the gate is "exactly one inbox
+  // face, which is the canonical channel itself". Here the face lives on a
+  // different channel, so both the in-channel batch and the outside-mention
+  // loop keep plain delivery.
+  const [owner] = await db.insert(users).values({
+    email: "joint-thread-gate-owner@test.com",
+    name: "joint-thread-gate-owner",
+    passwordHash: "x",
+    emailVerified: true,
+  }).returning();
+  const [server] = await db.insert(servers).values({
+    name: "Joint Thread Gate",
+    slug: "joint-thread-gate",
+    ownerId: owner.id,
+  }).returning();
+  const [canonical] = await db.insert(channels).values({
+    serverId: server.id,
+    name: "joint-thread-gate-canonical",
+    type: "channel",
+  }).returning();
+  const [face] = await db.insert(channels).values({
+    serverId: server.id,
+    name: "joint-thread-gate-face",
+    type: "channel",
+  }).returning();
+  const [faceAgent] = await db.insert(agents).values({
+    serverId: server.id,
+    name: "joint-face-agent",
+    runtime: "codex",
+  }).returning();
+  const [outsideAgent] = await db.insert(agents).values({
+    serverId: server.id,
+    name: "joint-outside-agent",
+    runtime: "codex",
+  }).returning();
+  await db.insert(channelAgents).values({ channelId: face.id, agentId: faceAgent.id });
+  const [actor] = await db.insert(externalActorProjections).values({
+    provider: "slack",
+    appRegistrationId: "registration-joint-gate",
+    installId: "install-joint-gate",
+    workspaceId: "workspace-joint-gate",
+    externalActorId: "UJOINTGATE",
+    displayName: "Slack Joint Author",
+    handles: ["joint-author"],
+    actorKind: "human",
+    state: "active",
+    deactivated: false,
+    projectionRevision: 1,
+    observedAt: new Date("2026-09-25T05:00:00.000Z"),
+  }).returning();
+  const created = await db.transaction((executor) => insertCanonicalExternalMessage({
+    executor,
+    channelId: canonical.id,
+    content: `hello @${outsideAgent.name}`,
+    createdAt: new Date("2026-09-25T05:01:00.000Z"),
+    projectionId: actor.id,
+    provider: "slack",
+    appRegistrationId: actor.appRegistrationId,
+    installId: actor.installId,
+    workspaceId: actor.workspaceId,
+    externalActorId: actor.externalActorId,
+    externalConversationId: "CJOINTGATE",
+    externalMessageId: "provider-joint-gate",
+    actorProjectionRevision: actor.projectionRevision,
+  }));
+  await db.insert(messageMentions).values({
+    messageId: created.message.id,
+    messageSeq: created.message.seq,
+    serverId: server.id,
+    channelId: canonical.id,
+    targetType: "agent",
+    targetId: outsideAgent.id,
+    handleAtSendTime: outsideAgent.name,
+    source: "send_path",
+    confidence: "exact",
+    notifiableAtSend: true,
+  });
+  // The inbox face is a different channel (joint face), not the canonical id.
+  await db.insert(inboxNotificationFacts).values({
+    receiverType: "agent",
+    receiverId: faceAgent.id,
+    serverId: server.id,
+    kind: "channel",
+    sourceChannelId: face.id,
+    messageId: created.message.id,
+    messageSeq: created.message.seq,
+    activityAt: created.message.createdAt,
+    personalMention: false,
+    unreadEligible: true,
+  });
+
+  const deliveries: Array<{ agentId: string; payload: any }> = [];
+  await deliverExternalInboundCommittedMessageToAgents({
+    async deliverMessage(agentId: string, payload: any) {
+      deliveries.push({ agentId, payload });
+      return { status: "queued" };
+    },
+  } as any, created.message.id);
+
+  // Face agent: delivered on the face channel, not a thread.
+  const faceDelivery = deliveries.find((delivery) => delivery.agentId === faceAgent.id);
+  assert.ok(faceDelivery);
+  assert.equal(faceDelivery.payload.channel_id, face.id);
+  assert.equal(faceDelivery.payload.channel_type, "channel");
+  // Outside-mentioned agent: delivered on the canonical channel — a thread
+  // wake is only valid when the single face IS the canonical channel.
+  const outsideDelivery = deliveries.find((delivery) => delivery.agentId === outsideAgent.id);
+  assert.ok(outsideDelivery);
+  assert.equal(outsideDelivery.payload.channel_id, canonical.id);
+  assert.equal(outsideDelivery.payload.channel_type, "channel");
+  assert.equal(outsideDelivery.payload.mentioned, true);
+  // No thread channel was created for either delivery.
+  const threads = await db.select().from(channels)
+    .where(eq(channels.parentMessageId, created.message.id));
+  assert.equal(threads.length, 0, "joint commits must not create canonical threads");
 });
 
 test("external reaction updates fan out once to every local Joint channel projection", async ({ db }) => {
@@ -1378,11 +1596,11 @@ test("broadcastSystemMessage records inbox facts for persistent system messages 
   const deliveries: { agentId: string; payload: any }[] = [];
   const message = await broadcastSystemMessage(
     io,
-    {
+    withChannelDelivery({
       deliverMessage: async (agentId: string, payload: any) => {
         deliveries.push({ agentId, payload });
       },
-    } as any,
+    }) as any,
     channel.id,
     "ApplePI unarchived this channel",
     {
@@ -1409,7 +1627,7 @@ test("broadcastSystemMessage records inbox facts for persistent system messages 
 
   const taskSummary = await broadcastSystemMessage(
     io,
-    { deliverMessage: async () => {} } as any,
+    withChannelDelivery({ deliverMessage: async () => {} }) as any,
     channel.id,
     `📋 1 new task created: #1 "Close fact coverage"`,
     {
@@ -1430,7 +1648,7 @@ test("broadcastSystemMessage records inbox facts for persistent system messages 
   // #9: task status transitions now record + born-read the acting user.
   const lifecycleNotice = await broadcastSystemMessage(
     io,
-    { deliverMessage: async () => {} } as any,
+    withChannelDelivery({ deliverMessage: async () => {} }) as any,
     channel.id,
     `🔄 Someone moved #1 "Close fact coverage" to In Review`,
     {
@@ -1501,11 +1719,11 @@ test("task-created direct agent delivery honors channel mute for body and summar
   assert.equal(taskFacts.some((fact) => fact.receiverType === "agent" && fact.receiverId === unmutedAgent.id), true);
 
   const deliveries: { agentId: string; payload: any }[] = [];
-  const orchestrator = {
+  const orchestrator = withChannelDelivery({
     deliverMessage: async (agentId: string, payload: any) => {
       deliveries.push({ agentId, payload });
     },
-  } as any;
+  }) as any;
 
   await deliverMessageToAgents(orchestrator, taskHostMessage, owner.name);
   assert.deepEqual(deliveries.map((delivery) => delivery.agentId), [unmutedAgent.id]);
@@ -1587,11 +1805,11 @@ test("task-created direct agent delivery includes parent channel metadata for th
 
   const { tasks: [task], hostMessages: [taskHostMessage] } = await taskService.createTasks(threadChannel.id, "user", owner.id, [{ title: "thread task body" }]);
   const deliveries: { agentId: string; payload: any }[] = [];
-  const orchestrator = {
+  const orchestrator = withChannelDelivery({
     deliverMessage: async (agentId: string, payload: any) => {
       deliveries.push({ agentId, payload });
     },
-  } as any;
+  }) as any;
 
   await deliverMessageToAgents(orchestrator, taskHostMessage, owner.name);
 
@@ -1681,11 +1899,11 @@ test("task-created direct agent delivery keeps followed threads independent from
   const { hostMessages: [taskHostMessage] } = await taskService.createTasks(thread.id, "user", owner.id, [{ title: "muted thread task body" }]);
 
   const deliveries: { agentId: string; payload: any }[] = [];
-  const orchestrator = {
+  const orchestrator = withChannelDelivery({
     deliverMessage: async (agentId: string, payload: any) => {
       deliveries.push({ agentId, payload });
     },
-  } as any;
+  }) as any;
 
   await deliverMessageToAgents(orchestrator, taskHostMessage, owner.name);
 
@@ -1747,11 +1965,11 @@ test("task-created followed-thread delivery projects task assignee metadata with
   assert.equal(assignedTask.taskAssigneeId, null, "host message must not carry task assignment");
 
   const deliveries: { agentId: string; payload: any }[] = [];
-  const orchestrator = {
+  const orchestrator = withChannelDelivery({
     deliverMessage: async (agentId: string, payload: any) => {
       deliveries.push({ agentId, payload });
     },
-  } as any;
+  }) as any;
 
   await deliverMessageToAgents(orchestrator, assignedTask, owner.name);
 
@@ -1797,7 +2015,9 @@ test("getAgentResumeCatchupMessages returns bounded post-join unread agent messa
   for (let i = 0; i < 5; i += 1) {
     await createMessage(channel.id, "agent", agent.id, `own post-cursor send should stay out ${i}`);
   }
-  const visible = await createMessage(channel.id, "user", owner.id, "post-join durable request");
+  const visible = await createMessage(channel.id, "user", owner.id, "post-join durable request", "chat", undefined, {
+    senderTimezone: "Asia/Shanghai",
+  });
   await createMessage(channel.id, "agent", agent.id, "own send should stay out");
 
   const base = new Date("2026-07-01T00:00:00.000Z");
@@ -1818,6 +2038,7 @@ test("getAgentResumeCatchupMessages returns bounded post-join unread agent messa
   assert.equal(result.messages[0].sender_name, owner.name);
   assert.equal(result.messages[0].channel_id, channel.id);
   assert.equal(result.messages[0].channel_type, "channel");
+  assert.equal(result.messages[0].sender_timezone, "Asia/Shanghai", "catch-up carries the human sender's zone like live delivery");
   assert.equal(result.maxSeq, visible.seq);
   // The resume summary must count exactly the rows the catch-up would hand over.
   assert.deepEqual(await getAgentUnreadCounts(agent.id, await referenceAgentInboxChain(agent.id)), { "#resume-catchup-room": 1 });
@@ -2106,7 +2327,7 @@ test("getAgentResumeCatchupMessages suppresses muted ordinary messages but prese
   assert.equal(result.maxSeq, pierced.seq);
 });
 
-// A mention pierces a mute (rw_agent_inbox_v5, 068-chain-mention-v6-consumers.sql): the same rule
+// A mention pierces a mute (rw_agent_inbox_v6, 076-cursor-decouple-consumers.sql): the same rule
 // as humans. The fixture is a channel the agent is a member of, with a read pre-mute
 // prefix, then `mutedOrdinary` non-mention messages after the mute point, then one
 // @mention of the agent.
@@ -3129,7 +3350,7 @@ test("broadcastAndDeliver shares the authoritative recipient set and persists na
 
   try {
     const { io, events } = createIoRecorder();
-    await broadcastAndDeliver(io, { deliverMessage: async () => undefined } as any, {
+    await broadcastAndDeliver(io, withChannelDelivery({ deliverMessage: async () => undefined }) as any, {
       channelId: "channel-1",
       senderType: "user",
       senderId: "user-1",
@@ -3167,7 +3388,7 @@ test("broadcastAndDeliver shares the authoritative recipient set and persists na
     });
 
     delete process.env.APP_URL;
-    await broadcastAndDeliver(io, { deliverMessage: async () => undefined } as any, {
+    await broadcastAndDeliver(io, withChannelDelivery({ deliverMessage: async () => undefined }) as any, {
       channelId: "channel-1",
       senderType: "user",
       senderId: "user-1",
@@ -3262,7 +3483,7 @@ test("notification payload projection stays fail-closed while Socket diagnostics
       tracer,
       "server.http.request",
       { surface: "server", kind: "server" },
-      () => broadcastAndDeliver(io, { deliverMessage: async () => undefined } as any, {
+      () => broadcastAndDeliver(io, withChannelDelivery({ deliverMessage: async () => undefined }) as any, {
         channelId: channel.id,
         senderType: "user",
         senderId: owner.id,
@@ -3282,7 +3503,7 @@ test("notification payload projection stays fail-closed while Socket diagnostics
       },
     });
     await assert.rejects(
-      () => broadcastAndDeliver(recorded.io as any, { deliverMessage: async () => undefined } as any, {
+      () => broadcastAndDeliver(recorded.io as any, withChannelDelivery({ deliverMessage: async () => undefined }) as any, {
         channelId: channel.id,
         senderType: "user",
         senderId: owner.id,
@@ -3357,7 +3578,7 @@ test("notification push socket kill-switch suppresses user-room emits without ch
 
   try {
     const { io, events } = createIoRecorder();
-    await broadcastAndDeliver(io, { deliverMessage: async () => undefined } as any, {
+    await broadcastAndDeliver(io, withChannelDelivery({ deliverMessage: async () => undefined }) as any, {
       channelId: "channel-1",
       senderType: "user",
       senderId: "user-1",
@@ -3409,7 +3630,7 @@ test("broadcastAndDeliver replays the original persisted agent send and re-broad
   });
 
   const { io, events } = createIoRecorder();
-  const agentOrchestrator = { deliverMessage: async () => undefined } as any;
+  const agentOrchestrator = withChannelDelivery({ deliverMessage: async () => undefined }) as any;
   const sendOpts = {
     channelId: "channel-1",
     senderType: "agent" as const,
@@ -3492,7 +3713,7 @@ test("broadcastAndDeliver emits dm:new to human user room for first-touch DM sid
   });
 
   const { io, events } = createIoRecorder();
-  await broadcastAndDeliver(io, { deliverMessage: async () => undefined } as any, {
+  await broadcastAndDeliver(io, withChannelDelivery({ deliverMessage: async () => undefined }) as any, {
     channelId: "dm-1",
     senderType: "agent",
     senderId: "agent-1",
@@ -3537,7 +3758,7 @@ test("broadcastSystemMessage emits dm:new to human user room for system DM sideb
   });
 
   const { io, events } = createIoRecorder();
-  await broadcastSystemMessage(io, { deliverMessage: async () => undefined } as any, "dm-1", "System DM", {
+  await broadcastSystemMessage(io, withChannelDelivery({ deliverMessage: async () => undefined }) as any, "dm-1", "System DM", {
     inboxFactPolicy: {
       mode: "skip",
       producer: "test.dm_hydration",
@@ -3604,7 +3825,7 @@ test("broadcastAndDeliver keeps keyless agent sends on the legacy non-idempotent
     buildPushTargets: async () => new Map(),
   });
   const { io, events } = createIoRecorder();
-  const agentOrchestrator = { deliverMessage: async () => undefined } as any;
+  const agentOrchestrator = withChannelDelivery({ deliverMessage: async () => undefined }) as any;
   const sendOpts = {
     channelId: "channel-1",
     senderType: "agent" as const,
@@ -3674,7 +3895,7 @@ test("broadcastAndDeliver emits dm conversationContext without changing the top-
   });
 
   const { io, events } = createIoRecorder();
-  await broadcastAndDeliver(io, { deliverMessage: async () => undefined } as any, {
+  await broadcastAndDeliver(io, withChannelDelivery({ deliverMessage: async () => undefined }) as any, {
     channelId: dmChannel.id,
     senderType: "user",
     senderId: owner.id,
@@ -3739,7 +3960,7 @@ test("broadcastAndDeliver only emits private-thread parent context to parent-vis
   });
 
   const { io, events } = createIoRecorder();
-  await broadcastAndDeliver(io, { deliverMessage: async () => undefined } as any, {
+  await broadcastAndDeliver(io, withChannelDelivery({ deliverMessage: async () => undefined }) as any, {
     channelId: thread.id,
     senderType: "user",
     senderId: owner.id,
@@ -3811,7 +4032,7 @@ test("broadcastAndDeliver emits replies sync window producer envelope for normal
     const thread = await getOrCreateThread(parent.id, owner.id, "user");
 
     const { io, events } = createIoRecorder();
-    await broadcastAndDeliver(io, { deliverMessage: async () => undefined } as any, {
+    await broadcastAndDeliver(io, withChannelDelivery({ deliverMessage: async () => undefined }) as any, {
       channelId: thread.id,
       senderType: "user",
       senderId: owner.id,
@@ -3968,7 +4189,7 @@ test("broadcastAndDeliver sends one source projection to web and both receiver-l
     });
 
     const { io, events } = createIoRecorder();
-    await broadcastAndDeliver(io, { deliverMessage: async () => undefined } as any, {
+    await broadcastAndDeliver(io, withChannelDelivery({ deliverMessage: async () => undefined }) as any, {
       channelId: localChannelB.id,
       senderType: "user",
       senderId: ownerB.id,
@@ -4099,7 +4320,7 @@ test("broadcastAndDeliver lets tests stub the archive gate without initializing 
   });
 
   const { io } = createIoRecorder();
-  const agentOrchestrator = { deliverMessage: async () => undefined } as any;
+  const agentOrchestrator = withChannelDelivery({ deliverMessage: async () => undefined }) as any;
 
   const message = await broadcastAndDeliver(io, agentOrchestrator, {
     channelId: "channel-1",
@@ -4196,11 +4417,11 @@ __setMessageServiceDepsForTests({
 });
 
 const { io, events } = createIoRecorder();
-const agentOrchestrator = {
+const agentOrchestrator = withChannelDelivery({
   deliverMessage: async (agentId: string, payload: any) => {
     deliveries.push({ agentId, payload });
   },
-} as any;
+}) as any;
 
 const responseMessage = await broadcastAndDeliver(io, agentOrchestrator, {
   channelId: "channel-1",
@@ -4324,11 +4545,11 @@ __setMessageServiceDepsForTests({
 });
 
 const { io } = createIoRecorder();
-const agentOrchestrator = {
+const agentOrchestrator = withChannelDelivery({
   deliverMessage: async (agentId: string, payload: any) => {
     deliveries.push({ agentId, payload });
   },
-} as any;
+}) as any;
 
 await broadcastAndDeliver(io, agentOrchestrator, {
   channelId: "channel-1",
@@ -4429,7 +4650,7 @@ test("④ durability precedes delivery: a mention is recoverable at the instant 
   let durableAtHandoff: boolean | null = null;
   let recoveryProbe: ReturnType<typeof listRecoverableMentionDeliveriesForAgent> | null = null;
   const { io } = createIoRecorder();
-  await broadcastAndDeliver(io, {
+  await broadcastAndDeliver(io, withChannelDelivery({
     deliverMessage: async () => {
       durableAtHandoff = payloadDurable;
       recoveryProbe = listRecoverableMentionDeliveriesForAgent(
@@ -4438,7 +4659,7 @@ test("④ durability precedes delivery: a mention is recoverable at the instant 
       );
       await recoveryProbe;
     },
-  } as any, {
+  }) as any, {
     channelId: channel.id,
     senderType: "user",
     senderId: owner.id,
@@ -4541,11 +4762,11 @@ test("⑤ declared degradation: a failed occurrence payload write is traced, sti
   const tracer = new BasicTracer({ sink });
   const { io } = createIoRecorder();
   await withTraceRoot(tracer, "server.http.request", { surface: "server", kind: "server" }, async () => {
-    await broadcastAndDeliver(io, {
+    await broadcastAndDeliver(io, withChannelDelivery({
       deliverMessage: async (agentId: string, payload: any) => {
         delivered.push({ agentId, payload });
       },
-    } as any, {
+    }) as any, {
       channelId: channel.id,
       senderType: "user",
       senderId: owner.id,
@@ -4662,11 +4883,11 @@ test("broadcastAndDeliver delivers a public-channel mention to a non-joined agen
   });
 
   const { io } = createIoRecorder();
-  const agentOrchestrator = {
+  const agentOrchestrator = withChannelDelivery({
     deliverMessage: async (agentId: string, payload: any) => {
       deliveries.push({ agentId, payload });
     },
-  } as any;
+  }) as any;
 
   await broadcastAndDeliver(io, agentOrchestrator, {
     channelId: "channel-1",
@@ -4752,11 +4973,11 @@ test("broadcastAndDeliver does not deliver an outsider mention at send time and 
   });
 
   const { io, events } = createIoRecorder();
-  const agentOrchestrator = {
+  const agentOrchestrator = withChannelDelivery({
     deliverMessage: async (agentId: string, payload: any) => {
       deliveries.push({ agentId, payload });
     },
-  } as any;
+  }) as any;
 
   const enriched = await broadcastAndDeliver(io, agentOrchestrator, {
     channelId: "channel-1",
@@ -4837,11 +5058,11 @@ test("broadcastAndDeliver does not deliver ordinary public-channel traffic to no
   });
 
   const { io } = createIoRecorder();
-  const agentOrchestrator = {
+  const agentOrchestrator = withChannelDelivery({
     deliverMessage: async (agentId: string, payload: any) => {
       deliveries.push({ agentId, payload });
     },
-  } as any;
+  }) as any;
 
   await broadcastAndDeliver(io, agentOrchestrator, {
     channelId: "channel-1",
@@ -4954,7 +5175,7 @@ test("broadcastAndDeliver records same-send thread facts and reactivates a direc
   });
 
   const { io } = createIoRecorder();
-  const agentOrchestrator = { deliverMessage: async () => undefined } as any;
+  const agentOrchestrator = withChannelDelivery({ deliverMessage: async () => undefined }) as any;
   const reply = await broadcastAndDeliver(io, agentOrchestrator, {
     channelId: thread.id,
     senderType: "user",
@@ -5075,7 +5296,7 @@ test("broadcastAndDeliver suppresses ordinary facts until a direct mention react
   });
 
   const { io } = createIoRecorder();
-  const agentOrchestrator = { deliverMessage: async () => undefined } as any;
+  const agentOrchestrator = withChannelDelivery({ deliverMessage: async () => undefined }) as any;
   const ordinary = await broadcastAndDeliver(io, agentOrchestrator, {
     channelId: thread.id,
     senderType: "user",
@@ -5376,11 +5597,11 @@ test("broadcastAndDeliver keeps followed joint-thread agent and push projections
 
     const { io, events } = createIoRecorder();
     const agentDeliveries: Array<{ agentId: string; payload: any }> = [];
-    const agentOrchestrator = {
+    const agentOrchestrator = withChannelDelivery({
       deliverMessage: async (agentId: string, payload: any) => {
         agentDeliveries.push({ agentId, payload });
       },
-    } as any;
+    }) as any;
     const reply = await broadcastAndDeliver(io, agentOrchestrator, {
       channelId: localThreadB.id,
       senderType: "user",
@@ -5614,11 +5835,11 @@ test("broadcastAndDeliver marks owner/admin sender delivery as admin authority",
   });
 
   const { io } = createIoRecorder();
-  const agentOrchestrator = {
+  const agentOrchestrator = withChannelDelivery({
     deliverMessage: async (agentId: string, payload: any, options: any) => {
       deliveries.push({ agentId, payload, options });
     },
-  } as any;
+  }) as any;
 
   await broadcastAndDeliver(io, agentOrchestrator, {
     channelId: "channel-1",
@@ -5678,11 +5899,11 @@ test("broadcastAndDeliver leaves member sender delivery subject to inbox receive
   });
 
   const { io } = createIoRecorder();
-  const agentOrchestrator = {
+  const agentOrchestrator = withChannelDelivery({
     deliverMessage: async (agentId: string, payload: any, options: any) => {
       deliveries.push({ agentId, payload, options });
     },
-  } as any;
+  }) as any;
 
   await broadcastAndDeliver(io, agentOrchestrator, {
     channelId: "channel-1",
@@ -5749,11 +5970,11 @@ test("broadcastAndDeliver does not deliver private-channel mentions to non-membe
   });
 
   const { io } = createIoRecorder();
-  const agentOrchestrator = {
+  const agentOrchestrator = withChannelDelivery({
     deliverMessage: async (agentId: string, payload: any) => {
       deliveries.push({ agentId, payload });
     },
-  } as any;
+  }) as any;
 
   await broadcastAndDeliver(io, agentOrchestrator, {
     channelId: "private-1",
@@ -5822,9 +6043,9 @@ test("declared degradation on the SINGLE-delivery path: a failed occurrence writ
     const sink = new MemoryTraceSink();
     const tracer = new BasicTracer({ sink });
     await withTraceRoot(tracer, "server.http.request", { surface: "server", kind: "server" }, async () => {
-      await deliverMessageToAgent({
+      await deliverMessageToAgent(withChannelDelivery({
         deliverMessage: async (agentId: string) => { delivered.push(agentId); return { status: "queued" }; },
-      } as any, message.id, agent.id);
+      }) as any, message.id, agent.id);
     });
 
     assert.equal(attempts, 1, "the occurrence write must be attempted exactly once");
@@ -5888,9 +6109,9 @@ test("task-message path: a failed occurrence write must not suppress the deliver
     const sink = new MemoryTraceSink();
     const tracer = new BasicTracer({ sink });
     await withTraceRoot(tracer, "server.http.request", { surface: "server", kind: "server" }, async () => {
-      await deliverMessageToAgents({
+      await deliverMessageToAgents(withChannelDelivery({
         deliverMessage: async (agentId: string) => { delivered.push(agentId); return { status: "queued" }; },
-      } as any, message, owner.name);
+      }) as any, message, owner.name);
     });
 
     assert.ok(attempts >= 1, "the occurrence write must have been attempted");
@@ -5959,4 +6180,174 @@ test("runExternalInboundCommitSideEffects resolves cleanly when both legs succee
     async () => {},
     async () => {},
   );
+});
+
+test("structured external mention writes an external_mention_facts row, never a message_mentions row", async ({ db }) => {
+  const [owner] = await db.insert(users).values({
+    email: `ext-mention-${randomUUID()}@test.invalid`,
+    name: `ext-mention-${randomUUID()}`,
+    passwordHash: "test-only",
+    emailVerified: true,
+  }).returning();
+  const [server] = await db.insert(servers).values({
+    name: "External Mention Server",
+    slug: `ext-mention-${randomUUID()}`,
+    ownerId: owner.id,
+  }).returning();
+  await db.insert(serverMembers).values({ serverId: server.id, userId: owner.id, role: "owner" });
+  const [channel] = await db.insert(channels).values({
+    serverId: server.id,
+    name: `ext-mention-${randomUUID()}`,
+    type: "channel",
+  }).returning();
+  await db.insert(channelHumans).values({ channelId: channel.id, userId: owner.id });
+
+  const [oauthClient] = await db.insert(oauthClients).values({
+    serverId: server.id,
+    clientId: `slack-ext-${randomUUID().slice(0, 8)}`,
+    clientSecretHash: "test-only",
+    appType: "slock_builtin",
+    name: "Slack Bridge",
+    allowedScopes: ["messages:read", "messages:write"],
+    createdByUserId: owner.id,
+  }).returning();
+  const [registration] = await db.insert(externalAppRegistrations).values({
+    oauthClientId: oauthClient.id,
+    provider: "slack",
+    environment: "test",
+    providerAppId: "A_EXT",
+    providerOAuthClientId: "oauth-ext",
+    capabilityManifestVersion: 1,
+    capabilityManifestHash: "manifest-ext",
+    requiredCapabilities: ["external_projection"],
+  }).returning();
+  const [grant] = await db.insert(externalAppServerGrants).values({
+    serverId: server.id,
+    registrationId: registration.id,
+    grantEpoch: 1,
+    grantedManifestVersion: 1,
+    grantedManifestHash: "manifest-ext",
+    grantedCapabilities: ["external_projection"],
+    grantedByType: "human",
+    grantedById: owner.id,
+  }).returning();
+  const [install] = await db.insert(externalAppInstalls).values({
+    serverId: server.id,
+    registrationId: registration.id,
+    serverGrantId: grant.id,
+    grantEpoch: 1,
+    state: "active",
+    connectionEpoch: 1,
+    scopeRevision: 1,
+    credentialRevision: 1,
+    installedScopes: ["chat:write"],
+    providerAppId: "A_EXT",
+    providerTeamId: "T_EXT",
+    authorityType: "team",
+    providerAuthorityId: "T_EXT",
+  }).returning();
+  const [binding] = await db.insert(externalChannelBindings).values({
+    serverId: server.id,
+    registrationId: registration.id,
+    installId: install.id,
+    channelId: channel.id,
+    providerConversationId: "C_EXT",
+    providerConversationKind: "public_channel",
+    privacyClass: "public",
+    grantEpoch: 1,
+    connectionEpoch: 1,
+    bindingEpoch: 1,
+    consentedByType: "human",
+    consentedById: owner.id,
+    consentedAt: new Date(),
+  }).returning();
+  await db.insert(externalBindingAudienceSnapshots).values({
+    bindingId: binding.id,
+    bindingEpoch: 1,
+    audienceRevision: 7,
+    externalMemberCount: 1,
+    externalAudienceDigest: "ext-digest",
+    raftMemberCount: 1,
+    raftAudienceDigest: "raft-digest",
+    status: "matched",
+    observedAt: new Date(Date.now() - 60_000),
+    expiresAt: new Date(Date.now() + 60_000),
+  });
+  const [actor] = await db.insert(externalActorProjections).values({
+    provider: "slack",
+    appRegistrationId: registration.id,
+    installId: install.id,
+    workspaceId: install.providerAuthorityId,
+    externalActorId: "U_EXT",
+    displayName: "Ada Lovelace",
+    handles: ["ada.lovelace"],
+    actorKind: "human",
+    state: "active",
+    deactivated: false,
+    projectionRevision: 1,
+    observedAt: new Date(Date.now() - 60_000),
+  }).returning();
+  await db.insert(externalAddressabilityProjections).values({
+    projectionId: actor.id,
+    provider: "slack",
+    appRegistrationId: registration.id,
+    installId: install.id,
+    workspaceId: install.providerAuthorityId,
+    connectionEpoch: install.connectionEpoch,
+    bindingId: binding.id,
+    bindingEpoch: binding.bindingEpoch,
+    conversationId: binding.providerConversationId,
+    memberRevision: 7,
+    contextRevision: 7,
+    state: "active",
+    observedAt: new Date(Date.now() - 60_000),
+    expiresAt: new Date(Date.now() + 60_000),
+  });
+
+  const io = { to() { return { emit() {} }; }, in() { return { in() { return { socketsJoin() {} }; }, socketsJoin() {} }; } } as any;
+  const orchestrator = withChannelDelivery({ deliverMessage: async () => undefined }) as any;
+  const sent = await broadcastAndDeliver(io, orchestrator, {
+    channelId: channel.id,
+    senderType: "user",
+    senderId: owner.id,
+    senderName: owner.name,
+    // The composer sanitizes a Slack handle with `.` into the Raft-legal
+    // `ada-lovelace` before inserting the token; the structured mention
+    // carries the sanitized token and the fact records it, so the outbound
+    // renderer swaps `@ada-lovelace` for `<@U_EXT>`.
+    content: "hi @ada-lovelace can you check",
+    mentions: [{ type: "external", id: actor.id, name: "ada-lovelace" }],
+  });
+  assert.ok(sent.id);
+
+  const facts = await db.select().from(externalMentionFacts)
+    .where(eq(externalMentionFacts.messageId, sent.id));
+  assert.equal(facts.length, 1);
+  assert.equal(facts[0]!.projectionId, actor.id);
+  assert.equal(facts[0]!.externalActorId, "U_EXT");
+  assert.equal(facts[0]!.handleAtSendTime, "ada-lovelace");
+  assert.equal(facts[0]!.bindingId, binding.id);
+  assert.equal(facts[0]!.memberRevision, 7);
+
+  const mentionsRows = await db.select().from(messageMentions)
+    .where(eq(messageMentions.messageId, sent.id));
+  assert.equal(mentionsRows.length, 0, "external mentions must not land in message_mentions");
+
+  // But it MUST surface in the payload's `mentions` array so the Raft client
+  // renders it as styled text (not plain `@ada-lovelace`).
+  const payloadMentions = (sent.mentions as { type: string; id: string; name: string }[] | undefined) ?? [];
+  const ext = payloadMentions.find((m) => m.type === "external");
+  assert.ok(ext, "payload must carry the external mention so the UI can highlight it");
+  assert.equal(ext.id, actor.id);
+  assert.equal(ext.name, "ada-lovelace");
+
+  // Hydrated (list/history) path must return the same external mention via
+  // the `external_mention_facts` lookup — not just the send-time payload.
+  const hydratedFacts = await db.select().from(externalMentionFacts)
+    .where(eq(externalMentionFacts.messageId, sent.id)).then((r) => r.map((row) => ({
+      type: "external" as const,
+      id: row.projectionId,
+      name: row.handleAtSendTime,
+    })));
+  assert.equal(hydratedFacts.length, 1, "hydrated read must surface the same fact");
 });

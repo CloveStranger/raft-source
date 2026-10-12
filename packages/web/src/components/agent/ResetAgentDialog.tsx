@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useCallback, useState } from "react";
 import { useIntl } from "react-intl";
 import { RotateCcw } from "lucide-react";
 import { RadioGroup, RadioGroupItem } from "raft-ui";
@@ -8,6 +8,18 @@ import type { MessageId } from "../../i18n/messages";
 import ConfirmDialog from "../ConfirmDialog";
 
 type ResetMode = "restart" | "session" | "full";
+
+type ResetOption = { mode: ResetMode; labelId: MessageId; descId: MessageId };
+
+const MEMBER_RUNTIME_OPTIONS: ResetOption[] = [
+  { mode: "restart", labelId: "agent.reset.restartModel", descId: "agent.reset.restartModelDesc" },
+  { mode: "session", labelId: "agent.reset.model", descId: "agent.reset.modelDesc" },
+];
+const STANDARD_OPTIONS: ResetOption[] = [
+  { mode: "restart", labelId: "agent.reset.restart", descId: "agent.reset.restartDesc" },
+  { mode: "session", labelId: "agent.reset.session", descId: "agent.reset.sessionDesc" },
+];
+const FULL_RESET_OPTION: ResetOption = { mode: "full", labelId: "agent.reset.full", descId: "agent.reset.fullDesc" };
 
 export default function ResetAgentDialog({
   agentId,
@@ -26,7 +38,7 @@ export default function ResetAgentDialog({
   const [mode, setMode] = useState<ResetMode>("restart");
   const resetAgent = useAgentStore((s) => s.resetAgent);
 
-  const handleReset = async () => {
+  const handleReset = useCallback(async () => {
     try {
       await resetAgent(agentId, mode);
     } catch (err: unknown) {
@@ -36,20 +48,15 @@ export default function ResetAgentDialog({
           || (err instanceof Error ? err.message : formatMessage({ id: "agent.reset.failed" })),
       );
     }
-  };
+  }, [resetAgent, agentId, mode, formatMessage]);
 
-  const options: { mode: ResetMode; labelId: MessageId; descId: MessageId }[] = memberRuntimeOnly
-    ? [
-        { mode: "restart", labelId: "agent.reset.restartModel", descId: "agent.reset.restartModelDesc" },
-        { mode: "session", labelId: "agent.reset.model", descId: "agent.reset.modelDesc" },
-      ]
-    : [
-        { mode: "restart", labelId: "agent.reset.restart", descId: "agent.reset.restartDesc" },
-        { mode: "session", labelId: "agent.reset.session", descId: "agent.reset.sessionDesc" },
-        ...(canFullReset
-          ? [{ mode: "full" as const, labelId: "agent.reset.full" as const, descId: "agent.reset.fullDesc" as const }]
-          : []),
-      ];
+  const handleModeChange = useCallback((value: string) => setMode(value as ResetMode), []);
+
+  const options: ResetOption[] = memberRuntimeOnly
+    ? MEMBER_RUNTIME_OPTIONS
+    : canFullReset
+      ? [...STANDARD_OPTIONS, FULL_RESET_OPTION]
+      : STANDARD_OPTIONS;
 
   const selectedOption = options.find((o) => o.mode === mode)!;
   // Severity now rides the semantic Button variant instead of the legacy
@@ -75,7 +82,7 @@ export default function ResetAgentDialog({
               keys, one tab stop, and a real checked state for assistive tech. */}
           <RadioGroup
             value={mode}
-            onValueChange={(value) => setMode(value as ResetMode)}
+            onValueChange={handleModeChange}
             aria-label={formatMessage({ id: "agent.reset.title" }, { name: agentName })}
             className="gap-3"
           >

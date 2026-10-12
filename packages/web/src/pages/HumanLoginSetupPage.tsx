@@ -1,8 +1,7 @@
 import { appendOAuthAuthorizationParams } from "@botiverse/raft-shared";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useIntl } from "react-intl";
 import {
-  Badge,
   Select,
   SelectContent,
   SelectIcon,
@@ -18,11 +17,11 @@ import { useAuthStore } from "../store/authStore";
 import { useServerStore } from "../store/serverStore";
 import type { Server } from "../store/serverStore";
 import AvatarSlot from "../components/ui/AvatarSlot";
-import AvatarListRow from "../components/ui/AvatarListRow";
 import SignedInAs from "../components/auth/SignedInAs";
 import RaftBrandLockup from "../components/brand/RaftBrandLockup";
 import RequestedScopeConsent from "../components/oauth/RequestedScopeConsent";
 import { hasAgentInboundOAuthScope } from "../lib/oauthScopePresentation";
+import { MarketplaceServerRow } from "./MarketplaceServerRow";
 
 type LoginClientSummary = {
   id?: string;
@@ -47,7 +46,7 @@ type LoginClientSummary = {
   };
 };
 
-type AvailableServerClient = {
+export type AvailableServerClient = {
   server: Server;
   client: LoginClientSummary;
 };
@@ -272,10 +271,10 @@ export default function HumanLoginSetupPage() {
   const selectedMarketplaceNeedsAdmin = selectedMarketplaceEntry?.client.availability === "install_required"
     && !selectedMarketplaceCanInstall;
   const detailsClient = marketplaceClient ?? client;
-  const availableServerOptions = availableServerClients.map(({ server }) => ({
+  const availableServerOptions = useMemo(() => availableServerClients.map(({ server }) => ({
     value: server.id,
     label: `${server.name} (${server.slug})`,
-  }));
+  })), [availableServerClients]);
 
   const serviceName = detailsClient?.name || (clientId.trim() ? formatMessage({ id: "pages.humanLogin.thisApp" }) : formatMessage({ id: "pages.humanLogin.thisService" }));
   const selectedServerName = selectedMarketplaceRow?.server.name
@@ -300,7 +299,7 @@ export default function HumanLoginSetupPage() {
   const unavailableAfterLookup = !!clientId.trim() && !serversLoading && !clientLoading
     && availableServerClients.length === 0 && installRequiredServerClients.length === 0;
 
-  async function authorizeWithClient(serverId: string, loginClient: LoginClientSummary) {
+  const authorizeWithClient = useCallback(async (serverId: string, loginClient: LoginClientSummary) => {
     setSubmitting(true);
     setStatus("");
     try {
@@ -323,9 +322,19 @@ export default function HumanLoginSetupPage() {
     } finally {
       setSubmitting(false);
     }
-  }
+  }, [
+    configuredReturnUrl,
+    formatMessage,
+    oidcCodeChallenge,
+    oidcCodeChallengeMethod,
+    oidcFlow,
+    oidcNonce,
+    requestedServerHint,
+    scopes,
+    setupState,
+  ]);
 
-  async function installMarketplaceApp(entry: AvailableServerClient) {
+  const installMarketplaceApp = useCallback(async (entry: AvailableServerClient) => {
     if (!entry.client.id || !entry.client.installation?.canInstall) return;
     setInstallingServerId(entry.server.id);
     setStatus("");
@@ -357,9 +366,9 @@ export default function HumanLoginSetupPage() {
     } finally {
       setInstallingServerId("");
     }
-  }
+  }, [authorizeWithClient, formatMessage]);
 
-  async function continueToApp() {
+  const continueToApp = useCallback(async () => {
     if (!clientId.trim()) {
       setStatus(formatMessage({ id: "pages.humanLogin.missingClientId" }));
       return;
@@ -378,7 +387,27 @@ export default function HumanLoginSetupPage() {
     }
 
     await authorizeWithClient(selectedServerId, client);
-  }
+  }, [authorizeWithClient, client, clientError, clientId, configuredReturnUrl, formatMessage, selectedServerId]);
+
+  const handleCommit = useCallback(() => {
+    if (selectedMarketplaceCanInstall && selectedMarketplaceEntry) {
+      void installMarketplaceApp(selectedMarketplaceEntry);
+      return;
+    }
+    void continueToApp();
+  }, [continueToApp, installMarketplaceApp, selectedMarketplaceCanInstall, selectedMarketplaceEntry]);
+
+  const handleLogout = useCallback(() => logout(), [logout]);
+
+  const handleSelectServerRow = useCallback((serverId: string) => {
+    if (installingServerId) return;
+    setSelectedServerId(serverId);
+  }, [installingServerId]);
+
+  const handleServerChange = useCallback((value: string | null) => {
+    if (value == null) return;
+    setSelectedServerId(value);
+  }, []);
 
   return (
     <div className="h-full min-h-0 overflow-y-auto bg-layer-canvas-muted font-display text-foreground-strong theme-brutal:bg-brutal-cream theme-brutal:text-black">
@@ -391,7 +420,7 @@ export default function HumanLoginSetupPage() {
           <div className="flex shrink-0 items-center gap-2 sm:gap-4">
             <a className="btn-flat-sm px-2.5 py-1.5 text-xs no-underline sm:text-sm" href="/">{formatMessage({ id: "pages.humanLogin.back" })}</a>
             <Button
-              onClick={() => logout()}
+              onClick={handleLogout}
               size="sm"
               variant="outline"
               className="font-black sm:text-sm"
@@ -480,64 +509,17 @@ export default function HumanLoginSetupPage() {
                       </div>
                     )}
                     <div className="max-h-72 divide-y-2 divide-black overflow-y-auto">
-                  {filteredMarketplaceServerRows.map(({ server, entry }) => {
-                    const installed = entry?.client.availability !== "install_required" && entry != null;
-                    const selected = selectedServerId === server.id;
-                    const canInstall = entry?.client.installation?.canInstall === true;
-                    const rowTitle = formatMessage({ id: installed
-                      ? "pages.humanLogin.serverInstalledReady"
-                      : canInstall
-                        ? "pages.humanLogin.serverNotInstalledCanInstall"
-                        : entry
-                          ? "pages.humanLogin.serverNotInstalledAskAdmin"
-                          : "pages.humanLogin.serverStatusUnavailable" });
-                    return (
-                      <AvatarListRow
-                        key={server.id}
-                        avatar={(
-                          <AvatarSlot
-                            context="surface-list"
-                            type="server"
-                            serverAvatarUrl={server.avatarUrl}
-                            serverInitial={server.name.slice(0, 1)}
-                            className="mt-1"
-                          />
-                        )}
-                        name={server.name}
-                        subtitle={server.slug}
-                        rightContent={installingServerId === server.id ? (
-                          <Spinner
-                            size="sm"
-                            aria-hidden="true"
-                            data-testid="marketplace-install-pending-row-spinner"
-                          />
-                        ) : !installed ? (
-                          <Badge appearance="outline" uppercase>
-                            {formatMessage({ id: !entry
-                              ? "pages.humanLogin.serverUnavailableCompact"
-                              : canInstall
-                                ? "pages.humanLogin.notInstalledCompact"
-                                : "pages.humanLogin.adminNeededCompact" })}
-                          </Badge>
-                        ) : null}
-                        align="start"
-                        selected={selected}
-                        onClick={() => {
-                          if (installingServerId) return;
-                          setSelectedServerId(server.id);
-                        }}
-                        className={`min-h-14 ${installingServerId ? "opacity-60" : ""}`}
-                        buttonProps={{
-                          "data-testid": `login-server-status-${server.id}`,
-                          disabled: !!installingServerId,
-                          "aria-pressed": selected,
-                          "aria-disabled": !!installingServerId,
-                          "aria-label": `${formatMessage({ id: "pages.humanLogin.useThisServer" })}: ${server.name}`,
-                          title: rowTitle,
-                        }}
-                      />
-                    );
-                  })}
+                  {filteredMarketplaceServerRows.map(({ server, entry }) => (
+                    <MarketplaceServerRow
+                      key={server.id}
+                      server={server}
+                      entry={entry}
+                      selected={selectedServerId === server.id}
+                      installPending={installingServerId === server.id}
+                      installInFlight={!!installingServerId}
+                      onSelect={handleSelectServerRow}
+                    />
+                  ))}
                     {filteredMarketplaceServerRows.length === 0 && (
                       <div className="px-3 py-6 text-center text-sm font-bold text-foreground-muted">
                         {formatMessage({ id: "pages.humanLogin.noServerSearchResults" })}
@@ -549,10 +531,7 @@ export default function HumanLoginSetupPage() {
               ) : availableServerClients.length > 0 ? (
                 <Select
                   value={selectedServerId}
-                  onValueChange={(value) => {
-                    if (value == null) return;
-                    setSelectedServerId(value);
-                  }}
+                  onValueChange={handleServerChange}
                   items={availableServerOptions}
                 >
                   <SelectTrigger className="w-full">
@@ -653,13 +632,7 @@ export default function HumanLoginSetupPage() {
               {!selectedMarketplaceNeedsAdmin ? (
                 <Button
                   disabled={selectedMarketplaceCanInstall ? !canInstallAndContinue : !canContinue}
-                  onClick={() => {
-                    if (selectedMarketplaceCanInstall && selectedMarketplaceEntry) {
-                      void installMarketplaceApp(selectedMarketplaceEntry);
-                      return;
-                    }
-                    void continueToApp();
-                  }}
+                  onClick={handleCommit}
                   size="lg"
                   variant="accent"
                   className="mt-4 w-full font-black disabled:cursor-not-allowed disabled:opacity-50"

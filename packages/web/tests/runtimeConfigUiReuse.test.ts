@@ -11,10 +11,18 @@ const agentDetailSource = readFileSync(
   new URL("../src/components/agent/AgentDetailPanel.tsx", import.meta.url),
   "utf8",
 );
-const runtimeConfigFieldsSource = readFileSync(
-  new URL("../src/components/agent/RuntimeConfigFields.tsx", import.meta.url),
+// RuntimeConfigFields plus the field components split out of it (task #709).
+const runtimeConfigFieldsSource = [
+  "RuntimeConfigFields",
+  "SchemaKimiRuntimeFields",
+  "SchemaBuiltInRuntimeFields",
+  "RuntimeEnvVarRow",
+  "RuntimeFormV2FieldControl",
+  "RuntimeFormV2SourceStatusLine",
+].map((name) => readFileSync(
+  new URL(`../src/components/agent/${name}.tsx`, import.meta.url),
   "utf8",
-);
+)).join("\n");
 const webSrcRoot = fileURLToPath(new URL("../src", import.meta.url));
 
 function listSourceFiles(dir: string): string[] {
@@ -66,7 +74,7 @@ test("runtime config fields keep the create-agent model rescan layout", () => {
 
 test("Built-in gateway and schema-backed model fields do not inherit host model defaults", () => {
   assert.match(runtimeConfigFieldsSource, /const customModelInputMode = customModelMode \|\| builtInGatewayProvider;/);
-  assert.match(runtimeConfigFieldsSource, /: builtInGatewayProvider \? \[\] : modelOptions;/);
+  assert.match(runtimeConfigFieldsSource, /: builtInGatewayProvider \? \[\] : modelOptions\)/);
   assert.match(runtimeConfigFieldsSource, /const machineSourceApplies = \(!providerModelList && !builtInGatewayProvider\) \|\| builtInCatalogApplies;/);
   assert.match(runtimeConfigFieldsSource, /const showHeaderRescan = machineSourceApplies/);
   // `<FieldAction>` is the local indirection that renders a tokenised raft-ui
@@ -74,8 +82,8 @@ test("Built-in gateway and schema-backed model fields do not inherit host model 
   // so Agent Details keeps its appearance. The property this guard protects,
   // "the rescan control sits in the label row", is unchanged.
   assert.match(runtimeConfigFieldsSource, /labelAccessory=\{showHeaderRescan \? \(\s*<Tooltip[\s\S]{0,120}?<FieldAction/);
-  assert.match(runtimeConfigFieldsSource, /\{builtInGatewayProvider \? null : \(\s*<RuntimeSelectControl/);
-  assert.match(runtimeConfigFieldsSource, /id: builtInGatewayProvider[\s\S]*"agent\.runtimeConfig\.gatewayModelId"/);
+  assert.match(runtimeConfigFieldsSource, /\{builtInGatewayProvider \? null : \(\s*<RuntimeChoiceCombobox/);
+  assert.match(runtimeConfigFieldsSource, /\{customModelSupported && builtInGatewayProvider && \([\s\S]*?"agent\.runtimeConfig\.gatewayModelId"/);
   assert.match(createAgentSource, /if \(schemaBacked \|\| customModelMode \|\| builtInGatewayModelRequired\) return;/);
 });
 

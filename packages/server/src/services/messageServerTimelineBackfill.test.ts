@@ -42,7 +42,7 @@ test("message_server_timeline backfill fills pre-0310 messages in batches and th
   assert.ok(first.batches >= 4);
   assert.equal(lines.length, first.batches);
 
-  assert.deepEqual(await verifyMessageServerTimeline(run, { batchSize: 3 }), { missingRows: 0, divergentRows: 0, sampleIds: [] });
+  assert.deepEqual(await verifyMessageServerTimeline(run, { batchSize: 3 }), { missingRows: 0, divergentRows: 0, sampleIds: [], scannedRows: 8 });
   for (const message of [...legacy, live!]) {
     const [row] = await db.select().from(messageServerTimeline).where(eq(messageServerTimeline.messageId, message.id));
     const [current] = await db.select().from(messages).where(eq(messages.id, message.id));
@@ -60,4 +60,7 @@ test("message_server_timeline backfill fills pre-0310 messages in batches and th
   await db.execute(sql`UPDATE message_server_timeline SET server_id = ${serverB!.id} WHERE message_id = ${live!.id}`);
   const stale = await verifyMessageServerTimeline(run, { batchSize: 3 });
   assert.deepEqual({ missing: stale.missingRows, divergent: stale.divergentRows, sample: stale.sampleIds }, { missing: 0, divergent: 1, sample: [live!.id] });
+
+  // A 0-row slice would scan nothing and report 0/0; the verifier refuses it.
+  await assert.rejects(verifyMessageServerTimeline(run, { batchSize: 0 }), RangeError);
 });

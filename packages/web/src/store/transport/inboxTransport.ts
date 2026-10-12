@@ -14,6 +14,7 @@
 
 import type { AxiosResponse } from "axios";
 import api from "../../api/client";
+import { getWithRwOverloadRetry } from "../../api/overloadRetry";
 import { emitStateTransitionTrace } from "../../utils/stateTransitionTrace";
 import type { InboxFilter, InboxItem } from "../inboxStore";
 import type {
@@ -39,7 +40,7 @@ export type InboxWindowFetcher = (params: {
 }) => Promise<InboxWindowResponse>;
 
 const defaultFetcher: InboxWindowFetcher = async (params) => {
-  const { data } = await api.get("/channels/inbox", { params });
+  const { data } = await getWithRwOverloadRetry("/channels/inbox", { params });
   return data as InboxWindowResponse;
 };
 

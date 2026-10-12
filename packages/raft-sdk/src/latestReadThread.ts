@@ -5,7 +5,7 @@
 //
 // Read-only: it never creates, repairs, migrates, or rewrites the CLI's state.
 
-import { constants } from "node:fs";
+import { constants, existsSync } from "node:fs";
 import { open } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -13,9 +13,9 @@ import { join } from "node:path";
 import {
   cliReadStatePathSegments,
   configuredCliReadStateBase,
+  defaultRaftHomeDirname,
   isLocalStateAgentId,
   latestReadThreadFromCliReadState,
-  RAFT_HOME_DEFAULT_DIRNAME,
 } from "@botiverse/raft-shared/src/agentOps/index";
 
 // The record's location (directory, file name, environment variables) is
@@ -28,7 +28,8 @@ export interface ReadLatestReadThreadOptions {
   agentId?: string;
   /**
    * The Raft home directory the CLI uses. Defaults to what the CLI resolves
-   * from `env`: `RAFT_HOME`, then `SLOCK_HOME`, then `~/.slock`.
+   * from `env`: `RAFT_HOME`, then `SLOCK_HOME`, then `~/.slock` if it holds Raft state,
+   * else `~/.raft`.
    */
   home?: string;
   /** Environment to resolve the defaults from. Defaults to `process.env`. */
@@ -72,12 +73,18 @@ function firstNonEmpty(...values: Array<string | undefined>): string | undefined
  * answer as a default to confirm, and keep private channel names out of
  * public places.
  */
+function defaultRaftHome(env: Record<string, string | undefined>): string {
+  // Same home directory the CLI uses (`env.HOME` first), so both resolve one path.
+  const home = env.HOME || homedir();
+  return join(home, defaultRaftHomeDirname((name) => existsSync(join(home, name))));
+}
+
 export async function readLatestReadThread(options: ReadLatestReadThreadOptions = {}): Promise<RaftLatestReadThread> {
   const env = options.env ?? process.env;
   const agentId = firstNonEmpty(options.agentId, env.SLOCK_AGENT_ID);
   if (!agentId || !isLocalStateAgentId(agentId)) return { state: "none", reason: "no_agent_id" };
 
-  const base = firstNonEmpty(options.home, configuredCliReadStateBase(env)) ?? join(homedir(), RAFT_HOME_DEFAULT_DIRNAME);
+  const base = firstNonEmpty(options.home, configuredCliReadStateBase(env)) ?? defaultRaftHome(env);
   const filePath = join(base, ...cliReadStatePathSegments(agentId));
 
   let handle: Awaited<ReturnType<typeof open>>;

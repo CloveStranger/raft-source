@@ -1114,3 +1114,72 @@ test("a specific agent tab intent is written through as that tab, not the ordere
     "an explicit tab intent must reach the URL as that tab",
   );
 });
+
+const externalMentionMember = {
+  id: "projection-1",
+  provider: "slack" as const,
+  displayName: "Ada Lovelace",
+  handles: ["ada.lovelace"],
+  actorKind: "human" as const,
+  avatarUrl: null,
+  workspaceId: "opaque-workspace-id",
+  externalActorId: "actor-1",
+  installId: "install-1",
+  appRegistrationId: "app-1",
+  workspaceName: "Analytical Engines",
+};
+
+test("external mention profile restores via channel members (not message context)", async () => {
+  resetStores();
+  const search = "?profile=external-mention%3Achannel-1%3Aprojection-1";
+  installWindowLocation("/s/acme/channel/channel-1", search);
+  const requests: Array<{ url: string }> = [];
+  api.get = (async (url: string) => {
+    requests.push({ url });
+    return {
+      data: {
+        agents: [],
+        humans: [],
+        externalMembers: [externalMentionMember],
+      },
+    };
+  }) as typeof api.get;
+
+  syncRightPanelStoresFromSearch(search);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+
+  assert.deepEqual(requests, [{ url: "/channels/channel-1/members" }]);
+  assert.equal(useProfileStore.getState().profileType, "external");
+  assert.equal(useProfileStore.getState().profileId, "projection-1");
+  assert.equal(useProfileStore.getState().externalProfile?.displayName, "Ada Lovelace");
+  assert.equal(useProfileStore.getState().externalProfileIsMention, true);
+});
+
+test("external mention profile closes when the projection is no longer in the binding", async () => {
+  resetStores();
+  const search = "?profile=external-mention%3Achannel-1%3Aprojection-gone";
+  installWindowLocation("/s/acme/channel/channel-1", search);
+  api.get = (async () => ({
+    data: { agents: [], humans: [], externalMembers: [] },
+  })) as typeof api.get;
+
+  syncRightPanelStoresFromSearch(search);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+
+  assert.equal(useProfileStore.getState().profileType, null);
+});
+
+test("external mention profile URL restores with parent channelId in a thread", async () => {
+  resetStores();
+  const search = "?profile=external-mention%3Aparent-channel-1%3Aprojection-1";
+  installWindowLocation("/s/acme/channel/thread-1", search);
+  api.get = (async () => ({
+    data: { agents: [], humans: [], externalMembers: [externalMentionMember] },
+  })) as typeof api.get;
+
+  syncRightPanelStoresFromSearch(search);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+
+  assert.equal(useProfileStore.getState().profileType, "external");
+  assert.equal(useProfileStore.getState().externalProfileChannelId, "parent-channel-1");
+});

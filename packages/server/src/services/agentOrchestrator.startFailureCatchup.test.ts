@@ -111,8 +111,8 @@ for (const sessionId of ["kimi-session-1", null] as const) {
       // non-retryably and automatic wakes stop.
       await breaker.recordStart(agent.id, "launch-1", Date.now());
       assert.equal(
-        await breaker.recordNonRetryableStartFailure(agent.id, { launchId: "launch-1", reason: "model_not_configured", nowMs: Date.now() }),
-        true,
+        (await breaker.recordStartFailure(agent.id, { launchId: "launch-1", reason: "model_not_configured", nowMs: Date.now() })).outcome,
+        "blocked",
       );
 
       const dm = await channelService.findOrCreateDM(server.id, owner.id, agent.id);
@@ -156,7 +156,7 @@ async function blockedWithOwedMessage() {
   bindMachine(orchestrator, machine.id, server.id);
   const breaker = (orchestrator as any).wakeCrashLoopBreaker;
   await breaker.recordStart(agent.id, "launch-1", Date.now());
-  await breaker.recordNonRetryableStartFailure(agent.id, { launchId: "launch-1", reason: "model_not_configured", nowMs: Date.now() });
+  await breaker.recordStartFailure(agent.id, { launchId: "launch-1", reason: "model_not_configured", nowMs: Date.now() });
   const dm = await channelService.findOrCreateDM(server.id, owner.id, agent.id);
   assert.ok(dm);
   const owed = await createMessage(dm.id, "user", owner.id, "owed while blocked");

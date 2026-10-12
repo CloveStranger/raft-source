@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createIntl } from "react-intl";
 import { mergedMessages } from "../src/i18n/messages/index";
-import { formatActivityTextDescriptor, getActivityTextDescriptor } from "../src/utils/activity";
+import { formatActivityTextDescriptor, formatSpawnFailureDetail, getActivityTextDescriptor } from "../src/utils/activity";
 import { useAgentStore } from "../src/store/agentStore";
 
 // task #1123 — the web must carry the daemon's typed spawn-failure reason and
@@ -50,4 +50,31 @@ test("the store keeps the spawnFailure carrier next to the activity state and cl
 
   useAgentStore.getState().updateActivity("agent-sf", "working", "Running command", 11, 600, { launchId: "launch-2", clientSeq: 1 }, "working", "running_command");
   assert.equal(useAgentStore.getState().agentActivities["agent-sf"]?.spawnFailure, undefined, "a later plain activity drops the carrier");
+});
+
+test("a paused agent's failed start says restarts are paused and how to lift it, in both catalogs", () => {
+  for (const locale of ["en", "zh-cn"] as const) {
+    const intl = createIntl({ locale, defaultLocale: "en", messages: mergedMessages(locale) });
+    const modelPaused = formatSpawnFailureDetail(intl.formatMessage, { reason: "model_not_found", model: "deepseek/deepseek-v4-flash", autoRestartPaused: true }, "daemon text");
+    assert.ok(modelPaused?.includes("deepseek/deepseek-v4-flash"), `${locale}: ${modelPaused}`);
+    assert.ok(modelPaused?.includes(locale === "en" ? "automatic restarts are paused" : "已暂停自动重启"), `${locale}: ${modelPaused}`);
+    const genericPaused = formatSpawnFailureDetail(intl.formatMessage, { reason: "runtime_spawn_failed", autoRestartPaused: true }, "Runtime failed to start.");
+    assert.ok(genericPaused?.startsWith("Runtime failed to start."), "other reasons keep the daemon's message, plus the pause");
+    assert.ok(!modelPaused?.includes("activity.status.") && !genericPaused?.includes("activity.status."), `${locale} copy must resolve`);
+  }
+  const intl = createIntl({ locale: "en", defaultLocale: "en", messages: mergedMessages("en") });
+  assert.equal(formatSpawnFailureDetail(intl.formatMessage, { reason: "runtime_spawn_failed" }, "x"), null, "not paused, no own copy: keep the daemon detail");
+  assert.equal(formatSpawnFailureDetail(intl.formatMessage, undefined, "x"), null);
+});
+
+test("task #10: session_needs_reset has its own copy that points to Reset Session, never 'restart the agent'", () => {
+  for (const locale of ["en", "zh-cn"] as const) {
+    const intl = createIntl({ locale, defaultLocale: "en", messages: mergedMessages(locale) });
+    for (const autoRestartPaused of [true, false]) {
+      const text = formatSpawnFailureDetail(intl.formatMessage, { reason: "session_needs_reset", autoRestartPaused }, "daemon text");
+      assert.ok(text && !text.includes("activity.status."), `${locale}: ${text}`);
+      assert.ok(text.includes(locale === "en" ? "Reset Session & Restart" : "重置会话并重启"), `${locale}: ${text}`);
+      assert.ok(!text.includes(locale === "en" ? "or restart the agent" : "手动重启 Agent 后恢复"), `${locale}: ${text}`);
+    }
+  }
 });

@@ -124,10 +124,11 @@ test("thread-window route supplies the host-owned close callback to ThreadPanel"
 });
 
 test("task page header keeps identity compact and exposes title through a themed tooltip", () => {
-  assert.match(threadWindowRouteSource, /<Tooltip\s+content=\{task\.title\}\s+disableHoverablePopup\s+contentProps=\{\{ className: "pointer-events-none" \}\}\s*>/);
+  assert.match(threadWindowRouteSource, /const NON_INTERACTIVE_TOOLTIP_PROPS = \{ className: "pointer-events-none" \};/);
+  assert.match(threadWindowRouteSource, /<Tooltip\s+content=\{task\.title\}\s+disableHoverablePopup\s+contentProps=\{NON_INTERACTIVE_TOOLTIP_PROPS\}\s*>/);
   assert.match(threadWindowRouteSource, /data-testid="task-page-identity"/);
   assert.match(threadWindowRouteSource, /task\.modal\.taskWithNumber/);
-  assert.match(threadWindowRouteSource, /channelType === "dm" \? "dm"/);
+  assert.match(threadWindowRouteSource, /taskChannelType === "dm" \? "dm"/);
   assert.match(threadWindowRouteSource, /h-dvh max-h-dvh min-h-0.*overflow-hidden/);
   assert.match(threadWindowRouteSource, /sm:border sm:border-line-muted sm:shadow-raft-md theme-brutal:sm:border-2 theme-brutal:sm:border-black theme-brutal:sm:bg-white theme-brutal:sm:shadow-brutal/);
   assert.match(threadWindowRouteSource, /data-testid="thread-window-surface"/);

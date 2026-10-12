@@ -21,7 +21,7 @@ import { createMessage } from "../services/messageService";
 import { mintAgentCredential } from "../services/agentCredentialService";
 
 // `raft inbox check` reads the agent's offered conversations from the agent
-// inbox view of the unified chain (RisingWave rw_agent_inbox_v5, which holds only
+// inbox view of the unified chain (RisingWave rw_agent_inbox_v6, which holds only
 // offered rows). The view read is stubbed through the RW test seam, answering
 // the page / totals / DM queries over the given rows as the view would;
 // everything else (targets, latest sender) is real Postgres.
@@ -34,7 +34,7 @@ function stubChain(rows: AgentInboxChainRow[]): void {
   __testRisingWaveInbox.set({
     getPool: () => ({} as never),
     query: (async (_pool: unknown, text: string, values: unknown[] = []) => {
-      assert.match(text, /FROM rw_agent_inbox_v5\s+WHERE agent_id = \$1/);
+      assert.match(text, /FROM rw_agent_inbox_v6\s+WHERE agent_id = \$1/);
       const param = (pattern: RegExp) => {
         const match = text.match(pattern);
         return match ? values[Number(match[1]) - 1] : undefined;

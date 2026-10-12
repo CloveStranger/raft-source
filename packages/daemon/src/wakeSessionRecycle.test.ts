@@ -154,6 +154,7 @@ test("cold-idle sweep selects only enabled, idle, cold runtimes with readable fa
     ...overrides,
   });
 
+  const skipped: string[] = [];
   const stops = await selectColdIdleRecycleStops([
     view({}),
     view({ agentId: "agent-busy", idle: false }),
@@ -161,9 +162,19 @@ test("cold-idle sweep selects only enabled, idle, cold runtimes with readable fa
     view({ agentId: "agent-disabled", config: { runtime: "claude", sessionId: null, constructedWakeContext: true, envVars: { RAFT_WAKE_RECYCLE: "0" } } as unknown as ColdIdleRuntimeView["config"] }),
     view({ agentId: "agent-codex", config: { runtime: "codex", sessionId: null, constructedWakeContext: true, envVars: enabledEnv } as unknown as ColdIdleRuntimeView["config"] }),
     view({ agentId: "agent-no-session", liveSessionId: null }),
-  ], { nowMs, homeDir: home, processEnv: {} });
+    view({ agentId: "agent-no-transcript", liveSessionId: "dddddddd-1111-2222-3333-444444444444" }),
+  ], { nowMs, homeDir: home, processEnv: {}, onSkip: (agentId, reason) => skipped.push(`${agentId}:${reason}`) });
 
   assert.deepEqual(stops.map((s) => s.agentId), ["agent-cold"]);
+  // Every process the sweep leaves alone reports the gate that held it.
+  assert.deepEqual(skipped, [
+    "agent-busy:not_idle",
+    "agent-warm-memory:recent_event",
+    "agent-disabled:disabled",
+    "agent-codex:session_facts_unavailable",
+    "agent-no-session:no_session",
+    "agent-no-transcript:session_facts_unavailable",
+  ]);
   assert.equal(stops[0]!.sessionId, coldSession);
   assert.equal(stops[0]!.priorContextTokens, 400_005);
 });
@@ -193,11 +204,13 @@ test("cold-idle sweep skips outstanding background tasks but allows terminated o
     lastEventAtMs: nowMs - 3 * HOUR_MS,
     liveSessionId: sessionId,
   });
+  const skipped: string[] = [];
   const stops = await selectColdIdleRecycleStops(
     [view("agent-armed", armedSession), view("agent-cleared", clearedSession)],
-    { nowMs, homeDir: home, processEnv: {} },
+    { nowMs, homeDir: home, processEnv: {}, onSkip: (agentId, reason) => skipped.push(`${agentId}:${reason}`) },
   );
   assert.deepEqual(stops.map((s) => s.agentId), ["agent-cleared"]);
+  assert.deepEqual(skipped, ["agent-armed:background_tasks_outstanding"]);
 });
 
 test("cold-idle sweep spares a runtime whose session sidecar (subagent) is still active", async () => {

@@ -15,14 +15,13 @@
 //     shows net new additions; if everyone is already a member, the
 //     submit button is disabled with a hint.
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Hash, Lock } from "lucide-react";
 import DialogCard from "../ui/DialogCard";
 import { useIntl } from "react-intl";
 import Banner from "../ui/Banner";
 import {
   ChannelMemberListShell,
-  ChannelMemberRemoveButton,
   ChannelMemberRow,
   ChannelMemberSectionHeader,
 } from "./ChannelMemberList";
@@ -32,6 +31,7 @@ import { useChannelStore } from "../../store/channelStore";
 import { useChannelMembers } from "../../hooks/useChannelMembers";
 import { isLocalProjectionMember } from "../../utils/channelLocalMembership";
 import { Button } from "raft-ui";
+import { CandidateRemoveButton } from "./CandidateRemoveButton";
 
 interface Props {
   channelId: string;
@@ -166,29 +166,29 @@ export default function AddMembersDialog({
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  function toggleHuman(id: string) {
+  const toggleHuman = useCallback((id: string) => {
     setSelectedHumanIds((prev) => {
       const next = new Set(prev);
       if (next.has(id)) next.delete(id);
       else next.add(id);
       return next;
     });
-  }
+  }, []);
 
-  function toggleAgent(id: string) {
+  const toggleAgent = useCallback((id: string) => {
     setSelectedAgentIds((prev) => {
       const next = new Set(prev);
       if (next.has(id)) next.delete(id);
       else next.add(id);
       return next;
     });
-  }
+  }, []);
 
   const nothingToAdd = candidateHumans.length === 0 && candidateAgents.length === 0;
   const nothingSelected = selectedHumanIds.size === 0 && selectedAgentIds.size === 0;
   const canSubmit = !submitting && !nothingToAdd && !nothingSelected;
 
-  async function handleSubmit() {
+  const handleSubmit = useCallback(async () => {
     if (!canSubmit || !channel) return;
     setSubmitting(true);
     setError(null);
@@ -221,7 +221,20 @@ export default function AddMembersDialog({
     } finally {
       setSubmitting(false);
     }
-  }
+  }, [
+    canSubmit,
+    channel,
+    onSubmitStart,
+    selectedHumanIds,
+    selectedAgentIds,
+    addMembers,
+    actionCardMessageId,
+    actionCardConfirmationVersion,
+    onSubmitted,
+    onClose,
+    formatMessage,
+    onSubmitError,
+  ]);
 
   // Ensure the dialog reflects the latest channel membership before
   // computing candidate filters — without this, freshly-added members
@@ -275,9 +288,10 @@ export default function AddMembersDialog({
                           name={a.displayName ?? a.name}
                           secondary={a.description}
                           trailing={(
-                            <ChannelMemberRemoveButton
+                            <CandidateRemoveButton
+                              id={a.id}
                               label={formatMessage({ id: "channel.addMembers.removeFromList" }, { name: a.displayName ?? a.name })}
-                              onClick={() => toggleAgent(a.id)}
+                              onRemove={toggleAgent}
                             />
                           )}
                         />
@@ -303,9 +317,10 @@ export default function AddMembersDialog({
                           name={m.displayName ?? m.name}
                           secondary={m.description ?? (m.displayName && m.displayName !== m.name ? `@${m.name}` : null)}
                           trailing={(
-                            <ChannelMemberRemoveButton
+                            <CandidateRemoveButton
+                              id={m.userId}
                               label={formatMessage({ id: "channel.addMembers.removeFromList" }, { name: m.displayName ?? m.name })}
-                              onClick={() => toggleHuman(m.userId)}
+                              onRemove={toggleHuman}
                             />
                           )}
                         />

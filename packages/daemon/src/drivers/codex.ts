@@ -1,15 +1,16 @@
 import { RuntimeExecutableNotFoundError } from "../spawnFailureErrors";
 import { spawn, execFileSync } from "node:child_process";
+import { spawnRuntimeChild } from "./runtimeChild";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import type { ChildProcess } from "node:child_process";
 import { hydrateRuntimeConfig, runtimeConfigToLaunchFields, runtimeModelSourceOutcomeFromSet, type AgentConfig, type RuntimeModelInfo, type RuntimeModelSet, type RuntimeModelSourceOutcome, type Tracer , type AxSurfaceText } from "@botiverse/raft-shared";
-import type { RuntimeDriver, SpawnContext, SpawnResult, ParsedEvent, RuntimeProbeResult } from "./types";
+import type { RuntimeDriver, SpawnContext, SpawnResult, ParsedEvent, RuntimeProbeResult, RuntimeProbeUnavailableReason } from "./types";
 import { buildCliTransportSystemPrompt, prepareCliTransport } from "./cliTransport";
 import { codexStateRootCandidates, resolveCodexHomeRootFromEnv } from "./codexHome";
 import { detectNodeHostKind, NodeHostUnavailableError, resolveNodeHostLaunch } from "./nodeHostLaunch";
-import { firstExistingPath, resolveCommandOnPath, withWindowsUserEnvironment, type ProbeDeps } from "./probe";
+import { firstExistingPath, lookupCommandOnPath, resolveCommandOnPath, withWindowsUserEnvironment, type ProbeDeps } from "./probe";
 import { resolveWindowsDirectLaunch } from "./windowsLaunch";
 import {
   CodexEventNormalizer,
@@ -80,6 +81,8 @@ interface CodexSpawnCandidateDiscovery {
   candidates: CodexSpawnCandidate[];
   /** Credential-free reasons a discovered surface could not become a candidate. */
   rejected: string[];
+  /** Why the `codex` PATH lookup resolved nothing; absent when it resolved a command. */
+  pathMissReason?: RuntimeProbeUnavailableReason;
 }
 
 type ExplicitCodexBinResolution =
@@ -179,7 +182,7 @@ function codexSpawnCandidates(deps: ProbeDeps = {}): CodexSpawnCandidateDiscover
       }
     }
 
-    const command = resolveCommandOnPath("codex", deps);
+    const { command, missReason: pathMissReason } = lookupCommandOnPath("codex", deps);
     if (command && !isWindowsSandboxRunner(command)) {
       const direct = windowsDirectCodexCandidate("path", command, deps);
       if (typeof direct === "string") rejected.push(direct);
@@ -196,12 +199,12 @@ function codexSpawnCandidates(deps: ProbeDeps = {}): CodexSpawnCandidateDiscover
       });
     }
 
-    return { candidates, rejected };
+    return { candidates, rejected, ...(pathMissReason ? { pathMissReason } : {}) };
   }
 
   const candidates: CodexSpawnCandidate[] = [];
 
-  const pathCommand = resolveCommandOnPath("codex", deps);
+  const { command: pathCommand, missReason: pathMissReason } = lookupCommandOnPath("codex", deps);
   if (pathCommand) {
     candidates.push({
       source: "path",
@@ -225,7 +228,7 @@ function codexSpawnCandidates(deps: ProbeDeps = {}): CodexSpawnCandidateDiscover
     }
   }
 
-  return { candidates, rejected: [] };
+  return { candidates, rejected: [], ...(pathMissReason ? { pathMissReason } : {}) };
 }
 
 export function resolveCodexCommand(deps: ProbeDeps = {}): string | null {
@@ -517,6 +520,8 @@ function resolveCompatibleCodexCandidate(deps: ProbeDeps = {}): {
   notes: string[];
   /** When CODEX_BIN was set but unusable — callers must fail closed, not fall through. */
   explicitOverrideFailed: boolean;
+  /** Automatic discovery only: why the `codex` PATH lookup resolved nothing. */
+  pathMissReason?: RuntimeProbeUnavailableReason;
 } {
   const rejected: string[] = [];
   const notes: string[] = [];
@@ -590,11 +595,12 @@ function resolveCompatibleCodexCandidate(deps: ProbeDeps = {}): {
     version: best?.version ?? null,
     notes,
     explicitOverrideFailed: false,
+    ...(discovery.pathMissReason ? { pathMissReason: discovery.pathMissReason } : {}),
   };
 }
 
 export function probeCodex(deps: ProbeDeps = {}): RuntimeProbeResult {
-  const { candidate, rejected, version, notes } = resolveCompatibleCodexCandidate(deps);
+  const { candidate, rejected, version, notes, explicitOverrideFailed, pathMissReason } = resolveCompatibleCodexCandidate(deps);
   const parts = [
     ...rejected,
     ...notes,
@@ -602,8 +608,14 @@ export function probeCodex(deps: ProbeDeps = {}): RuntimeProbeResult {
   if (!candidate) {
     parts.push(describeSearchPath(deps));
     parts.push("Restart the Raft daemon after changing PATH or installing Codex so the new environment is picked up.");
+    // Nothing discovered at all (no CODEX_BIN override, no candidate found and
+    // none rejected) carries the PATH lookup's own verdict, so an undecided
+    // lookup (e.g. a timeout) is not "not installed". Any rejected candidate or
+    // failed override is an installed-but-unusable Codex.
+    const nothingDiscovered = !explicitOverrideFailed && rejected.length === 0;
     return {
       available: false,
+      unavailableReason: (nothingDiscovered ? pathMissReason : undefined) ?? "probe_failed",
       diagnostic: parts.length > 0
         ? parts.join("; ")
         : "No Codex CLI app-server candidate was found.",
@@ -989,9 +1001,11 @@ export class CodexDriver implements RuntimeDriver {
         electron_run_as_node: env?.ELECTRON_RUN_AS_NODE === "1",
       },
     });
+    // task #365: after the last await, right before the child exists.
+    ctx.assertLaunchCurrent?.();
     let proc: ChildProcess;
     try {
-      proc = spawn(command, spawnArgs, {
+      proc = spawnRuntimeChild(command, spawnArgs, {
         cwd: ctx.workingDirectory,
         stdio: ["pipe", "pipe", "pipe"],
         env: env ?? spawnEnv,
@@ -1203,6 +1217,10 @@ export class CodexDriver implements RuntimeDriver {
 
   get currentSessionId(): string | null {
     return this.normalizer.threadId;
+  }
+
+  get hasLiveTurn(): boolean {
+    return this.normalizer.hasLiveTurn;
   }
 
   encodeStdinMessage(

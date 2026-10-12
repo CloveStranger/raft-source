@@ -1,4 +1,5 @@
 import "./helpers/domSetup";
+import { comboboxText } from "./helpers/combobox";
 
 import assert from "node:assert/strict";
 import type { ReactElement } from "react";
@@ -212,7 +213,7 @@ test("Create Cindy locks the official identity, prefers Claude regardless of cat
   await waitFor(() => {
     const selects = screen.getAllByRole("combobox");
     assert.match(selects[0]?.textContent ?? "", /Claude Code/);
-    assert.ok(selects.some((select) => /Claude Opus/.test(select.textContent ?? "")));
+    assert.ok(selects.some((select) => /Claude Opus/.test(comboboxText(select))));
   });
   assert.ok(screen.getAllByText("Cindy").length > 0);
   assert.equal(screen.queryAllByRole("textbox").length, 0);
@@ -234,7 +235,7 @@ test("Create Cindy falls back from unavailable Claude to Codex with the current 
     const selects = screen.getAllByRole("combobox");
     assert.match(selects[0]?.textContent ?? "", /Codex/);
     const expected = getModelLabel("codex", getDefaultModel("codex"));
-    assert.ok(selects.some((select) => select.textContent?.includes(expected)));
+    assert.ok(selects.some((select) => comboboxText(select).includes(expected)));
   });
 });
 

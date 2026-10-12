@@ -113,11 +113,11 @@ export default function QuotedMessageCard({
             <span className="text-foreground-hint">·</span>
             <MessageQuotedPreviewAuthor className="inline-flex min-w-0 items-center gap-1.5">
               <CompactUserAvatar author={author} />
-              <MessageQuotedPreviewAuthorName className="truncate font-bold text-foreground-strong">
+              <MessageQuotedPreviewAuthorName className="min-w-0 truncate font-bold text-foreground-strong">
                 {author.name}
               </MessageQuotedPreviewAuthorName>
               {author.subtitle ? (
-                <MessageQuotedPreviewAuthorMeta className="truncate font-mono text-[10px] text-foreground-hint">
+                <MessageQuotedPreviewAuthorMeta className="min-w-0 flex-1 max-w-fit truncate font-mono text-[10px] text-foreground-hint">
                   {author.subtitle}
                 </MessageQuotedPreviewAuthorMeta>
               ) : null}

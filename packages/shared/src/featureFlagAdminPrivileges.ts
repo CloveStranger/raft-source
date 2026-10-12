@@ -7,6 +7,10 @@ export const REQUIRED_FEATURE_FLAG_ADMIN_PRIVILEGES = [
   { kind: "table", object: "public.announcements", privilege: "UPDATE" },
   { kind: "table", object: "public.announcement_audit_events", privilege: "SELECT" },
   { kind: "table", object: "public.announcement_audit_events", privilege: "INSERT" },
+  { kind: "table", object: "public.announcement_image_assets", privilege: "SELECT" },
+  { kind: "table", object: "public.announcement_image_assets", privilege: "INSERT" },
+  { kind: "table", object: "public.announcement_image_assets", privilege: "UPDATE" },
+  { kind: "table", object: "public.announcement_image_assets", privilege: "DELETE" },
   { kind: "table", object: "public.feature_flag_audiences", privilege: "SELECT" },
   { kind: "table", object: "public.feature_flag_audiences", privilege: "INSERT" },
   { kind: "table", object: "public.feature_flag_audiences", privilege: "UPDATE" },
@@ -67,6 +71,7 @@ export const FEATURE_FLAG_ADMIN_COLUMN_PROJECTIONS = [
 const FEATURE_FLAG_ADMIN_COLUMN_PRIVILEGE_OBJECTS = [
   "public.announcements",
   "public.announcement_audit_events",
+  "public.announcement_image_assets",
   "public.feature_flag_audiences",
   "public.feature_flag_audience_members",
   "public.users",
@@ -100,6 +105,9 @@ function isExpectedEffectiveColumnPrivilege(
   }
   if (object === "public.announcement_audit_events") {
     return privilege === "SELECT" || privilege === "INSERT";
+  }
+  if (object === "public.announcement_image_assets") {
+    return privilege === "SELECT" || privilege === "INSERT" || privilege === "UPDATE";
   }
   if (object === "public.feature_flag_audiences") {
     return privilege === "SELECT" || privilege === "INSERT" || privilege === "UPDATE";
@@ -140,6 +148,13 @@ export const FORBIDDEN_FEATURE_FLAG_ADMIN_PRIVILEGES = [
   { kind: "table", object: "public.announcement_audit_events", privilege: "TRUNCATE" },
   { kind: "table", object: "public.announcement_audit_events", privilege: "REFERENCES" },
   { kind: "table", object: "public.announcement_audit_events", privilege: "TRIGGER" },
+  { kind: "table", object: "public.announcement_image_assets", privilege: "SELECT WITH GRANT OPTION" },
+  { kind: "table", object: "public.announcement_image_assets", privilege: "INSERT WITH GRANT OPTION" },
+  { kind: "table", object: "public.announcement_image_assets", privilege: "UPDATE WITH GRANT OPTION" },
+  { kind: "table", object: "public.announcement_image_assets", privilege: "DELETE WITH GRANT OPTION" },
+  { kind: "table", object: "public.announcement_image_assets", privilege: "TRUNCATE" },
+  { kind: "table", object: "public.announcement_image_assets", privilege: "REFERENCES" },
+  { kind: "table", object: "public.announcement_image_assets", privilege: "TRIGGER" },
   { kind: "table", object: "public.feature_flag_audiences", privilege: "SELECT WITH GRANT OPTION" },
   { kind: "table", object: "public.feature_flag_audiences", privilege: "INSERT WITH GRANT OPTION" },
   { kind: "table", object: "public.feature_flag_audiences", privilege: "UPDATE WITH GRANT OPTION" },

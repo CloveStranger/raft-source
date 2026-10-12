@@ -1,4 +1,4 @@
-import { forwardRef } from "react";
+import { forwardRef, useCallback } from "react";
 import { CheckCircle2 } from "lucide-react";
 import { useIntl } from "react-intl";
 import {
@@ -26,6 +26,10 @@ export interface NotificationCenterProps {
   flavor: "desktop" | "mobile";
 }
 
+function initialFocusForKeyboardOpen(openType: string) {
+  return openType === "keyboard";
+}
+
 const NotificationCenter = forwardRef<HTMLDivElement, NotificationCenterProps>(
   function NotificationCenter({ notifications, flavor }, ref) {
     const { formatMessage } = useIntl();
@@ -41,7 +45,7 @@ const NotificationCenter = forwardRef<HTMLDivElement, NotificationCenterProps>(
         side={flavor === "desktop" ? "right" : "bottom"}
         align="end"
         sideOffset={8}
-        initialFocus={(openType) => openType === "keyboard"}
+        initialFocus={initialFocusForKeyboardOpen}
         aria-label={formatMessage({ id: "ui.notificationCenter.ariaLabel" })}
       >
         <NotificationCenterHeader className="px-3">
@@ -97,11 +101,15 @@ function NotificationActions({
   dismiss: (key: string) => void;
 }) {
   const { formatMessage } = useIntl();
+  const { dismissalKey } = entry;
+  const handleDismiss = useCallback(() => {
+    if (dismissalKey) dismiss(dismissalKey);
+  }, [dismiss, dismissalKey]);
   const actions: Array<{ action: NotificationAction; variant: "primary" | "secondary" }> = [];
   if (entry.action) actions.push({ action: entry.action, variant: "primary" });
   if (entry.secondaryAction) actions.push({ action: entry.secondaryAction, variant: "secondary" });
 
-  if (actions.length === 0 && !entry.dismissalKey) return null;
+  if (actions.length === 0 && !dismissalKey) return null;
   return (
     <NotificationCenterItemActions className="mt-2 ml-0 flex-wrap justify-start">
       {actions.map(({ action, variant }) => (
@@ -115,11 +123,11 @@ function NotificationActions({
           {action.label}
         </NotificationCenterActionButton>
       ))}
-      {entry.dismissalKey ? (
+      {dismissalKey ? (
         <NotificationCenterActionButton
           type="button"
           variant="secondary"
-          onClick={() => entry.dismissalKey && dismiss(entry.dismissalKey)}
+          onClick={handleDismiss}
         >
           {formatMessage({ id: "common.announcement.dismiss" })}
         </NotificationCenterActionButton>

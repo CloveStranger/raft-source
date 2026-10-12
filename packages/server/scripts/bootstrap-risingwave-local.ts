@@ -197,7 +197,7 @@ async function assertRequiredRelations(risingwave: pg.Client): Promise<void> {
     ],
   ] as const) {
     const invalid = await risingwave.query<{ count: string }>(
-      `SELECT count(*)::text AS count FROM rw_inbox_serving_v6 WHERE ${predicate}`,
+      `SELECT count(*)::text AS count FROM rw_inbox_serving_v8 WHERE ${predicate}`,
     );
     if (Number(invalid.rows[0]?.count ?? -1) !== 0) {
       throw new Error(`serving invariant failed: ${message}`);

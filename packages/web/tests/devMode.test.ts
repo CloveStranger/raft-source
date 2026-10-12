@@ -105,7 +105,7 @@ test("slockdev wires Report Issue to the local trace worker", () => {
   assert.match(reportDialogSource, /\/feedback\/\$\{report\.id\}\/transcript/);
   assert.doesNotMatch(reportDialogSource, /sessionId/);
   const submittedReportType = /type SubmittedReport = \{[\s\S]*?\};/.exec(reportDialogSource)?.[0] ?? "";
-  const copyReportReference = /const handleCopyReportReference[\s\S]*?setReportRefCopied\(true\);\n  \};/.exec(reportDialogSource)?.[0] ?? "";
+  const copyReportReference = /const handleCopyReportReference[\s\S]*?setReportRefCopied\(true\);\n  \}/.exec(reportDialogSource)?.[0] ?? "";
   assert.match(submittedReportType, /reportId/);
   assert.match(submittedReportType, /issueDescription/);
   assert.match(submittedReportType, /ticketId/);

@@ -148,12 +148,16 @@ test("opening the reaction picker pins the message toolbar visible outside row h
   assert.ok(toolbar);
   assert.ok(reactionButton);
   assert.equal(toolbar.classList.contains("hidden"), false, "resting toolbar stays mounted for stable hover clicks");
-  assert.equal(toolbar.classList.contains("opacity-0"), true);
+  // raft-ui 0.5.35 (#386): the opacity is variable-driven (`--mi-toolbar-opacity`,
+  // set by the row on hover/focus-within/open popup) instead of the
+  // `opacity-0` / `group-hover:opacity-100` classes.
+  assert.equal(toolbar.classList.contains("opacity-(--mi-toolbar-opacity,0)"), true);
+  assert.equal(toolbar.classList.contains("!opacity-100"), false);
 
   fireEvent.click(reactionButton);
 
   assert.equal(reactionButton.getAttribute("aria-expanded"), "true");
-  assert.equal(toolbar.classList.contains("opacity-100") || toolbar.classList.contains("!opacity-100"), true);
+  assert.equal(toolbar.classList.contains("!opacity-100"), true, "the open picker pins the toolbar visible outside row hover");
   assert.equal(toolbar.classList.contains("flex"), true);
 });
 

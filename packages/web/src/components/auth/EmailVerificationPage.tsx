@@ -1,6 +1,6 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useEffectEvent, useCallback } from "react";
 import { Input, Button } from "raft-ui";
-import type { FormEvent } from "react";
+import type { ChangeEvent, FormEvent } from "react";
 import { useIntl } from "react-intl";
 import { useAuthStore } from "../../store/authStore";
 import { RefreshCw, LogOut, KeyRound } from "lucide-react";
@@ -10,6 +10,10 @@ import { AuthPageIntro } from "./AuthPageFrame";
 
 interface EmailVerificationPageProps {
   initialToken?: string | null;
+}
+
+function reloadPage() {
+  window.location.reload();
 }
 
 export default function EmailVerificationPage({ initialToken }: EmailVerificationPageProps) {
@@ -27,16 +31,7 @@ export default function EmailVerificationPage({ initialToken }: EmailVerificatio
   const [showManualInput, setShowManualInput] = useState(false);
   const [manualToken, setManualToken] = useState("");
 
-  // Auto-verify if token provided via URL
-  useEffect(() => {
-    // oxlint-disable-next-line react-doctor/no-event-handler -- YMNNE-family: pre-existing non-bug site grandfathered; rule now gates new code (see docs/frontend/render-cost-contract.md)
-    if (initialToken) {
-      handleVerify(initialToken);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [initialToken]);
-
-  const handleVerify = async (token: string) => {
+  const handleVerify = useCallback(async (token: string) => {
     setVerifying(true);
     setError("");
     try {
@@ -51,9 +46,23 @@ export default function EmailVerificationPage({ initialToken }: EmailVerificatio
     } finally {
       setVerifying(false);
     }
-  };
+  }, [verifyEmail, formatMessage]);
 
-  const handleResend = async () => {
+  // Auto-verify if token provided via URL. useEffectEvent: only a NEW
+  // initialToken may trigger verification — a locale switch (new formatMessage
+  // → new handleVerify identity) must not re-verify an already-consumed token
+  // (Josh, task #709).
+  const verifyOnLoad = useEffectEvent((token: string) => {
+    void handleVerify(token);
+  });
+  useEffect(() => {
+    // oxlint-disable-next-line react-doctor/no-event-handler -- YMNNE-family: pre-existing non-bug site grandfathered; rule now gates new code (see docs/frontend/render-cost-contract.md)
+    if (initialToken) {
+      verifyOnLoad(initialToken);
+    }
+  }, [initialToken]);
+
+  const handleResend = useCallback(async () => {
     setResending(true);
     setError("");
     setResendSuccess(false);
@@ -65,14 +74,22 @@ export default function EmailVerificationPage({ initialToken }: EmailVerificatio
     } finally {
       setResending(false);
     }
-  };
+  }, [resendVerification, formatMessage]);
 
-  const handleManualSubmit = (e: FormEvent) => {
+  const handleManualSubmit = useCallback((e: FormEvent) => {
     e.preventDefault();
     if (manualToken.trim()) {
-      handleVerify(manualToken.trim());
+      void handleVerify(manualToken.trim());
     }
-  };
+  }, [manualToken, handleVerify]);
+
+  const handleManualTokenChange = useCallback((e: ChangeEvent<HTMLInputElement>) => {
+    setManualToken(e.target.value);
+  }, []);
+
+  const handleLogout = useCallback(() => {
+    void logout();
+  }, [logout]);
 
   if (verified) {
     return (
@@ -83,7 +100,7 @@ export default function EmailVerificationPage({ initialToken }: EmailVerificatio
             description={formatMessage({ id: "pages.emailVerification.verifiedDescription" })}
           />
           <Button
-            onClick={() => window.location.reload()}
+            onClick={reloadPage}
             size="lg"
             variant="accent"
             className="w-full"
@@ -157,7 +174,7 @@ export default function EmailVerificationPage({ initialToken }: EmailVerificatio
                 type="text"
                 className="flex-1"
                 value={manualToken}
-                onChange={(e) => setManualToken(e.target.value)}
+                onChange={handleManualTokenChange}
                 placeholder={formatMessage({ id: "pages.emailVerification.tokenPlaceholder" })}
               />
               <Button size="sm"
@@ -174,7 +191,7 @@ export default function EmailVerificationPage({ initialToken }: EmailVerificatio
             variant="outline"
             size="lg"
             className="w-full"
-            onClick={() => logout()}
+            onClick={handleLogout}
           >
             <LogOut size={14} />
             {formatMessage({ id: "pages.emailVerification.logOut" })}

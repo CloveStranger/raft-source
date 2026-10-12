@@ -36,6 +36,7 @@ import { mintAgentCredential } from "../services/agentCredentialService";
 import { AgentOrchestrator } from "../services/agentOrchestrator";
 import { recordInboxNotificationFacts } from "../services/inboxNotificationService";
 import { referenceAgentInboxChain } from "../test/agentInboxChainReference";
+import { withChannelDelivery } from "../test/orchestratorStub";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 
@@ -90,7 +91,7 @@ async function humanMessage(f: Fixture, content: string, senderId = f.owner.id) 
 
 /** The send pipeline (persist, sender read position, delivery), as the send routes run it. */
 async function send(app: { io: unknown }, senderType: "user" | "agent", senderId: string, f: Fixture, content: string) {
-  const orchestrator = { deliverMessage: async () => ({ status: "queued", reason: "replayable_inbox" }) } as unknown as AgentOrchestrator;
+  const orchestrator = withChannelDelivery({ deliverMessage: async () => ({ status: "queued", reason: "replayable_inbox" }) }) as unknown as AgentOrchestrator;
   const sent = await broadcastAndDeliver(app.io as Parameters<typeof broadcastAndDeliver>[0], orchestrator, {
     channelId: f.channelId,
     senderType,

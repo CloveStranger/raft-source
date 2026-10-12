@@ -153,6 +153,12 @@
       "dependsOn": "/providerId"
     }
   },
+  "writeOnlyKeepRequiresUnchanged": {
+    "/apiKey": [
+      "/providerId",
+      "/baseUrl"
+    ]
+  },
   "values": {
     "providerId": "openai-compatible",
     "baseUrl": "https://gateway.example.test/v1",

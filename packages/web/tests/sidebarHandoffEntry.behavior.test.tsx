@@ -84,7 +84,7 @@ function renderSidebar() {
   render(
     <MemoryRouter initialEntries={["/s/server/members"]}>
       <TestIntlProvider>
-        <Sidebar workspaceRailMode="members" />
+        <Sidebar />
       </TestIntlProvider>
     </MemoryRouter>,
   );

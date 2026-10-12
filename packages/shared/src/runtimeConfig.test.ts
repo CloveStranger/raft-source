@@ -968,6 +968,12 @@ test("write validation gates reasoning effort per preset model — max/ultra can
   assert.equal(parsePreset("codex", "gpt-6-astra", "ultra"), "ultra");
   assert.equal(parsePreset("codex", "gpt-5.6-sol", "ultra"), "ultra");
   assert.equal(parsePreset("codex", "gpt-5.6-luna", "ultra"), null);
+  // GPT-6.1 Sol and GPT-6 Sol declare max/ultra; GPT-6 Luna stops at max.
+  assert.equal(parsePreset("codex", "gpt-6.1-sol", "ultra"), "ultra");
+  assert.equal(parsePreset("codex", "gpt-6.1-sol", "max"), "max");
+  assert.equal(parsePreset("codex", "gpt-6-sol", "ultra"), "ultra");
+  assert.equal(parsePreset("codex", "gpt-6-luna", "max"), "max");
+  assert.equal(parsePreset("codex", "gpt-6-luna", "ultra"), null);
 });
 
 test("Kimi keeps live-declared open effort values without inheriting another model's defaults", () => {

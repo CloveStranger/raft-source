@@ -34,6 +34,9 @@ export type FormFieldProps = {
   error?: ReactNode;
   /** Small control or tooltip rendered beside the label. */
   labelAccessory?: ReactNode;
+  /** Secondary action pushed to the far end of the label row, e.g. the
+   *  sign-in form's "Forgot password?" link. */
+  labelAction?: ReactNode;
   /** `<label htmlFor>` — point at the inner control's `id`. */
   htmlFor?: LabelHTMLAttributes<HTMLLabelElement>["htmlFor"];
   /** Label case style. `"uppercase"` (default) matches the dialog/settings
@@ -55,6 +58,7 @@ export default function FormField({
   hint,
   error,
   labelAccessory,
+  labelAction,
   htmlFor,
   labelStyle = "uppercase",
   size = "default",
@@ -69,9 +73,10 @@ export default function FormField({
   const labelTextCls = `${base} ${labelStyle === "uppercase" ? LABEL_UPPERCASE : ""}`.trim();
   const labelCls = `mb-1 block ${labelTextCls}`;
   const wrapperCls = className ? className : undefined;
+  const hasLabelRow = Boolean(labelAccessory || labelAction);
   const labelElement = (
     <FieldLabel
-      className={labelAccessory ? labelTextCls : labelCls}
+      className={hasLabelRow ? labelTextCls : labelCls}
       htmlFor={htmlFor}
     >
       {label}
@@ -83,10 +88,11 @@ export default function FormField({
   );
   return (
     <Field className={wrapperCls} invalid={Boolean(error)}>
-      {labelAccessory ? (
+      {hasLabelRow ? (
         <div className="mb-1 flex items-center gap-1">
           {labelElement}
           {labelAccessory}
+          {labelAction ? <span className="ml-auto flex">{labelAction}</span> : null}
         </div>
       ) : labelElement}
       {children}

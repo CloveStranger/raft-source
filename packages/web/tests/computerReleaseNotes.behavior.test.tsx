@@ -95,7 +95,7 @@ function renderPanel({
   });
   return renderWithIntl(
     <MemoryRouter initialEntries={["/s/acme/settings/computers/computer-1"]}>
-      <MachineDetailPanel machine={machine} workspaceEmbedded />
+      <MachineDetailPanel machine={machine} hideHeader />
     </MemoryRouter>,
     { locale },
   );

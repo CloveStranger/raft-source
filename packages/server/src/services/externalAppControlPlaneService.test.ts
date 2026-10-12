@@ -151,17 +151,17 @@ async function completeInstall(
   teamId = "T_TEST_WORKSPACE",
   providerUserId = "U_TEST_OWNER",
   encryptedMaterial = "sealed:test-only-ciphertext",
+  installedScopes = ["chat:write", "channels:history"],
 ) {
   return completeExternalOAuthAttempt({
     attemptId,
     providerAppId: seeded.registration.providerAppId,
     providerTeamId: teamId,
     providerUserId,
-    providerInstallerIsWorkspaceAdmin: true,
     botUserId: "U_TEST_BOT",
     providerBotId: "B_TEST_BOT",
     workspaceName: "Test Workspace",
-    installedScopes: ["chat:write", "channels:history"],
+    installedScopes,
     sealedCredential: {
       encryptedMaterial,
       envelopeKeyId: "test-envelope-key",
@@ -277,7 +277,6 @@ test("OAuth completion atomically installs only exact scopes and sealed credenti
       providerAppId: seeded.registration.providerAppId,
       providerTeamId: "T_TEST_WORKSPACE",
       providerUserId: "U_TEST_OWNER",
-      providerInstallerIsWorkspaceAdmin: true,
       botUserId: "U_TEST_BOT",
       installedScopes: ["chat:write"],
       sealedCredential: {
@@ -302,30 +301,7 @@ test("OAuth completion atomically installs only exact scopes and sealed credenti
       attemptId: claimed.attemptId,
       providerAppId: seeded.registration.providerAppId,
       providerTeamId: "T_TEST_WORKSPACE",
-      providerUserId: "U_TEST_OWNER",
-      providerInstallerIsWorkspaceAdmin: false,
-      botUserId: "U_TEST_BOT",
-      installedScopes: ["chat:write", "channels:history"],
-      sealedCredential: {
-        encryptedMaterial: "sealed:test-only-ciphertext",
-        envelopeKeyId: "test-envelope-key",
-        aadVersion: 1,
-      },
-    }),
-    (error: unknown) =>
-      error instanceof ExternalAppControlPlaneError
-      && error.code === "external_app_not_authorized",
-  );
-  assert.equal((await getDb().select().from(externalAppInstalls)).length, 0);
-  assert.equal((await getDb().select().from(externalAppCredentials)).length, 0);
-
-  await assert.rejects(
-    completeExternalOAuthAttempt({
-      attemptId: claimed.attemptId,
-      providerAppId: seeded.registration.providerAppId,
-      providerTeamId: "T_TEST_WORKSPACE",
       providerUserId: "U_TEST_BOT",
-      providerInstallerIsWorkspaceAdmin: true,
       botUserId: "U_TEST_BOT",
       installedScopes: ["chat:write", "channels:history"],
       sealedCredential: {
@@ -1188,6 +1164,138 @@ test("private binding requires the exact fresh matched audience snapshot", async
     await getDb().select().from(serverMembers),
     memberRowsBefore,
     "audience reconciliation must never add or remove Raft members",
+  );
+});
+
+test("second server shares install when install scopes cover requested; rejects when install is missing a required scope", async () => {
+  const seeded = await seedControlPlane();
+  const first = await beginAndClaim(seeded);
+  // First install carries extras beyond the two test requested scopes.
+  await completeInstall(
+    seeded,
+    first.claimed.attemptId,
+    "T_TEST_WORKSPACE",
+    "U_TEST_OWNER",
+    "sealed:test-only-ciphertext",
+    ["chat:write", "channels:history", "usergroups:read", "usergroups:write"],
+  );
+
+  const [secondOwner] = await getDb().insert(users).values({
+    email: `scope-second-${randomUUID()}@raft.test`,
+    name: `scope-second-${randomUUID().slice(0, 8)}`,
+    displayName: "Second Owner",
+    passwordHash: "hash",
+    emailVerified: true,
+  }).returning();
+  const secondServer = await createServer(
+    "Scope Second Server",
+    `scope-second-${randomUUID()}`,
+    secondOwner.id,
+  );
+  await getDb().insert(oauthClientInstalls).values({
+    serverId: secondServer.id,
+    clientId: seeded.client.id,
+    installedByUserId: secondOwner.id,
+  });
+  const [secondGrant] = await getDb().insert(externalAppServerGrants).values({
+    serverId: secondServer.id,
+    registrationId: seeded.registration.id,
+    grantEpoch: 1,
+    grantedManifestVersion: 1,
+    grantedManifestHash: "manifest-v1",
+    grantedCapabilities: ["external_projection", "channel_events"],
+    grantedByType: "human",
+    grantedById: secondOwner.id,
+  }).returning();
+  const secondAttempt = await beginExternalOAuthAttempt({
+    serverId: secondServer.id,
+    registrationId: seeded.registration.id,
+    serverGrantId: secondGrant.id,
+    grantEpoch: 1,
+    requestingUserId: secondOwner.id,
+    redirectUri: "https://raft.test/api/external-apps/slack/oauth/callback",
+    requestedScopes: ["channels:history", "chat:write"],
+    grantIntent: "second-server-install",
+  });
+  const secondClaim = await claimExternalOAuthAttempt({
+    state: secondAttempt.state,
+    expectedEnvironment: "test",
+    expectedRedirectUri: "https://raft.test/api/external-apps/slack/oauth/callback",
+  });
+  // Superset install + matching contract → second server shares (no conflict).
+  const second = await completeInstall(
+    { ...seeded, owner: secondOwner, server: secondServer, grant: secondGrant },
+    secondClaim.attemptId,
+    "T_TEST_WORKSPACE",
+    "U_SECOND_OWNER",
+    "sealed:second-must-not-overwrite",
+    ["chat:write", "channels:history", "usergroups:read", "usergroups:write"],
+  );
+  const installs = await getDb().select().from(externalAppInstalls);
+  assert.equal(installs.length, 1, "second server must share the existing install");
+  assert.equal(second.installId, installs[0]!.id);
+
+  // Now simulate the reverse: install is missing a required scope.
+  // Remove chat:write from the install's recorded scopes.
+  await getDb().update(externalAppInstalls).set({
+    installedScopes: ["channels:history"],
+  }).where(eq(externalAppInstalls.id, installs[0]!.id));
+
+  const [thirdOwner] = await getDb().insert(users).values({
+    email: `scope-third-${randomUUID()}@raft.test`,
+    name: `scope-third-${randomUUID().slice(0, 8)}`,
+    displayName: "Third Owner",
+    passwordHash: "hash",
+    emailVerified: true,
+  }).returning();
+  const thirdServer = await createServer(
+    "Scope Third Server",
+    `scope-third-${randomUUID()}`,
+    thirdOwner.id,
+  );
+  await getDb().insert(oauthClientInstalls).values({
+    serverId: thirdServer.id,
+    clientId: seeded.client.id,
+    installedByUserId: thirdOwner.id,
+  });
+  const [thirdGrant] = await getDb().insert(externalAppServerGrants).values({
+    serverId: thirdServer.id,
+    registrationId: seeded.registration.id,
+    grantEpoch: 1,
+    grantedManifestVersion: 1,
+    grantedManifestHash: "manifest-v1",
+    grantedCapabilities: ["external_projection", "channel_events"],
+    grantedByType: "human",
+    grantedById: thirdOwner.id,
+  }).returning();
+  const thirdAttempt = await beginExternalOAuthAttempt({
+    serverId: thirdServer.id,
+    registrationId: seeded.registration.id,
+    serverGrantId: thirdGrant.id,
+    grantEpoch: 1,
+    requestingUserId: thirdOwner.id,
+    redirectUri: "https://raft.test/api/external-apps/slack/oauth/callback",
+    requestedScopes: ["channels:history", "chat:write"],
+    grantIntent: "third-server-install",
+  });
+  const thirdClaim = await claimExternalOAuthAttempt({
+    state: thirdAttempt.state,
+    expectedEnvironment: "test",
+    expectedRedirectUri: "https://raft.test/api/external-apps/slack/oauth/callback",
+  });
+  // Install missing chat:write but attempt requires it → must not share.
+  await assert.rejects(
+    completeInstall(
+      { ...seeded, owner: thirdOwner, server: thirdServer, grant: thirdGrant },
+      thirdClaim.attemptId,
+      "T_TEST_WORKSPACE",
+      "U_THIRD_OWNER",
+      "sealed:third-must-not-overwrite",
+      ["chat:write", "channels:history"],
+    ),
+    (error: unknown) =>
+      error instanceof ExternalAppControlPlaneError
+      && error.code === "external_app_install_conflict",
   );
 });
 

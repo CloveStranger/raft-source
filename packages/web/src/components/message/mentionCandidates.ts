@@ -7,9 +7,18 @@ export interface MentionCandidate {
   serverId?: string | null;
   serverName?: string | null;
   serverSlug?: string | null;
+  /** Joint rosters (RFC 075 phase 1): every server label of a person who
+   *  participates through more than the viewer's server, viewed server
+   *  first. Takes precedence over serverName/serverSlug when present. */
+  serverLabels?: string[] | null;
   name: string;
   displayName: string | null;
-  type: "agent" | "user" | "computer" | "app";
+  /**
+   * `external` = a linked provider member (Slack participant) — id is the
+   * projection id, name is the outbound handle. Never wakes a Raft actor;
+   * it mints an `external_mention_facts` row for the Slack renderer.
+   */
+  type: "agent" | "user" | "computer" | "app" | "external";
   avatarUrl: string | null;
   gravatarHash?: string | null;
   email?: string | null;
@@ -34,6 +43,8 @@ interface BuildMentionCandidateGroupsFromRankedOptions {
 interface MentionCandidateGroups {
   inChannel: MentionCandidate[];
   notInChannel: MentionCandidate[];
+  /** Linked provider members (e.g. Slack) — always channel-scoped. */
+  externals: MentionCandidate[];
   computers: MentionCandidate[];
   apps: MentionCandidate[];
   flat: MentionCandidate[];
@@ -54,6 +65,7 @@ export function getMentionCandidateDescription(candidate: MentionCandidate): str
 }
 
 export function getMentionCandidateServerLabel(candidate: MentionCandidate): string | null {
+  if (candidate.serverLabels?.length) return candidate.serverLabels.join(", ");
   return candidate.serverName || candidate.serverSlug || null;
 }
 
@@ -125,13 +137,16 @@ export function buildMentionCandidateGroupsFromRankedCandidates({
   prioritizeThreadParticipants,
 }: BuildMentionCandidateGroupsFromRankedOptions): MentionCandidateGroups {
   const people = rankedCandidates.filter((candidate) => candidate.type === "agent" || candidate.type === "user");
+  const externals = rankedCandidates.filter((candidate) => candidate.type === "external");
   const computers = rankedCandidates.filter((candidate) => candidate.type === "computer");
   const apps = rankedCandidates.filter((candidate) => candidate.type === "app");
   const inChannel = people.filter((candidate) => channelMemberIds.has(candidate.id));
   const notInChannel = people.filter((candidate) => !channelMemberIds.has(candidate.id));
 
   if (prioritizeThreadParticipants !== true) {
-    return { inChannel, notInChannel, computers, apps, flat: [...inChannel, ...notInChannel, ...computers, ...apps] };
+    // Externals sit inside the in-channel group in the UI (Slack badge marks
+    // them), so they land after inChannel in flat index order.
+    return { inChannel, notInChannel, externals, computers, apps, flat: [...inChannel, ...externals, ...notInChannel, ...computers, ...apps] };
   }
 
   // Stryker disable next-line ArrayDeclaration: empty original-order tuples are equivalent under stable sort for this tie-breaker; query order preservation is covered by non-thread and recency tests.
@@ -143,8 +158,9 @@ export function buildMentionCandidateGroupsFromRankedCandidates({
   return {
     inChannel: sortedInChannel,
     notInChannel: sortedNotInChannel,
+    externals,
     computers,
     apps,
-    flat: [...sortedInChannel, ...sortedNotInChannel, ...computers, ...apps],
+    flat: [...sortedInChannel, ...externals, ...sortedNotInChannel, ...computers, ...apps],
   };
 }

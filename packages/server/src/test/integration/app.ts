@@ -17,6 +17,8 @@ import type { SlackBridgeRouteDependencies } from "../../routes/slackBridge";
 
 type StubAgentOrchestrator = {
   deliverMessage: () => Promise<void>;
+  deliverMessagesOnChannel: (channelId: string, deliveries: ReadonlyArray<{ agentId: string; message: unknown; options?: unknown }>) => Array<Promise<unknown>>;
+  loadDeliveryGates: () => Promise<null>;
   receiveMessages: () => Promise<never[]>;
   peekPendingMessages: () => never[];
   acknowledgeDeliveredMessages: () => { removedCount: number };
@@ -32,6 +34,7 @@ type StubAgentOrchestrator = {
     serverId?: string,
   ) => Promise<{ acceptedCount: number; rejectedCount: number; droppedCount: number }>;
   getActivity: (agentId: string) => Promise<{ activity: string; activityDetail: string }>;
+  getActivities: (rows: ReadonlyArray<{ id: string }>) => Promise<Array<{ activity: string; activityDetail: string }>>;
   listRecentActivityLog: (agentId: string, limit?: number) => Promise<never[]>;
   getLiveActivityObservedAtMs: (agentId: string) => Promise<number | null>;
   getMachineStatus: (machineId: string) => Promise<"online" | "offline">;
@@ -68,10 +71,15 @@ function ensureTestEnv() {
 }
 
 function createAgentOrchestratorStub(): StubAgentOrchestrator {
-  return {
+  const stub: StubAgentOrchestrator = {
     detectMachineRuntimeModels: async () => ({ kind: "missing_config", recovery: "kimi_login" }),
     pushAppConfigUpsert: async () => false,
     deliverMessage: async () => { },
+    // Each item through the stub's deliverMessage (looked up at call time, so
+    // a test replacing it still observes channel-batch deliveries).
+    deliverMessagesOnChannel: (_channelId, deliveries) => deliveries.map(({ agentId, message, options }) =>
+      (stub.deliverMessage as (...args: unknown[]) => Promise<unknown>)(agentId, message, options)),
+    loadDeliveryGates: async () => null,
     receiveMessages: async () => [],
     peekPendingMessages: () => [],
     acknowledgeDeliveredMessages: () => ({ removedCount: 0 }),
@@ -100,6 +108,9 @@ function createAgentOrchestratorStub(): StubAgentOrchestrator {
         : 0,
     }),
     getActivity: async () => ({ activity: "offline", activityDetail: "" }),
+    // Per row through getActivity, so a test that replaces getActivity on the
+    // stub still drives list endpoints.
+    getActivities: async (rows) => Promise.all(rows.map((row) => stub.getActivity(row.id))),
     listRecentActivityLog: async () => [],
     getLiveActivityObservedAtMs: async () => null,
     getMachineStatus: async () => "offline",
@@ -117,6 +128,7 @@ function createAgentOrchestratorStub(): StubAgentOrchestrator {
     getAgentSessionTranscript: async () => ({ transcript: "stub transcript", reachable: true }),
     collectFeedbackTranscript: async () => ({ reachable: true, traceBundleId: "stub-bundle-id" }),
   };
+  return stub;
 }
 
 export type TestAppOptions = {

@@ -29,6 +29,7 @@ import { mintAgentCredential } from "../services/agentCredentialService";
 import { AgentOrchestrator } from "../services/agentOrchestrator";
 import { recordInboxNotificationFacts } from "../services/inboxNotificationService";
 import { referenceAgentInboxChain } from "../test/agentInboxChainReference";
+import { withChannelDelivery } from "../test/orchestratorStub";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 
@@ -552,7 +553,7 @@ async function seedJointChannelForAgent(f: Awaited<ReturnType<typeof seedExterna
 
 /** The send pipeline as the agent send route runs it, then the sender read position settles. */
 async function agentSend(app: { io: unknown }, f: Awaited<ReturnType<typeof seedExternalFixture>>, channelId: string, content: string) {
-  const orchestrator = { deliverMessage: async () => ({ status: "queued", reason: "replayable_inbox" }) } as unknown as AgentOrchestrator;
+  const orchestrator = withChannelDelivery({ deliverMessage: async () => ({ status: "queued", reason: "replayable_inbox" }) }) as unknown as AgentOrchestrator;
   const own = await broadcastAndDeliver(app.io as Parameters<typeof broadcastAndDeliver>[0], orchestrator, {
     channelId,
     senderType: "agent",

@@ -267,6 +267,7 @@ export async function createAppOutboundPermissionRevision(input: {
 export async function approvePendingAppOutboundPermissionRevision(input: {
   clientId: string;
   reviewerUserId: string;
+  expectedRevisionId?: string;
 }, dbOrTx: ReturnType<typeof getDb> = getDb()) {
   return dbOrTx.transaction(async (tx) => {
     const [client] = await tx.select({
@@ -282,6 +283,16 @@ export async function approvePendingAppOutboundPermissionRevision(input: {
       .limit(1)
       .for("update");
     if (!client?.pendingRevisionId) return null;
+    // The approval binds the revision the reviewer actually displayed. When
+    // the caller passes expectedRevisionId (the value shipped in the
+    // marketplace listing) and it no longer matches the client's current
+    // pending pointer — e.g. the publisher replaced the request after the
+    // reviewer opened the detail — refuse rather than approve authority the
+    // reviewer never saw. Callers that omit the field keep the legacy
+    // approve-latest behavior.
+    if (input.expectedRevisionId && input.expectedRevisionId !== client.pendingRevisionId) {
+      return "stale";
+    }
     const now = currentDate();
 
     const [revision] = await tx.update(oauthAppPermissionRevisions).set({

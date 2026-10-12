@@ -24,11 +24,12 @@ import {
 import { reconcileSlackChannelLifecycle } from "./slackBindingLifecycleService";
 import { evaluateFeatureFlag } from "./featureFlagService";
 import { slackBridgeDatabaseRuntimeRevision } from "./slackBridgeDatabaseRuntimeAuthority";
+import { extractSlackUsergroupMentions } from "./slackMentionTokens";
 
 const SLACK_SIGNATURE_MAX_SKEW_SECONDS = 5 * 60;
 const EXTERNAL_EVENT_PAYLOAD_TTL_MS = 24 * 60 * 60_000;
 const PAYLOAD_AAD_PURPOSE = "external-inbound-normalized-event" as const;
-const NORMALIZED_PAYLOAD_SCHEMA = "external-inbound-normalized-event.v2" as const;
+const NORMALIZED_PAYLOAD_SCHEMA = "external-inbound-normalized-event.v3" as const;
 const NORMALIZED_REACTION_PAYLOAD_SCHEMA = "external-inbound-normalized-reaction.v1" as const;
 const SLACK_ATTACHMENT_ONLY_MESSAGE = "[Attachment]";
 const MAX_SLACK_FILES_PER_MESSAGE = 10;
@@ -1077,6 +1078,9 @@ export async function verifyAndAdmitSlackIngress(input: {
     throw new ExternalAppIngressError("Slack message event is invalid", "external_ingress_payload_invalid");
   }
   const content = rawContent ?? SLACK_ATTACHMENT_ONLY_MESSAGE;
+  // Never rejects: duplicate ids keep the first label and mentions beyond the
+  // cap are ignored — rejecting here would drop the whole user message.
+  const providerAgentMentions = extractSlackUsergroupMentions(content);
   if (!input.runtimeResolver) {
     throw new ExternalAppIngressError("Slack runtime authority is unavailable", "external_ingress_authority_unavailable");
   }
@@ -1169,6 +1173,7 @@ export async function verifyAndAdmitSlackIngress(input: {
     providerMessageId,
     providerThreadId,
     providerFileIds,
+    providerAgentMentions,
     content,
     createdAt: new Date(Number(providerMessageId.split(".")[0]) * 1_000).toISOString(),
   });

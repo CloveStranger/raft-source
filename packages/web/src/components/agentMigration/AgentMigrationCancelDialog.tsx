@@ -1,13 +1,22 @@
+import { useCallback } from "react";
 import { useIntl } from "react-intl";
-import { X } from "lucide-react";
 import api from "../../api/client";
 import ConfirmDialog from "../ConfirmDialog";
-import Banner from "../ui/Banner";
 import type { Machine } from "../../store/machineStore";
 import { migrationSupportRef, migrationTargetLabel } from "./presentation";
-import type { AgentMigrationNotice } from "./realtime";
+import type { AgentMigrationNotice, AgentMigrationStatusResponse } from "./realtime";
 import { canCancelMigration } from "./state";
 import { MigrationReference } from "./MigrationReference";
+
+// A running migration bumps its revision at every step, so the revision the
+// dialog opened with is often already stale when the user confirms. A stale
+// rejection re-reads the status and retries for the same migration while it
+// is still cancellable; anything else is surfaced as before.
+const MAX_CANCEL_ATTEMPTS = 3;
+
+function migrationErrorCode(error: unknown): string | undefined {
+  return (error as { response?: { data?: { code?: string } } }).response?.data?.code;
+}
 
 export function AgentMigrationCancelDialog({
   agentId,
@@ -27,36 +36,45 @@ export function AgentMigrationCancelDialog({
   const target = migrationTargetLabel(formatMessage, machines, notice.targetMachineId);
   const ref = migrationSupportRef(notice);
 
-  const submit = async () => {
+  const submit = useCallback(async () => {
     if (!canCancelMigration(notice)) return;
-    try {
-      await api.post(`/agents/${agentId}/migration/cancel`, {
-        migrationRef: ref,
-        expectedRevision: notice.revision,
-      });
-      await onRefresh();
-    } catch (nextError: unknown) {
-      const value = nextError as {
-        response?: { data?: { code?: string } };
-      };
-      const code = value.response?.data?.code;
-      await onRefresh();
-      const message = code === "MIGRATION_REVISION_STALE" || code === "MIGRATION_CONCURRENT_UPDATE"
-        ? formatMessage({ id: "agent.migration.cancelDialogStaleError" })
-        : formatMessage({ id: "agent.migration.cancelDialogGenericError" });
-      const technicalCode = code && /^[A-Za-z][A-Za-z0-9_-]{1,127}$/.test(code) ? code : null;
-      throw new Error(technicalCode ? `${message} (${technicalCode})` : message);
+    let expectedRevision = notice.revision;
+    for (let attempt = 1; ; attempt += 1) {
+      try {
+        await api.post(`/agents/${agentId}/migration/cancel`, {
+          migrationRef: ref,
+          expectedRevision,
+        });
+        await onRefresh();
+        return;
+      } catch (nextError: unknown) {
+        const code = migrationErrorCode(nextError);
+        if (code === "MIGRATION_REVISION_STALE" && attempt < MAX_CANCEL_ATTEMPTS) {
+          const latest = await api.get<AgentMigrationStatusResponse>(`/agents/${agentId}/migration`)
+            .then(({ data }) => data.migration)
+            .catch(() => null);
+          if (latest && latest.migrationRef === ref && canCancelMigration(latest)) {
+            expectedRevision = latest.revision;
+            continue;
+          }
+        }
+        await onRefresh();
+        const message = code === "MIGRATION_REVISION_STALE" || code === "MIGRATION_CONCURRENT_UPDATE"
+          ? formatMessage({ id: "agent.migration.cancelDialogStaleError" })
+          : formatMessage({ id: "agent.migration.cancelDialogGenericError" });
+        const technicalCode = code && /^[A-Za-z][A-Za-z0-9_-]{1,127}$/.test(code) ? code : null;
+        throw new Error(technicalCode ? `${message} (${technicalCode})` : message);
+      }
     }
-  };
+  }, [agentId, formatMessage, notice, onRefresh, ref]);
 
   return (
     <ConfirmDialog
       title={formatMessage({ id: "agent.migration.cancelDialogTitle" })}
-      confirmLabel={formatMessage({ id: "agent.migration.cancelAction" })}
+      confirmLabel={formatMessage({ id: "agent.migration.cancelDialogConfirm" })}
       loadingLabel={formatMessage({ id: "agent.migration.cancelDialogRequesting" })}
       cancelLabel={formatMessage({ id: "agent.migration.cancelDialogKeepAction" })}
-      confirmIcon={<X size={14} aria-hidden="true" />}
-      confirmColor="bg-brutal-orange"
+      confirmVariant="warning"
       confirmDisabled={!canCancelMigration(notice)}
       maxWidthClass="max-w-md"
       plainMessage
@@ -64,16 +82,13 @@ export function AgentMigrationCancelDialog({
       onClose={onClose}
       onConfirm={submit}
       message={
-        <div className="space-y-3">
-          <Banner
-            intent="warning"
-            density="sm"
-            title={formatMessage({ id: "agent.migration.cancelDialogSafetyTitle" })}
-          >
-            {formatMessage({ id: "agent.migration.cancelDialogSafeMessage" }, { source, target })}
-          </Banner>
+        <div className="space-y-3 text-sm leading-relaxed text-foreground-strong">
+          <div>
+            <p className="font-bold">{formatMessage({ id: "agent.migration.cancelDialogSafetyTitle" })}</p>
+            <p>{formatMessage({ id: "agent.migration.cancelDialogSafeMessage" }, { source, target })}</p>
+          </div>
           <MigrationReference notice={notice} />
-          <p className="text-xs text-foreground-muted theme-brutal:text-black/60">
+          <p className="text-foreground-muted">
             {formatMessage({ id: "agent.migration.cancelDialogExplanation" })}
           </p>
         </div>

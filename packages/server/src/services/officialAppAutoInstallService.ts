@@ -45,20 +45,38 @@ export async function projectOfficialAppDiscovery(input: {
   official: boolean;
   purpose: string;
 }> {
+  return (await projectOfficialAppDiscoveryMany([input], dbOrTx)).get(input.clientId)!;
+}
+
+/**
+ * projectOfficialAppDiscovery for a list of clients (keyed by clientId) in at
+ * most one query: a marketplace list used to read the registry once per app.
+ */
+export async function projectOfficialAppDiscoveryMany(inputs: ReadonlyArray<{
+  clientId: string;
+  sourceServerId: string;
+  clientKey: string;
+}>, dbOrTx: DbExecutor = getDb()): Promise<Map<string, { official: boolean; purpose: string }>> {
+  const result = new Map(inputs.map((input) => [input.clientId, { official: false, purpose: "" }]));
   const trustRoot = parseProtectedOfficialServerId();
-  if (!trustRoot || input.sourceServerId !== trustRoot) return { official: false, purpose: "" };
-  const [entry] = await dbOrTx.select({ purpose: officialAppRegistry.purpose })
+  const candidates = trustRoot ? inputs.filter((input) => input.sourceServerId === trustRoot) : [];
+  if (!trustRoot || candidates.length === 0) return result;
+  const entries = await dbOrTx.select({
+    clientId: officialAppRegistry.oauthClientId,
+    clientKey: officialAppRegistry.clientKey,
+    purpose: officialAppRegistry.purpose,
+  })
     .from(officialAppRegistry)
     .where(and(
-      eq(officialAppRegistry.oauthClientId, input.clientId),
-      eq(officialAppRegistry.clientKey, input.clientKey),
+      inArray(officialAppRegistry.oauthClientId, candidates.map((input) => input.clientId)),
       eq(officialAppRegistry.publisherServerId, trustRoot),
       eq(officialAppRegistry.status, "approved"),
-    )).limit(1);
-  return {
-    official: !!entry,
-    purpose: entry?.purpose ?? "",
-  };
+    ));
+  for (const input of candidates) {
+    const entry = entries.find((row) => row.clientId === input.clientId && row.clientKey === input.clientKey);
+    if (entry) result.set(input.clientId, { official: true, purpose: entry.purpose ?? "" });
+  }
+  return result;
 }
 
 /**

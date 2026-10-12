@@ -259,6 +259,14 @@ export interface SpawnContext {
   agentAppInbox?: AgentAppInboxStore;
   cliTransportTraceDir?: string | null;
   tracer?: Tracer;
+  /**
+   * task #365: throws when the launch was claimed against a server
+   * connection that is no longer the current one. Every driver calls it after
+   * its last await and immediately before the runtime comes into existence
+   * (a child process: right before `spawn()`; a native session: before its
+   * session factory), so no process is created for a stale launch.
+   */
+  assertLaunchCurrent?: () => void;
 }
 
 // ── Spawn Result ──
@@ -268,10 +276,26 @@ export interface SpawnResult {
   process: ChildProcess;
 }
 
+/**
+ * Structured cause for an unavailable runtime probe. Log severity is chosen from
+ * this, never from the diagnostic text: only "not_installed" (the command was
+ * not found on PATH / in its known install locations) is an expected state for
+ * an optional runtime; every other reason means something is installed but
+ * broken and stays a warning.
+ */
+export type RuntimeProbeUnavailableReason =
+  | "not_installed"
+  | "probe_failed"
+  | "probe_timeout"
+  | "permission_denied"
+  | "unsupported_version";
+
 export interface RuntimeProbeResult {
   available: boolean;
   version?: string;
   diagnostic?: string;
+  /** Set only when `available` is false. Absent means unknown (treated as a failure). */
+  unavailableReason?: RuntimeProbeUnavailableReason;
 }
 
 export interface RuntimeLaunchVersionPolicy {
@@ -501,6 +525,16 @@ export interface RuntimeDriver {
   readonly supportsNativeStandingPrompt?: boolean;
 
   /**
+   * task #13: the runtime rebuilds the standing prompt from this launch on
+   * every start, so a resumed session already runs on the current prompt
+   * (Pi / Built-in: systemPromptOverride; OpenCode: per-process agent config;
+   * Kimi SDK: resumeSession renders the given roleAdditional).
+   * Absent/false: a resumed session keeps its original prompt, and the daemon
+   * re-delivers a changed one in the first input (standingPromptRefresh.ts).
+   */
+  readonly standingPromptRefreshesOnResume?: boolean;
+
+  /**
    * Driver-owned live busy-delivery gate. APM lifecycle state must never claim
    * a direct steer is available when the runtime driver has already closed the
    * native turn. Drivers without a narrower native gate may omit this method.
@@ -536,6 +570,13 @@ export interface RuntimeDriver {
    * session rollovers/forks are preserved as telemetry sequence boundaries.
    */
   readonly currentSessionId?: string | null;
+
+  /**
+   * Whether the runtime itself reports a turn as accepted or running. Drivers
+   * that track the native turn lifecycle (Codex app-server) expose it so the
+   * daemon's busy state can be checked against evidence; omit when unknown.
+   */
+  readonly hasLiveTurn?: boolean;
 
   /**
    * Runtime-native state root observed from launch env or initialize metadata,

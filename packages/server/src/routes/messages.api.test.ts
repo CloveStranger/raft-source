@@ -19,14 +19,16 @@ import { agentActivityEvents, attachmentObjectCharges, attachmentObjects, attach
 import { assignMachine, createAgent } from "../services/agentService";
 import { mintAgentCredential } from "../services/agentCredentialService";
 import { AgentOrchestrator } from "../services/agentOrchestrator";
-import { addAgent, addHuman, archiveChannel, createChannel, findOrCreateDM, findOrCreateUserDM, getActiveJointThreadProjectionsByCanonicalThread, getActiveJointThreadProjectionsByCanonicalThreadsForServer, getOrCreateThread, getOrCreateThreadForChannel, removeHuman } from "../services/channelService";
+import { addAgent, addHuman, archiveChannel, createChannel, findOrCreateDM, findOrCreateUserDM, getActiveJointThreadProjectionsByCanonicalThread, getActiveJointThreadProjectionsByCanonicalThreadsForServer, getOrCreateThread, getOrCreateThreadForChannel, getThreadSummaries, removeHuman } from "../services/channelService";
 import { registerMachine } from "../services/machineService";
 import {
   __resetMessageServiceDepsForTests,
   __setMessageServiceDepsForTests,
   createMessage,
   listMessages,
+  listMessagesWithCoverage,
   projectJointMessagesToLocalChannel,
+  syncMessages,
 } from "../services/messageService";
 import {
   __resetOrdinaryMessageOutboundAuthorizationResolverForTests,
@@ -48,6 +50,7 @@ import {
   __setWebHttpClientTraceSinkForTest,
   startWebHttpClientSpan,
 } from "../../../web/src/utils/webHttpClientTrace";
+import { withChannelDelivery } from "../test/orchestratorStub";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 
@@ -386,8 +389,8 @@ test("GET /messages/channel/:channelId records page-load phases and constant que
         "messages.attachment_comment_gate",
         "messages.attachment_comment_refs",
         "messages.attachments_by_messages",
-        "messages.channel.coverage_bound",
         "messages.channel.loaded_page",
+        "messages.external_mention_facts_by_messages",
         "messages.external_reactions_by_messages",
         "messages.mentions_by_messages",
         "messages.reactions_by_messages",
@@ -402,13 +405,14 @@ test("GET /messages/channel/:channelId records page-load phases and constant que
     },
   );
   // +2: page-scoped thread summary and provider-neutral external reactions — still constant.
+  // -1: the coverage bounds ride the page statement.
+  // +1: Slack-side mention facts (external_mention_facts, one batched lookup by message id).
   assert.ok(dbEvents.length <= 16, "message page query count should stay constant for mixed senders/attachments/reactions");
 
   const dbEventByQuery = new Map(dbEvents.map((event) => [event.attrs?.query_name, event]));
   assert.equal(dbEventByQuery.get("messages.channel.loaded_page")?.attrs?.phase, "messages.paged");
   assert.equal(dbEventByQuery.get("messages.channel.loaded_page")?.attrs?.row_count, 3);
   assert.equal(dbEventByQuery.get("messages.channel.loaded_page")?.attrs?.limit, 50);
-  assert.equal(dbEventByQuery.get("messages.channel.coverage_bound")?.attrs?.row_count, 1);
   assert.equal(dbEventByQuery.get("messages.senders.user_profiles")?.attrs?.input_count, 1);
   assert.equal(dbEventByQuery.get("messages.senders.agent_profiles")?.attrs?.row_count, 1);
   assert.equal(dbEventByQuery.get("messages.attachments_by_messages")?.attrs?.input_count, 3);
@@ -427,6 +431,85 @@ test("GET /messages/channel/:channelId records page-load phases and constant que
   assert.ok(readyEvent);
   assert.equal(readyEvent.attrs?.messages_count, 3);
   assert.equal(readyEvent.attrs?.history_limited, false);
+});
+
+test("a channel page reads its messages in a few sequential waves, at most 3 queries at once", async ({ app }) => {
+  void app; // initializes the database
+  const db = getDb();
+  const owner = await seedUser("messages-waves-owner@slock.test", "messages-waves-owner");
+  const server = await createServer("Messages Waves Server", "messages-waves-server", owner.id);
+  await db.update(serversTable).set({ plan: "founder" }).where(eq(serversTable.id, server.id));
+  await db.insert(serverMembers).values({ serverId: server.id, userId: owner.id, role: "owner" }).onConflictDoNothing();
+  const channel = await createChannel(server.id, "messages-waves-channel");
+  const agent = await createAgent(server.id, "messages-waves-agent", { runtime: "codex" });
+  const userMessage = await createMessage(channel.id, "user", owner.id, "user message");
+  await createMessage(channel.id, "agent", agent.id, "agent message");
+  await db.insert(attachments).values({
+    messageId: userMessage.id,
+    channelId: channel.id,
+    uploaderId: owner.id,
+    uploaderType: "user",
+    filename: "waves.png",
+    mimeType: "image/png",
+    sizeBytes: 128,
+    storageKey: "waves/waves.png",
+  });
+
+  const thread = await getOrCreateThreadForChannel(channel.id, userMessage.id, owner.id, "user");
+  await createMessage(thread.id, "user", owner.id, "user reply");
+  await createMessage(thread.id, "agent", agent.id, "agent reply");
+
+  // Every statement a call sends, and how many were in flight when each
+  // started. A statement that starts with nothing in flight waits for all the
+  // ones before it: that count is the call's sequential depth.
+  type PgliteLike = { query: (...args: unknown[]) => Promise<unknown> };
+  const pg = (db as unknown as { $client: PgliteLike }).$client;
+  const measure = async <T>(run: () => Promise<T>) => {
+    const originalQuery = pg.query.bind(pg);
+    const counts = { inFlight: 0, maxInFlight: 0, statements: 0, sequentialDepth: 0 };
+    pg.query = (async (...args: unknown[]) => {
+      counts.statements += 1;
+      if (counts.inFlight === 0) counts.sequentialDepth += 1;
+      counts.inFlight += 1;
+      counts.maxInFlight = Math.max(counts.maxInFlight, counts.inFlight);
+      try {
+        return await originalQuery(...args);
+      } finally {
+        counts.inFlight -= 1;
+      }
+    }) as PgliteLike["query"];
+    try {
+      return { result: await run(), ...counts };
+    } finally {
+      pg.query = originalQuery;
+    }
+  };
+  const { result: page, maxInFlight, statements, sequentialDepth } = await measure(() =>
+    listMessagesWithCoverage(channel.id, 50, undefined, undefined, undefined, {
+      attachmentCommentViewerUserId: owner.id,
+    }));
+
+  assert.equal(page.messages.length, 2);
+  assert.equal(page.messages.find((message) => message.id === userMessage.id)?.attachments.length, 1);
+  assert.equal(page.coverage.remoteHighWaterSeq, Math.max(...page.messages.map((message) => message.seq)));
+  // The page transaction runs on its own client and is not counted here; the
+  // enrichment reads after it run in three waves (17 statements were 17
+  // sequential round trips before).
+  assert.ok(maxInFlight <= 3, `at most 3 statements in flight, saw ${maxInFlight}`);
+  assert.ok(statements >= 15, `the page still sends every enrichment read (${statements})`);
+  assert.ok(sequentialDepth <= 5, `sequential depth ${sequentialDepth} for ${statements} statements`);
+
+  // Thread summaries: the thread list (two statements), then participants /
+  // unread / latest replies together, then the reply senders together: 7
+  // statements, 4 deep (7 deep before).
+  const summaries = await measure(() => getThreadSummaries(channel.id, {
+    userId: owner.id,
+    parentMessageIds: [userMessage.id],
+  }));
+  assert.equal(summaries.result[userMessage.id]?.latestReplies.length, 2);
+  assert.ok(summaries.maxInFlight <= 3, `at most 3 summary statements in flight, saw ${summaries.maxInFlight}`);
+  assert.ok(summaries.statements >= 6, `summaries still send every read (${summaries.statements})`);
+  assert.ok(summaries.sequentialDepth <= 4, `summary depth ${summaries.sequentialDepth} for ${summaries.statements} statements`);
 });
 
 test("message window coverage binds empty, sparse-tail, and non-latest pages fail-closed", async ({ app }) => {
@@ -646,6 +729,53 @@ test("public channel permalink preview resolves short message ids for non-joined
     ),
     "recipient should resolve the target message without joining the public channel",
   );
+});
+
+test("syncMessages returns numeric seq on both the /messages/sync route and the sync:resume outlet", async ({ app }) => {
+  const db = getDb();
+  const owner = await seedUser("sync-seq-owner@slock.test", "sync-seq-owner");
+  const server = await createServer("Sync Seq Server", "sync-seq-server", owner.id);
+  await db.insert(serverMembers).values({ serverId: server.id, userId: owner.id, role: "owner" }).onConflictDoNothing();
+  const channel = await createChannel(server.id, "sync-seq-channel");
+  await db.insert(channelHumans).values({ channelId: channel.id, userId: owner.id }).onConflictDoNothing();
+  const first = await createMessage(channel.id, "user", owner.id, "sync seq first");
+  const second = await createMessage(channel.id, "user", owner.id, "sync seq second");
+
+  // Production node-postgres returns int8 (`messages.seq`) from raw
+  // `db.execute` as a STRING; PGlite returns a number. Emulate the production
+  // driver for raw rows so this test pins the wire type, not the test driver.
+  const originalExecute = db.execute.bind(db);
+  (db as { execute: unknown }).execute = (async (...args: Parameters<typeof db.execute>) => {
+    const result = await originalExecute(...args);
+    for (const row of (result as { rows?: Array<Record<string, unknown>> }).rows ?? []) {
+      if (typeof row.seq === "number") row.seq = String(row.seq);
+    }
+    return result;
+  }) as typeof db.execute;
+
+  try {
+    // Route outlet (channel-scoped reconnect catch-up).
+    const token = await tokenForHuman(owner.email);
+    const res = await fetch(
+      `${app.baseUrl}/api/messages/sync?since_seq=${first.seq - 1}&channel_id=${channel.id}`,
+      { headers: authHeaders(token, server.id) },
+    );
+    assert.equal(res.status, 200);
+    const synced = await res.json() as Array<{ id: string; seq: unknown }>;
+    assert.deepEqual(synced.map((message) => message.id), [first.id, second.id]);
+    for (const message of synced) assert.equal(typeof message.seq, "number");
+    assert.deepEqual(synced.map((message) => message.seq), [first.seq, second.seq]);
+
+    // Socket `sync:resume` outlet: all channels, server-scoped, viewer-filtered.
+    const resumed = await syncMessages(first.seq - 1, undefined, 50, server.id, undefined, owner.id);
+    const resumedOwn = resumed.filter((message) => message.channelId === channel.id);
+    assert.deepEqual(resumedOwn.map((message) => message.id), [first.id, second.id]);
+    for (const message of resumedOwn) assert.equal(typeof message.seq, "number");
+    // `seq + 1` must be arithmetic, not string concatenation.
+    assert.equal((resumedOwn[0]!.seq as number) + 1, first.seq + 1);
+  } finally {
+    (db as { execute: unknown }).execute = originalExecute;
+  }
 });
 
 test("human message v2 returns sender-only mention warnings while v1 and consumer payloads stay unchanged", async ({ app }) => {
@@ -2611,13 +2741,13 @@ test("POST /v2/messages surfaces stopped-agent DM delivery warnings without fail
 
   const originalOrchestrator = app.app.get("agentOrchestrator") as AgentOrchestrator;
   const delivered: Array<{ agentId: string; message: AgentMessage }> = [];
-  app.app.set("agentOrchestrator", {
+  app.app.set("agentOrchestrator", withChannelDelivery({
     ...originalOrchestrator,
     deliverMessage: async (agentId: string, message: AgentMessage) => {
       delivered.push({ agentId, message });
       return { status: "dropped" as const, reason: "wake_suppressed" as const };
     },
-  });
+  }));
   onTestFinished(() => {
     app.app.set("agentOrchestrator", originalOrchestrator);
   });
@@ -2666,13 +2796,13 @@ test("POST /v2/messages keeps stopped-agent warning lookup bounded", async ({ ap
   const slowDelivery = new Promise<{ status: "dropped"; reason: "wake_suppressed" }>((resolve) => {
     releaseDelivery = () => resolve({ status: "dropped", reason: "wake_suppressed" });
   });
-  app.app.set("agentOrchestrator", {
+  app.app.set("agentOrchestrator", withChannelDelivery({
     ...originalOrchestrator,
     deliverMessage: async (agentId: string, message: AgentMessage) => {
       delivered.push({ agentId, message });
       return slowDelivery;
     },
-  });
+  }));
   onTestFinished(() => {
     releaseDelivery();
     app.app.set("agentOrchestrator", originalOrchestrator);

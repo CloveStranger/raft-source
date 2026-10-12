@@ -1,3 +1,8 @@
+import { useProfileStore } from "../src/store/profileStore";
+import { useSearchContentStore } from "../src/store/searchContentStore";
+import { isThreadMaximized, useUIStore } from "../src/store/uiStore";
+import { useThreadStore } from "../src/store/threadStore";
+import { useMessageStore } from "../src/store/messageStore";
 import assert from "node:assert/strict";
 import {
   canAutoMarkLiveAppendRead,
@@ -89,4 +94,61 @@ test("live append auto-read requires explicit user activity in this tab", () => 
     ),
     false
   );
+});
+
+
+test("maximized thread suppresses channel auto-read until the channel is restored", () => {
+  const ui = useUIStore.getState();
+  const thread = useThreadStore.getState();
+  const messages = useMessageStore.getState();
+  try {
+    useThreadStore.setState({ openParentMessageId: "parent", openParentChannelId: "channel", taskModal: null });
+    useMessageStore.setState({ currentChannelId: "channel" });
+    useUIStore.setState({ threadMaximized: false });
+    const doc = { visibilityState: "visible" as const, hasFocus: () => true };
+    useUIStore.getState().toggleThreadMaximized();
+    assert.equal(canAutoMarkCurrentChannelRead(doc, () => true), false);
+    assert.equal(canAutoMarkLiveAppendRead(doc, () => true, () => true), false);
+    assert.equal(canAutoMarkLiveAppendRead(doc, () => true, () => true, "thread"), true);
+    useMessageStore.setState({ currentChannelId: "other" });
+    assert.equal(canAutoMarkCurrentChannelRead(doc, () => true), true);
+    useMessageStore.setState({ currentChannelId: "channel" });
+    useUIStore.getState().toggleThreadMaximized();
+    assert.equal(canAutoMarkCurrentChannelRead(doc, () => true), true);
+    useUIStore.getState().toggleThreadMaximized();
+    useThreadStore.getState().closeThread();
+    assert.equal(useUIStore.getState().threadMaximized, false);
+    assert.equal(canAutoMarkCurrentChannelRead(doc, () => true), true);
+  } finally {
+    useUIStore.setState(ui); useThreadStore.setState(thread); useMessageStore.setState(messages);
+  }
+});
+
+test("profile and content navigation restore the shared layout/read state", () => {
+  const ui = useUIStore.getState();
+  const thread = useThreadStore.getState();
+  const messages = useMessageStore.getState();
+  const profile = useProfileStore.getState();
+  const search = useSearchContentStore.getState();
+  const doc = { visibilityState: "visible" as const, hasFocus: () => true };
+  try {
+    useThreadStore.setState({ openParentMessageId: "parent", openParentChannelId: "channel" });
+    useMessageStore.setState({ currentChannelId: "channel" });
+    useUIStore.setState({ threadMaximized: true });
+    assert.equal(isThreadMaximized(true, "parent", "channel", "channel"), true);
+    assert.equal(canAutoMarkCurrentChannelRead(doc, () => true), false);
+    useProfileStore.getState().openProfile("human", "person", { openSource: "thread" });
+    assert.equal(useUIStore.getState().threadMaximized, false);
+    assert.equal(canAutoMarkCurrentChannelRead(doc, () => true), true);
+    useUIStore.getState().toggleThreadMaximized();
+    useSearchContentStore.getState().open({ kind: "channel", id: "channel" });
+    assert.equal(useUIStore.getState().threadMaximized, false);
+    assert.equal(canAutoMarkCurrentChannelRead(doc, () => true), true);
+    assert.equal(isThreadMaximized(true, "parent", "channel", "channel", true), false);
+    assert.equal(isThreadMaximized(true, null, "channel", "channel"), false);
+    assert.equal(isThreadMaximized(true, "parent", "channel", "other"), false);
+  } finally {
+    useUIStore.setState(ui); useThreadStore.setState(thread); useMessageStore.setState(messages);
+    useProfileStore.setState(profile); useSearchContentStore.setState(search);
+  }
 });

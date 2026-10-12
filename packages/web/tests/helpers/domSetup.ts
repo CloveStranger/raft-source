@@ -8,14 +8,26 @@ import "global-jsdom/register";
 // per file (e.g. agentRouteLocatesSidebarRow, attachmentCommentsPanelAnchor).
 Element.prototype.scrollIntoView = function scrollIntoView() {};
 
-// jsdom ships no `CSS.escape` either (browsers do). Minimal spec-shaped
-// polyfill: escape everything outside the identifier-safe set, so escaped
-// selectors built from URL-decoded ids stay valid and match nothing on a
-// crafted input (task #702).
+// jsdom before 30 shipped no `CSS.escape` (browsers do; jsdom 30 does too, so
+// this is now a fallback). Minimal spec-shaped polyfill: escape everything
+// outside the identifier-safe set, so escaped selectors built from URL-decoded
+// ids stay valid and match nothing on a crafted input (task #702).
 if (typeof CSS === "undefined" || typeof CSS.escape !== "function") {
   const cssShim = (typeof CSS === "undefined" ? {} : CSS) as { escape?: (value: string) => string };
   cssShim.escape = (value: string) => String(value).replace(/[^a-zA-Z0-9_\u00a0-\uffff-]/g, "\\$&");
   (globalThis as typeof globalThis & { CSS?: typeof cssShim }).CSS = cssShim;
+}
+
+// jsdom 30 implements `CSS.supports()` by parsing the declaration, so it
+// answers true for `field-sizing: content` although it has no layout engine
+// and never sizes a field. Component code that picks the native path on that
+// answer (the composer autosize) would silently stop running its measured
+// fallback in every DOM test. Report the property as unsupported here; suites
+// that want the native path pass `fieldSizingSupported` explicitly.
+if (typeof CSS !== "undefined" && typeof CSS.supports === "function") {
+  const nativeSupports = CSS.supports.bind(CSS) as (...args: string[]) => boolean;
+  CSS.supports = ((...args: string[]) =>
+    args[0]?.includes("field-sizing") ? false : nativeSupports(...args)) as typeof CSS.supports;
 }
 // oxlint-disable-next-line no-restricted-imports -- Whole-module React shim for classic-runtime test dependencies.
 import * as React from "react";

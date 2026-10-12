@@ -23,6 +23,10 @@
 //   2. behind + effective != required  -> REJECT (real migration under wrong timeout)
 //   3. behind + effective == required  -> ADMIT (canonical migrate up to target)
 //   4. head ahead / diverged / malformed / manifest empty -> REJECT (fail closed)
+//   4b. behind, but a pending entry is not newer than the db head -> REJECT
+//      (PENDING_NOT_NEWER_THAN_HEAD): drizzle's migrator applies only entries
+//      whose folderMillis is greater than the db head's created_at, so it would
+//      skip that entry silently and still report success.
 //   5. never leak the DSN or any row/credential value; target head + db head are
 //      bound by BOTH hash and created_at against the exact manifest.
 //
@@ -33,6 +37,8 @@
 //
 // Side-effect free (no auto-run) so the classifier is unit-testable;
 // scripts/migration-preflight.ts is the thin executable.
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import pg from "pg";
 import { readMigrationFiles } from "drizzle-orm/migrator";
 
@@ -44,7 +50,7 @@ const QT = `"${MIGRATIONS_SCHEMA}"."${MIGRATIONS_TABLE}"`;
 
 export type PreflightConfig = { kind: "config"; connectionString: string; requiredMs: number };
 export type PreflightAbort = { kind: "abort"; code: string; detail?: string };
-export type ManifestEntry = { hash: string; folderMillis: number };
+export type ManifestEntry = { hash: string; folderMillis: number; tag?: string };
 export type DbHead = { hash: unknown; createdAt: unknown } | null;
 export type AdmissionVerdict = { admit: boolean; code: string; detail?: string };
 
@@ -93,9 +99,14 @@ export function resolvePreflightConfig(
 /** Read the exact's own migration manifest into ordered {hash, folderMillis}.
  * Throws if the folder is unreadable or empty (caller fails closed). */
 export function readManifest(migrationsFolder: string): ManifestEntry[] {
-  const entries = readMigrationFiles({ migrationsFolder }).map((m) => ({
+  // readMigrationFiles walks the journal in order, so index i is journal entry i.
+  const journal = JSON.parse(
+    readFileSync(path.join(migrationsFolder, "meta", "_journal.json"), "utf8"),
+  ) as { entries: { tag: string }[] };
+  const entries = readMigrationFiles({ migrationsFolder }).map((m, i) => ({
     hash: m.hash,
     folderMillis: m.folderMillis,
+    tag: journal.entries[i]?.tag,
   }));
   if (entries.length === 0) throw new Error("MANIFEST_EMPTY");
   return entries;
@@ -118,6 +129,8 @@ export function classifyAdmission(
   const target = manifest[manifest.length - 1];
 
   let atTarget: boolean;
+  let headIdx = -1;
+  let headCreatedAt = 0;
   if (dbHead === null) {
     atTarget = false; // no rows applied -> behind (fresh DB)
   } else {
@@ -135,10 +148,28 @@ export function classifyAdmission(
       };
     }
     atTarget = idx === manifest.length - 1;
+    headIdx = idx;
+    headCreatedAt = createdAt;
   }
 
   if (atTarget) {
     return { admit: true, code: "AT_TARGET_NOOP" };
+  }
+
+  // Behind. drizzle's migrator applies an entry only when its folderMillis is
+  // greater than the db head's created_at, so a pending entry that is not newer
+  // than the head (typically a migration generated on a long-lived branch and
+  // merged after a newer one shipped) would be skipped silently while the deploy
+  // reports success. Refuse instead. A fresh db (no head) applies everything.
+  if (headIdx !== -1) {
+    const skipped = manifest.slice(headIdx + 1).filter((m) => m.folderMillis <= headCreatedAt);
+    if (skipped.length > 0) {
+      return {
+        admit: false,
+        code: "PENDING_NOT_NEWER_THAN_HEAD",
+        detail: `pending=${skipped.map((m) => m.tag ?? m.hash.slice(0, 12)).join(",")} head_created_at=${headCreatedAt}`,
+      };
+    }
   }
 
   // Behind: the intended timeout is requested by the migration DSN's

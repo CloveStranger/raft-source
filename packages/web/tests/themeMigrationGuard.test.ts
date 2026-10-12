@@ -73,17 +73,25 @@ function unscopedClasses(path: string, regex: RegExp): string[] {
 test("rebuilt search / settings / modal surfaces keep brutal-palette classes scoped", () => {
   const RATCHET_LIMITS: [path: string, maxAllowed: number][] = [
     ["src/components/search/MessageSearchPage.tsx", 0],
+    // MessageSearchPage's result rows, split into their own files (task #709).
+    ["src/components/search/MessageHitRow.tsx", 0],
+    ["src/components/search/SearchHomeEntityRow.tsx", 0],
+    ["src/components/search/EntityResultRow.tsx", 0],
     ["src/components/settings/ReleaseNotesPanel.tsx", 0],
     ["src/components/layout/SidebarConversationFinder.tsx", 0],
     ["src/components/member/InviteHumanDialog.tsx", 0],
+    ["src/components/member/InviteeRow.tsx", 0],
     ["src/components/settings/SettingsPanel.tsx", 21],
     ["src/components/message/ThreadPanel.tsx", 7],
     ["src/components/message/MessageInput.tsx", 3],
+    // MessageInput's suggestion row, split into its own file (task #709).
+    ["src/components/message/AutocompleteOptionRow.tsx", 0],
     ["src/components/message/ChatPanel.tsx", 3],
     ["src/components/settings/AppearanceThemePicker.tsx", 2],
     ["src/components/message/AttachmentChip.tsx", 0],
     ["src/components/agent/AgentWorkspace.tsx", 0],
     ["src/pages/PublicServerPage.tsx", 1],
+    ["src/pages/PublicMessageRow.tsx", 0],
     // F3: LeftRail brand signature surface intentionally retains 5 brutal chrome classes
     ["src/components/layout/LeftRail.tsx", 5],
   ];

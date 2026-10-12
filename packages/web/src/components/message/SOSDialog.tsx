@@ -1,11 +1,24 @@
 import { Textarea, Button } from "raft-ui";
-import { useState, useRef, useEffect } from "react";
+import { useCallback, useState, useRef, useEffect } from "react";
+import type { ChangeEvent } from "react";
 import { useIntl } from "react-intl";
 import DialogCard from "../ui/DialogCard";
 import Banner from "../ui/Banner";
 import api from "../../api/client";
 
 type Phase = "confirm" | "stopped" | "resuming";
+
+interface ResumeAllResponse {
+  results?: Array<{ agentId: string; ok: boolean; reason?: string }>;
+}
+
+/** Agents the resume did not reach: still starting (try again shortly) or failed. */
+interface ResumeShortfall {
+  starting: number;
+  failed: number;
+  /** A retry names only these, so agents that already got the guidance are not sent it again. */
+  agentIds: string[];
+}
 
 export default function SOSDialog({
   channelId,
@@ -21,6 +34,7 @@ export default function SOSDialog({
   const [stopping, setStopping] = useState(false);
   const [resuming, setResuming] = useState(false);
   const [guidance, setGuidance] = useState("");
+  const [resumeShortfall, setResumeShortfall] = useState<ResumeShortfall | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
@@ -29,7 +43,7 @@ export default function SOSDialog({
     }
   }, [phase]);
 
-  const handleStop = async () => {
+  const handleStop = useCallback(async () => {
     setStopping(true);
     try {
       await api.post(`/channels/${channelId}/stop-all-agents`);
@@ -39,19 +53,35 @@ export default function SOSDialog({
     } finally {
       setStopping(false);
     }
-  };
+  }, [channelId]);
 
-  const handleResume = async () => {
+  const handleResume = useCallback(async () => {
     if (!guidance.trim()) return;
     setResuming(true);
     try {
       const prompt = `[SOS] The user has emergency-stopped all agents in #${channelName} because they were going off-track. Here is the user's correction and new guidance:\n\n${guidance.trim()}\n\nRead this carefully, acknowledge the correction, and adjust your approach accordingly. Use check_messages and read_history to understand the current state before taking any action.`;
-      await api.post(`/channels/${channelId}/resume-all-agents`, { prompt });
-      onClose();
+      const { data } = await api.post<ResumeAllResponse>(
+        `/channels/${channelId}/resume-all-agents`,
+        resumeShortfall ? { prompt, agentIds: resumeShortfall.agentIds } : { prompt },
+      );
+      // The server reports each agent; one it could not start did not get the
+      // guidance, so keep the dialog open (with the text) instead of closing.
+      const missed = (data?.results ?? []).filter((result) => !result.ok);
+      if (missed.length === 0) {
+        onClose();
+        return;
+      }
+      const starting = missed.filter((result) => result.reason === "start_in_flight").length;
+      setResumeShortfall({ starting, failed: missed.length - starting, agentIds: missed.map((result) => result.agentId) });
+      setResuming(false);
     } catch {
       setResuming(false);
     }
-  };
+  }, [channelId, channelName, guidance, onClose, resumeShortfall]);
+
+  const handleGuidanceChange = useCallback((event: ChangeEvent<HTMLTextAreaElement>) => {
+    setGuidance(event.target.value);
+  }, []);
 
   return (
     <DialogCard
@@ -100,10 +130,24 @@ export default function SOSDialog({
             <p className="mb-2 text-sm">
               {formatMessage({ id: "message.sos.guidanceHint" })}
             </p>
+            {resumeShortfall && (
+              <Banner intent="warning" density="sm" className="mb-3" data-slot="sos-resume-shortfall">
+                {resumeShortfall.starting > 0 && (
+                  <div>
+                    {formatMessage({ id: "message.sos.resumeStillStarting" }, { count: resumeShortfall.starting })}
+                  </div>
+                )}
+                {resumeShortfall.failed > 0 && (
+                  <div>
+                    {formatMessage({ id: "message.sos.resumeFailed" }, { count: resumeShortfall.failed })}
+                  </div>
+                )}
+              </Banner>
+            )}
             <Textarea
               ref={textareaRef}
               value={guidance}
-              onChange={(e) => setGuidance(e.target.value)}
+              onChange={handleGuidanceChange}
               placeholder={formatMessage({ id: "message.sos.guidancePlaceholder" })}
               className="mb-4 w-full resize-none p-3 text-sm"
               rows={4}

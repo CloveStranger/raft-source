@@ -6,6 +6,7 @@ import { act, fireEvent, screen, waitFor, within } from "@testing-library/react"
 import { AGENT_MIGRATION_FEATURE_FLAG_KEY, AGENT_MIGRATION_STATES } from "@botiverse/raft-shared";
 import api from "../src/api/client";
 import { REGISTERED_SERVER_FEATURE_FLAG_KEYS } from "../src/store/serverFeatureFlags";
+import { useAgentStore } from "../src/store/agentStore";
 import { useMachineStore } from "../src/store/machineStore";
 import { useServerStore } from "../src/store/serverStore";
 import {
@@ -17,6 +18,24 @@ import {
 } from "./helpers/agentDetailPanelHarness";
 
 afterEach(resetAgentDetailPanelState);
+
+/** The Migrate button in the profile's Agent migration section. */
+async function migrationEntry(name = "Migrate") {
+  const section = await screen.findByTestId("agent-migration-section");
+  return within(section).getByRole("button", { name });
+}
+
+/** The submit button inside the open start dialog. */
+function dialogButton(name: string) {
+  return within(screen.getByRole("dialog")).getByRole("button", { name });
+}
+
+/** The migration Steps position: "complete" when every step is finished, else the 1-based current step. */
+function migrationStep(name: string) {
+  const items = within(screen.getByRole("list", { name })).getAllByRole("listitem");
+  if (items.every((item) => item.classList.contains("r-step--finish"))) return "complete";
+  return String(items.findIndex((item) => item.getAttribute("aria-current") === "step") + 1);
+}
 
 test("migration profile entry is absent from the DOM while the migration flag is off", async () => {
   const agent = seedPanelState("server-flag-off");
@@ -39,7 +58,7 @@ test("migration profile entry is absent from the DOM while the migration flag is
 
   await waitFor(() => assert.equal(evaluateCalls, 1));
   assert.equal(
-    screen.queryByRole("button", { name: "Move to another computer" }),
+    screen.queryByTestId("agent-migration-section"),
     null,
     "flag-off profile must not render the migration entry",
   );
@@ -52,8 +71,12 @@ test("migration profile entry has no progress when no migration exists", async (
 
   renderPanel(agent);
 
-  await screen.findByRole("button", { name: "Move to another computer" });
-  assert.equal(screen.queryByRole("progressbar"), null);
+  const entry = await migrationEntry();
+  assert.ok(screen.queryByRole("list", { name: /Migration progress/ }) === null);
+  await waitFor(() => assert.equal(useServerStore.getState().billing?.plan, "pro"));
+  assert.ok(entry);
+  // The section always marks migration as a Pro feature.
+  assert.equal(screen.getByTestId("agent-migration-pro-badge").textContent, "Pro");
 });
 
 test("post-trial Free projection gates only the new migration entry and routes to billing", async () => {
@@ -71,14 +94,17 @@ test("post-trial Free projection gates only the new migration entry and routes t
   renderPanel(agent);
 
   await waitFor(() => assert.equal(useServerStore.getState().billing?.plan, "free"));
-  fireEvent.click(await screen.findByRole("button", { name: "Move to another computer" }));
+  const entry = await migrationEntry();
+  // Non-Pro servers see the Pro badge on the entry's corner, outside the button's accessible name.
+  const badge = screen.getByTestId("agent-migration-pro-badge");
+  assert.equal(badge.textContent, "Pro");
+  assert.equal(badge.getAttribute("data-slot"), "badge");
+  assert.equal(entry.contains(badge), false);
+  fireEvent.click(entry);
 
-  assert.ok(screen.getByRole("heading", { name: "Move agents with Pro" }));
+  assert.ok(screen.getByRole("heading", { name: "Upgrade to Pro to migrate agents" }));
   assert.ok(screen.getByText(
-    "Upgrade this server to Pro to move the agent and its workspace to another Computer.",
-  ));
-  assert.ok(screen.getByText(
-    "Existing migration status, cancellation, cleanup, and recovery stay available.",
+    "After upgrading, you can migrate an agent and its workspace to another computer.",
   ));
   assert.equal(
     screen.queryByRole("heading", { name: "Move to another computer" }),
@@ -86,7 +112,7 @@ test("post-trial Free projection gates only the new migration entry and routes t
   );
   assert.equal(posts.includes("/agents/agent-1/migrate"), false);
 
-  fireEvent.click(screen.getByRole("button", { name: "View Plan & Billing" }));
+  fireEvent.click(screen.getByRole("button", { name: "Upgrade" }));
   await waitFor(() => {
     assert.equal(screen.getByTestId("location").textContent, "/s/botiverse/settings/billing");
   });
@@ -100,17 +126,14 @@ test("post-trial Free projection renders the migration upgrade prompt in zh-CN",
   renderPanel(agent, "zh-cn");
 
   await waitFor(() => assert.equal(useServerStore.getState().billing?.plan, "free"));
-  fireEvent.click(await screen.findByRole("button", { name: "迁移到另一台计算机" }));
+  fireEvent.click(await migrationEntry("迁移"));
 
-  assert.ok(screen.getByRole("heading", { name: "使用 Pro 迁移 Agent" }));
+  assert.ok(screen.getByRole("heading", { name: "升级至 Pro 以迁移 Agent" }));
   assert.ok(screen.getByText(
-    "将此服务器升级到 Pro，即可把 Agent 及其工作区迁移到另一台 Computer。",
+    "升级后，可以把 Agent 连同工作区迁移到另一台计算机。",
   ));
-  assert.ok(screen.getByText(
-    "现有迁移的状态、取消、清理和恢复功能仍然可用。",
-  ));
-  assert.ok(screen.getByRole("button", { name: "查看套餐与账单" }));
-  assert.equal(screen.queryByText("Move agents with Pro"), null);
+  assert.ok(screen.getByRole("button", { name: "升级" }));
+  assert.ok(screen.queryByText("Upgrade to Pro to migrate agents") === null);
 });
 
 test("typed backend plan denial replaces the start dialog with the same upgrade prompt", async () => {
@@ -141,17 +164,20 @@ test("typed backend plan denial replaces the start dialog with the same upgrade 
   renderPanel(agent);
 
   await waitFor(() => assert.equal(useServerStore.getState().billing?.plan, "pro"));
-  fireEvent.click(await screen.findByRole("button", { name: "Move to another computer" }));
-  fireEvent.click(screen.getByRole("button", { name: "Start Migration" }));
+  fireEvent.click(await migrationEntry());
+  fireEvent.click(dialogButton("Migrate"));
 
-  assert.ok(await screen.findByRole("heading", { name: "Move agents with Pro" }));
+  assert.ok(await screen.findByRole("heading", { name: "Upgrade to Pro to migrate agents" }));
   assert.equal(startCalls, 1);
   assert.equal(
     screen.queryByRole("heading", { name: "Move to another computer" }),
     null,
   );
-  assert.equal(screen.queryByText("MIGRATION_PRO_PLAN_REQUIRED"), null);
-  assert.equal(screen.queryByText("Upgrade required"), null);
+  assert.ok(screen.queryByText("MIGRATION_PRO_PLAN_REQUIRED") === null);
+  assert.ok(screen.queryByText("Upgrade required") === null);
+  // Close the modal so its scroll lock does not leak into later tests.
+  fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+  await waitFor(() => assert.ok(screen.queryByRole("dialog") === null));
 });
 
 test("Free projection preserves the current active migration status", async () => {
@@ -174,10 +200,11 @@ test("Free projection preserves the current active migration status", async () =
   await waitFor(() => assert.equal(useServerStore.getState().billing?.plan, "free"));
   assert.ok(screen.getByText("Transferring workspace to Target Computer."));
   assert.equal(
-    (screen.getByRole("button", { name: "Migration in progress" }) as HTMLButtonElement).disabled,
-    true,
+    within(screen.getByTestId("agent-migration-section")).queryByRole("button", { name: "Migrate" }),
+    null,
+    "while a migration runs, the progress block's Cancel is the only action",
   );
-  assert.equal(screen.queryByRole("heading", { name: "Move agents with Pro" }), null);
+  assert.ok(screen.queryByRole("heading", { name: "Upgrade to Pro to migrate agents" }) === null);
 });
 
 test("migration profile entry starts migration directly without preparing an action card", async () => {
@@ -235,20 +262,21 @@ test("migration profile entry starts migration directly without preparing an act
   renderPanel(agent);
 
   await waitFor(() => assert.equal(evaluateCalls, 1));
-  const entry = await screen.findByRole("button", { name: "Move to another computer" });
+  const entry = await migrationEntry();
   fireEvent.click(entry);
 
+  const dialog = screen.getByRole("dialog", { name: "Move to another computer" });
+  assert.equal(dialog.getAttribute("data-slot"), "dialog-content", "the start dialog is the raft-ui Dialog");
   assert.ok(screen.getByRole("heading", { name: "Move to another computer" }));
-  assert.ok(screen.getByText("Migration mode: stop before export"));
-  assert.ok(screen.getByText(/Migration resets the current session/));
-  assert.ok(screen.getByText(/workspace files, including MEMORY.md and notes when present/));
-  assert.ok(screen.getByText(/conversation context reset/));
-  const targetComputerSelect = screen.getByRole("combobox", { name: "Target computer" });
-  assert.equal(targetComputerSelect.textContent?.trim(), "Target Computer");
-  assert.equal(targetComputerSelect.tagName, "BUTTON");
-  assert.ok(targetComputerSelect.querySelector('[data-slot="select-trigger-content"]'));
+  assert.ok(screen.getByText("Your agent will stop while it migrates, then start again on the new computer."));
+  assert.ok(screen.getByText(/Migrating moves the workspace files/));
+  assert.ok(screen.getByText(/including MEMORY.md and notes if any/));
+  assert.ok(screen.getByText(/starts a fresh session and picks up from MEMORY.md/));
+  const targetComputerInput = screen.getByRole("combobox", { name: "Target computer" }) as HTMLInputElement;
+  assert.equal(targetComputerInput.tagName, "INPUT", "the target picker is the raft-ui ComboboxSelect");
+  assert.equal(targetComputerInput.value, "Target Computer");
 
-  fireEvent.click(screen.getByRole("button", { name: "Start Migration" }));
+  fireEvent.click(dialogButton("Migrate"));
 
   await waitFor(() => {
     const start = posts.find((post) => post.url === "/agents/agent-1/migrate");
@@ -263,15 +291,17 @@ test("migration profile entry starts migration directly without preparing an act
     "profile migration must not prepare or execute an action card",
   );
   assert.ok(screen.getByText("Stopping the agent on Source Computer so its workspace can be packed."));
-  const progress = screen.getByRole("progressbar", { name: "Migration progress to Target Computer" });
-  assert.equal(progress.getAttribute("aria-valuenow"), "13");
+  assert.equal(migrationStep("Migration progress to Target Computer"), "1");
   assert.ok(screen.getByText("Stop agent"));
   assert.ok(screen.getByText("Pack workspace"));
   assert.ok(screen.getByText("Transfer files"));
   assert.ok(screen.getByText("Start on new computer"));
+  const completeStep = screen.getByText("Migration complete").closest('[data-slot="step"]');
+  assert.ok(completeStep?.classList.contains("r-step--wait"), "the outcome step stays pending until the migration completes");
   assert.equal(
-    (screen.getByRole("button", { name: "Migration in progress" }) as HTMLButtonElement).disabled,
-    true,
+    within(screen.getByTestId("agent-migration-section")).queryByRole("button", { name: "Migrate" }),
+    null,
+    "while a migration runs, the progress block's Cancel is the only action",
   );
 });
 
@@ -328,20 +358,25 @@ test("migration start consumes the canonical support ref and refreshes Cancel ca
 
   renderPanel(agent);
   await waitFor(() => assert.equal(statusCalls, 1));
-  fireEvent.click(await screen.findByRole("button", { name: "Move to another computer" }));
-  fireEvent.click(screen.getByRole("button", { name: "Start Migration" }));
+  fireEvent.click(await migrationEntry());
+  fireEvent.click(dialogButton("Migrate"));
 
   await waitFor(() => assert.equal(statusCalls, 2));
   await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
-  assert.equal(screen.queryByText(migrationRef), null, "the POST response must not seed visible migration state");
-  assert.equal(screen.queryByRole("progressbar"), null);
+  assert.ok(screen.queryByText(migrationRef) === null, "the POST response must not seed visible migration state");
+  assert.ok(screen.queryByRole("list", { name: /Migration progress/ }) === null);
   resolveRefresh({ data: { migration: canonical } });
-  await screen.findByRole("button", { name: "Cancel migration" });
-  fireEvent.click(screen.getByRole("button", { name: `Copy migration reference ${migrationRef}` }));
-  await waitFor(() => assert.deepEqual(clipboardWrites, [migrationRef]));
-  fireEvent.click(screen.getByRole("button", { name: "Cancel migration" }));
+  await screen.findByRole("button", { name: "Cancel" });
+  // A running migration does not show its support reference; the cancel dialog does.
+  assert.ok(screen.queryByText(migrationRef) === null);
+  fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
   const cancelDialog = screen.getByRole("dialog", { name: "Cancel migration?" });
   assert.ok(within(cancelDialog).getByText(migrationRef));
+  fireEvent.click(within(cancelDialog).getByRole("button", { name: `Copy migration ID ${migrationRef}` }));
+  await waitFor(() => assert.deepEqual(clipboardWrites, [migrationRef]));
+  // Close the modal so its scroll lock does not leak into later tests.
+  fireEvent.click(within(cancelDialog).getByRole("button", { name: "Continue" }));
+  await waitFor(() => assert.ok(screen.queryByRole("dialog") === null));
 });
 
 test("migration target uses the shared selector and submits the selected computer", async () => {
@@ -381,24 +416,22 @@ test("migration target uses the shared selector and submits the selected compute
 
   renderPanel(agent);
 
-  fireEvent.click(await screen.findByRole("button", { name: "Move to another computer" }));
-  const selector = screen.getByRole("combobox", { name: "Target computer" });
-  assert.equal(selector.tagName, "BUTTON");
-  assert.ok(selector.querySelector('[data-slot="select-trigger-content"]'));
+  fireEvent.click(await migrationEntry());
+  const selector = screen.getByRole("combobox", { name: "Target computer" }) as HTMLInputElement;
+  assert.equal(selector.tagName, "INPUT");
   selector.focus();
   fireEvent.keyDown(selector, { key: "ArrowDown" });
-  const listbox = await screen.findByRole("listbox");
-  assert.match(listbox.className, /max-h-64/);
+  const listbox = (await screen.findAllByRole("listbox", { hidden: true })).at(-1)!;
   assert.deepEqual(
-    within(listbox).getAllByRole("option").map((option) => option.textContent?.trim()),
+    within(listbox).getAllByRole("option", { hidden: true }).map((option) => option.textContent?.trim()),
     ["Target Computer", "Backup Computer"],
   );
-  const backupOption = within(listbox).getByRole("option", { name: "Backup Computer" });
+  const backupOption = within(listbox).getByRole("option", { name: "Backup Computer", hidden: true });
   fireEvent.pointerDown(backupOption, { pointerType: "mouse" });
   fireEvent.click(backupOption);
-  await waitFor(() => assert.equal(selector.textContent?.trim(), "Backup Computer"));
+  await waitFor(() => assert.equal(selector.value, "Backup Computer"));
 
-  fireEvent.click(screen.getByRole("button", { name: "Start Migration" }));
+  fireEvent.click(dialogButton("Migrate"));
   await waitFor(() => {
     assert.deepEqual(
       posts.find((post) => post.url === "/agents/agent-1/migrate")?.body,
@@ -417,12 +450,12 @@ test("migration target selector shows a disabled empty state when no destination
 
   renderPanel(agent);
 
-  fireEvent.click(await screen.findByRole("button", { name: "Move to another computer" }));
-  const selector = screen.getByRole("combobox", { name: "Target computer" });
-  assert.equal(selector.textContent?.trim(), "No other attached computer");
-  assert.equal((selector as HTMLButtonElement).disabled, true);
+  fireEvent.click(await migrationEntry());
+  const selector = screen.getByRole("combobox", { name: "Target computer" }) as HTMLInputElement;
+  assert.equal(selector.placeholder, "No other computers available");
+  assert.equal(selector.disabled, true);
   assert.equal(
-    (screen.getByRole("button", { name: "Start Migration" }) as HTMLButtonElement).disabled,
+    (dialogButton("Migrate") as HTMLButtonElement).disabled,
     true,
   );
 });
@@ -475,18 +508,18 @@ test("migration profile entry keeps the latest completed migration visible at 10
 
   renderPanel(agent);
 
-  fireEvent.click(await screen.findByRole("button", { name: "Move to another computer" }));
-  fireEvent.click(screen.getByRole("button", { name: "Start Migration" }));
+  fireEvent.click(await migrationEntry());
+  fireEvent.click(dialogButton("Migrate"));
 
-  await screen.findByText(/Agent moved to Target Computer and started successfully/);
+  await screen.findByText(/The agent migrated to Target Computer and is now running there/);
   assert.equal(
-    screen.getByRole("progressbar", { name: "Migration progress to Target Computer" }).getAttribute("aria-valuenow"),
-    "100",
+    migrationStep("Migration progress to Target Computer"),
+    "complete",
   );
-  assert.ok(screen.getByText("Complete"));
-  assert.ok(screen.getByText("Moved from Source Computer to Target Computer"));
-  assert.ok(screen.getByText(/Migration resets the current session/));
-  assert.ok(screen.getByRole("button", { name: "Move to another computer" }));
+  assert.ok(screen.queryByText("Complete") === null, "a finished migration reads from the Steps; no Complete badge");
+  assert.ok(screen.getByText("Migrated to Target Computer"));
+  assert.ok(screen.queryByTestId("migration-completion-summary") === null);
+  assert.ok(await migrationEntry());
 });
 
 test("migration profile entry shows typed transport failures inline", async () => {
@@ -534,7 +567,7 @@ test("migration profile entry shows typed transport failures inline", async () =
 
   renderPanel(agent);
 
-  fireEvent.click(await screen.findByRole("button", { name: "Move to another computer" }));
+  fireEvent.click(await migrationEntry());
 
   for (const { code, expected } of [
     {
@@ -550,7 +583,7 @@ test("migration profile entry shows typed transport failures inline", async () =
       expected: "The connection between the two computers dropped during the transfer. Make sure both computers are online, then try again.",
     },
   ]) {
-    fireEvent.click(screen.getByRole("button", { name: "Start Migration" }));
+    fireEvent.click(dialogButton("Migrate"));
     await screen.findByText(expected);
     assert.ok(screen.getByText(code));
   }
@@ -586,14 +619,14 @@ test("resumable capability error names the Computer and exposes recovery actions
   };
 
   renderPanel(agent);
-  fireEvent.click(await screen.findByRole("button", { name: "Move to another computer" }));
-  fireEvent.click(screen.getByRole("button", { name: "Start Migration" }));
+  fireEvent.click(await migrationEntry());
+  fireEvent.click(dialogButton("Migrate"));
 
   assert.ok(await screen.findByText(
     "Target Computer needs a Raft Computer update before it can move agents. Update Raft Computer on Target Computer to the latest version, restart it, wait for it to reconnect, then try again.",
   ));
-  assert.equal(screen.queryByText("raw backend transport detail"), null);
-  assert.equal(screen.queryByText("must-not-render"), null);
+  assert.ok(screen.queryByText("raw backend transport detail") === null);
+  assert.ok(screen.queryByText("must-not-render") === null);
   const technicalCode = screen.getByText("MIGRATION_RESUMABLE_CAPABILITY_REQUIRED");
   const technicalDetails = technicalCode.closest("details");
   assert.ok(technicalDetails);
@@ -603,15 +636,15 @@ test("resumable capability error names the Computer and exposes recovery actions
   fireEvent.click(screen.getByRole("button", { name: "Try again" }));
   await waitFor(() => assert.equal(startCalls, 2));
 
-  fireEvent.click(screen.getByRole("button", { name: "Open Computers" }));
-  await waitFor(() => {
-    assert.equal(
-      screen.getByTestId("location").textContent,
-      "/s/botiverse/computer/target-machine",
-      "an online Computer without an upgrade badge must remain directly reachable from the failure",
-    );
-    assert.equal(screen.getByTestId("location-search").textContent, "");
-  });
+  // Recovery is a content link that opens Computers in a new tab, not a footer action.
+  const recoveryLink = screen.getByRole("link", { name: "Open computer settings" });
+  assert.equal(
+    recoveryLink.getAttribute("href"),
+    "/s/botiverse/computer/target-machine",
+    "an online Computer without an upgrade badge must remain directly reachable from the failure",
+  );
+  assert.equal(recoveryLink.getAttribute("target"), "_blank");
+  assert.ok(screen.queryByRole("button", { name: "Open computer settings" }) === null);
 });
 
 test("computer capability error renders every structured failure as a readable list", async () => {
@@ -643,8 +676,8 @@ test("computer capability error renders every structured failure as a readable l
   };
 
   renderPanel(agent);
-  fireEvent.click(await screen.findByRole("button", { name: "Move to another computer" }));
-  fireEvent.click(screen.getByRole("button", { name: "Start Migration" }));
+  fireEvent.click(await migrationEntry());
+  fireEvent.click(dialogButton("Migrate"));
 
   assert.ok(await screen.findByText("Fix these computer requirements before starting the migration:"));
   const sourceIssue = screen.getByText(
@@ -655,8 +688,8 @@ test("computer capability error renders every structured failure as a readable l
   );
   assert.equal(sourceIssue.closest("li")?.parentElement?.tagName, "UL");
   assert.equal(targetIssue.closest("li")?.parentElement?.tagName, "UL");
-  assert.equal(screen.queryByText("raw aggregate error must not render"), null);
-  assert.ok(screen.getByRole("button", { name: "Open Computers" }));
+  assert.ok(screen.queryByText("raw aggregate error must not render") === null);
+  assert.ok(screen.getByRole("link", { name: "Open Computers" }));
 });
 
 test("resumable capability recovery copy and actions render in zh-CN", async () => {
@@ -686,16 +719,16 @@ test("resumable capability recovery copy and actions render in zh-CN", async () 
   };
 
   renderPanel(agent, "zh-cn");
-  fireEvent.click(await screen.findByRole("button", { name: "迁移到另一台计算机" }));
-  fireEvent.click(screen.getByRole("button", { name: "开始迁移" }));
+  fireEvent.click(await migrationEntry("迁移"));
+  fireEvent.click(dialogButton("迁移"));
 
   assert.ok(await screen.findByText(
     "Source Computer 需要先更新 Raft Computer 才能迁移 Agent。请将 Source Computer 上的 Raft Computer 更新到最新版本，重启并等待重新连接后再试。",
   ));
-  assert.ok(screen.getByRole("button", { name: "打开 Computer 列表" }));
+  assert.ok(screen.getByRole("link", { name: "打开计算机设置" }));
   assert.ok(screen.getByRole("button", { name: "重试" }));
   assert.ok(screen.getByText("技术详情"));
-  assert.equal(screen.queryByText("raw backend transport detail"), null);
+  assert.ok(screen.queryByText("raw backend transport detail") === null);
 });
 
 test("migration profile entry restores persisted migration status after refresh", async () => {
@@ -736,23 +769,23 @@ test("migration profile entry restores persisted migration status after refresh"
   await waitFor(() => assert.equal(statusCalls, 1));
   assert.ok(screen.getByText("Transferring workspace to Target Computer."));
   assert.equal(
-    screen.getByRole("progressbar", { name: "Migration progress to Target Computer" }).getAttribute("aria-valuenow"),
-    "63",
+    migrationStep("Migration progress to Target Computer"),
+    "3",
   );
 });
 
-for (const { state, extra, expectedProgress, expectedMessage } of ([
-  { state: "provisioning", expectedProgress: "13", expectedMessage: "Stopping the agent on Source Computer so its workspace can be packed." },
+for (const { state, extra, expectedStep, expectedMessage } of ([
+  { state: "provisioning", expectedStep: "1", expectedMessage: "Stopping the agent on Source Computer so its workspace can be packed." },
   {
     state: "provisioning",
     extra: { sourceQuiescedAt: new Date().toISOString() },
-    expectedProgress: "38",
+    expectedStep: "2",
     expectedMessage: "Packing the workspace on Source Computer. Large workspaces can take up to 30 minutes.",
   },
   {
     state: "provisioning",
     extra: { sourceQuiescedAt: new Date(Date.now() - 5 * 60_000 - 1_000).toISOString() },
-    expectedProgress: "38",
+    expectedStep: "2",
     expectedMessage: "Packing the workspace on Source Computer (5 minutes so far). Large workspaces can take up to 30 minutes.",
   },
   {
@@ -761,24 +794,24 @@ for (const { state, extra, expectedProgress, expectedMessage } of ([
       sourceQuiescedAt: new Date().toISOString(),
       sourceBuildProgress: { phase: "packing", files: 41_000, bytes: 2.3 * 1024 ** 3, reportedAt: new Date().toISOString() },
     },
-    expectedProgress: "38",
+    expectedStep: "2",
     expectedMessage: "Packing the workspace on Source Computer: 41,000 files, 2.3 GB so far.",
   },
   {
     state: "provisioning",
     extra: { sourceQuiescedAt: new Date().toISOString(), transportControlRegisteredAt: new Date().toISOString() },
-    expectedProgress: "63",
-    expectedMessage: "Uploading the workspace from Source Computer for Target Computer.",
+    expectedStep: "3",
+    expectedMessage: "Uploading the workspace from Source Computer to send to Target Computer.",
   },
   // Legacy enum value that is never written; presented as packing.
-  { state: "prep", expectedProgress: "38", expectedMessage: "Packing the workspace on Source Computer. Large workspaces can take up to 30 minutes." },
-  { state: "ready", expectedProgress: "63", expectedMessage: "Workspace bundle is ready. Starting transfer to Target Computer." },
-  { state: "in_transit", expectedProgress: "63", expectedMessage: "Transferring workspace to Target Computer." },
-  { state: "arriving", expectedProgress: "88", expectedMessage: "Starting the agent on Target Computer." },
-  { state: "starting", expectedProgress: "88", expectedMessage: "Starting the agent on Target Computer." },
-] as Array<{ state: string; extra?: Record<string, unknown>; expectedProgress: string; expectedMessage: string }>)) {
+  { state: "prep", expectedStep: "2", expectedMessage: "Packing the workspace on Source Computer. Large workspaces can take up to 30 minutes." },
+  { state: "ready", expectedStep: "3", expectedMessage: "The workspace is packed. Sending it to Target Computer." },
+  { state: "in_transit", expectedStep: "3", expectedMessage: "Transferring workspace to Target Computer." },
+  { state: "arriving", expectedStep: "4", expectedMessage: "Setting up the workspace on Target Computer." },
+  { state: "starting", expectedStep: "4", expectedMessage: "Starting the agent on Target Computer." },
+] as Array<{ state: string; extra?: Record<string, unknown>; expectedStep: string; expectedMessage: string }>)) {
   test(`migration profile entry renders persisted ${state} progress: ${expectedMessage}`, async () => {
-    const serverId = `server-active-${state}-${expectedProgress}-${expectedMessage.length}`;
+    const serverId = `server-active-${state}-${expectedStep}-${expectedMessage.length}`;
     const agent = seedPanelState(serverId);
     const migration = {
       agentId: "agent-1",
@@ -796,18 +829,19 @@ for (const { state, extra, expectedProgress, expectedMessage } of ([
 
     await screen.findByText(expectedMessage);
     assert.equal(
-      screen.getByRole("progressbar", { name: "Migration progress to Target Computer" }).getAttribute("aria-valuenow"),
-      expectedProgress,
+      migrationStep("Migration progress to Target Computer"),
+      expectedStep,
     );
     assert.equal(
-      screen.getByLabelText("Migration to Target Computer").querySelectorAll('[data-slot="progress"][data-variant="accent"], [class~="theme-brutal:bg-brutal-pink"]').length,
-      2,
-      "active fill and current-step marker must share the migration pink intent",
+      screen.getByLabelText("Migration to Target Computer").querySelectorAll('[data-slot="step"].r-step--process').length,
+      1,
+      "exactly the current step shows as in progress",
     );
     assert.equal(
-      (screen.getByRole("button", { name: "Migration in progress" }) as HTMLButtonElement).disabled,
-      true,
-    );
+    within(screen.getByTestId("agent-migration-section")).queryByRole("button", { name: "Migrate" }),
+    null,
+    "while a migration runs, the progress block's Cancel is the only action",
+  );
   });
 }
 
@@ -837,16 +871,21 @@ test("migration profile entry keeps prior progress across a temporary poll failu
   await screen.findByText("Transferring workspace to Target Computer.");
   await waitFor(() => assert.equal(statusCalls, 2), { timeout: 3_500 });
   assert.equal(
-    screen.getByRole("progressbar", { name: "Migration progress to Target Computer" }).getAttribute("aria-valuenow"),
-    "63",
+    migrationStep("Migration progress to Target Computer"),
+    "3",
   );
-  assert.ok(screen.getByText("Migration status unavailable"));
+  assert.ok(screen.getByText("Can't load migration status"));
 });
 
 test("migration profile entry polls active progress until the persisted terminal state", async () => {
   const agent = seedPanelState("server-polling-progress");
   let statusCalls = 0;
+  let agentListCalls = 0;
   api.get = async (url: string) => {
+    if (url === "/agents") {
+      agentListCalls += 1;
+      return { data: useAgentStore.getState().agents } as never;
+    }
     if (url.includes("/runtime-account-usage/")) return { data: { state: "missing", snapshot: null } } as never;
     if (url === "/agents/agent-1/migration") {
       statusCalls += 1;
@@ -902,24 +941,27 @@ test("migration profile entry polls active progress until the persisted terminal
 
   renderPanel(agent);
 
-  fireEvent.click(await screen.findByRole("button", { name: "Move to another computer" }));
-  fireEvent.click(screen.getByRole("button", { name: "Start Migration" }));
+  fireEvent.click(await migrationEntry());
+  fireEvent.click(dialogButton("Migrate"));
   await screen.findByText("Stopping the agent on Source Computer so its workspace can be packed.");
   assert.equal(statusCalls, 2);
 
   await waitFor(() => {
     assert.equal(statusCalls, 3);
-    assert.ok(screen.getAllByText(/Agent moved to Target Computer and started successfully/).length >= 1);
+    assert.ok(screen.getAllByText(/The agent migrated to Target Computer and is now running there/).length >= 1);
   }, { timeout: 3_500 });
   assert.equal(
-    screen.getByRole("progressbar", { name: "Migration progress to Target Computer" }).getAttribute("aria-valuenow"),
-    "100",
+    migrationStep("Migration progress to Target Computer"),
+    "complete",
   );
-  assert.ok(screen.getByText(/Migration resets the current session/));
-  assert.ok(screen.getByRole("button", { name: "Move to another computer" }));
+  assert.ok(screen.queryByTestId("migration-completion-summary") === null);
+  assert.ok(await migrationEntry());
+  // No agent update is broadcast for a migration, so watching it complete
+  // re-reads agents once to move the Computer row to the target.
+  await waitFor(() => assert.equal(agentListCalls, 1));
 });
 
-test("completed migration renders localized route and continuity copy without transfer breakdown", async () => {
+test("completed migration renders one localized outcome line without transfer breakdown", async () => {
   const agent = seedPanelState("server-completed-summary-zh");
   const migration = {
     agentId: "agent-1",
@@ -936,15 +978,15 @@ test("completed migration renders localized route and continuity copy without tr
   renderPanel(agent, "zh-cn");
 
   assert.equal(
-    (await screen.findByRole("progressbar", { name: "迁移到 Target Computer 的进度" }))
-      .getAttribute("aria-valuenow"),
-    "100",
+    (await screen.findByRole("list", { name: "迁移到 Target Computer 的进度" }), migrationStep("迁移到 Target Computer 的进度")),
+    "complete",
   );
-  const summary = screen.getByTestId("migration-completion-summary");
-  assert.ok(within(summary).getByText("已从 Source Computer 迁移至 Target Computer"));
-  assert.ok(within(summary).getByText(/目标工作区已提交/));
-  assert.ok(within(summary).getByText(/MEMORY.md 和 notes/));
-  assert.equal(within(summary).queryByText(/sha256|workspacePathRef|\/Users\//i), null);
+  const section = screen.getByTestId("agent-migration-section");
+  assert.ok(within(section).getByText("已迁移到 Target Computer"));
+  assert.ok(within(section).getByText("Agent 已迁移到 Target Computer，并已在那里运行。"));
+  // One outcome line: no repeated route/continuity summary under it.
+  assert.ok(screen.queryByTestId("migration-completion-summary") === null);
+  assert.ok(within(section).queryByText(/sha256|workspacePathRef|\/Users\//i) === null);
 });
 
 test("prep deadline abort copy is source-specific instead of blaming both computers", async () => {
@@ -973,8 +1015,8 @@ test("prep deadline abort copy is source-specific instead of blaming both comput
     + "Source Computer may have gone offline, or packing stalled. Make sure Source Computer is "
     + "online, then try again.",
   ));
-  assert.equal(screen.queryByText(/both Computers.*online/i), null);
-  assert.equal(screen.queryByText(/Large workspaces/i), null);
+  assert.ok(screen.queryByText(/both Computers.*online/i) === null);
+  assert.ok(screen.queryByText(/Large workspaces/i) === null);
   // Before the flip the agent never left: that is said first, on its own line.
   assert.ok(screen.getByText("The agent is still on Source Computer and works as usual."));
 });
@@ -998,7 +1040,7 @@ test("prep deadline abort copy shows the real deadline when the REST snapshot ca
   renderPanel(agent);
 
   assert.ok(await screen.findByText(/stopped making progress before the deadline \(/));
-  assert.equal(screen.queryByText(/Large workspaces/i), null);
+  assert.ok(screen.queryByText(/Large workspaces/i) === null);
 });
 
 test("migration profile entry shows persisted typed transport failure after refresh", async () => {
@@ -1049,9 +1091,35 @@ test("migration profile entry shows persisted typed transport failure after refr
   assert.ok(screen.getByText(/^The connection between the two computers dropped at .*, during the transfer\. Bring Target Computer online, then try again\.$/));
   assert.ok(screen.queryByText(/heartbeat/) === null);
   assert.ok(screen.getByText("MIGRATION_TRANSPORT_LOST"));
-  assert.equal(screen.queryByText(/Target transfer object did not appear before deadline/), null);
-  assert.ok(screen.getByRole("progressbar", { name: "Migration progress to Target Computer" }));
+  assert.ok(screen.queryByText(/Target transfer object did not appear before deadline/) === null);
+  assert.ok(screen.getByRole("list", { name: "Migration progress to Target Computer" }));
   assert.ok(screen.getByRole("button", { name: "Try migration again" }));
+});
+
+test("a running migration shows only heading, Steps, one status line and Cancel", async () => {
+  const agent = seedPanelState("server-migration-quiet-running");
+  stubAgentDetailApi({
+    agentId: "agent-1",
+    migrationRef: "mig_abcdefghijklmnopqrstuv",
+    state: "in_transit",
+    revision: 4,
+    sourceMachineId: "source-machine",
+    targetMachineId: "target-machine",
+    updatedAt: "2026-07-20T08:00:00.000Z",
+  });
+  stubMigrationFeatureFlag("server-migration-quiet-running");
+
+  renderPanel(agent);
+
+  await screen.findByRole("list", { name: "Migration progress to Target Computer" });
+  const section = screen.getByTestId("agent-migration-section");
+  assert.ok(within(section).queryByText("mig_abcdefghijklmnopqrstuv") === null, "no support reference while running");
+  assert.ok(within(section).queryByText(/updates automatically/i) === null);
+  assert.ok(
+    within(section).queryByText("Move this agent and its workspace to another computer. The agent stops while it migrates, then starts again there.") === null,
+    "the section description steps aside while a migration is in flight",
+  );
+  assert.ok(within(section).getByRole("button", { name: "Cancel" }));
 });
 
 test("the latest row shows the canonical migration reference and Copy preserves the exact value", async () => {
@@ -1060,7 +1128,7 @@ test("the latest row shows the canonical migration reference and Copy preserves 
   const active = {
     agentId: "agent-1",
     migrationRef: activeRef,
-    state: "in_transit",
+    state: "failed", // the reference is shown where support may need it: under problems
     revision: 4,
     sourceMachineId: "source-machine",
     targetMachineId: "target-machine",
@@ -1077,9 +1145,9 @@ test("the latest row shows the canonical migration reference and Copy preserves 
   renderPanel(agent);
 
   await screen.findByText(activeRef);
-  fireEvent.click(screen.getByRole("button", { name: `Copy migration reference ${activeRef}` }));
+  fireEvent.click(screen.getByRole("button", { name: `Copy migration ID ${activeRef}` }));
   await waitFor(() => assert.deepEqual(clipboardWrites, [activeRef]));
-  assert.ok(screen.getByRole("button", { name: "Migration reference copied" }));
+  assert.ok(screen.getByRole("button", { name: "Migration ID copied" }));
 });
 
 test("Cancel uses one safe dialog without client-side phase guessing", async () => {
@@ -1099,15 +1167,15 @@ test("Cancel uses one safe dialog without client-side phase guessing", async () 
 
   renderPanel(agent);
 
-  fireEvent.click(await screen.findByRole("button", { name: "Cancel migration" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Cancel" }));
   const dialog = screen.getByRole("dialog", { name: "Cancel migration?" });
-  assert.ok(within(dialog).getByText("Safe cancellation"));
-  assert.ok(within(dialog).getByText(/preserve the authoritative Computer/));
+  assert.ok(within(dialog).getByText("Canceling is safe"));
+  assert.ok(within(dialog).getByText(/clean up on both computers/));
   assert.ok(within(dialog).getByText(migrationRef));
-  assert.equal(within(dialog).queryByText("Before computer switch"), null);
-  assert.equal(within(dialog).queryByText("After computer switch"), null);
-  fireEvent.click(within(dialog).getByRole("button", { name: "Keep migration" }));
-  await waitFor(() => assert.equal(document.querySelector('[role="dialog"]'), null));
+  assert.ok(within(dialog).queryByText("Before computer switch") === null);
+  assert.ok(within(dialog).queryByText("After computer switch") === null);
+  fireEvent.click(within(dialog).getByRole("button", { name: "Continue" }));
+  await waitFor(() => assert.ok(document.querySelector('[role="dialog"]') === null));
 });
 
 test("successful Cancel discards its POST representation and refetches authoritative status", async () => {
@@ -1150,9 +1218,9 @@ test("successful Cancel discards its POST representation and refetches authorita
   };
 
   renderPanel(agent);
-  fireEvent.click(await screen.findByRole("button", { name: "Cancel migration" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Cancel" }));
   const dialog = screen.getByRole("dialog", { name: "Cancel migration?" });
-  fireEvent.click(within(dialog).getByRole("button", { name: "Cancel migration" }));
+  fireEvent.click(within(dialog).getByRole("button", { name: "Stop" }));
 
   await waitFor(() => assert.equal(statusCalls, 2));
   assert.equal(
@@ -1160,13 +1228,13 @@ test("successful Cancel discards its POST representation and refetches authorita
     null,
     "the cancel POST response must not project terminal state",
   );
-  await waitFor(() => assert.equal(screen.queryByRole("dialog", { name: "Cancel migration?" }), null));
-  assert.ok(screen.getByRole("button", { name: "Move to another computer" }));
+  await waitFor(() => assert.ok(screen.queryByRole("dialog", { name: "Cancel migration?" }) === null));
+  assert.ok(await migrationEntry());
 });
 
 for (const [state, message] of [
-  ["canceled_pre_flip", "The migration was canceled before the computer switch. The agent remains on the source computer."],
-  ["canceled_post_flip", "The migration was canceled after the computer switch. The migrated agent was stopped and cleanup was confirmed."],
+  ["canceled_pre_flip", "The migration was canceled before the agent switched computers. The agent is still on the original computer."],
+  ["canceled_post_flip", "The migration was canceled after the agent switched computers. The agent is stopped on the new computer, and cleanup is done."],
 ] as const) {
   test(`${state} renders as a terminal canceled outcome`, async () => {
     const serverId = `server-${state}`;
@@ -1186,11 +1254,11 @@ for (const [state, message] of [
 
     assert.ok(await screen.findByText(message));
     assert.ok(screen.getByText("Migration to Target Computer canceled"));
-    assert.equal(screen.queryByText("Moving to Target Computer"), null);
-    assert.ok(screen.getByText("Canceled"));
-    assert.equal(screen.queryByText("In progress"), null);
-    assert.equal(screen.queryByRole("button", { name: "Migration in progress" }), null);
-    assert.ok(screen.getByRole("button", { name: "Move to another computer" }));
+    assert.ok(screen.queryByText("Migrating to Target Computer") === null);
+    assert.ok(screen.queryByText("Canceled") === null, "no status badge: the title and Steps carry the state");
+    assert.ok(screen.queryByText("In progress") === null);
+    assert.ok(screen.queryByRole("button", { name: "Migration in progress" }) === null);
+    assert.ok(await migrationEntry());
   });
 }
 
@@ -1220,8 +1288,8 @@ for (const state of AGENT_MIGRATION_STATES.filter((candidate) => !MOVING_MIGRATI
 
     renderPanel(agent);
 
-    await screen.findByText("mig_abcdefghijklmnopqrstuv");
-    assert.equal(screen.queryByText("Moving to Target Computer"), null);
+    await screen.findByRole("list", { name: "Migration progress to Target Computer" });
+    assert.ok(screen.queryByText("Migrating to Target Computer") === null);
   });
 }
 
@@ -1248,7 +1316,7 @@ for (const [state, extra] of [
     renderPanel(agent);
 
     assert.ok(await screen.findByText("Migration to Target Computer needs attention"));
-    assert.equal(screen.queryByText("Moving to Target Computer"), null);
+    assert.ok(screen.queryByText("Migrating to Target Computer") === null);
   });
 }
 
@@ -1285,14 +1353,15 @@ test("Cancel failure refreshes status and never presents terminal success", { ti
 
   renderPanel(agent);
 
-  fireEvent.click(await screen.findByRole("button", { name: "Cancel migration" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Cancel" }));
   const dialog = screen.getByRole("dialog", { name: "Cancel migration?" });
-  assert.ok(within(dialog).getByText("Safe cancellation"));
-  fireEvent.click(within(dialog).getByRole("button", { name: "Cancel migration" }));
-  await within(dialog).findByText(/migration changed before cancellation was submitted/i);
-  await waitFor(() => assert.equal(statusCalls, 2));
-  assert.equal(screen.queryByText("Migration canceled"), null);
-  assert.ok(within(dialog).getByRole("button", { name: "Cancel migration" }));
+  assert.ok(within(dialog).getByText("Canceling is safe"));
+  fireEvent.click(within(dialog).getByRole("button", { name: "Stop" }));
+  await within(dialog).findByText(/migration moved on before your request went through/i);
+  // Initial load + one status re-read per stale retry (2) + the final refresh.
+  await waitFor(() => assert.equal(statusCalls, 4));
+  assert.ok(screen.queryByText("Migration canceled") === null);
+  assert.ok(within(dialog).getByRole("button", { name: "Stop" }));
 });
 
 test("migration profile entry shows a retryable automatic-start failure after arrival", async () => {
@@ -1333,7 +1402,11 @@ test("migration profile entry shows a retryable automatic-start failure after ar
   await screen.findByText("Agent did not start");
   assert.ok(screen.getByText("The workspace moved to Target Computer, but the agent did not start automatically."));
   assert.ok(screen.getByText("auto_start_failed"));
-  assert.equal(screen.getByRole("button", { name: "Migration in progress" }).hasAttribute("disabled"), true);
+  assert.equal(
+    within(screen.getByTestId("agent-migration-section")).queryByRole("button", { name: "Migrate" }),
+    null,
+    "the migration is still active, so the section offers no second Migrate",
+  );
 });
 
 test("migration profile entry translates bundle-too-large wire payload without exposing it", async () => {
@@ -1377,7 +1450,7 @@ test("migration profile entry translates bundle-too-large wire payload without e
   await screen.findByText("Migration failed");
   assert.ok(screen.getByText("The workspace is too large to move: compressed, it is over the 3 GiB limit. Largest items: .git/ (2 GiB), archive.tar (1 GiB), media/ (0.5 GiB). Ask the agent to delete large files it no longer needs, or to list them in .raftmigrateignore, then try again."));
   assert.ok(screen.getByText("MIGRATION_OBJECT_STORE_BUNDLE_TOO_LARGE"));
-  assert.equal(screen.queryByText(wireMessage), null);
+  assert.ok(screen.queryByText(wireMessage) === null);
   assert.equal(document.body.textContent?.includes("actualBytes="), false);
   assert.equal(document.body.textContent?.includes("maxBytes="), false);
 });
@@ -1423,7 +1496,7 @@ test("migration profile entry fails closed when a new wire error has no copy yet
   await screen.findByText("Something went wrong during the transfer. Try again.");
   assert.ok(screen.getByText("The agent is still on Source Computer and works as usual."));
   assert.ok(screen.getByText("MIGRATION_FUTURE_FAILURE"));
-  assert.equal(screen.queryByText(wireMessage), null);
+  assert.ok(screen.queryByText(wireMessage) === null);
   assert.equal(document.body.textContent?.includes("quotedTable="), false);
   assert.equal(document.body.textContent?.includes("params="), false);
 });
@@ -1459,4 +1532,52 @@ test("a migration that failed after the move says the agent is on the target, no
   );
   assert.ok(screen.queryByText(/still on Source Computer/) === null);
   assert.ok(screen.getByText("auto_start_failed"));
+});
+
+test("cancel retries with the latest revision when the migration advanced after the dialog opened", async () => {
+  const agent = seedPanelState("server-cancel-stale-retry");
+  const migrationRef = "mig_abcdefghijklmnopqrstuv";
+  const base = {
+    agentId: "agent-1",
+    migrationRef,
+    sourceMachineId: "source-machine",
+    targetMachineId: "target-machine",
+    updatedAt: "2026-08-04T02:00:00.000Z",
+  };
+  // The dialog opens at revision 1; by the time the user confirms, the
+  // migration has moved on to revision 3 (still cancellable).
+  let latest: Record<string, unknown> = { ...base, state: "provisioning", revision: 1 };
+  stubAgentDetailApi();
+  const fallbackGet = api.get;
+  api.get = async (url: string) => {
+    if (url.includes("/runtime-account-usage/")) return { data: { state: "missing", snapshot: null } } as never;
+    if (url === "/agents/agent-1/migration") return { data: { migration: latest } } as never;
+    return fallbackGet(url);
+  };
+  const cancelRevisions: unknown[] = [];
+  api.post = async (url: string, body?: unknown) => {
+    if (url === "/feature-flags/evaluate") {
+      return { data: { evaluations: [{ key: AGENT_MIGRATION_FEATURE_FLAG_KEY, enabled: true }] } } as never;
+    }
+    if (url === "/agents/agent-1/migration/cancel") {
+      const { expectedRevision } = body as { expectedRevision: number };
+      cancelRevisions.push(expectedRevision);
+      if (expectedRevision !== latest.revision) {
+        throw Object.assign(new Error("stale"), { response: { status: 409, data: { code: "MIGRATION_REVISION_STALE" } } });
+      }
+      latest = { ...latest, state: "cancel_requested_pre_flip", revision: (latest.revision as number) + 1 };
+      return { data: { migration: latest } } as never;
+    }
+    throw new Error(`unexpected POST ${url}`);
+  };
+
+  renderPanel(agent);
+  fireEvent.click(await screen.findByRole("button", { name: "Cancel" }));
+  const dialog = screen.getByRole("dialog", { name: "Cancel migration?" });
+  latest = { ...latest, revision: 3 };
+  fireEvent.click(within(dialog).getByRole("button", { name: "Stop" }));
+
+  await waitFor(() => assert.deepEqual(cancelRevisions, [1, 3]));
+  await waitFor(() => assert.ok(screen.queryByRole("dialog", { name: "Cancel migration?" }) === null));
+  assert.ok(screen.queryByText(/MIGRATION_REVISION_STALE/) === null);
 });

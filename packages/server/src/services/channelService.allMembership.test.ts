@@ -20,6 +20,7 @@ import {
 } from "./channelService";
 import { broadcastAndDeliver, broadcastSystemMessage } from "./messageService";
 import { withTraceRoot } from "../tracing/semanticTrace";
+import { withChannelDelivery } from "../test/orchestratorStub";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 
@@ -148,9 +149,9 @@ test("#all message delivery traces include virtual audience counts without priva
     })(),
   });
   const io = createNoopIo();
-  const agentOrchestrator = {
+  const agentOrchestrator = withChannelDelivery({
     deliverMessage: async () => {},
-  } as any;
+  }) as any;
 
   await withTraceRoot(tracer, "test.all.message", { surface: "server", kind: "server" }, async () => {
     await broadcastAndDeliver(io, agentOrchestrator, {
@@ -235,7 +236,7 @@ test("#all delivery excludes Guests from inbox facts and push targets", async ({
     })(),
   });
   const io = createNoopIo();
-  const agentOrchestrator = { deliverMessage: async () => {} } as any;
+  const agentOrchestrator = withChannelDelivery({ deliverMessage: async () => {} }) as any;
 
   await withTraceRoot(tracer, "test.all.guest_delivery", { surface: "server", kind: "server" }, async () => {
     await broadcastAndDeliver(io, agentOrchestrator, {

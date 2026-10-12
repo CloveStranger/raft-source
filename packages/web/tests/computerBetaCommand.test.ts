@@ -84,7 +84,10 @@ function sourceSlice(source: string, start: string, end: string): string {
 
 test("add computer dialog uses the shared explicit platform command selector", () => {
   const source = readSource("src/components/machine/AddMachineDialog.tsx");
-  const guideSource = readSource("src/components/machine/ComputerCommandGuide.tsx");
+  const guideSource = [
+    readSource("src/components/machine/ComputerCommandGuide.tsx"),
+    readSource("src/components/machine/CommandRow.tsx"),
+  ].join("\n");
 
   assert.match(source, /const serverSlug = useServerStore\(\(s\) => s\.current\?\.slug\)/);
   assert.match(source, /const deploymentEnv = import\.meta\.env\?\.VITE_DEPLOYMENT_ENV/);
@@ -120,7 +123,13 @@ test("add computer dialog uses the shared explicit platform command selector", (
 });
 
 test("machine detail connect command uses the same platform selector and keeps online recovery guide", () => {
-  const source = readSource("src/components/machine/MachineDetailPanel.tsx");
+  const source = [
+    readSource("src/components/machine/MachineDetailPanel.tsx"),
+    readSource("src/components/machine/CommandCopyRoot.tsx"),
+    readSource("src/components/machine/WorkspaceDeleteButton.tsx"),
+    readSource("src/components/machine/BulkResetOptionCard.tsx"),
+    readSource("src/components/machine/MachineAgentRow.tsx"),
+  ].join("\n");
 
   assert.match(source, /platform: "windows"/);
   assert.match(source, /deploymentEnv = import\.meta\.env\?\.VITE_DEPLOYMENT_ENV/);
@@ -150,8 +159,17 @@ test("machine detail connect command uses the same platform selector and keeps o
 });
 
 test("Windows Computer copy stays x64-scoped to the production manifest and the manual no longer offers the retired daemon command", { skip: inSourceSnapshot }, () => {
-  const guide = readSource("src/components/machine/ComputerCommandGuide.tsx");
-  const detail = readSource("src/components/machine/MachineDetailPanel.tsx");
+  const guide = [
+    readSource("src/components/machine/ComputerCommandGuide.tsx"),
+    readSource("src/components/machine/CommandRow.tsx"),
+  ].join("\n");
+  const detail = [
+    readSource("src/components/machine/MachineDetailPanel.tsx"),
+    readSource("src/components/machine/CommandCopyRoot.tsx"),
+    readSource("src/components/machine/WorkspaceDeleteButton.tsx"),
+    readSource("src/components/machine/BulkResetOptionCard.tsx"),
+    readSource("src/components/machine/MachineAgentRow.tsx"),
+  ].join("\n");
   const manual = readSource("../../manual/agent-knowledge/computer.md");
   const releaseWorkflow = readSource("../../.github/workflows/publish-computer-sea.yml");
 
@@ -170,7 +188,13 @@ test("Windows Computer copy stays x64-scoped to the production manifest and the 
 });
 
 test("machine detail computer actions expose terminal verification and the recovery ladder", () => {
-  const source = readSource("src/components/machine/MachineDetailPanel.tsx");
+  const source = [
+    readSource("src/components/machine/MachineDetailPanel.tsx"),
+    readSource("src/components/machine/CommandCopyRoot.tsx"),
+    readSource("src/components/machine/WorkspaceDeleteButton.tsx"),
+    readSource("src/components/machine/BulkResetOptionCard.tsx"),
+    readSource("src/components/machine/MachineAgentRow.tsx"),
+  ].join("\n");
   const englishMessages = readSource("src/i18n/messages/en.ts");
 
   assert.doesNotMatch(source, /COMPUTER_TERMINAL_VERIFICATION_COMMANDS/);
@@ -213,7 +237,10 @@ test("experimental labels remain on explicit experimental features and stay off 
   assert.match(graphSource, /<Badge\.Experimental\b/);
   assert.doesNotMatch(graphSource, /ExperimentalBadge/);
 
-  const guideSource = readSource("src/components/machine/ComputerCommandGuide.tsx");
+  const guideSource = [
+    readSource("src/components/machine/ComputerCommandGuide.tsx"),
+    readSource("src/components/machine/CommandRow.tsx"),
+  ].join("\n");
   assert.match(guideSource, /<Badge\.Experimental\s*\/>/);
   assert.match(guideSource, /platform === "windows"/);
 
@@ -248,7 +275,10 @@ test("experimental labels remain on explicit experimental features and stay off 
   assert.match(appNotificationsEyebrow, /<SectionEyebrow as="div">\{formatMessage/);
   assert.match(appNotificationsEyebrow, /<Badge\.Experimental\s*\/>/);
 
-  const humanLoginSetupSource = readSource("src/pages/HumanLoginSetupPage.tsx");
+  const humanLoginSetupSource = [
+    readSource("src/pages/HumanLoginSetupPage.tsx"),
+    readSource("src/pages/MarketplaceServerRow.tsx"),
+  ].join("\n");
   assert.doesNotMatch(humanLoginSetupSource, /<Badge\.Experimental\b/);
   assert.doesNotMatch(humanLoginSetupSource, /ExperimentalBadge/);
 });
@@ -276,7 +306,7 @@ test("machine detail copy buttons copy command to clipboard", async () => {
       createElement(
         MemoryRouter,
         { initialEntries: ["/s/acme/settings/computers/computer-1"] },
-        createElement(MachineDetailPanel, { machine, workspaceEmbedded: true }),
+        createElement(MachineDetailPanel, { machine, hideHeader: true }),
       ),
     );
 

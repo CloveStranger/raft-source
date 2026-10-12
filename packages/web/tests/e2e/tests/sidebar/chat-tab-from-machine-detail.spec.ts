@@ -63,11 +63,6 @@ for (const width of [800, 1280]) {
     const login = await loginViaApi(request, seed);
     await dismissOwnerOnboarding(request, seed, login.accessToken);
     await injectSessionBeforeBoot(page, { ...login, serverSlug: seed.server.slug });
-    await page.addInitScript(() => {
-      for (const key of Object.keys(localStorage)) {
-        if (key.startsWith("raft:workspace-grid-mode:")) localStorage.removeItem(key);
-      }
-    });
     await page.route("**/api/announcements/active", (route) => route.fulfill({
       json: { announcements: [] },
     }));

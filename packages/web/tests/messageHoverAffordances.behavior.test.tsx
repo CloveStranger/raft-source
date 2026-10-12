@@ -281,10 +281,13 @@ test("thread origin hover affordances stay anchored to the message row", async (
     false,
     "the transparent toolbar remains a hit target so moving above the row cannot collapse its own hover",
   );
-  assert.match(toolbar.className, /(?:^| )opacity-0(?: |$)/);
-  assert.match(toolbar.className, /(?:^| )group-hover\/message:opacity-100(?: |$)/);
-  assert.match(toolbar.className, /(?:^| )group-focus-within\/message:opacity-100(?: |$)/);
+  // Since raft-ui 0.5.35 (#386) the reveal is variable-driven and stays
+  // anchored to the row: the row sets `--mi-toolbar-opacity` / `--mi-toolbar-pe`
+  // on hover and focus-within (and an open popup), the toolbar reads them.
+  assert.match(toolbar.className, /(?:^| )opacity-\(--mi-toolbar-opacity,0\)(?: |$)/);
   assert.equal(toolbar.classList.contains("hidden"), false);
+  assert.match(row.className, /(?:^| )hover:\[--mi-toolbar-opacity:1\](?: |$)/);
+  assert.match(row.className, /(?:^| )focus-within:\[--mi-toolbar-opacity:1\](?: |$)/);
   assert.equal(reaction.closest("[data-message-affordance='toolbar']"), toolbar);
   assert.equal(thread.closest("[data-message-affordance='toolbar']"), toolbar);
   assert.equal(saveButton.closest("[data-message-affordance='toolbar']"), toolbar);

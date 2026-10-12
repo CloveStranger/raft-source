@@ -1,5 +1,5 @@
 import { Checkbox, Textarea, Button } from "raft-ui";
-import { useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { Bug, CheckCircle } from "lucide-react";
 import { useIntl } from "react-intl";
 import { useNavigate } from "react-router-dom";
@@ -204,7 +204,7 @@ export default function ReportIssueDialog({
   // task #1228 ①: only the HTTP result of our own request is known here.
   const [transcriptRequestState, setTranscriptRequestState] = useState<TranscriptRequestState | null>(null);
 
-  const handleSubmit = async () => {
+  const handleSubmit = useCallback(async () => {
     if (!consented || loading) return;
     if (!feedbackExportUrl) {
       setError(formatMessage({ id: "agent.reportIssue.exportNotConfigured" }));
@@ -444,9 +444,9 @@ export default function ReportIssueDialog({
     } finally {
       setLoading(false);
     }
-  };
+  }, [agent, canIncludeMachineLog, consented, description, dmChannelId, feedbackExportUrl, formatMessage, locale, getActivityLog, getTrajectoryLog, includeActivityLog, includeMachineLogTail, includeRecentMessages, includeSessionTranscript, includeTrajectoryLog, loading, machine, server, user]);
 
-  const handleRetryTicket = async () => {
+  const handleRetryTicket = useCallback(async () => {
     if (!submittedReport || submittedReport.ticketId) return;
     setTicketRetrying(true);
     try {
@@ -455,9 +455,9 @@ export default function ReportIssueDialog({
     } finally {
       setTicketRetrying(false);
     }
-  };
+  }, [submittedReport]);
 
-  const handleCopyReportReference = async () => {
+  const handleCopyReportReference = useCallback(async () => {
     if (!submittedReport) return;
     const lines = [
       `reportId: ${submittedReport.reportId}`,
@@ -466,11 +466,45 @@ export default function ReportIssueDialog({
     ].filter(Boolean);
     await navigator.clipboard.writeText(lines.join("\n"));
     setReportRefCopied(true);
-  };
+  }, [submittedReport]);
+
+  const handleDescriptionChange = useCallback((e: React.ChangeEvent<HTMLTextAreaElement>) => {
+    setDescription(e.target.value);
+  }, []);
+
+  const handleRecentMessagesChange = useCallback((checked: boolean) => {
+    setIncludeRecentMessages(checked);
+  }, []);
+
+  const handleActivityLogChange = useCallback((checked: boolean) => {
+    setIncludeActivityLog(checked);
+  }, []);
+
+  const handleTrajectoryLogChange = useCallback((checked: boolean) => {
+    setIncludeTrajectoryLog(checked);
+  }, []);
+
+  const handleSessionTranscriptChange = useCallback((checked: boolean) => {
+    setIncludeSessionTranscript(checked);
+  }, []);
+
+  const handleMachineLogTailChange = useCallback((checked: boolean) => {
+    setMachineLogTailChoice(checked);
+  }, []);
+
+  const handleConsentedChange = useCallback((checked: boolean) => {
+    setConsented(checked);
+  }, []);
 
   const ticketPath = submittedReport?.ticketId && submittedReport.serverSlug
     ? `/s/${submittedReport.serverSlug}/settings/feedback/ticket/${encodeURIComponent(submittedReport.ticketId)}`
     : null;
+
+  const handleViewTicket = useCallback(() => {
+    if (!ticketPath) return;
+    onClose();
+    navigate(ticketPath);
+  }, [onClose, navigate, ticketPath]);
 
   if (submitted) {
     return (
@@ -531,10 +565,7 @@ export default function ReportIssueDialog({
               <Button size="sm"
                 variant="outline"
                 type="button"
-                onClick={() => {
-                  onClose();
-                  navigate(ticketPath);
-                }}
+                onClick={handleViewTicket}
                 className="px-4 py-2 text-sm"
               >
                 {formatMessage({ id: "agent.reportIssue.viewTicket" })}
@@ -571,7 +602,7 @@ export default function ReportIssueDialog({
             rows={3}
             placeholder={formatMessage({ id: "agent.reportIssue.describePlaceholder" })}
             value={description}
-            onChange={(e) => setDescription(e.target.value)}
+            onChange={handleDescriptionChange}
             disabled={loading}
           />
         </FormField>
@@ -588,7 +619,7 @@ export default function ReportIssueDialog({
             <label className="flex select-none items-center gap-2">
               <Checkbox
                 checked={includeRecentMessages}
-                onCheckedChange={(checked) => setIncludeRecentMessages(checked)}
+                onCheckedChange={handleRecentMessagesChange}
                 disabled={loading}
               />
               <span className="text-sm">{formatMessage({ id: "agent.reportIssue.includeRecentMessages" })}</span>
@@ -596,7 +627,7 @@ export default function ReportIssueDialog({
             <label className="flex select-none items-center gap-2">
               <Checkbox
                 checked={includeActivityLog}
-                onCheckedChange={(checked) => setIncludeActivityLog(checked)}
+                onCheckedChange={handleActivityLogChange}
                 disabled={loading}
               />
               <span className="text-sm">{formatMessage({ id: "agent.reportIssue.includeLiveActivity" })}</span>
@@ -604,7 +635,7 @@ export default function ReportIssueDialog({
             <label className="flex select-none items-center gap-2">
               <Checkbox
                 checked={includeTrajectoryLog}
-                onCheckedChange={(checked) => setIncludeTrajectoryLog(checked)}
+                onCheckedChange={handleTrajectoryLogChange}
                 disabled={loading}
               />
               <span className="text-sm">{formatMessage({ id: "agent.reportIssue.includeActivityHistory" })}</span>
@@ -612,7 +643,7 @@ export default function ReportIssueDialog({
             <label className="flex select-none items-center gap-2">
               <Checkbox
                 checked={includeSessionTranscript}
-                onCheckedChange={(checked) => setIncludeSessionTranscript(checked)}
+                onCheckedChange={handleSessionTranscriptChange}
                 disabled={loading || !agent.machineId}
               />
               <span className="text-sm">{formatMessage({ id: "agent.reportIssue.includeRuntimeTranscript" })}</span>
@@ -626,7 +657,7 @@ export default function ReportIssueDialog({
               <label className="flex select-none items-start gap-2">
                 <Checkbox
                   checked={includeMachineLogTail}
-                  onCheckedChange={(checked) => setMachineLogTailChoice(checked)}
+                  onCheckedChange={handleMachineLogTailChange}
                   disabled={loading || !includeSessionTranscript}
                 />
                 <span className="text-sm">
@@ -655,7 +686,7 @@ export default function ReportIssueDialog({
           <label className="flex select-none items-center gap-2">
             <Checkbox
               checked={consented}
-              onCheckedChange={(checked) => setConsented(checked)}
+              onCheckedChange={handleConsentedChange}
               disabled={loading}
             />
             <span className="text-xs font-bold">{formatMessage({ id: "agent.reportIssue.consent" })}</span>

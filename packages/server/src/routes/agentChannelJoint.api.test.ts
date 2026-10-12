@@ -6,11 +6,11 @@ import { randomUUID } from "node:crypto";
 import { and, eq } from "drizzle-orm";
 
 import { getDb } from "../db/index";
-import { serverAgentMembers } from "../db/schema";
+import { serverAgentMembers, serverMembers } from "../db/schema";
 import { addMember } from "../services/serverService";
 import { createAgent } from "../services/agentService";
 import { mintAgentCredential } from "../services/agentCredentialService";
-import { addAgent, getChannel, isChannelAgent, isChannelHuman } from "../services/channelService";
+import { addAgent, addHuman, getChannel, isChannelAgent, isChannelHuman } from "../services/channelService";
 import { createServer, headers, installFakeIo, seedUser } from "./channels.api.fixtures";
 import { setChannelArchivedForAgent } from "./agentChannelLifecycle";
 import { addChannelMemberForAgent, removeChannelMemberForAgent } from "./agentChannelMembers";
@@ -62,7 +62,9 @@ async function setupJoint(app: { baseUrl: string }, label: string) {
   return {
     hostServer,
     targetServer,
+    hostOwner,
     targetOwner,
+    channelName: `${label}-room-${suffix}`,
     hostProjectionId: hostProjection.id,
     targetProjectionId: targetProjection.id,
     agent,
@@ -214,4 +216,34 @@ test("an admin agent archives and unarchives a joint channel for every server; a
   assert.equal(unarchived.status, 200, JSON.stringify(unarchived.body));
   assert.equal((await getChannel(f.hostProjectionId))?.archivedAt, null);
   assert.equal((await getChannel(f.targetProjectionId))?.archivedAt, null);
+});
+
+test("an agent's joint member listing names every server a person takes part through (RFC 075 phase 1)", async ({ app }) => {
+  const f = await setupJoint(app, "joint-badges");
+  const dualName = `joint-badges-dual-${randomUUID().slice(0, 8)}`;
+  const dual = await seedUser(`${dualName}@slock.test`, dualName);
+  await getDb().insert(serverMembers).values([
+    { serverId: f.hostServer.id, userId: dual.id, role: "member" },
+    { serverId: f.targetServer.id, userId: dual.id, role: "member" },
+  ]);
+  await addHuman(f.hostProjectionId, dual.id);
+  await addHuman(f.targetProjectionId, dual.id);
+  const credential = await mintAgentCredential({
+    agentId: f.agent.id,
+    scopes: ["channels"],
+    name: "joint-badges-test",
+    createdByUserId: null,
+  });
+
+  const res = await fetch(`${app.baseUrl}/internal/agent-api/channel-members?channel=${encodeURIComponent(`#${f.channelName}`)}`, {
+    headers: { Authorization: `Bearer ${credential.apiKey}` },
+  });
+  assert.equal(res.status, 200, await res.clone().text());
+  const body = await res.json() as { humans: Array<{ name: string; servers?: Array<{ name: string; slug: string; yours?: true }> }> };
+  const byName = new Map(body.humans.map((human) => [human.name, human]));
+  const host = { name: f.hostServer.name, slug: f.hostServer.slug, yours: true };
+  const target = { name: f.targetServer.name, slug: f.targetServer.slug };
+  assert.deepEqual(byName.get(dual.name)?.servers, [host, target], "own server first and marked yours, then the peer");
+  assert.deepEqual(byName.get(f.targetOwner.name)?.servers, [target], "a peer-only person names the peer server");
+  assert.equal(byName.get(f.hostOwner.name)?.servers, undefined, "a person only on the agent's server is listed as before");
 });

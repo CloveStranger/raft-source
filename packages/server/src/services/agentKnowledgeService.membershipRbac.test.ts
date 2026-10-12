@@ -131,6 +131,7 @@ test("the documented version gate is real: channel roles need supportsChannelRol
     channelRole: "admin" as const,
     isChannelMember: true,
     capability: "removeChannelMembers" as const,
+    channelType: "channel",
   };
   assert.equal(hasEffectiveChannelCapability({ ...input, supportsChannelRoles: true }), true);
   assert.equal(

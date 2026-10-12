@@ -1,14 +1,17 @@
-import Tooltip from "../ui/Tooltip";
-import { Badge, SegmentedControl, SegmentedControlItem, SegmentedControlLabel, CopyableCodeRoot, CopyableCode, CopyableCodeAction } from "raft-ui";
-import { useState } from "react";
+import { Badge, SegmentedControl, SegmentedControlItem, SegmentedControlLabel } from "raft-ui";
+import { useCallback, useMemo, useState } from "react";
 import { Terminal } from "lucide-react";
 import { useIntl } from "react-intl";
 import type { ComputerCommandPlatform } from "../../utils/computerSetupCommand";
 import SectionEyebrow from "../ui/SectionEyebrow";
+import { CommandRow } from "./CommandRow";
 
 interface ComputerCommandGuideProps {
   computerCommand: string | null;
   computerInstallCommand: string | null;
+  // When set, mac/Linux shows this single install-then-setup command instead
+  // of the separate install and setup steps.
+  computerInstallAndSetupCommand?: string | null;
   windowsComputerCommand?: string | null;
   windowsComputerInstallCommand?: string | null;
   className?: string;
@@ -19,13 +22,14 @@ interface ComputerCommandGuideProps {
 // command is retired: the daemon is no longer published on its own and this
 // guide never offers it (docs/operations/computer-release-version.md).
 
-type CopyTarget =
+export type CopyTarget =
   | "mac-linux-install"
+  | "mac-linux-install-and-setup"
   | "mac-linux-setup"
   | "windows-install"
   | "windows-setup";
 
-interface CommandStep {
+export interface CommandStep {
   target: CopyTarget;
   label?: string;
   command: string;
@@ -44,10 +48,14 @@ function getComputerSteps(
   platform: ComputerCommandPlatform,
   macLinuxInstall: string | null,
   macLinuxSetup: string | null,
+  macLinuxInstallAndSetup: string | null,
   windowsInstall: string | null,
   windowsSetup: string | null,
   labels: ComputerStepLabels,
 ): CommandStep[] {
+  if (platform === "mac-linux" && macLinuxInstallAndSetup) {
+    return [{ target: "mac-linux-install-and-setup", command: macLinuxInstallAndSetup, copyAriaLabel: labels.copySetup }];
+  }
   const install = platform === "windows" ? windowsInstall : macLinuxInstall;
   const setup = platform === "windows" ? windowsSetup : macLinuxSetup;
   const prefix = platform === "windows" ? "windows" : "mac-linux";
@@ -73,24 +81,13 @@ function CommandRows({
 }) {
   return (
     <div className="space-y-3">
-      {steps.map(({ target, label, command, copyAriaLabel }) => (
-        <div key={target}>
-          {label ? <div className="mb-1 text-xs font-bold text-foreground-muted theme-brutal:text-black/60">{label}</div> : null}
-          <CopyableCodeRoot
-            copied={copiedCommand === target}
-            onCopy={() => onCopy(target)}
-          >
-            <CopyableCode className="min-w-0 flex-1 px-3 py-2 font-mono text-xs break-all">
-              {command}
-            </CopyableCode>
-            <Tooltip content={copyAriaLabel}>
-              <CopyableCodeAction
-                aria-label={copyAriaLabel}
-                className="shrink-0"
-              />
-            </Tooltip>
-          </CopyableCodeRoot>
-        </div>
+      {steps.map((step) => (
+        <CommandRow
+          key={step.target}
+          step={step}
+          copied={copiedCommand === step.target}
+          onCopy={onCopy}
+        />
       ))}
     </div>
   );
@@ -99,6 +96,7 @@ function CommandRows({
 export default function ComputerCommandGuide({
   computerCommand,
   computerInstallCommand,
+  computerInstallAndSetupCommand = null,
   windowsComputerCommand = null,
   windowsComputerInstallCommand = null,
   className = "",
@@ -111,33 +109,49 @@ export default function ComputerCommandGuide({
   const isComputerGuide = Boolean(
     computerCommand || computerInstallCommand || windowsComputerCommand || windowsComputerInstallCommand,
   );
-  const selectedComputerSteps = getComputerSteps(
-    platform,
-    computerInstallCommand,
+  const displayedComputerSteps = useMemo(() => {
+    const selectedComputerSteps = getComputerSteps(
+      platform,
+      computerInstallCommand,
+      computerCommand,
+      computerInstallAndSetupCommand,
+      windowsComputerInstallCommand,
+      windowsComputerCommand,
+      {
+        install: formatMessage({ id: "machine.commandGuide.installStep" }),
+        setup: formatMessage({ id: "machine.commandGuide.setupStep" }),
+        copyInstall: formatMessage({ id: "machine.commandGuide.copyInstallCommand" }),
+        copySetup: formatMessage({ id: "machine.commandGuide.copySetupCommand" }),
+      },
+    );
+    return selectedComputerSteps.length === 1
+      ? [{
+        ...selectedComputerSteps[0],
+        label: undefined,
+        copyAriaLabel: formatMessage({ id: "machine.commandGuide.copyComputerCliCommand" }),
+      }]
+      : selectedComputerSteps;
+  }, [
     computerCommand,
-    windowsComputerInstallCommand,
+    computerInstallAndSetupCommand,
+    computerInstallCommand,
+    formatMessage,
+    platform,
     windowsComputerCommand,
-    {
-      install: formatMessage({ id: "machine.commandGuide.installStep" }),
-      setup: formatMessage({ id: "machine.commandGuide.setupStep" }),
-      copyInstall: formatMessage({ id: "machine.commandGuide.copyInstallCommand" }),
-      copySetup: formatMessage({ id: "machine.commandGuide.copySetupCommand" }),
-    },
-  );
-  const displayedComputerSteps = selectedComputerSteps.length === 1
-    ? [{
-      ...selectedComputerSteps[0],
-      label: undefined,
-      copyAriaLabel: formatMessage({ id: "machine.commandGuide.copyComputerCliCommand" }),
-    }]
-    : selectedComputerSteps;
+    windowsComputerInstallCommand,
+  ]);
 
-  const handleCopy = (target: CopyTarget) => {
+  const handleCopy = useCallback((target: CopyTarget) => {
     setCopiedCommand(target);
     setTimeout(() => {
       setCopiedCommand((current) => (current === target ? null : current));
     }, 2000);
-  };
+  }, []);
+
+  const handlePlatformChange = useCallback((next: ComputerCommandPlatform) => {
+    setPlatform(next);
+    onPlatformChange?.(next);
+  }, [onPlatformChange]);
 
   return (
     <div className={className}>
@@ -148,10 +162,7 @@ export default function ComputerCommandGuide({
         </div>
         <SegmentedControl<ComputerCommandPlatform>
           value={platform}
-          onValueChange={(next) => {
-            setPlatform(next);
-            onPlatformChange?.(next);
-          }}
+          onValueChange={handlePlatformChange}
           aria-label={formatMessage({ id: "machine.commandGuide.choosePlatform" })}
           className="shrink-0"
         >
@@ -188,7 +199,7 @@ export default function ComputerCommandGuide({
             <CommandRows
               steps={displayedComputerSteps}
               copiedCommand={copiedCommand}
-              onCopy={(target) => handleCopy(target)}
+              onCopy={handleCopy}
             />
           ) : (
             <div className="border-2 border-line-muted theme-brutal:border-black/30 bg-layer-panel theme-brutal:bg-white px-3 py-2 text-xs font-bold text-foreground-muted theme-brutal:text-black/50">
@@ -200,7 +211,7 @@ export default function ComputerCommandGuide({
         <CommandRows
           steps={displayedComputerSteps}
           copiedCommand={copiedCommand}
-          onCopy={(target) => handleCopy(target)}
+          onCopy={handleCopy}
         />
       ) : (
         <div className="border-2 border-line-muted theme-brutal:border-black/30 bg-layer-panel theme-brutal:bg-white px-3 py-2 text-xs font-bold text-foreground-muted theme-brutal:text-black/50">

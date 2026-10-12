@@ -5,7 +5,7 @@
 // shared user identity + N independent per-server attachments, each with
 // its own runner, all owned by one service.
 //
-//   ~/.slock/computer/
+//   <Raft home>/computer/            # Raft home: see resolveRaftHome
 //     user-session.json              # SHARED — one user identity per Computer
 //     run/                           # service-level runtime state (RFC v9.8 §8.1)
 //       service.sock                 # §4 IPC socket (POSIX)
@@ -27,8 +27,16 @@
 // Anything that should be wiped by the internal `reset-service` IPC
 // mutation belongs under `run/`, not at the install root.
 import { createHash } from "node:crypto";
+import { existsSync, readdirSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import {
+  configuredRaftHome,
+  defaultRaftHomeDirname,
+  defaultRaftHomesConflict,
+  LEGACY_RAFT_HOME_DIRNAME,
+  RAFT_HOME_DIRNAME,
+} from "@botiverse/raft-shared";
 
 /**
  * Current on-disk JSON-state schema version (pre-release hardening).
@@ -48,8 +56,73 @@ export function resolveRaftHome(
   homeDir = os.homedir(),
 ): string {
   const configured = env.RAFT_HOME?.trim() || env.SLOCK_HOME?.trim();
-  const raw = configured && configured.length > 0 ? configured : path.join(homeDir, ".slock");
+  const raw = configured && configured.length > 0 ? configured : resolveDefaultRaftHome(homeDir);
   return path.resolve(expandHome(raw, homeDir));
+}
+
+/** ~/.slock when it already holds Raft state, else ~/.raft (rule in @botiverse/raft-shared raftHome.ts). */
+export function resolveDefaultRaftHome(homeDir = os.homedir()): string {
+  return path.resolve(homeDir, defaultRaftHomeDirname((name) => existsSync(path.join(homeDir, name))));
+}
+
+export interface RaftHomeConflict {
+  /** Both default homes, each with how many agent workspaces it holds. */
+  homes: Array<{ path: string; agentCount: number }>;
+}
+
+/**
+ * task #915: with no RAFT_HOME / SLOCK_HOME set and BOTH ~/.slock and ~/.raft
+ * holding Raft state, the default rule cannot know which one this computer
+ * runs from. Starting from the wrong one strands its agents' workspaces, so
+ * `start` refuses and `doctor` reports this instead of guessing.
+ */
+export function findRaftHomeConflict(
+  env: { SLOCK_HOME?: string; RAFT_HOME?: string } = process.env,
+  homeDir = os.homedir(),
+  exists: (p: string) => boolean = existsSync,
+  countAgents: (agentsDir: string) => number = countAgentWorkspaces,
+): RaftHomeConflict | null {
+  if (configuredRaftHome(env)) return null;
+  if (!defaultRaftHomesConflict((name) => exists(path.join(homeDir, name)))) return null;
+  return {
+    homes: [LEGACY_RAFT_HOME_DIRNAME, RAFT_HOME_DIRNAME].map((name) => {
+      const home = path.resolve(homeDir, name);
+      return { path: home, agentCount: countAgents(path.join(home, "agents")) };
+    }),
+  };
+}
+
+/** Only a home picked by the default rule can be a guess; an explicit one is the owner's choice. */
+export function findRaftHomeConflictFor(
+  slockHome: string,
+  env: { SLOCK_HOME?: string; RAFT_HOME?: string } = process.env,
+  homeDir = os.homedir(),
+): RaftHomeConflict | null {
+  const conflict = findRaftHomeConflict(env, homeDir);
+  if (!conflict) return null;
+  const resolved = path.resolve(slockHome);
+  return conflict.homes.some((h) => h.path === resolved) ? conflict : null;
+}
+
+/** One message for the owner: what each home holds and how to pick one. */
+export function describeRaftHomeConflict(conflict: RaftHomeConflict, homeDir = os.homedir()): string {
+  const homes = conflict.homes
+    .map((h) => `${formatRaftHomeForDisplay(h.path, homeDir)} (${h.agentCount} agent workspace${h.agentCount === 1 ? "" : "s"})`)
+    .join(" and ");
+  const example = formatRaftHomeForDisplay(conflict.homes[conflict.homes.length - 1]!.path, homeDir);
+  return (
+    `Both ${homes} hold Raft data, so Raft Computer cannot tell which one this computer uses. ` +
+    `Set RAFT_HOME to the one whose agents you use, for example \`RAFT_HOME=${example} raft-computer start\`, ` +
+    `and keep it set whenever you run Raft Computer.`
+  );
+}
+
+function countAgentWorkspaces(agentsDir: string): number {
+  try {
+    return readdirSync(agentsDir, { withFileTypes: true }).filter((e) => e.isDirectory()).length;
+  } catch {
+    return 0;
+  }
 }
 
 export function formatRaftHomeForDisplay(raftHome: string, homeDir = os.homedir()): string {

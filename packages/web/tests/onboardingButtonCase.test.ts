@@ -59,7 +59,10 @@ test("dialog buttons and context-menu items are Title Case", () => {
 test("page-level form buttons are Title Case too, not just dialogs", () => {
   // The create-server page sat on "Create server" while the very same file said
   // "+ Create New Server" for the same action. One rule now covers both.
-  const serverSelector = read("src/components/auth/ServerSelector.tsx");
+  const serverSelector = [
+    read("src/components/auth/ServerSelector.tsx"),
+    read("src/components/auth/ServerOptionCard.tsx"),
+  ].join("\n");
   const enCatalog = read("src/i18n/messages/en.ts");
   // ServerSelector migrated to react-intl, so its button copy is no longer in the
   // JSX. Same treatment as Sidebar/handoff above: the id is pinned at the call

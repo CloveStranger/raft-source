@@ -1,9 +1,9 @@
 import { randomUUID } from "node:crypto";
-import { spawn } from "node:child_process";
+import { spawnRuntimeChild } from "./runtimeChild";
 import path from "node:path";
 import { hydrateRuntimeConfig, runtimeConfigToLaunchFields, type AgentConfig, type RuntimeModelSourceOutcome , type AxSurfaceText } from "@botiverse/raft-shared";
 import { buildCliTransportSystemPrompt, prepareCliTransport } from "./cliTransport";
-import { resolveCommandOnPath, readCommandVersion, type ProbeDeps } from "./probe";
+import { lookupCommandOnPath, resolveCommandOnPath, readCommandVersion, type ProbeDeps } from "./probe";
 import { resolveWindowsDirectLaunch, type DirectLaunch } from "./windowsLaunch";
 import type { ParsedEvent, RuntimeDriver, RuntimeProbeResult, SpawnContext, SpawnResult } from "./types";
 import {
@@ -120,8 +120,8 @@ export class AntigravityDriver implements RuntimeDriver {
   private sessionAnnounced = false;
 
   probe(): RuntimeProbeResult {
-    const command = resolveCommandOnPath("agy");
-    if (!command) return { available: false };
+    const { command, missReason } = lookupCommandOnPath("agy");
+    if (!command) return { available: false, unavailableReason: missReason };
     return {
       available: true,
       version: readCommandVersion(command) ?? undefined,
@@ -153,7 +153,9 @@ export class AntigravityDriver implements RuntimeDriver {
       ...ANTIGRAVITY_ENV_OVERRIDES,
     });
 
-    const proc = spawn(launch.command, launch.args, {
+    // task #365: after the last await, right before the child exists.
+    ctx.assertLaunchCurrent?.();
+    const proc = spawnRuntimeChild(launch.command, launch.args, {
       cwd: ctx.workingDirectory,
       stdio: ["pipe", "pipe", "pipe"],
       env: launch.env ?? spawnEnv,

@@ -94,6 +94,15 @@ export interface SlackBridgeFrozenAuthorPresentation {
   } | null;
 }
 
+// Hosts whose public avatar URLs may be forwarded to Slack as-is, without
+// requiring the asset to be stored on our own CDN. Slack fetches icon_url
+// server-side, so the URL only needs to be publicly reachable over HTTPS.
+// Exported so the delivery worker can apply the same boundary when
+// validating snapshots; do not add a separate copy.
+export const EXTERNAL_AVATAR_ALLOWED_HOSTS = new Set([
+  "lh3.googleusercontent.com",
+]);
+
 function frozenAuthorAvatar(input: {
   senderType: "user" | "agent";
   serverId: string;
@@ -108,17 +117,22 @@ function frozenAuthorAvatar(input: {
   } catch {
     return null;
   }
-  const basePath = cdnBase.pathname.replace(/\/$/u, "");
   if (
     url.protocol !== "https:"
-    || cdnBase.protocol !== "https:"
-    || url.origin !== cdnBase.origin
-    || !url.pathname.startsWith(`${basePath}/`)
     || url.username
     || url.password
     || url.search
     || url.hash
   ) return null;
+  if (url.origin !== cdnBase.origin) {
+    if (!EXTERNAL_AVATAR_ALLOWED_HOSTS.has(url.hostname)) return null;
+    return {
+      publicUrl: url.toString(),
+      contentDigest: createHash("sha256").update(url.toString()).digest("hex").slice(0, 32),
+    };
+  }
+  const basePath = cdnBase.pathname.replace(/\/$/u, "");
+  if (cdnBase.protocol !== "https:" || !url.pathname.startsWith(`${basePath}/`)) return null;
   const owned = input.senderType === "user"
     ? isStoredUserAvatarUrl(input.avatarUrl)
     : isStoredServerScopedAvatarUrl(input.avatarUrl, input.serverId);

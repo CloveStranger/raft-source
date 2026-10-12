@@ -1,15 +1,47 @@
 import assert from "node:assert/strict";
-import { mkdirSync, rmSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { listLegacyRaftStatePaths, resolveDefaultRaftHome, resolveRaftHome, resolveRaftHomePath } from "./raftHome";
 
-test("resolveRaftHome defaults to ~/.slock", () => {
-  assert.equal(resolveRaftHome({}, "/Users/alice"), path.resolve("/Users/alice/.slock"));
+function withTempHome(run: (home: string) => void): void {
+  const home = path.join(os.tmpdir(), `raft-home-default-test-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+  mkdirSync(home, { recursive: true });
+  try {
+    run(home);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+}
+
+test("resolveRaftHome defaults to ~/.raft on a machine without ~/.slock", () => {
+  withTempHome((home) => {
+    assert.equal(resolveRaftHome({}, home), path.resolve(home, ".raft"));
+  });
+});
+
+test("resolveRaftHome keeps an existing ~/.slock that holds Raft state, even when ~/.raft exists too", () => {
+  withTempHome((home) => {
+    mkdirSync(path.join(home, ".slock", "agents"), { recursive: true });
+    assert.equal(resolveRaftHome({}, home), path.resolve(home, ".slock"));
+    mkdirSync(path.join(home, ".raft", "agents"), { recursive: true });
+    assert.equal(resolveRaftHome({}, home), path.resolve(home, ".slock"));
+  });
+});
+
+test("resolveRaftHome is not pulled to a ~/.slock that only holds a notice file", () => {
+  withTempHome((home) => {
+    mkdirSync(path.join(home, ".raft", "agents"), { recursive: true });
+    mkdirSync(path.join(home, ".slock"));
+    writeFileSync(path.join(home, ".slock", ".cli-rename-notice"), "");
+    assert.equal(resolveRaftHome({}, home), path.resolve(home, ".raft"));
+  });
 });
 
 test("resolveDefaultRaftHome resolves the default root independently of SLOCK_HOME", () => {
-  assert.equal(resolveDefaultRaftHome("/Users/alice"), path.resolve("/Users/alice/.slock"));
+  withTempHome((home) => {
+    assert.equal(resolveDefaultRaftHome(home), path.resolve(home, ".raft"));
+  });
 });
 
 test("resolveRaftHome normalizes SLOCK_HOME to an absolute path", () => {
@@ -63,4 +95,30 @@ test("listLegacyRaftStatePaths is empty for default SLOCK_HOME", () => {
   } finally {
     rmSync(home, { recursive: true, force: true });
   }
+});
+
+// Every process must resolve the Raft home through the shared rule
+// (@botiverse/raft-shared raftHome.ts), or a new machine ends up with state in
+// both ~/.raft and ~/.slock. This catches a default home spelled out by hand:
+// `.slock`/`.raft` joined straight onto the user's home directory. Directories
+// named `.slock` INSIDE an agent workspace are a different thing and allowed.
+test("no package hard-codes the default Raft home directory", () => {
+  const packagesDir = path.resolve(new URL(".", import.meta.url).pathname, "..", "..");
+  const roots = ["daemon/src", "computer/src", "cli/src", "raft-sdk/src"];
+  const homeJoin = /(?:homedir\(\)|homeDir|\bhome\b|HOME)\s*(?:\?\?[^,]*)?,\s*["'`]\.(?:slock|raft)["'`/]/;
+  const offenders: string[] = [];
+  const walk = (dir: string): void => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        if (entry.name !== "node_modules") walk(full);
+      } else if (/\.(?:ts|mts|mjs)$/.test(entry.name) && !/\.test\.|testkit/.test(entry.name)) {
+        readFileSync(full, "utf8").split("\n").forEach((line, index) => {
+          if (homeJoin.test(line)) offenders.push(`${path.relative(packagesDir, full)}:${index + 1}: ${line.trim()}`);
+        });
+      }
+    }
+  };
+  for (const root of roots) walk(path.join(packagesDir, root));
+  assert.deepEqual(offenders, [], "resolve the Raft home through resolveRaftHome / defaultRaftHomeDirname instead");
 });

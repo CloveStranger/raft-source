@@ -5,7 +5,7 @@ import { useShallow } from "zustand/react/shallow";
 import { useIntl } from "react-intl";
 import Tooltip from "../ui/Tooltip";
 import { formatRelativeTime } from "../../utils/relativeTime";
-import { Activity, ArrowDownUp, ArrowUp, AtSign, Bell, BellOff, Bookmark, Check, CheckCircle2, ChevronDown, Hash, Inbox, Mail, MessageSquareCheck, MessageSquareDot, MessageSquareText, Pencil, RotateCcw, Search } from "lucide-react";
+import { Activity, ArrowDownUp, ArrowUp, AtSign, BellOff, Bookmark, Check, CheckCircle2, ChevronDown, Hash, Inbox, Mail, MessageCircle, MessageSquareText, Pencil, RotateCcw, Search } from "lucide-react";
 import { getInboxItemKey, useInboxStore } from "../../store/inboxStore";
 import type { ActivitySortDirection, InboxItem, InboxFilter, InboxGroupCount } from "../../store/inboxStore";
 import { useActivityPanelWindowBundle } from "../../store/activityPanel/useActivityShadow";
@@ -14,7 +14,6 @@ import {
   Button,
   Card,
   ActivityInboxPanel,
-  ContextMenuPopup,
   DirectMessageIcon,
   SegmentedControl,
   SegmentedControlItem,
@@ -61,7 +60,6 @@ import {
 import InlineMarkdownPreview from "../markdown/InlineMarkdownPreview";
 import PanelHeader from "../ui/PanelHeader";
 import EmptyState from "../ui/EmptyState";
-import MenuItem from "../ui/MenuItem";
 import DialogCard from "../ui/DialogCard";
 import { ConversationCardSkeleton } from "../ui/Skeleton";
 import AvatarSlot from "../ui/AvatarSlot";
@@ -69,14 +67,10 @@ import { placeInboxContextMenu } from "./inboxContextMenuPosition";
 import type { InboxContextMenuPosition } from "./inboxContextMenuPosition";
 import { itemFilterChannelLabel } from "./inboxChannelFilter";
 import DismissBackdrop from "../ui/DismissBackdrop";
+import { InboxContextMenu } from "./InboxContextMenu";
 
 function itemKey(item: InboxItem): string {
   return getInboxItemKey(item);
-}
-
-function itemChannelId(item: InboxItem): string {
-  if (item.kind === "mention_action") return item.channelId;
-  return item.kind === "thread" ? item.threadChannelId : item.channelId;
 }
 
 function handleNestedRowActionKeyDown(event: ReactKeyboardEvent<HTMLButtonElement>, action: () => void) {
@@ -219,7 +213,8 @@ function activityMentionsOnly(filter: InboxFilter): boolean {
 }
 
 type CtxMenu = InboxContextMenuPosition;
-type ActivitySidebarView = "all" | "unread" | "mentions" | "saved" | "done";
+type ActivitySidebarView = "all" | "unread" | "mentions" | "saved" | "dms" | "done";
+const DM_VIEW_REFRESH_DEBOUNCE_MS = 500;
 
 const ACTIVITY_SORT_OPTIONS: Array<{ value: ActivitySortDirection; labelId: MessageId }> = [
   { value: "desc", labelId: "activity.current.sortNewest" },
@@ -288,14 +283,13 @@ function ActivityGroupIcon({ group, dmChannel }: { group: InboxGroupCount; dmCha
   );
 }
 
-function InboxRow({ item, filter, searchQuery, onOpen, onDone, onContextMenu, onDragStart, focused, active, focusRef, doneAction = "done" }: {
+function InboxRow({ item, filter, searchQuery, onOpen, onDone, onContextMenu, focused, active, focusRef, doneAction = "done" }: {
   item: InboxItem;
   filter: InboxFilter;
   searchQuery: string;
-  onOpen: (e: React.MouseEvent | ReactKeyboardEvent) => void;
-  onDone: () => void;
-  onContextMenu: (e: React.MouseEvent) => void;
-  onDragStart?: (event: React.DragEvent<HTMLDivElement>) => void;
+  onOpen: (e: React.MouseEvent | ReactKeyboardEvent, item: InboxItem) => void;
+  onDone: (item: InboxItem) => void;
+  onContextMenu: (e: React.MouseEvent, item: InboxItem) => void;
   focused?: boolean;
   active?: boolean;
   focusRef?: React.Ref<HTMLDivElement>;
@@ -411,6 +405,22 @@ function InboxRow({ item, filter, searchQuery, onOpen, onDone, onContextMenu, on
     rowActionVisibilityClassName
   }`;
   const hasRowAction = doneAction !== "none";
+  const handleOpen = useCallback((event: React.MouseEvent | ReactKeyboardEvent) => onOpen(event, item), [item, onOpen]);
+  const handleKeyDown = useCallback((event: ReactKeyboardEvent) => {
+    if (event.key !== "Enter" && event.key !== " ") return;
+    event.preventDefault();
+    onOpen(event, item);
+  }, [item, onOpen]);
+  const handleContextMenu = useCallback((event: React.MouseEvent) => onContextMenu(event, item), [item, onContextMenu]);
+  const handleDone = useCallback(() => onDone(item), [item, onDone]);
+  const handleDoneClick = useCallback((event: React.MouseEvent) => {
+    event.stopPropagation();
+    handleDone();
+  }, [handleDone]);
+  const handleDoneKeyDown = useCallback(
+    (event: ReactKeyboardEvent<HTMLButtonElement>) => handleNestedRowActionKeyDown(event, handleDone),
+    [handleDone],
+  );
   const timestampVisibilityClassName = !hasRowAction
     ? ""
     : active
@@ -429,15 +439,9 @@ function InboxRow({ item, filter, searchQuery, onOpen, onDone, onContextMenu, on
       data-focused={focused ? "true" : undefined}
       data-active={active ? "true" : undefined}
       aria-current={focused || active ? "true" : undefined}
-      onClick={onOpen}
-      onKeyDown={(event) => {
-        if (event.key !== "Enter" && event.key !== " ") return;
-        event.preventDefault();
-        onOpen(event);
-      }}
-      onContextMenu={onContextMenu}
-      draggable={!!onDragStart}
-      onDragStart={onDragStart}
+      onClick={handleOpen}
+      onKeyDown={handleKeyDown}
+      onContextMenu={handleContextMenu}
       className={rowClassName}
     >
       <div className="min-w-0 w-full" data-testid="conversation-card-content">
@@ -554,8 +558,8 @@ function InboxRow({ item, filter, searchQuery, onOpen, onDone, onContextMenu, on
           <Tooltip content={formatMessage({ id: doneAction === "restore" ? "activity.current.restore" : "thread.row.markAsDone" })}>
           <Button variant="ghost" size="icon-sm"
             type="button"
-            onClick={(e) => { e.stopPropagation(); onDone(); }}
-            onKeyDown={(event) => handleNestedRowActionKeyDown(event, onDone)}
+            onClick={handleDoneClick}
+            onKeyDown={handleDoneKeyDown}
             className={doneActionClassName}
             aria-label={formatMessage({ id: doneAction === "restore" ? "activity.current.restore" : "thread.row.markAsDone" })}
             data-testid="inbox-row-done"
@@ -574,9 +578,7 @@ function isDesktopMasterDetailViewport(newInbox = false): boolean {
   return window.matchMedia(newInbox ? "(min-width: 768px)" : "(min-width: 1024px)").matches;
 }
 
-export default function ThreadsInbox({ onOpenItem, onDragItem, compactActivitySidebar = false }: {
-  onOpenItem?: (item: InboxItem) => void;
-  onDragItem?: (event: React.DragEvent<HTMLDivElement>, item: InboxItem) => void;
+export default function ThreadsInbox({ compactActivitySidebar = false }: {
   compactActivitySidebar?: boolean;
 } = {}) {
   const { formatMessage, formatNumber } = useIntl();
@@ -610,13 +612,9 @@ export default function ThreadsInbox({ onOpenItem, onDragItem, compactActivitySi
   const markRead = useInboxStore((s) => s.markRead);
   const markAllRead = useInboxStore((s) => s.markAllRead);
   const markDone = useInboxStore((s) => s.markDone);
-  const markThreadUnfollowed = useInboxStore((s) => s.markThreadUnfollowed);
-  const markThreadRefollowed = useInboxStore((s) => s.markThreadRefollowed);
   const openThread = useThreadStore((s) => s.openThread);
   const openContentSlot = useSearchContentStore((s) => s.open);
   const contentSlot = useSearchContentStore((s) => s.slot);
-  const followThread = useThreadStore((s) => s.followThread);
-  const unfollowThread = useThreadStore((s) => s.unfollowThread);
   const focusedThreadChannelId = useThreadStore((s) => s.focusedThreadChannelId);
   const setFocusedThreadChannelId = useThreadStore((s) => s.setFocusedThreadChannelId);
   const savedEntries = useSavedStore((s) => s.saved);
@@ -637,6 +635,12 @@ export default function ThreadsInbox({ onOpenItem, onDragItem, compactActivitySi
   const [doneLoading, setDoneLoading] = useState(false);
   const [doneLoadingMore, setDoneLoadingMore] = useState(false);
   const [doneHasMore, setDoneHasMore] = useState(false);
+  const [dmItems, setDmItems] = useState<InboxItem[]>([]);
+  const [dmTotal, setDmTotal] = useState<number | null>(null);
+  const [dmLoading, setDmLoading] = useState(false);
+  const [dmLoadingMore, setDmLoadingMore] = useState(false);
+  const [dmHasMore, setDmHasMore] = useState(false);
+  const dmRequestIdRef = useRef(0);
   const scrollRef = useRef<HTMLDivElement>(null);
   const focusedRowRef = useRef<HTMLDivElement>(null);
   const autoScrolledFocusKeyRef = useRef<string | null>(null);
@@ -710,7 +714,9 @@ export default function ThreadsInbox({ onOpenItem, onDragItem, compactActivitySi
     ? savedActivityItems
     : activityView === "done"
       ? doneItems
-      : items;
+      : activityView === "dms"
+        ? dmItems
+        : items;
   // Top-level Activity views and source selection are independent dimensions.
   // Saved/Done change the result set, never the mixed DM/channel navigation.
   const activityFacetGroups = activityGroups;
@@ -758,18 +764,25 @@ export default function ThreadsInbox({ onOpenItem, onDragItem, compactActivitySi
     ? savedLoading
     : activityView === "done"
       ? doneLoading
-      : loading;
+      : activityView === "dms"
+        ? dmLoading
+        : loading;
   const visibleLoadingMore = activityView === "saved"
     ? savedLoading && savedActivityItems.length > 0
     : activityView === "done"
       ? doneLoadingMore
-      : loadingMore;
+      : activityView === "dms"
+        ? dmLoadingMore
+        : loadingMore;
   const visibleHasMore = activityView === "saved"
     ? savedHasMore
     : activityView === "done"
       ? doneHasMore
-      : hasMore;
-  const showMarkAllRead = totalUnreadCount > 0 && activityView !== "saved" && activityView !== "done";
+      : activityView === "dms"
+        ? dmHasMore
+        : hasMore;
+  // Mark-all-read acts on all of Activity, so it is offered only on the unscoped views.
+  const showMarkAllRead = totalUnreadCount > 0 && activityView !== "saved" && activityView !== "done" && activityView !== "dms";
   const prevItemsRef = useRef(visibleItems);
 
   const setActivityFilter = useCallback((nextFilter: InboxFilter) => {
@@ -816,6 +829,40 @@ export default function ThreadsInbox({ onOpenItem, onDragItem, compactActivitySi
       if (requestId === doneRequestIdRef.current) {
         setDoneLoading(false);
         setDoneLoadingMore(false);
+      }
+    }
+  }, [effectiveChannelFilterId, inboxSearchQuery, sortDirection]);
+
+  // The DMs view is Activity served with scope=dms (DMs and threads under DMs).
+  // Like Done it is its own request; it re-reads whenever the active window
+  // changes so realtime updates and Done actions reach it.
+  const loadDmItems = useCallback(async (reset = true, offset = 0, background = false) => {
+    const requestId = ++dmRequestIdRef.current;
+    if (reset && !background) setDmLoading(true);
+    else if (!reset) setDmLoadingMore(true);
+    try {
+      const { data } = await api.get("/channels/inbox", {
+        params: {
+          filter: "all",
+          scope: "dms",
+          limit: 30,
+          offset,
+          sort: sortDirection,
+          q: inboxSearchQuery || undefined,
+          channelId: effectiveChannelFilterId || undefined,
+        },
+      });
+      if (requestId !== dmRequestIdRef.current) return;
+      const nextItems = (data.items ?? []) as InboxItem[];
+      setDmItems((current) => reset ? nextItems : [...current, ...nextItems]);
+      setDmHasMore(!!data.hasMore);
+      setDmTotal(typeof data.totalCount === "number" ? data.totalCount : null);
+    } catch (err) {
+      console.error("Failed to load DM Activity:", err);
+    } finally {
+      if (requestId === dmRequestIdRef.current) {
+        setDmLoading(false);
+        setDmLoadingMore(false);
       }
     }
   }, [effectiveChannelFilterId, inboxSearchQuery, sortDirection]);
@@ -877,6 +924,30 @@ export default function ThreadsInbox({ onOpenItem, onDragItem, compactActivitySi
     if (!activitySidebarInboxEnabled || activityView !== "done") return;
     void loadDoneItems(true, 0);
   }, [activitySidebarInboxEnabled, activityView, loadDoneItems]);
+
+  const dmViewActive = activitySidebarInboxEnabled && activityView === "dms";
+  useEffect(() => {
+    if (!dmViewActive) return;
+    void loadDmItems(true, 0);
+  }, [dmViewActive, loadDmItems]);
+  // Any change to the active window (new message, read, Done) re-reads the
+  // DMs page in the background, without the loading skeleton. Debounced so a
+  // burst of updates costs one scoped query, not one per update.
+  const dmRefreshArmedRef = useRef(false);
+  useEffect(() => {
+    if (!dmViewActive) {
+      dmRefreshArmedRef.current = false;
+      return;
+    }
+    if (!dmRefreshArmedRef.current) {
+      dmRefreshArmedRef.current = true;
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      void loadDmItems(true, 0, true);
+    }, DM_VIEW_REFRESH_DEBOUNCE_MS);
+    return () => window.clearTimeout(timer);
+  }, [dmViewActive, items, loadDmItems]);
 
   useEffect(() => {
     if (!activitySidebarInboxEnabled || activityView === "saved" || activityView === "done") return;
@@ -1033,7 +1104,7 @@ export default function ThreadsInbox({ onOpenItem, onDragItem, compactActivitySi
     };
   }, []);
 
-  const navigateToChat = (item: InboxItem) => {
+  const navigateToChat = useCallback((item: InboxItem) => {
     if (item.kind === "thread") {
       // Prefer the first message that actually @-mentions the user (when the row
       // carries a mention) over the first unread message, so mention rows focus
@@ -1065,50 +1136,12 @@ export default function ThreadsInbox({ onOpenItem, onDragItem, compactActivitySi
     const targetMessageId = item.firstUnreadMessageId ?? item.lastMessageId;
     if (item.kind === "dm") nav.toDmMessage(item.channelId, targetMessageId);
     else nav.toMessage(item.channelId, targetMessageId);
-  };
+  }, [nav]);
 
-  const handleActivate = (event: React.MouseEvent | ReactKeyboardEvent, item: InboxItem) => {
-    const activationDetail = "detail" in event ? event.detail : 1;
-    if (onOpenItem) {
-      handleOpen(item);
-      return;
-    }
-    // Activity needs enough horizontal room for both the inbox list and the
-    // detail pane. Tablet/narrow desktop keeps the rail but opens the target
-    // route directly instead of crushing the middle column.
-    if (!isDesktopMasterDetailViewport(activitySidebarInboxEnabled)) {
-      if (activateTimerRef.current !== null) {
-        window.clearTimeout(activateTimerRef.current);
-        activateTimerRef.current = null;
-      }
-      handleOpen(item);
-      return;
-    }
-    if (activationDetail >= 2) {
-      if (activateTimerRef.current !== null) {
-        window.clearTimeout(activateTimerRef.current);
-        activateTimerRef.current = null;
-      }
-      trackActivityItemOpen(item.kind);
-      if (item.unreadCount > 0) void markRead(item);
-      navigateToChat(item);
-      return;
-    }
-    if (activateTimerRef.current !== null) window.clearTimeout(activateTimerRef.current);
-    activateTimerRef.current = window.setTimeout(() => {
-      activateTimerRef.current = null;
-      handleOpen(item);
-    }, 220);
-  };
-
-  const handleOpen = (item: InboxItem) => {
+  const handleOpen = useCallback((item: InboxItem) => {
     trackActivityItemOpen(item.kind);
     if (item.unreadCount > 0) {
       void markRead(item);
-    }
-    if (onOpenItem) {
-      onOpenItem(item);
-      return;
     }
     // Master/detail (open in col 3) on desktop — identical interaction to
     // clicking a /search result (stdrc #proj-activity:171042a3 2026-06-23).
@@ -1174,12 +1207,52 @@ export default function ThreadsInbox({ onOpenItem, onDragItem, compactActivitySi
     } else {
       nav.toMessage(item.channelId, item.firstMentionMessageId ?? (item.unreadCount > 0 ? item.firstUnreadMessageId ?? item.lastMessageId : item.lastMessageId));
     }
-  };
+  }, [activitySidebarInboxEnabled, markRead, nav, openContentSlot, openThread]);
+
+  const handleActivate = useCallback((event: React.MouseEvent | ReactKeyboardEvent, item: InboxItem) => {
+    const activationDetail = "detail" in event ? event.detail : 1;
+    // Activity needs enough horizontal room for both the inbox list and the
+    // detail pane. Tablet/narrow desktop keeps the rail but opens the target
+    // route directly instead of crushing the middle column.
+    if (!isDesktopMasterDetailViewport(activitySidebarInboxEnabled)) {
+      if (activateTimerRef.current !== null) {
+        window.clearTimeout(activateTimerRef.current);
+        activateTimerRef.current = null;
+      }
+      handleOpen(item);
+      return;
+    }
+    if (activationDetail >= 2) {
+      if (activateTimerRef.current !== null) {
+        window.clearTimeout(activateTimerRef.current);
+        activateTimerRef.current = null;
+      }
+      trackActivityItemOpen(item.kind);
+      if (item.unreadCount > 0) void markRead(item);
+      navigateToChat(item);
+      return;
+    }
+    if (activateTimerRef.current !== null) window.clearTimeout(activateTimerRef.current);
+    activateTimerRef.current = window.setTimeout(() => {
+      activateTimerRef.current = null;
+      handleOpen(item);
+    }, 220);
+  }, [activitySidebarInboxEnabled, handleOpen, markRead, navigateToChat]);
 
   const openCtxMenu = useCallback((e: React.MouseEvent, item: InboxItem) => {
     e.preventDefault();
     setCtxMenu(placeInboxContextMenu({ x: e.clientX, y: e.clientY, item }));
   }, []);
+  const closeCtxMenu = useCallback(() => setCtxMenu(null), []);
+
+  const handleRowDone = useCallback((item: InboxItem) => {
+    if (activityView === "done") {
+      void restoreDoneItem(item);
+      return;
+    }
+    trackActivityMark("done");
+    void markDone(item);
+  }, [activityView, markDone, restoreDoneItem]);
 
   const focusNextUnread = useCallback(() => {
     const unreadItems = visibleItems.filter((item) => item.unreadCount > 0);
@@ -1196,6 +1269,29 @@ export default function ThreadsInbox({ onOpenItem, onDragItem, compactActivitySi
     focusNextUnread();
   }, [focusNextUnread]);
 
+  const jumpToNextUnreadTitle = formatMessage({ id: "thread.header.jumpToNextUnread" });
+  const headerContainerProps = useMemo(() => ({
+    "data-testid": "inbox-header",
+    title: jumpToNextUnreadTitle,
+  }), [jumpToNextUnreadTitle]);
+  const headerTitleClickProps = useMemo(() => ({
+    "data-testid": "inbox-header-title",
+    title: jumpToNextUnreadTitle,
+    onClick: handleHeaderTitleClick,
+  }), [handleHeaderTitleClick, jumpToNextUnreadTitle]);
+
+  const handleSortChange = useCallback((value: unknown) => {
+    setSortDirection(value === "asc" ? "asc" : "desc");
+  }, [setSortDirection]);
+  const handleMarkAllRead = useCallback(() => {
+    void markAllRead();
+  }, [markAllRead]);
+  const scrollToTop = useCallback(() => {
+    scrollRef.current?.scrollTo({ top: 0, behavior: "smooth" });
+    setNewUpdateCount(0);
+  }, []);
+  const closeActivitySwitcher = useCallback(() => setActivitySwitcherOpen(false), []);
+
   const handleScroll = (target: HTMLDivElement) => {
     isNearTopRef.current = target.scrollTop < 50;
     setSavedScrollTop(target.scrollTop);
@@ -1209,6 +1305,8 @@ export default function ThreadsInbox({ onOpenItem, onDragItem, compactActivitySi
         void loadMoreSaved();
       } else if (activityView === "done") {
         void loadDoneItems(false, doneItems.length);
+      } else if (activityView === "dms") {
+        void loadDmItems(false, dmItems.length);
       } else if (nextCursor !== null) {
         void loadInbox();
       }
@@ -1216,7 +1314,7 @@ export default function ThreadsInbox({ onOpenItem, onDragItem, compactActivitySi
   };
 
   const contextMenuBackdrop = ctxMenu ? (
-    <DismissBackdrop onDismiss={() => setCtxMenu(null)} trapContextMenu />
+    <DismissBackdrop onDismiss={closeCtxMenu} trapContextMenu />
   ) : null;
 
   const sidebarResponsiveSuffix = " lg:justify-start lg:gap-2 lg:px-2.5";
@@ -1228,6 +1326,7 @@ export default function ThreadsInbox({ onOpenItem, onDragItem, compactActivitySi
     { value: "unread" as const, label: formatMessage({ id: "thread.filter.unread" }), icon: <Mail size={14} />, count: totalUnreadCount },
     { value: "mentions" as const, label: formatMessage({ id: "thread.filter.mentions" }), icon: <AtSign size={14} />, count: null },
     { value: "saved" as const, label: formatMessage({ id: "activity.current.saved" }), icon: <Bookmark size={14} />, count: savedTotal },
+    { value: "dms" as const, label: formatMessage({ id: "activity.current.dms" }), icon: <MessageCircle size={14} />, count: dmTotal },
     { value: "done" as const, label: formatMessage({ id: "activity.current.done" }), icon: <CheckCircle2 size={14} />, count: doneItems.length },
   ];
   const activeActivityViewOption = activityViewOptions.find((entry) => entry.value === activityView) ?? activityViewOptions[0];
@@ -1278,7 +1377,7 @@ export default function ThreadsInbox({ onOpenItem, onDragItem, compactActivitySi
           >
             <ActivityGroupIcon group={group} dmChannel={dmChannel} />
             <span className={labelClass}>{stripActivityTitlePrefix(group.channelName)}</span>
-            {activityView === "saved" || activityView === "done"
+            {activityView === "saved" || activityView === "done" || activityView === "dms"
               ? null
               : (
                 <span
@@ -1315,6 +1414,11 @@ export default function ThreadsInbox({ onOpenItem, onDragItem, compactActivitySi
             <span className={labelClass}>{formatMessage({ id: "activity.current.saved" })}</span>
             {savedTotal > 0 ? <Tooltip content={formatNumber(savedTotal)}><span aria-label={formatNumber(savedTotal)} className={countClass}>{formatNumber(savedTotal)}</span></Tooltip> : null}
           </button>
+          <button type="button" className={navButtonClass(activityView === "dms")} onClick={() => handleViewClick("dms")} data-testid={`${testIdPrefix}-nav-dms`}>
+            <MessageCircle size={iconSize} className="shrink-0" />
+            <span className={labelClass}>{formatMessage({ id: "activity.current.dms" })}</span>
+            {dmTotal !== null && dmTotal > 0 ? <Tooltip content={formatNumber(dmTotal)}><span aria-label={formatNumber(dmTotal)} className={countClass}>{formatNumber(dmTotal)}</span></Tooltip> : null}
+          </button>
           <button type="button" className={navButtonClass(activityView === "done")} onClick={() => handleViewClick("done")} data-testid={`${testIdPrefix}-nav-done`}>
             <CheckCircle2 size={iconSize} className="shrink-0" />
             <span className={labelClass}>{formatMessage({ id: "activity.current.done" })}</span>
@@ -1348,90 +1452,7 @@ export default function ThreadsInbox({ onOpenItem, onDragItem, compactActivitySi
   };
 
   const contextMenuPortal = ctxMenu ? createPortal(
-    <ContextMenuPopup
-      className="fixed z-[60] overflow-y-auto overflow-x-hidden select-none"
-      style={{
-        left: ctxMenu.x,
-        top: ctxMenu.y,
-        width: 184,
-        maxWidth: ctxMenu.maxWidth,
-        maxHeight: ctxMenu.maxHeight,
-      }}
-      data-testid="activity-context-menu"
-    >
-      {(ctxMenu.item.kind !== "thread" || ctxMenu.item.isFollowing !== false) && (
-        <MenuItem
-          icon={ctxMenu.item.unreadCount > 0 ? <MessageSquareCheck size={14} /> : <MessageSquareDot size={14} />}
-          onClick={async () => {
-            const channelId = itemChannelId(ctxMenu.item);
-            if (ctxMenu.item.unreadCount > 0) {
-              await markRead(ctxMenu.item);
-            } else {
-              await api.post(`/channels/${channelId}/unread`).catch(() => {});
-            }
-            await refreshInbox();
-            setCtxMenu(null);
-          }}
-        >
-          {ctxMenu.item.unreadCount > 0 ? formatMessage({ id: "thread.contextMenu.markAsRead" }) : formatMessage({ id: "thread.contextMenu.markAsUnread" })}
-        </MenuItem>
-      )}
-      <MenuItem
-        icon={<Check size={14} />}
-        onClick={() => {
-          void markDone(ctxMenu.item);
-          setCtxMenu(null);
-        }}
-      >
-        {formatMessage({ id: "thread.contextMenu.done" })}
-      </MenuItem>
-      {ctxMenu.item.kind === "thread" && ctxMenu.item.isFollowing !== false && (
-        <MenuItem
-          icon={<BellOff size={14} />}
-          onClick={async () => {
-            const item = ctxMenu.item;
-            setCtxMenu(null);
-            if (item.kind === "thread") {
-              try {
-                await unfollowThread(item.threadChannelId);
-                // Unfollow changes future delivery, not Activity history. Keep
-                // this exact row and expose its new follow state.
-                markThreadUnfollowed(item);
-              } catch {
-                // Persistence failed; preserve the canonical followed row and
-                // reconcile any unrelated concurrent Activity changes.
-                await refreshInbox();
-              }
-            }
-          }}
-        >
-          {formatMessage({ id: "thread.contextMenu.unfollow" })}
-        </MenuItem>
-      )}
-      {ctxMenu.item.kind === "thread" && ctxMenu.item.isFollowing === false && (
-        <MenuItem
-          icon={<Bell size={14} />}
-          onClick={async () => {
-            const item = ctxMenu.item;
-            setCtxMenu(null);
-            if (item.kind === "thread") {
-              try {
-                await followThread(item.parentMessageId);
-                // Refollow preserves this exact row as an active followed
-                // thread.
-                markThreadRefollowed(item.threadChannelId);
-              } catch {
-                // Persistence failed; keep the unfollowed row and reconcile the
-                // rest of Activity without fabricating a successful refollow.
-                await refreshInbox();
-              }
-            }
-          }}
-        >
-          {formatMessage({ id: "thread.contextMenu.follow" })}
-        </MenuItem>
-      )}
-    </ContextMenuPopup>,
+    <InboxContextMenu ctxMenu={ctxMenu} onClose={closeCtxMenu} />,
     document.body,
   ) : null;
 
@@ -1449,15 +1470,8 @@ export default function ThreadsInbox({ onOpenItem, onDragItem, compactActivitySi
         icon={<Activity size={18} />}
         iconBg="bg-primary-soft text-foreground-strong theme-brutal:bg-soft-signal theme-brutal:text-black"
         onMobileBack={onMobileBack}
-        containerProps={{
-          "data-testid": "inbox-header",
-          title: formatMessage({ id: "thread.header.jumpToNextUnread" }),
-        }}
-        titleClickProps={{
-          "data-testid": "inbox-header-title",
-          title: formatMessage({ id: "thread.header.jumpToNextUnread" }),
-          onClick: handleHeaderTitleClick,
-        }}
+        containerProps={headerContainerProps}
+        titleClickProps={headerTitleClickProps}
       />
 
       <div className="flex min-h-0 flex-1">
@@ -1521,7 +1535,7 @@ export default function ThreadsInbox({ onOpenItem, onDragItem, compactActivitySi
                   <div className="w-[116px] shrink-0">
                     <Select
                       value={sortDirection}
-                      onValueChange={(value) => setSortDirection(value === "asc" ? "asc" : "desc")}
+                      onValueChange={handleSortChange}
                       items={activitySortOptions}
                     >
                       <SelectTrigger
@@ -1548,7 +1562,7 @@ export default function ThreadsInbox({ onOpenItem, onDragItem, compactActivitySi
                   {showMarkAllRead && (
                   <Tooltip content={formatMessage({ id: "thread.markAllRead.title" })}>
                     <Button
-                      onClick={() => void markAllRead()}
+                      onClick={handleMarkAllRead}
                       size="sm"
                       variant="outline"
                       className="h-8 shrink-0 whitespace-nowrap px-2 text-xs font-bold"
@@ -1570,6 +1584,7 @@ export default function ThreadsInbox({ onOpenItem, onDragItem, compactActivitySi
                     { value: "unread", labelId: "thread.filter.unread" },
                     { value: "mentions", labelId: "thread.filter.mentions" },
                     { value: "saved", labelId: "activity.current.saved" },
+                    { value: "dms", labelId: "activity.current.dms" },
                     { value: "done", labelId: "activity.current.done" },
                   ] as const).map((entry) => (
                     <button
@@ -1640,7 +1655,7 @@ export default function ThreadsInbox({ onOpenItem, onDragItem, compactActivitySi
                   <div className="hidden md:block">
                     <Select
                       value={sortDirection}
-                      onValueChange={(value) => setSortDirection(value === "asc" ? "asc" : "desc")}
+                      onValueChange={handleSortChange}
                       items={activitySortOptions}
                     >
                       <SelectTrigger
@@ -1669,7 +1684,7 @@ export default function ThreadsInbox({ onOpenItem, onDragItem, compactActivitySi
               {showMarkAllRead && (
                 <Tooltip content={formatMessage({ id: "thread.markAllRead.title" })}>
                   <Button
-                    onClick={() => void markAllRead()}
+                    onClick={handleMarkAllRead}
                     size="sm"
                     variant="outline"
                     className="h-8 shrink-0 whitespace-nowrap px-2 text-xs font-bold"
@@ -1692,10 +1707,7 @@ export default function ThreadsInbox({ onOpenItem, onDragItem, compactActivitySi
           >
             {newUpdateCount > 0 && (
               <Button
-                onClick={() => {
-                  scrollRef.current?.scrollTo({ top: 0, behavior: "smooth" });
-                  setNewUpdateCount(0);
-                }}
+                onClick={scrollToTop}
                 size="sm"
                 variant="outline"
                 className="sticky top-0 left-1/2 -translate-x-1/2 z-10 mb-2 flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold"
@@ -1713,11 +1725,15 @@ export default function ThreadsInbox({ onOpenItem, onDragItem, compactActivitySi
                   ? <Bookmark size={36} />
                   : activityView === "done"
                     ? <CheckCircle2 size={36} />
-                    : <MessageSquareText size={36} />}
+                    : activityView === "dms"
+                      ? <MessageCircle size={36} />
+                      : <MessageSquareText size={36} />}
                 title={activityView === "saved"
                     ? formatMessage({ id: "activity.current.emptySaved" })
                     : activityView === "done"
                       ? formatMessage({ id: "activity.current.emptyDone" })
+                      : activityView === "dms" && !effectiveChannelFilterId
+                        ? formatMessage({ id: "activity.current.emptyDms" })
                       : effectiveChannelFilterId && selectedActivityGroup
                     ? formatMessage({ id: "activity.channelFilter.emptyTitle" }, { channel: stripActivityTitlePrefix(selectedActivityGroup.channelName) })
                     : filter === "mentions"
@@ -1729,6 +1745,8 @@ export default function ThreadsInbox({ onOpenItem, onDragItem, compactActivitySi
                     ? formatMessage({ id: "activity.current.emptySavedDescription" })
                     : activityView === "done"
                       ? formatMessage({ id: "activity.current.emptyDoneDescription" })
+                      : activityView === "dms" && !effectiveChannelFilterId
+                        ? formatMessage({ id: "activity.current.emptyDmsDescription" })
                       : effectiveChannelFilterId
                     ? formatMessage({ id: "activity.channelFilter.emptyDescription" })
                     : filter === "mentions"
@@ -1751,17 +1769,9 @@ export default function ThreadsInbox({ onOpenItem, onDragItem, compactActivitySi
                       item={item}
                       filter={filter}
                       searchQuery={inboxSearchQuery}
-                      onOpen={(e) => handleActivate(e, item)}
-                      onDone={() => {
-                        if (activityView === "done") {
-                          void restoreDoneItem(item);
-                          return;
-                        }
-                        trackActivityMark("done");
-                        void markDone(item);
-                      }}
-                      onContextMenu={(event) => openCtxMenu(event, item)}
-                      onDragStart={onDragItem ? (event) => onDragItem(event, item) : undefined}
+                      onOpen={handleActivate}
+                      onDone={handleRowDone}
+                      onContextMenu={openCtxMenu}
                       focused={isFocused}
                       active={isActive}
                       focusRef={isFocused ? focusedRowRef : undefined}
@@ -1781,7 +1791,7 @@ export default function ThreadsInbox({ onOpenItem, onDragItem, compactActivitySi
       {activitySidebarInboxEnabled && activitySwitcherOpen ? (
         <DialogCard
           title={formatMessage({ id: "thread.header.title" })}
-          onClose={() => setActivitySwitcherOpen(false)}
+          onClose={closeActivitySwitcher}
           testId="activity-switcher-dialog"
           closeOnBackdrop
         >

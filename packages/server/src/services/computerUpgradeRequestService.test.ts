@@ -68,7 +68,7 @@ test("one open request per machine; the reported version settles it as done", as
   }
 });
 
-test("a reconnect with the old version is a failure carrying the installer's reason; a silent machine expires", async () => {
+test("a reconnect with the old version fails the request only with the installer's receipt for it; a silent machine expires", async () => {
   await openTestDatabase("pglite://:memory:");
   try {
     const { userId, serverId } = await seed();
@@ -85,16 +85,20 @@ test("a reconnect with the old version is a failure carrying the installer's rea
     assert.equal(failed.observedVersion, "1.0.36");
     assert.equal(failed.reason, "download checksum mismatch");
 
-    // A receipt for a different target is not this request's reason.
     const second = await createComputerUpgradeRequest({ serverId, machineId, targetVersion: "1.0.41", requestedByUserId: userId, now: new Date(now.getTime() + 1) });
     assert.equal(second.created, true);
-    const failedNoReceipt = await observeComputerVersionForUpgradeRequests({
-      machineId,
-      reportedVersion: "1.0.36",
-      receipt: { targetVersion: "9.9.9", outcome: "failed", reason: "stale" },
-      now,
-    });
-    assert.equal(failedNoReceipt?.reason, "version_unchanged");
+    // An old-version `ready` with no receipt for THIS target is not an outcome:
+    // a connection blip mid-download reconnects on the old version. The request
+    // stays pending (xxchan 10-12: the page dropped to "offline" mid-upgrade).
+    for (const receipt of [null, { targetVersion: "9.9.9", outcome: "failed" as const, reason: "stale" }]) {
+      const blip = await observeComputerVersionForUpgradeRequests({ machineId, reportedVersion: "1.0.36", receipt, now });
+      assert.equal(blip, null, "old version without this target's receipt settles nothing");
+    }
+    const [stillOpen] = await getDb().select().from(computerUpgradeRequests).where(eq(computerUpgradeRequests.id, second.row.id));
+    assert.equal(stillOpen!.outcome, null);
+    assert.equal(projectComputerUpgradeRequest(stillOpen!).state, "pending");
+    const secondDone = await observeComputerVersionForUpgradeRequests({ machineId, reportedVersion: "1.0.41", now });
+    assert.equal(secondDone?.outcome, "done");
 
     // Expiry: only open rows past their deadline become no_response.
     const thirdAt = new Date(now.getTime() + 2);

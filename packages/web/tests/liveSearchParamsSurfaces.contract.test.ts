@@ -8,7 +8,6 @@ const migratedSurfaces = [
   "src/components/agent/AgentDetailPanel.tsx",
   "src/components/message/ForwardedBundleRouteCard.tsx",
   "src/components/search/MessageSearchPage.tsx",
-  "src/components/workspace/workspaceGridUrlState.ts",
   "src/hooks/useEmbedParamsKeeper.ts",
 ] as const;
 

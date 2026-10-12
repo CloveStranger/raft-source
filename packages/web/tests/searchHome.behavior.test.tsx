@@ -400,12 +400,14 @@ test("search history renders the 15 most recent queries as wrapping tags", async
   const firstTag = tags[0];
   const firstRemove = screen.getByLabelText('Remove "query 1" from search history');
   assert.equal(firstTag.classList.contains("group"), true);
-  assert.equal(firstTag.classList.contains("hover:bg-fill-muted"), true);
+  // Each entry is the raft-ui Badge, not a hand-built box (task #746).
+  assert.equal(firstTag.dataset.slot, "badge");
   assert.equal(firstRemove.classList.contains("opacity-0"), true);
   assert.equal(firstRemove.classList.contains("group-hover:opacity-100"), true);
-  assert.equal(firstRemove.classList.contains("size-5"), true);
-  assert.equal(firstRemove.classList.contains("hover:bg-fill-muted"), true);
-  assert.equal(firstRemove.classList.contains("hover:text-foreground-strong"), true);
+  // The remove control sits inside the badge, above the entry's full-pill
+  // click target.
+  assert.ok(firstTag.contains(firstRemove));
+  assert.equal(firstRemove.classList.contains("z-10"), true);
 });
 
 test("desktop search history keeps hover removal and shows no edit toggle", async () => {

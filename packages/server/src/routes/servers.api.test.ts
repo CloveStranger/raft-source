@@ -34,6 +34,7 @@ import { getLatestComputerReleaseNotes, getLatestComputerVersion, __resetLatestC
 import { OFFICIAL_ONBOARDING_AGENT_IDENTITY } from "../services/officialOnboardingAgentIdentity";
 import { GROK_RUNTIME_FEATURE_FLAG_KEY, REMOTE_COMPUTER_UPGRADE_V2_FEATURE_FLAG_KEY } from "../services/featureFlagService";
 import { computerUpgradeRequests } from "../db/schema";
+import { getOpenComputerUpgradeRequest } from "../services/computerUpgradeRequestService";
 import { __clearRuntimeAccountUsageLocalCacheForTests, runtimeAccountUsageCacheService } from "../services/runtimeAccountUsageCacheService";
 import { __clearMachineRuntimeModelCatalogLocalCacheForTests, machineRuntimeModelCatalogService } from "../services/machineRuntimeModelCatalogService";
 import { RouteFailureError } from "../tracing/routeFailure";
@@ -1343,7 +1344,7 @@ test("GET /api/servers/unread-summary records phases and batched query shape", a
     assert.equal(dbEventByQuery.get("servers.sidebar_unread_counts_by_user")?.attrs?.servers_count, 2);
     assert.equal(dbEventByQuery.get("servers.sidebar_unread_counts_by_user")?.attrs?.servers_with_unread_count, 2);
     assert.equal(dbEventByQuery.get("servers.sidebar_unread_counts_by_user")?.attrs?.["inbox.backend"], "rw_mv");
-    assert.equal(dbEventByQuery.get("servers.sidebar_unread_counts_by_user")?.attrs?.rw_conversation_unread_view, "rw_conversation_unread_v2");
+    assert.equal(dbEventByQuery.get("servers.sidebar_unread_counts_by_user")?.attrs?.rw_conversation_unread_view, "rw_conversation_unread_v3");
     assert.equal(dbEventByQuery.get("servers.sidebar_unread_counts_by_user")?.attrs?.["inbox.route"], "sidebar_summary");
     assert.equal(dbEventByQuery.get("servers.sidebar_unread_counts_by_user")?.attrs?.["inbox.fallback_reason"], "none");
     assert.equal(dbEventByQuery.get("servers.sidebar_unread_counts_by_user")?.attrs?.["inbox.contract_version"], 3);
@@ -4464,6 +4465,33 @@ test("schema runtime options serve Built-in Pi and live model-scoped Kimi defini
     const v2ProviderBody = await v2ProviderRes.json() as unknown;
     assert.equal(v2ProviderRes.status, 200, `v2 option sources need no schemaVersion: ${JSON.stringify(v2ProviderBody)}`);
     assert.deepEqual(v2ProviderBody, providerSourceBody);
+    assert.equal(v2ProviderRes.headers.get("content-language"), "en");
+
+    // v2 copy follows Accept-Language; values and structure do not change.
+    const zhHeaders = { ...headers, "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8" };
+    const zhRes = await fetch(
+      `${app.baseUrl}/api/servers/${server.id}/machines/${machine.id}/runtime-forms/v2/builtin`,
+      { headers: zhHeaders },
+    );
+    assert.equal(zhRes.status, 200);
+    assert.equal(zhRes.headers.get("content-language"), "zh-CN");
+    assert.match(zhRes.headers.get("vary") ?? "", /Accept-Language/i);
+    const zh = parseRuntimeFormV2(await zhRes.json());
+    assert.ok(zh, "a localized form is still a valid v2 form");
+    assert.equal(zh.fields.find((field) => field.key === "providerId")?.label, "提供方");
+    assert.deepEqual(zh.fields.map((field) => [field.key, field.kind]), v2.fields.map((field) => [field.key, field.kind]));
+    assert.equal(v2.fields.find((field) => field.key === "providerId")?.label, "Provider");
+    const zhProviderRes = await fetch(
+      `${app.baseUrl}/api/servers/${server.id}/machines/${machine.id}/runtime-forms/v2/builtin/option-sources/provider`,
+      { headers: zhHeaders },
+    );
+    assert.equal(zhProviderRes.status, 200);
+    assert.equal(zhProviderRes.headers.get("content-language"), "zh-CN");
+    const zhProvider = await zhProviderRes.json() as { options: Array<{ value: string }> };
+    assert.deepEqual(
+      zhProvider.options.map((option) => option.value),
+      providerSource.options.map((option) => option.value),
+    );
     assert.equal(providerSource.schemaVersion, definition.schemaVersion);
     assert.equal(providerSource.kind, "select");
     assert.ok(providerSource.options.some((option) => option.value === "deepseek" && option.providerKind === "preset"));
@@ -4508,19 +4536,15 @@ test("schema runtime options serve Built-in Pi and live model-scoped Kimi defini
       `${app.baseUrl}/api/servers/${server.id}/machines/${machine.id}/runtime-form-definitions/builtin/option-sources/model?schemaVersion=${definition.schemaVersion}`,
       { headers },
     );
-    assert.equal(offlineSourceRes.status, 409);
-    assert.deepEqual(
-      await offlineSourceRes.json(),
-      {
-        error:
-          "The target Computer's Built-in model catalog is unavailable. Retry after the Computer reconnects.",
-        code: "builtin_catalog_unavailable",
-        daemonVersion: null,
-        computerVersion: null,
-        recovery: "retry",
-      },
-      "offline detection stays typed unavailable instead of becoming an empty form catalog",
-    );
+    // Offline: the bundled catalog keeps the form usable (never an empty one);
+    // starting the agent still checks the Computer's own catalog.
+    assert.equal(offlineSourceRes.status, 200);
+    const offlineSource = await offlineSourceRes.json() as {
+      kind: string;
+      optionsByValue: Record<string, unknown[]>;
+    };
+    assert.equal(offlineSource.kind, "dependent_select");
+    assert.ok((offlineSource.optionsByValue.deepseek ?? []).length > 0, "offline serves the bundled catalog, not an empty one");
 
     const staleSourceRes = await fetch(
       `${app.baseUrl}/api/servers/${server.id}/machines/${machine.id}/runtime-form-definitions/builtin/option-sources/provider?schemaVersion=stale`,
@@ -4617,6 +4641,12 @@ test("schema kimi option source falls back to the managed default on missing_con
     ]);
     assert.equal(fallbackSource.defaultValue, "kimi-code/kimi-for-coding");
 
+    // Offline Computer: the same managed default, not a hard failure.
+    outcome = { kind: "error", retryable: true, code: "computer_offline" };
+    const offlineRes = await fetch(sourceUrl, { headers });
+    assert.equal(offlineRes.status, 200);
+    assert.equal((await offlineRes.json() as { defaultValue: string }).defaultValue, "kimi-code/kimi-for-coding");
+
     // Genuine detection failures still fail closed.
     outcome = { kind: "error", retryable: true };
     const errorRes = await fetch(sourceUrl, { headers });
@@ -4655,8 +4685,10 @@ test("a runtime with only a v2 form is served on v2 and stays invisible to v1 cl
     const headers = { Authorization: `Bearer ${await tokenForHuman(owner.email)}`, "X-Server-Id": server.id };
     app.app.set("agentOrchestrator", { hasMachineLocally: () => true });
     const base = `${app.baseUrl}/api/servers/${server.id}/machines/${machine.id}`;
-    const piRow = async () => {
-      const res = await fetch(`${base}/runtime-options`, { headers });
+    const piRow = async (optIn = true) => {
+      const res = await fetch(`${base}/runtime-options`, {
+        headers: optIn ? { ...headers, "X-Raft-Runtime-Form-V2": "1" } : headers,
+      });
       assert.equal(res.status, 200);
       const body = await res.json() as { options: Array<Record<string, unknown> & { runtimeId: string }> };
       return body.options.find((option) => option.runtimeId === "pi");
@@ -4665,6 +4697,10 @@ test("a runtime with only a v2 form is served on v2 and stays invisible to v1 cl
     // v2 clients: the marker, the form and its option source.
     const row = await piRow();
     assert.deepEqual(row?.runtimeFormV2, { protocolVersion: 2 });
+    // Clients that do not opt in (released mobile apps decode strictly) never see it.
+    const strictRow = await piRow(false);
+    assert.ok(strictRow);
+    assert.equal("runtimeFormV2" in strictRow, false);
     const formRes = await fetch(`${base}/runtime-forms/v2/pi`, { headers });
     assert.equal(formRes.status, 200);
     assert.deepEqual(await formRes.json(), JSON.parse(JSON.stringify(buildRuntimeFormV2("pi"))));
@@ -4722,7 +4758,7 @@ test("batch 2 v2 forms: OpenCode option source is the live probe or the static f
     const fixture = (name: string) => JSON.parse(readFileSync(new URL(`../../../runtime-form/fixtures/${name}`, import.meta.url), "utf8")) as unknown;
 
     // The OpenCode row carries the v2 marker and no v1 ref; the deprecated runtimes are not offered for new agents.
-    const rowsRes = await fetch(`${base}/runtime-options`, { headers });
+    const rowsRes = await fetch(`${base}/runtime-options`, { headers: { ...headers, "X-Raft-Runtime-Form-V2": "1" } });
     assert.equal(rowsRes.status, 200);
     const rows = (await rowsRes.json() as { options: Array<Record<string, unknown> & { runtimeId: string }> }).options;
     const opencodeRow = rows.find((row) => row.runtimeId === "opencode");
@@ -6643,10 +6679,12 @@ test("remote_computer_upgrade_v2 alone opens the machine-list projection and the
         throw new Error("the v2 upgrade route must not use the legacy control relay");
       },
       sendComputerUpgrade: async (machineId: string, targetVersion: string, requestId: string) => {
+        if (!deliver) return { sent: false };
         sent.push({ machineId, targetVersion, requestId });
         return { sent: true };
       },
     });
+    let deliver = true;
     let handsRequests = 0;
     app.app.set("computerBroadcastPolicyEvaluator", (input: EvaluateComputerBroadcastPolicyInput) =>
       evaluateBroadcastPolicy(input, { fetchFn: async () => {
@@ -6700,6 +6738,19 @@ test("remote_computer_upgrade_v2 alone opens the machine-list projection and the
     assert.equal(openPolicy?.eligibility, "eligible");
     assert.equal(openPolicy?.reasonCode, "eligible");
     assert.equal(openPolicy?.targetVersion, "1.0.41");
+    // The command cannot be delivered (machine dropped between the route's
+    // check and the send): the request is settled on the spot, so the next
+    // click creates a fresh request and really sends it instead of getting the
+    // stuck row back (`created: false`, nothing sent) until the deadline.
+    deliver = false;
+    const undelivered = await upgrade();
+    assert.equal(undelivered.status, 409, await undelivered.clone().text());
+    assert.equal(((await undelivered.json()) as { code: string }).code, "computer_offline");
+    assert.equal(await getOpenComputerUpgradeRequest(machine.id), null, "no open request is left behind");
+    const [undeliveredRow] = await getDb().select().from(computerUpgradeRequests).where(eq(computerUpgradeRequests.machineId, machine.id));
+    assert.equal(undeliveredRow?.outcome, "failed");
+    assert.equal(undeliveredRow?.reason, "command_not_delivered");
+    deliver = true;
     const openUpgrade = await upgrade();
     assert.equal(openUpgrade.status, 201, await openUpgrade.clone().text());
     const openBody = await openUpgrade.json() as { upgradeRequest: { id: string; targetVersion: string } };

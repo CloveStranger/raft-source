@@ -8,6 +8,7 @@ import { getActorServerRoleInServer } from "../lib/actorPermissions";
 import { actorHasChannelCapability, withLockedChannelActorCapability } from "../lib/channelActorPermissions";
 import { addTraceEvent, errorClassOf } from "../tracing/semanticTrace";
 import type { AgentOrchestrator } from "../services/agentOrchestrator";
+import { agentRefusalBody, agentServerRoleRequiredBody, asSentence } from "../lib/agentServerRoleRequired";
 
 export interface AgentChannelMemberActor {
   id: string;
@@ -226,6 +227,30 @@ export async function addChannelMemberForAgent(input: {
     });
     return { status: 409, body: { error: "This channel is archived", code: "channel_archived" } };
   }
+  // Two refusals the role check would misreport as "ask an admin".
+  if (channelService.isAllSystemChannel(channel)) {
+    addTraceEvent("agent_channel_member_add.request.failed", { reason: "all_channel", status_code: 403 });
+    return {
+      status: 403,
+      body: agentRefusalBody(
+        "Cannot add members to the #all channel",
+        "all_channel_membership_fixed",
+        "Everyone on the server is already in #all; there is nobody to add. Do not retry.",
+      ),
+    };
+  }
+  // Owners and admins may add without being in the channel; members must be in it.
+  if (!canManageUnjoined && !await channelService.isChannelAgent(channel.id, actor.id)) {
+    addTraceEvent("agent_channel_member_add.request.failed", { reason: "channel_membership_required", status_code: 403 });
+    return {
+      status: 403,
+      body: agentRefusalBody(
+        "Agent must be a member of this channel to add members",
+        "channel_membership_required",
+        `Join #${channel.name} first (for a private channel, ask a member to add you), then retry.`,
+      ),
+    };
+  }
   const hasAuthority = await actorHasChannelCapability(serverId, channel.id, "agent", actor.id, "addChannelMembers");
   addTraceEvent("agent_channel_member_add.authorization.checked", {
     outcome: hasAuthority ? "allowed" : "denied",
@@ -236,7 +261,7 @@ export async function addChannelMemberForAgent(input: {
       reason: "capability_required",
       status_code: 403,
     });
-    return { status: 403, body: { error: "Agent requires addChannelMembers capability to add channel members" } };
+    return { status: 403, body: await agentServerRoleRequiredBody({ serverId, agentId: actor.id, capabilities: ["addChannelMembers"], action: "add channel members" }) };
   }
 
   const payload = typeof body === "object" && body !== null ? body as Record<string, unknown> : {};
@@ -325,12 +350,22 @@ export async function addChannelMemberForAgent(input: {
       },
     };
   } catch (err) {
+    if (err instanceof Error && err.message === channelService.ASSISTANT_CHANNEL_FORBIDDEN_MESSAGE) {
+      return {
+        status: 403,
+        body: agentRefusalBody(
+          err.message,
+          channelService.ASSISTANT_CHANNEL_FORBIDDEN_CODE,
+          "A personal assistant stays in its DM with its owner and cannot be added to channels. Do not retry.",
+        ),
+      };
+    }
     if (err instanceof Error && err.message === "Channel capability required") {
       addTraceEvent("agent_channel_member_add.request.failed", {
         reason: "capability_required_under_lock",
         status_code: 403,
       });
-      return { status: 403, body: { error: "Agent requires addChannelMembers capability to add channel members" } };
+      return { status: 403, body: await agentServerRoleRequiredBody({ serverId, agentId: actor.id, capabilities: ["addChannelMembers"], action: "add channel members" }) };
     }
     addTraceEvent("agent_channel_member_add.request.failed", {
       reason: "unexpected_error",
@@ -395,7 +430,14 @@ export async function removeChannelMemberForAgent(input: {
       reason: "all_channel",
       status_code: 403,
     });
-    return { status: 403, body: { error: "Cannot remove members from the #all channel" } };
+    return {
+      status: 403,
+      body: agentRefusalBody(
+        "Cannot remove members from the #all channel",
+        "all_channel_membership_fixed",
+        "Everyone on the server is in #all, so nobody can be removed from it. Do not retry.",
+      ),
+    };
   }
   if (!await channelService.canAgentAccessChannel(channel.id, actor.id)) {
     addTraceEvent("agent_channel_member_remove.request.failed", {
@@ -414,7 +456,7 @@ export async function removeChannelMemberForAgent(input: {
       reason: "capability_required",
       status_code: 403,
     });
-    return { status: 403, body: { error: "Agent requires removeChannelMembers capability to remove channel members" } };
+    return { status: 403, body: await agentServerRoleRequiredBody({ serverId, agentId: actor.id, capabilities: ["removeChannelMembers"], action: "remove channel members", channelAdminIn: channel.type === "joint" ? undefined : channel.name }) };
   }
   if (channel.archivedAt) {
     addTraceEvent("agent_channel_member_remove.request.failed", {
@@ -499,12 +541,19 @@ export async function removeChannelMemberForAgent(input: {
     };
   } catch (err) {
     const msg = err instanceof Error ? err.message : "";
-    if (msg.includes("Cannot remove") || msg === "Channel capability required") {
+    if (msg === "Channel capability required") {
+      addTraceEvent("agent_channel_member_remove.request.failed", {
+        reason: "capability_required_under_lock",
+        status_code: 403,
+      });
+      return { status: 403, body: await agentServerRoleRequiredBody({ serverId, agentId: actor.id, capabilities: ["removeChannelMembers"], action: "remove channel members", channelAdminIn: channel.type === "joint" ? undefined : channel.name }) };
+    }
+    if (msg.includes("Cannot remove")) {
       addTraceEvent("agent_channel_member_remove.request.failed", {
         reason: "forbidden_remove",
         status_code: 403,
       });
-      return { status: 403, body: { error: msg } };
+      return { status: 403, body: agentRefusalBody(msg, "channel_member_remove_forbidden", `${asSentence(msg)} Nobody can do this; do not retry.`) };
     }
     addTraceEvent("agent_channel_member_remove.request.failed", {
       reason: "unexpected_error",

@@ -1,153 +1,52 @@
-import { Ban, CheckCircle, Circle, Eye, Play } from "lucide-react";
-import type { ComponentType, CSSProperties } from "react";
-import type { BadgeProps } from "raft-ui";
+import type { TaskStatusId } from "raft-ui";
 import type { MessageId } from "../../i18n/messages";
 import type { ServerRole } from "@botiverse/raft-shared";
 import type { Task, TaskStatus } from "../../store/taskStore";
 
-type BadgeVariant = NonNullable<BadgeProps["variant"]>;
-type BadgeAppearance = NonNullable<BadgeProps["appearance"]>;
+/**
+ * The task-status vocabulary — the app's canonical status set. This module owns
+ * only what is status SEMANTICS: the label id (a MessageId, never a sentence)
+ * and the transition rules. It deliberately owns NO colour, icon, or badge
+ * recipe any more.
+ *
+ * Task-status APPEARANCE has exactly one source: raft-ui's `TaskStatusBadge` /
+ * `TaskStatusIcon` (and the `task-status-*` tokens behind them). Surfaces render
+ * those components; nothing here re-declares a colour, so a status can no longer
+ * look different on different screens.
+ */
 
-// Source content stays Title Case — status pills sit next to case-sensitive
-// identifiers (e.g. `task #N @assignee`) and uppercasing breaks identity.
-// stdrc msg=ce25da45 + msg=65681d15 (option B): drop forced uppercase from
-// status indicators specifically; label-only Badge instances elsewhere
-// keep the brutal contract. Future non-brutal themes render this content
-// natural-cased without a transform.
 export interface TaskStatusUi {
   /**
-   * The status vocabulary is the app's canonical one — it is rendered by every
-   * task surface AND by the message-side badge. It holds a MessageId, never a
-   * sentence: this module used to return finished English ("Todo", "In
-   * Progress", …), so every consuming .tsx scanned clean while the screen
-   * showed English, and the hardcoded-English scanner reports 0 findings here
-   * because it only walks .tsx (task #54). Holding ids is what makes that
-   * class impossible rather than merely absent.
+   * The status label as a MessageId — rendered by every task surface. Holding
+   * an id (not finished English) is what makes a hardcoded-English regression
+   * impossible rather than merely absent (task #54).
    */
   labelId: MessageId;
-  /**
-   * Canonical status background. StatusBadge applies this after the raft-ui
-   * semantic variant so every task surface keeps the same product color;
-   * direct-style callsites such as InlineBadgeEditor consume it as well.
-   */
-  bg: string;
-  variant: BadgeVariant;
-  appearance: BadgeAppearance;
-  icon: ComponentType<{ size?: number; className?: string }>;
 }
 
 export const TASK_STATUS_UI: Record<TaskStatus, TaskStatusUi> = {
-  todo: {
-    labelId: "task.status.todo",
-    bg: "bg-brutal-orange",
-    variant: "warning",
-    appearance: "solid",
-    icon: Circle,
-  },
-  in_progress: {
-    labelId: "task.status.inProgress",
-    bg: "bg-brutal-cyan",
-    variant: "information",
-    appearance: "solid",
-    icon: Play,
-  },
-  in_review: {
-    labelId: "task.status.inReview",
-    bg: "bg-brutal-lavender",
-    variant: "accent",
-    appearance: "solid",
-    icon: Eye,
-  },
-  done: {
-    labelId: "task.status.done",
-    bg: "bg-brutal-lime",
-    variant: "success",
-    appearance: "solid",
-    icon: CheckCircle,
-  },
-  // Closed = won't-do (cancelled / abandoned). Uses `brutal-stone`, the
-  // warm neutral terminal-state token — semantically "exited / no longer
-  // active", not "destructive". The earlier `brutal-red` was a category
-  // collision: red is reserved for destructive irreversible actions
-  // (Delete buttons, ConfirmDialog destructive confirm), but `closed`
-  // is reversible (`closed → todo` is a valid transition below) and
-  // operating it on a task isn't dangerous. Joy designed `brutal-stone`
-  // for this semantic slot — see `--color-brutal-stone` in index.css.
-  // #proj-uiux task #145 (daily UI audit Finding 1, stdrc-approved
-  // 2026-05-08, Joy spec'd, Bugen implemented).
-  closed: {
-    labelId: "task.status.closed",
-    bg: "bg-brutal-stone",
-    variant: "muted",
-    appearance: "solid",
-    icon: Ban,
-  },
+  todo: { labelId: "task.status.todo" },
+  in_progress: { labelId: "task.status.inProgress" },
+  in_review: { labelId: "task.status.inReview" },
+  done: { labelId: "task.status.done" },
+  // Closed = won't-do (cancelled / abandoned). Its disabled look comes from
+  // raft-ui's task-status tokens; this map only carries the label id.
+  closed: { labelId: "task.status.closed" },
 };
 
 /**
- * Back-compat alias for task list/card callsites that still apply the bg
- * utility directly. Keep it as a typed view over TASK_STATUS_UI, not a second
- * source of truth.
+ * Back-compat alias for task list/card callsites that read the label. Keep it a
+ * typed view over TASK_STATUS_UI, not a second source of truth.
  */
-export const STATUS_STYLES: Record<TaskStatus, { bg: string; labelId: MessageId }> = TASK_STATUS_UI;
+export const STATUS_STYLES: Record<TaskStatus, TaskStatusUi> = TASK_STATUS_UI;
 
 /**
- * The status surfaces are shared by task cards, inline editors, board headers,
- * and message-attached task chips.  Keep the foreground paired with the
- * background here as well as the background token itself: a light foreground
- * on the dark theme's saturated solid state colors is effectively unreadable.
- * These pairings mirror the Raft UI solid Badge/TaskStatus recipes, while the
- * Brutal overrides preserve the product's hard-label treatment.
+ * slock writes statuses snake_case (`in_progress`); raft-ui writes them
+ * kebab-case (`in-progress`). One converter, one place — so no callsite
+ * hand-writes the mapping.
  */
-export function getTaskStatusBadgeClassName(status: TaskStatus): string {
-  switch (status) {
-    case "todo":
-      return "bg-warning-soft text-warning-strong dark:bg-warning-soft dark:text-warning-strong theme-brutal:bg-brutal-orange theme-brutal:text-black";
-    case "in_progress":
-      return "bg-info-soft text-info-strong dark:bg-info-soft dark:text-info-strong theme-brutal:bg-brutal-cyan theme-brutal:text-black";
-    case "in_review":
-      return "bg-accent-soft text-accent-strong dark:bg-accent-soft dark:text-accent-strong theme-brutal:bg-brutal-lavender theme-brutal:text-black";
-    case "done":
-      return "bg-success-soft text-success-strong dark:bg-success-soft dark:text-success-strong theme-brutal:bg-brutal-lime theme-brutal:text-black";
-    case "closed":
-      return "bg-fill-muted text-foreground-strong theme-brutal:bg-brutal-stone theme-brutal:text-black";
-  }
-}
-
-/**
- * Shared per-status badge config for the message-side task badge in MessageItem.
- * Both the header (inline) and below-content (thread-root) variants render off
- * TASK_STATUS_UI so adding a new status — or recoloring an existing one — only
- * requires one edit.
- *
- * eric 2026-05-08 #proj-uiux:c697be7a (task #141) — before this map was
- * extracted, the below-content variant had its own inline 4-entry config
- * (todo / in_progress / in_review / done) that silently fell back to
- * `statusConfig.todo` for `closed`. That fallback made a closed task in the
- * thread panel header render with the orange/Circle TODO styling even
- * though `data-task-status="closed"` updated correctly — the perceived
- * "thread badge didn't update" repro from the original task #141 report.
- *
- * `closed` uses `bg-brutal-stone` (NOT `bg-brutal-red`) per #proj-uiux task
- * #145 / PR #1464. See TASK_STATUS_UI.closed for the full rationale.
- */
-export type StatusBadgeConfig = Pick<TaskStatusUi, "appearance" | "bg" | "icon" | "variant">;
-export const STATUS_BADGE_CONFIG: Record<TaskStatus, StatusBadgeConfig> = TASK_STATUS_UI;
-
-/**
- * Resolve the canonical status background to an inline color.
- *
- * raft-ui Badge variants also contribute a semantic background utility
- * (`warning` → `bg-warning-base`, for example). Depending on the compiled CSS
- * order, that utility can win over `cfg.bg` even though both Activity and Chat
- * read TASK_STATUS_UI. Applying the same canonical token as an inline style
- * makes TASK_STATUS_UI the final pixel authority as well as the TypeScript
- * authority.
- */
-export function getTaskStatusBackgroundStyle(status: TaskStatus): CSSProperties {
-  const cfg = TASK_STATUS_UI[status] ?? TASK_STATUS_UI.todo;
-  const token = cfg.bg.startsWith("bg-") ? cfg.bg.slice(3) : "";
-  return token ? { backgroundColor: `var(--color-${token})` } : {};
+export function toRuiTaskStatus(status: TaskStatus): TaskStatusId {
+  return status.replace(/_/g, "-") as TaskStatusId;
 }
 
 // Mirror of taskService.VALID_TRANSITIONS — kept in sync so the menu only

@@ -106,3 +106,22 @@ test("create account exposes configured Google and GitHub entry buttons without 
   });
   assert.equal(screen.queryByText(/goes straight to identity setup/i), null);
 });
+
+test("a disabled Continue states its reason until the legal box is accepted", async () => {
+  // task #724: the user could not see why Continue was disabled. The reason is
+  // the unchecked legal box; show it as a persistent line and drop it once the
+  // box is checked, so it never reads as an error.
+  vi.spyOn(api, "get").mockImplementation(async () => ({ data: { providers: [] } }));
+  renderPage();
+
+  const hintId = "auth.legalAcceptance.requiredHint";
+  // Copy comes through react-intl (both locales are supplied in the catalogs).
+  const hint = () => screen.queryByTestId("register-legal-hint");
+  assert.ok(hint(), "the reason line is visible while the legal box is unchecked");
+  assert.ok(screen.getByRole("button", { name: "Continue" }).hasAttribute("disabled"));
+
+  fireEvent.click(screen.getByRole("checkbox"));
+  await waitFor(() => assert.equal(hint(), null));
+  assert.equal(screen.getByRole("button", { name: "Continue" }).hasAttribute("disabled"), false);
+  assert.ok(hintId, "key stays wired");
+});

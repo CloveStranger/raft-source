@@ -33,11 +33,55 @@ type EventMetadata = Record<string, unknown>;
 const targetFreshnessGates = new Map<string, Promise<void>>();
 
 export type FreshnessMessageAnchorOptions = {
+  /**
+   * The sending actor. Its own messages are excluded, and so are system
+   * notices the server recorded as caused by it (`causal_actor_*`) whose kind
+   * is in SELF_CAUSED_FRESHNESS_EXEMPT_SUBTYPES. Everything else still counts:
+   * notices by anyone else, with no recorded causal actor, or of any other kind.
+   */
   excludeSender?: {
     senderType: "user" | "agent";
     senderId: string;
   };
 };
+
+/**
+ * System notice kinds that do not hold their own causal actor's send. A kind is
+ * listed only when every field of its text is either in the actor's request,
+ * in the successful response to that request, or the actor's own name
+ * (#proj-runtime task #1255). This is not proof the actor read the response.
+ * Not listed, so they keep holding: `task.lifecycle_thread` (its text carries
+ * the task title; the status-update response does not) and `channel.rename`
+ * (its "from" name is read outside the update lock and is not returned). A new
+ * kind holds until someone checks it and adds it here.
+ */
+export const SELF_CAUSED_FRESHNESS_EXEMPT_SUBTYPES = [
+  "agent.join_channel",
+  "channel.agent_membership",
+  "channel.human_membership",
+  "channel.archive",
+  "channel.unarchive",
+  "task.created_summary",
+  "task.assignment_receipt",
+  "task.converted_summary",
+] as const;
+
+function excludeSenderConditions(excludeSender: NonNullable<FreshnessMessageAnchorOptions["excludeSender"]>) {
+  return [
+    not(and(
+      eq(messages.senderType, excludeSender.senderType),
+      eq(messages.senderId, excludeSender.senderId),
+    )!),
+    // COALESCE: a NULL causal actor must keep the row, not drop it.
+    sql`NOT COALESCE(
+      ${messages.messageType} = 'system'
+      AND ${messages.causalActorType} = ${excludeSender.senderType}
+      AND ${messages.causalActorId} = ${excludeSender.senderId}
+      AND ${messages.systemSubtype} IN (${sql.join(SELF_CAUSED_FRESHNESS_EXEMPT_SUBTYPES.map((subtype) => sql`${subtype}`), sql`, `)}),
+      false
+    )`,
+  ];
+}
 
 export type FreshnessMessageRangeOptions = FreshnessMessageAnchorOptions & {
   latestSeq?: number;
@@ -60,10 +104,7 @@ export type AgentAttentionMessageOptions = FreshnessMessageRangeOptions;
 function messageAnchorConditions(channelId: string, options?: FreshnessMessageAnchorOptions) {
   const conditions = [eq(messages.channelId, channelId)];
   if (options?.excludeSender) {
-    conditions.push(not(and(
-      eq(messages.senderType, options.excludeSender.senderType),
-      eq(messages.senderId, options.excludeSender.senderId),
-    )!));
+    conditions.push(...excludeSenderConditions(options.excludeSender));
   }
   return conditions;
 }
@@ -324,10 +365,7 @@ function agentAttentionConditions(
     conditions.push(not(inArray(inboxNotificationFacts.messageSeq, excludedSeqs)));
   }
   if (options?.excludeSender) {
-    conditions.push(not(and(
-      eq(messages.senderType, options.excludeSender.senderType),
-      eq(messages.senderId, options.excludeSender.senderId),
-    )!));
+    conditions.push(...excludeSenderConditions(options.excludeSender));
   }
   return conditions;
 }

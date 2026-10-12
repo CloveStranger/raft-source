@@ -178,6 +178,53 @@ async function downloadOfficialNode({ platform, arch, nodeVersion, workDir }) {
   return extractedBinary;
 }
 
+// The agent CLI as its own CJS bundle (task #11). Same define/banner contract
+// as bundleCjs; the SEA loader evaluates it alone for `__cli`, so an agent
+// `raft` call skips the 38 MB Computer bundle (~550 → ~150 MiB per call).
+async function bundleSeaCliCjs({ cliVersion, workDir }) {
+  const { build } = await import("esbuild");
+  const outfile = join(workDir, "cli-bundle.cjs");
+  await build({
+    entryPoints: [join(COMPUTER_ROOT, "src", "seaCliEntry.ts")],
+    bundle: true,
+    platform: "node",
+    format: "cjs",
+    target: "node20",
+    outfile,
+    define: {
+      __RAFT_CLI_VERSION__: JSON.stringify(cliVersion),
+      "import.meta.url": "__slockImportMetaUrl",
+    },
+    banner: {
+      js: `const __slockImportMetaUrl = require("node:url").pathToFileURL(process.execPath).href;`,
+    },
+    logLevel: "info",
+  });
+  return outfile;
+}
+
+// The SEA main script: picks ONE embedded bundle and evaluates it with the
+// CommonJS wrapper a SEA main script gets (builtin-only require, __filename =
+// the executable). Dynamic import() keeps the main-context default loader.
+const SEA_LOADER_SOURCE = `"use strict";
+const sea = require("node:sea");
+const path = require("node:path");
+const vm = require("node:vm");
+const name = process.argv[2] === "__cli" ? "cli.cjs" : "computer.cjs";
+const run = vm.compileFunction(sea.getAsset(name, "utf8"), ["exports", "require", "module", "__filename", "__dirname"], {
+  filename: name,
+  importModuleDynamically: vm.constants.USE_MAIN_CONTEXT_DEFAULT_LOADER,
+});
+const loaded = { exports: {} };
+run.call(loaded.exports, loaded.exports, require, loaded, process.execPath, path.dirname(process.execPath));
+`;
+
+async function writeSeaLoader({ workDir }) {
+  const loaderPath = join(workDir, "sea-loader.cjs");
+  await writeFile(loaderPath, SEA_LOADER_SOURCE);
+  return loaderPath;
+}
+
 async function bundleCjs({ version, daemonVersion, cliVersion, workDir }) {
   const { build } = await import("esbuild");
   const outfile = join(workDir, "computer-bundle.cjs");
@@ -255,7 +302,7 @@ async function copyPhotonWasmSidecar(outDir) {
   console.log(`[build] photon wasm: ${outWasm} (${digest})`);
 }
 
-async function makeBlob({ bundlePath, workDir, nodeVersion }) {
+async function makeBlob({ loaderPath, bundlePath, cliBundlePath, workDir, nodeVersion }) {
   const hostMajor = process.versions.node.split(".")[0];
   const targetMajor = String(nodeVersion).split(".")[0];
   if (hostMajor !== targetMajor) {
@@ -270,7 +317,12 @@ async function makeBlob({ bundlePath, workDir, nodeVersion }) {
   await writeFile(
     configPath,
     JSON.stringify(
-      { main: bundlePath, output: blobPath, disableExperimentalSEAWarning: true },
+      {
+        main: loaderPath,
+        output: blobPath,
+        disableExperimentalSEAWarning: true,
+        assets: { "computer.cjs": bundlePath, "cli.cjs": cliBundlePath },
+      },
       null,
       2,
     ),
@@ -411,6 +463,55 @@ function smokeNativeBinary({ outBinary, platform, arch, version, daemonVersion, 
     );
   }
   console.log(`[verify] ${outBinary} bundled OAuth derivation passed`);
+
+  // The agent CLI path runs from its own embedded asset (seaCliEntry.ts).
+  const cliResult = spawnSync(outBinary, ["__cli", "--version"], {
+    encoding: "utf8",
+    windowsHide: true,
+    timeout: 30_000,
+    env: smokeEnv,
+  });
+  const cliReported = String(cliResult.stdout ?? "").trim();
+  if (cliResult.status !== 0 || !cliReported.endsWith(cliVersion)) {
+    throw new Error(
+      `native agent CLI smoke failed with ${cliResult.status ?? cliResult.signal}: ` +
+        `${cliResult.stderr || cliResult.stdout || cliResult.error}`,
+    );
+  }
+  console.log(`[verify] ${outBinary} __cli --version → ${cliReported}`);
+  assertAgentCliFootprint({ outBinary, smokeEnv });
+}
+
+// Peak memory budget for one agent `raft` call (task #11). 1.0.47 measured
+// ~580 MiB; the CLI-only asset measures ~140 MiB on linux-arm64.
+const AGENT_CLI_MAX_RSS_MIB = 220;
+
+// POSIX only: reads the child's peak RSS via python's getrusage(RUSAGE_CHILDREN)
+// (Node has no API for a child's rusage). Skipped where python3 is missing.
+function assertAgentCliFootprint({ outBinary, smokeEnv }) {
+  if (process.platform === "win32") return;
+  const probe = [
+    "import resource, subprocess, sys, time",
+    "t = time.time()",
+    "r = subprocess.run([sys.argv[1], '__cli', '--version'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)",
+    "u = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss",
+    "kib = u / 1024 if sys.platform == 'darwin' else u",
+    "print(r.returncode, int(kib / 1024), round(time.time() - t, 2))",
+  ].join("\n");
+  const result = spawnSync("python3", ["-c", probe, outBinary], { encoding: "utf8", env: { ...smokeEnv, PATH: process.env.PATH } });
+  if (result.error || result.status !== 0) {
+    console.log(`[verify] agent CLI footprint not measured (python3 unavailable: ${result.error?.message ?? result.stderr})`);
+    return;
+  }
+  const [code, rssMiB, seconds] = String(result.stdout).trim().split(/\s+/).map(Number);
+  console.log(`[verify] agent CLI footprint: ${rssMiB} MiB peak RSS, ${seconds}s (budget ${AGENT_CLI_MAX_RSS_MIB} MiB)`);
+  if (code !== 0) throw new Error(`agent CLI footprint probe: __cli --version exited ${code}`);
+  if (!(rssMiB <= AGENT_CLI_MAX_RSS_MIB)) {
+    throw new Error(
+      `agent CLI footprint ${rssMiB} MiB exceeds the ${AGENT_CLI_MAX_RSS_MIB} MiB budget: ` +
+        "an agent `raft` call must not load the Computer bundle (see seaCliEntry.ts)",
+    );
+  }
 }
 
 async function sha256(file) {
@@ -468,8 +569,10 @@ async function main() {
     return;
   }
 
+  const cliBundlePath = await bundleSeaCliCjs({ cliVersion, workDir });
+  const loaderPath = await writeSeaLoader({ workDir });
   const officialNode = await downloadOfficialNode({ platform, arch, nodeVersion, workDir });
-  const blobPath = await makeBlob({ bundlePath, workDir, nodeVersion });
+  const blobPath = await makeBlob({ loaderPath, bundlePath, cliBundlePath, workDir, nodeVersion });
 
   const ext = platform === "win32" ? ".exe" : "";
   const binaryName = `raft-computer-${platform}-${arch}${ext}`;

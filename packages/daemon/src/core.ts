@@ -41,6 +41,7 @@ import {
   isValidMachineDiskStatus,
   DAEMON_CAPABILITY_RUNTIME_OUTCOME_V1,
   SERVER_CAPABILITY_RUNTIME_OUTCOME_ACK_V1,
+  SERVER_CAPABILITY_START_SPAWN_ERROR_V1,
   type AgentStartNotSpawnedReason,
 } from "@botiverse/raft-shared";
 import {
@@ -58,8 +59,9 @@ import {
   APP_SNAPSHOT_TRACE_IDENTITY_KEYS,
   APP_SOURCE_TRACE_IDENTITY_KEYS,
 } from "@botiverse/raft-shared/src/appRuntimeTrace";
-import { AgentProcessManager, classifySpawnFailure, type RuntimeProcessGate } from "./agentProcessManager";
+import { AgentProcessManager, classifySpawnFailure, StaleDispatchError, type RuntimeProcessGate } from "./agentProcessManager";
 import { getDriver } from "./drivers/index";
+import type { RuntimeProbeUnavailableReason } from "./drivers/types";
 import { readCommandVersion, resolveCommandOnPath } from "./drivers/probe";
 import {
   DaemonConnection,
@@ -112,6 +114,7 @@ import {
 import { isProviderProbeRuntime } from "@botiverse/raft-shared";
 import { VERSION as PI_SDK_VERSION } from "@earendil-works/pi-coding-agent";
 import { asProviderProbeId } from "@botiverse/raft-shared";
+import { warmContractSchemas } from "@botiverse/raft-shared";
 import { assertLegacyDaemonKeyNotAdoptedByComputer } from "./computerMigrationGuard";
 import { buildRuntimeModelSourceResultMessage } from "./runtimeModelSourceProjection";
 import {
@@ -129,6 +132,7 @@ import {
 } from "./raftDiskJanitor";
 import type { AgentMigrationExportProgress } from "./agentMigrationExport";
 import {
+  AgentMigrationChunkDigestMismatchError,
   classifyAgentMigrationTargetResidue,
   commitMarkerMatches,
   readCommitMarker,
@@ -170,6 +174,43 @@ const MIGRATION_OBJECT_STORE_DOWNLOAD_RETRY_INITIAL_MS = 25;
 const MIGRATION_OBJECT_STORE_DOWNLOAD_RETRY_MAX_MS = 250;
 // Matches the source's upload concurrency.
 const MIGRATION_TARGET_CHUNK_DOWNLOAD_CONCURRENCY = 3;
+/** A chunk whose bytes keep failing their digest is corrupt, not a network blip. */
+const MIGRATION_CHUNK_DIGEST_MISMATCH_MAX_ATTEMPTS = 3;
+// A body retry downloads the whole chunk again, so back off further than the
+// header-level retries do.
+const MIGRATION_CHUNK_BODY_RETRY_INITIAL_MS = 1_000;
+const MIGRATION_CHUNK_BODY_RETRY_MAX_MS = 10_000;
+const RETRYABLE_CHUNK_BODY_ERROR_CODES = new Set([
+  "ECONNRESET",
+  "ECONNABORTED",
+  "ETIMEDOUT",
+  "EPIPE",
+  "ENETUNREACH",
+  "ENETDOWN",
+  "EHOSTUNREACH",
+  "EAI_AGAIN",
+  "ERR_STREAM_PREMATURE_CLOSE",
+]);
+
+/**
+ * True only for failures of the network stream itself (connection dropped or
+ * timed out while the chunk body was streaming). Local file-system errors
+ * (ENOSPC, EACCES, EROFS, ...) and our own MIGRATION_* errors never recover by
+ * downloading again, so they fail the chunk at once with their real reason.
+ */
+function isRetryableChunkBodyError(error: unknown): boolean {
+  for (let current = error, depth = 0; current && depth < 5; depth += 1) {
+    if (!(current instanceof Error)) return false;
+    const code = (current as { code?: unknown }).code;
+    if (typeof code === "string" && (RETRYABLE_CHUNK_BODY_ERROR_CODES.has(code) || code.startsWith("UND_ERR_"))) {
+      return true;
+    }
+    // undici reports a body cut off mid-stream as `TypeError: terminated`.
+    if (current.name === "TypeError" && current.message === "terminated") return true;
+    current = (current as { cause?: unknown }).cause;
+  }
+  return false;
+}
 const DISK_STATUS_FIRST_REPORT_DELAY_MS = 60_000;
 const DISK_STATUS_REPORT_INTERVAL_MS = 60 * 60 * 1_000;
 const STUCK_TOOL_V0_IDENTITY_ATTRS = [
@@ -239,6 +280,9 @@ export const DAEMON_CORE_TRACE_ATTR_CONTRACTS = {
       "mode",
       "pending_app_items",
       "message_identity_created",
+      "failure_reason",
+      "busy_retry_attempts",
+      "busy_wait_ms",
     ],
   },
   "daemon.app_source.receive": {
@@ -446,7 +490,7 @@ export const DAEMON_CORE_TRACE_ATTR_CONTRACTS = {
     ],
   },
   "daemon.agent.start": {
-    spanAttrs: ["agent_id", "launch_id", "start_dispatch_id", "runtime"],
+    spanAttrs: ["agent_id", "launch_id", "start_dispatch_id", "runtime", "runtime_cli_version"],
     endAttrs: ["outcome", "error_class"],
   },
   "daemon.agent.start_dispatch.receipt": {
@@ -761,6 +805,8 @@ export interface RuntimeDetection {
   ids: string[];
   versions: Record<string, string>;
   diagnostics?: Record<string, string>;
+  /** Structured cause per unavailable runtime, when its probe reported one. Daemon-local; not sent on the wire. */
+  unavailableReasons?: Record<string, RuntimeProbeUnavailableReason>;
 }
 
 export type DefaultAgentEnvVarsProvider = (
@@ -1414,33 +1460,13 @@ export function resolveRaftCliPathOrEmpty(moduleUrl: string = import.meta.url): 
   }
 }
 
-/**
- * Run the bundled `slock` CLI in-process with `argv` as its arguments.
- *
- * The busybox/self-re-exec answer to "how does an agent call `slock` on a SEA
- * single-binary Computer". A SEA binary can't spawn `node <cli-script>` (no
- * node, no sidecar script), so instead the SEA binary re-execs itself in a CLI
- * mode (`<exe> __cli <args>`) and this runs the CLI it bundled. The CLI entry
- * runs `program.parseAsync(process.argv)` on import, so we rewrite argv to look
- * like a normal `slock <args>` invocation and then load it. A fresh process is
- * spawned per agent `slock` call (the cliTransport wrapper execs `<exe> __cli`),
- * so there is no module-cache reuse concern. Importing the entry here also pulls
- * the CLI into the SEA bundle's import graph (it is otherwise only referenced by
- * path via {@link resolveRaftCliPath} and would not be embedded).
- */
-export async function runBundledRaftCli(argv: string[]): Promise<void> {
-  process.argv = [process.execPath, "slock", ...argv];
-  // Static specifier (so esbuild embeds the CLI into the SEA bundle), but the
-  // CLI dist ships no .d.ts beside index.js → TS7016. It is a side-effecting
-  // "run the CLI" import, not a typed module.
-  // @ts-expect-error - untyped CLI entry; importing it runs program.parseAsync.
-  await import("@botiverse/raft/dist/index.js");
-}
+export { runBundledRaftCli } from "./bundledRaftCli";
 
 export function detectRuntimes(tracer: Tracer = noopTracer): RuntimeDetection {
   const ids: string[] = [];
   const versions: Record<string, string> = {};
   const diagnostics: Record<string, string> = {};
+  const unavailableReasons: Record<string, RuntimeProbeUnavailableReason> = {};
   const span = tracer.startSpan("daemon.runtime.detect", {
     surface: "daemon",
     kind: "internal",
@@ -1458,6 +1484,7 @@ export function detectRuntimes(tracer: Tracer = noopTracer): RuntimeDetection {
         if (!probe.available) {
           if (probe.version) versions[runtime.id] = probe.version;
           if (probe.diagnostic) diagnostics[runtime.id] = probe.diagnostic;
+          if (probe.unavailableReason) unavailableReasons[runtime.id] = probe.unavailableReason;
           span.addEvent("daemon.runtime.detect.checked", {
             runtime: runtime.id,
             outcome: "unavailable",
@@ -1523,7 +1550,12 @@ export function detectRuntimes(tracer: Tracer = noopTracer): RuntimeDetection {
       detected_runtime_count: ids.length,
     },
   });
-  return { ids, versions, ...(Object.keys(diagnostics).length > 0 ? { diagnostics } : {}) };
+  return {
+    ids,
+    versions,
+    ...(Object.keys(diagnostics).length > 0 ? { diagnostics } : {}),
+    ...(Object.keys(unavailableReasons).length > 0 ? { unavailableReasons } : {}),
+  };
 }
 
 function readPositiveIntegerEnv(name: string, fallback: number): number {
@@ -1678,6 +1710,8 @@ export class DaemonCore {
   private lastReadyRuntimes: readonly string[] = [];
   /** Runtime ids + versions from the last `ready`; a change lifts the reconnect throttle. */
   private lastReadyRuntimeSignature = "";
+  /** Runtime CLI versions from the last ready frame, by runtime id (for start traces). */
+  private lastReadyRuntimeVersions: Record<string, string> = {};
   private catalogPublishInFlight = false;
   private catalogPublishQueued: { force: boolean } | null = null;
   private lastCatalogPublish: { atMs: number; runtimeSignature: string } | null = null;
@@ -1754,6 +1788,8 @@ export class DaemonCore {
       workerUrl: traceUploadDisabled ? undefined : (process.env.SLOCK_DAEMON_TRACE_UPLOAD_URL || DEFAULT_TRACE_UPLOAD_URL),
       serverConnected: () => connection?.connected ?? false,
       appInboxForAgent: (agentId: string) => this.getAgentAppInbox(agentId),
+      // Lazy: the local app runtime is created after the agent manager.
+      onAgentWorkingToIdle: (agentId: string) => this.localScheduleRuntime?.onAgentWorkingToIdle(agentId),
       // RFC 071 outbox: every spawn/rebind first durably records the process as open.
       runtimeProcessGate: {
         openProcess: (agentId: string, processInstanceId: string, spawnLaunchId: string | null) =>
@@ -2010,6 +2046,10 @@ export class DaemonCore {
 
   start() {
     logger.info("[Slock Daemon] Starting...");
+    // The shared contract schemas are built on first use so a short `raft` CLI
+    // call builds only its own route's. The daemon is long-lived: build them
+    // all here so a broken schema fails startup, not a later request.
+    warmContractSchemas();
     // RFC 071: reload un-acked evidence; it is resent with its original identities.
     this.runtimeOutcomeOutbox.load();
     logger.info(`[Slock Daemon] ${SLOCK_HOME_ENV}=${this.slockHome}`);
@@ -2794,22 +2834,7 @@ export class DaemonCore {
         return { chunk, expected };
       });
       await forEachWithConcurrency(planned, MIGRATION_TARGET_CHUNK_DOWNLOAD_CONCURRENCY, async ({ chunk, expected }) => {
-        const response = await this.fetchResumableTransferWithRetry(
-          lease,
-          "chunk_download",
-          true,
-          signal,
-          () => daemonFetch(chunk.url, { method: "GET", signal }),
-        );
-        if (!response.ok || !response.body) {
-          throw new Error(`MIGRATION_CHUNK_DOWNLOAD_FAILED:${response.status}`);
-        }
-        await verifyAndStoreAgentMigrationChunk({
-          control,
-          chunkIndex: chunk.index,
-          chunk: Readable.fromWeb(response.body as import("node:stream/web").ReadableStream),
-          chunksDirectory,
-        });
+        await this.downloadResumableChunkWithRetry(lease, control, chunk, chunksDirectory, signal);
         await this.reportResumableChunkReceipt(lease, "target", expected, null, signal);
       });
     }
@@ -3056,6 +3081,77 @@ export class DaemonCore {
         response,
         "chunk_receipt",
       );
+    }
+  }
+
+  /**
+   * Download and store one chunk. `fetchResumableTransferWithRetry` only covers
+   * getting the response headers; a connection that drops while the body is
+   * streaming throws from the pipeline instead, so retry the whole chunk here
+   * until the lease expires, but only for network-stream failures
+   * (isRetryableChunkBodyError); a digest mismatch gets 3 attempts, and any
+   * other error (full disk, permissions, invalid control) fails at once.
+   */
+  private async downloadResumableChunkWithRetry(
+    lease: AgentMigrationTransportLeaseMessage,
+    control: AgentMigrationControlManifest,
+    chunk: { index: number; url: string },
+    chunksDirectory: string,
+    signal: AbortSignal,
+  ): Promise<void> {
+    const expiresAtMs = Date.parse(lease.expiresAt);
+    let attempt = 0;
+    let digestMismatches = 0;
+    let delayMs = MIGRATION_CHUNK_BODY_RETRY_INITIAL_MS;
+    while (true) {
+      signal.throwIfAborted();
+      attempt += 1;
+      const response = await this.fetchResumableTransferWithRetry(
+        lease,
+        "chunk_download",
+        true,
+        signal,
+        () => daemonFetch(chunk.url, { method: "GET", signal }),
+      );
+      if (!response.ok || !response.body) {
+        throw new Error(`MIGRATION_CHUNK_DOWNLOAD_FAILED:${response.status}`);
+      }
+      const body = Readable.fromWeb(response.body as import("node:stream/web").ReadableStream);
+      try {
+        await verifyAndStoreAgentMigrationChunk({
+          control,
+          chunkIndex: chunk.index,
+          chunk: body,
+          chunksDirectory,
+        });
+        return;
+      } catch (error) {
+        // verifyAndStore may throw before reading the body; destroying the
+        // stream cancels the response so the connection is released.
+        body.destroy();
+        signal.throwIfAborted();
+        if (error instanceof AgentMigrationChunkDigestMismatchError) {
+          digestMismatches += 1;
+          if (digestMismatches >= MIGRATION_CHUNK_DIGEST_MISMATCH_MAX_ATTEMPTS) throw error;
+        } else if (!isRetryableChunkBodyError(error)) {
+          throw error;
+        }
+        const remainingMs = expiresAtMs - currentTimeMs();
+        if (remainingMs <= 0) throw error;
+        const sleepMs = Math.min(delayMs, remainingMs);
+        this.recordDaemonEvent("daemon.migration_transport.resumable", {
+          ...migrationTraceIdentityAttrs(lease, "chunk_download"),
+          outcome: "retry",
+          operation: "chunk_download",
+          attempt,
+          // A 2xx status marks a body failure: header-level retries never have one.
+          http_status: response.status,
+          error_class: errorClassOf(error),
+          retry_delay_ms: sleepMs,
+        });
+        await waitForAmbientBackoff(sleepMs, signal);
+        delayMs = Math.min(delayMs * 2, MIGRATION_CHUNK_BODY_RETRY_MAX_MS);
+      }
     }
   }
 
@@ -3902,6 +3998,18 @@ export class DaemonCore {
   }
 
   private reportAgentStartFailure(msg: AgentStartMessage, err: unknown, startSpan?: TraceContext): void {
+    if (err instanceof StaleDispatchError) {
+      // task #365: already settled `stale_dispatch` where the process would
+      // have been created; not a start failure, and the status stays as is.
+      this.recordDaemonEvent("daemon.agent.start.stale_dispatch", {
+        agentId: msg.agentId,
+        launchId: msg.launchId,
+        start_dispatch_id: msg.startDispatchId,
+        checked_at: "spawn",
+      }, "ok", startSpan);
+      logger.warn(`[Agent ${msg.agentId}] Refused start ${msg.launchId ?? "(no launch)"} before spawning: claimed against an earlier connection`);
+      return;
+    }
     // RFC 071: a launch the process manager did not settle (spawned, rebound,
     // or its own not_spawned) failed here before any process existed.
     this.agentManager.settleServerStartNotSpawned(
@@ -3925,25 +4033,9 @@ export class DaemonCore {
       // The shown refusal text (with the way out) where this daemon refused the start itself.
       ...(err instanceof LocalStartRefusedError ? { local_refusal_detail: err.message } : {}),
     }, "error", startSpan);
-    this.agentManager.reportStartFailureStatus(msg.agentId, msg.launchId);
-    // Accepted ambient clock: telemetry records the daemon's observed wall-clock time for this failure.
-    this.connection.send({
-      type: "agent:activity",
-      agentId: msg.agentId,
-      detail: classification.userMessage,
-      detailKind: "runtime_unavailable",
-      launchId: msg.launchId,
-      observedAtMs: Date.now(),
-      isHeartbeat: false,
-      // task #1123: the typed reason travels beside the human text so the web
-      // picks copy by reason instead of parsing the detail string.
-      spawnFailure: {
-        reason: classification.reason,
-        ...(classification.reason === "model_not_found" && typeof msg.config.model === "string" && msg.config.model
-          ? { model: msg.config.model.slice(0, 128) }
-          : {}),
-      },
-    });
+    // task #1123: the typed reason travels beside the human text so the web
+    // picks copy by reason instead of parsing the detail string.
+    this.agentManager.reportStartFailure(msg.agentId, msg.launchId, classification, msg.config.model);
   }
 
   // One consumer span covers the whole start request, including duplicate
@@ -3959,6 +4051,9 @@ export class DaemonCore {
         launch_id: msg.launchId,
         start_dispatch_id: msg.startDispatchId,
         runtime: msg.config.runtime,
+        // The runtime CLI's own version as last detected (`runtime_version`
+        // elsewhere is the daemon's), so starts can be grouped by it.
+        runtime_cli_version: this.lastReadyRuntimeVersions[msg.config.runtime || "claude"] ?? undefined,
       },
     });
     const endWithFailure = (err: unknown) => {
@@ -4028,6 +4123,26 @@ export class DaemonCore {
       this.reportAgentStartFailure(msg, new Error("Too many starts are still waiting for a result on this agent"), startSpan);
       return;
     }
+    // task #365: an automatic start the server claimed against an earlier
+    // connection (it left that replica before a reconnect, then arrived late)
+    // must not create a process: the server may already have claimed another
+    // start on this connection. Refused here at once when already stale; the
+    // binding check is where the process is created (the process manager
+    // re-checks after the credential mint and any start queue wait). Settled
+    // `stale_dispatch` (never counted); the agent's status is left as it is,
+    // since a current start may own it.
+    const currentEpoch = this.agentManager.currentConnectionEpochId;
+    const claimedEpoch = msg.type === "agent:start" ? msg.connectionEpochId : undefined;
+    if (claimedEpoch && currentEpoch && claimedEpoch !== currentEpoch) {
+      this.agentManager.settleServerStartNotSpawned(msg.agentId, msg.launchId, "stale_dispatch");
+      this.recordDaemonEvent("daemon.agent.start.stale_dispatch", {
+        agentId: msg.agentId,
+        launchId: msg.launchId,
+        start_dispatch_id: msg.startDispatchId,
+      }, "ok", startSpan);
+      logger.warn(`[Agent ${msg.agentId}] Refused start ${msg.launchId ?? "(no launch)"}: claimed against an earlier connection`);
+      return;
+    }
     // RFC 071 outbox local refusal: before the agent counts as starting, so a
     // refused start leaves no starting state behind.
     const admission = this.localStartAdmission(msg);
@@ -4076,6 +4191,7 @@ export class DaemonCore {
         startSpan,
         msg.catchupBatchId,
         recoveryGrant,
+        claimedEpoch ?? null,
       );
       if (msg.startDispatchId) {
         const acceptance = this.agentManager.getAgentStartAcceptance(msg.agentId);
@@ -4128,6 +4244,17 @@ export class DaemonCore {
         this.serverAcksRuntimeOutcomes = !this.machineContextConflict
           && (msg.capabilities ?? []).includes(SERVER_CAPABILITY_RUNTIME_OUTCOME_ACK_V1);
         this.runtimeOutcomeOutbox.onServerContext(this.serverAcksRuntimeOutcomes);
+        // task #365: a proven never-created child is reported as `spawn_error`
+        // only to a server that counts it AND acks outbox frames (the report
+        // travels in the outbox; without acks it would sit there while the
+        // crash report that feeds the #1119 breaker is gone). Automatic
+        // starts claimed against another connection are refused (see
+        // startAgentFromMessage).
+        this.agentManager.setServerStartContext({
+          spawnErrorCapable: this.serverAcksRuntimeOutcomes
+            && (msg.capabilities ?? []).includes(SERVER_CAPABILITY_START_SPAWN_ERROR_V1),
+          connectionEpochId: typeof msg.connectionEpochId === "string" && msg.connectionEpochId ? msg.connectionEpochId : null,
+        });
         break;
 
       case "agent:outcome:ack":
@@ -4408,9 +4535,10 @@ export class DaemonCore {
         // transcript_outcome object (best-effort, never retried, never able to
         // delay or rewrite the result).
         const daemonVersion = readBakedDaemonVersion();
+        const reportGeneratedAt = msg.feedbackReportGeneratedAt ?? currentDate().toISOString();
         void runFeedbackTranscriptRequest({
           collect: () => this.agentManager.collectFeedbackTranscript(msg.agentId, msg.feedbackReportId, {
-            reportGeneratedAt: msg.feedbackReportGeneratedAt ?? currentDate().toISOString(),
+            reportGeneratedAt,
             reportTimeSource: msg.feedbackReportTimeSource ?? "server_request_received",
           }, {
             includeMachineLogTail: msg.includeMachineLogTail === true,
@@ -4433,6 +4561,13 @@ export class DaemonCore {
             msg.requestId,
             result,
             daemonVersion ?? null,
+          ),
+          // task #1230: own budget, after the frame; never awaited here.
+          uploadAgentEventTail: () => this.agentManager.uploadFeedbackAgentEventTail(
+            msg.agentId,
+            msg.feedbackReportId,
+            msg.requestId,
+            reportGeneratedAt,
           ),
           workerConfigured: this.agentManager.feedbackUploadsConfigured,
           tag: `report=${msg.feedbackReportId} agent=${msg.agentId} request=${msg.requestId}`,
@@ -4653,7 +4788,9 @@ export class DaemonCore {
                 ? "control_busy"
                 : /(?:^|\b)SELF_RELAUNCH_UNAVAILABLE(?:\b|:)/.test(message)
                   ? "self_relaunch_unavailable"
-                  : "computer_control_failed";
+                  : /(?:^|\b)UPGRADE_START_REJECTED(?:\b|:)/.test(message)
+                    ? "upgrade_start_rejected"
+                    : "computer_control_failed";
               logger.error(
                 `[Daemon] computer:${action} control handler failed: ${message}`,
               );
@@ -4665,8 +4802,22 @@ export class DaemonCore {
                   ok: false,
                   error: failure,
                 });
+                return;
               }
-              // upgrade: nothing to report; the machine's reconnect version is the readback.
+              // task #917: an upgrade that never reached the installer (a
+              // supervisor that cannot be upgraded in place, a busy service,
+              // an unreachable seam) has no reconnect to read back from. Settle
+              // it now. Only the supervisor refusals also write a disk receipt
+              // (recordRemoteUpgradeRefusal) that the next `ready` relays if
+              // this message is lost; a busy or unreachable seam leaves no
+              // receipt, so a lost message there waits out the request deadline.
+              this.connection.send({
+                type: "computer:upgrade:done",
+                requestId,
+                ok: false,
+                code: failure,
+                reason: message.replace(/[\u0000-\u001f\u007f]+/gu, " ").slice(0, 2048),
+              });
             });
         } else {
           logger.info(`[Daemon] Ignoring computer:${action} — not launched by a Computer service.`);
@@ -4791,13 +4942,24 @@ export class DaemonCore {
   }
 
   private async emitReady(expectedLifecycleGeneration?: number): Promise<boolean> {
-    const { ids: runtimes, versions: runtimeVersions, diagnostics: runtimeDiagnostics = {} } = this.runtimeDetector();
+    const {
+      ids: runtimes,
+      versions: runtimeVersions,
+      diagnostics: runtimeDiagnostics = {},
+      unavailableReasons: runtimeUnavailableReasons = {},
+    } = this.runtimeDetector();
     this.lastReadyRuntimes = runtimes;
     this.lastReadyRuntimeSignature = JSON.stringify(runtimes.map((id) => [id, runtimeVersions[id] ?? null]));
+    this.lastReadyRuntimeVersions = runtimeVersions;
     const runtimeInfo = runtimes.map((id) => runtimeVersions[id] ? `${id} (${runtimeVersions[id]})` : id);
     logger.info(`[Daemon] Detected runtimes: ${runtimeInfo.join(", ") || "none"}`);
     for (const [runtime, diagnostic] of Object.entries(runtimeDiagnostics)) {
-      logger.warn(`[Daemon] Runtime ${runtime} diagnostic: ${diagnostic}`);
+      // A missing optional runtime is an expected inventory state, re-probed on
+      // every ready; only installed-but-broken runtimes (or unknown causes) warn.
+      const notInstalled = !runtimes.includes(runtime) && runtimeUnavailableReasons[runtime] === "not_installed";
+      const message = `[Daemon] Runtime ${runtime} diagnostic: ${diagnostic}`;
+      if (notInstalled) logger.info(message);
+      else logger.warn(message);
     }
     const runningAgentIds = this.agentManager.getRunningAgentIds();
     const idleAgentSessions = this.agentManager.getIdleAgentSessionIds();

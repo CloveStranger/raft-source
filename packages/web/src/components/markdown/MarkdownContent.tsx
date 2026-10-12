@@ -11,7 +11,7 @@ import type {
   ComponentPropsWithoutRef,
   ComponentType,
 } from "react";
-import ReactMarkdown from "react-markdown";
+import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import type { Components, Options } from "react-markdown";
 import remarkBreaks from "remark-breaks";
 import remarkGfm from "remark-gfm";
@@ -26,7 +26,8 @@ import {
 type PluggableList = NonNullable<Options["remarkPlugins"]>;
 import { transparentImageBackgroundClass } from "../../utils/imagePreviewStyles";
 import CodeBlock, { extractCodeBlockText } from "./CodeBlock";
-import { markdownSanitizeSchema } from "./markdownSanitizeSchema";
+import { markdownSanitizeSchema, MARKDOWN_EXTRA_HREF_PROTOCOLS } from "./markdownSanitizeSchema";
+import { CustomProtocolLink, isCustomProtocolHref } from "./CustomProtocolLink";
 import { MermaidDiagram } from "../mermaid/MermaidDiagram";
 import { readMermaidSource } from "../mermaid/mermaidSource";
 import { remarkDisableIndentedCode } from "./remarkDisableIndentedCode";
@@ -199,6 +200,39 @@ export function MarkdownCode({
   return <code className={className}>{children}</code>;
 }
 
+/**
+ * Canonical markdown link renderer. Custom-protocol hrefs (obsidian:// and
+ * friends — the sanitize allowlist extension in `markdownSanitizeSchema.ts`
+ * decides which schemes can reach this point) route through a confirmation
+ * dialog before handing off to the OS (task #734); ordinary links open in a
+ * new tab. The chat surface's anchor override delegates to this for
+ * custom-protocol hrefs, so the confirm decision lives in exactly one place
+ * for every surface that renders untrusted markdown.
+ */
+export function MarkdownLink({
+  href,
+  children,
+}: {
+  href?: string;
+  children?: ReactNode;
+}) {
+  if (isCustomProtocolHref(href)) {
+    return <CustomProtocolLink href={href}>{children}</CustomProtocolLink>;
+  }
+  return (
+    <a
+      href={href}
+      target="_blank"
+      rel="noopener noreferrer"
+      {...externalTranslationGuardProps(
+        "text-blue-700 dark:text-blue-300 underline decoration-2 underline-offset-2 hover:text-brutal-pink select-text",
+      )}
+    >
+      {children}
+    </a>
+  );
+}
+
 export const BASE_MARKDOWN_COMPONENTS: Components = {
   pre: ({ children }) => <BaseCodePre>{children}</BaseCodePre>,
   code: (props) => <MarkdownCode {...props} />,
@@ -282,20 +316,12 @@ export const BASE_MARKDOWN_COMPONENTS: Components = {
   img: ({ src, alt }) => (
     <img src={src} alt={alt || ""} className={`my-2 max-w-full border border-line-muted theme-brutal:border-2 theme-brutal:border-black ${transparentImageBackgroundClass}`} />
   ),
-  // Default link renderer — opens in a new tab. Chat surface overrides this
-  // to handle @mention / #channel / task / thread / slock permalink markup.
-  a: ({ href, children }) => (
-    <a
-      href={href}
-      target="_blank"
-      rel="noopener noreferrer"
-      {...externalTranslationGuardProps(
-        "text-blue-700 dark:text-blue-300 underline decoration-2 underline-offset-2 hover:text-brutal-pink select-text",
-      )}
-    >
-      {children}
-    </a>
-  ),
+  // Default link renderer — opens ordinary links in a new tab, custom
+  // protocols (obsidian://) through the confirm dialog (task #734). Chat
+  // surface overrides this to handle @mention / #channel / task / thread /
+  // slock permalink markup, and delegates back to MarkdownLink for
+  // custom-protocol hrefs.
+  a: ({ href, children }) => <MarkdownLink href={href}>{children}</MarkdownLink>,
 };
 
 const DOCUMENT_MARKDOWN_COMPONENTS: Components = {
@@ -397,6 +423,18 @@ const COMPACT_REMARK_PLUGINS: PluggableList = [
 ];
 const DEFAULT_REHYPE_PLUGINS: PluggableList = [[rehypeSanitize, markdownSanitizeSchema]];
 
+// react-markdown applies its own urlTransform AFTER the rehype plugins, and
+// its default blanks any href scheme outside http/https/mailto/… — that would
+// re-strip the custom protocols the sanitize schema just allowed (task #734).
+// Preserve exactly the schemes on the sanitize allowlist extension; defer to
+// the default transform for everything else. Module-level so the prop keeps a
+// stable identity (see the memoization note above).
+function markdownUrlTransform(url: string): string {
+  const scheme = /^([a-zA-Z][a-zA-Z0-9+.-]*):/.exec(url)?.[1]?.toLowerCase();
+  if (scheme && MARKDOWN_EXTRA_HREF_PROTOCOLS.includes(scheme)) return url;
+  return defaultUrlTransform(url);
+}
+
 export interface MarkdownContentProps {
   /** The markdown source string. */
   source: string;
@@ -479,6 +517,7 @@ function MarkdownContentImpl({
         <ReactMarkdown
           remarkPlugins={resolvedRemarkPlugins}
           rehypePlugins={rehypePlugins}
+          urlTransform={markdownUrlTransform}
           components={mergedComponents}
         >
           {source}

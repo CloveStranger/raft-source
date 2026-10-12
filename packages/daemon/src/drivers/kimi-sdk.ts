@@ -543,6 +543,12 @@ export async function createKimiAgentSessionForContext(
       },
     } : {}),
   };
+  // task #365: right before the SDK session is resumed or created. What ran
+  // before it is local preparation only (CLI transport files, LocalKaos, the
+  // harness object, the managed MCP proxy): no provider request and no tool
+  // execution. A stale launch throws here; the launch's proxies are released
+  // by the process manager's failed-start cleanup.
+  ctx.assertLaunchCurrent?.();
   let session: KimiSession;
   try {
     if (ctx.config.sessionId) {
@@ -558,6 +564,9 @@ export async function createKimiAgentSessionForContext(
         if (!isKimiError(resumeError) || !KIMI_RECOVERABLE_RESUME_CODES.has(resumeError.code)) {
           throw typedKimiStartError(resumeError, selectedModel);
         }
+        // task #365: the failed resume was an await; check again before the
+        // fresh session is created.
+        ctx.assertLaunchCurrent?.();
         session = await harness.createSession({
           ...sessionFields,
           ...(selectedModel ? { model: selectedModel } : {}),
@@ -704,6 +713,8 @@ export class KimiSdkRuntimeSession implements RuntimeSession {
     setKimiSdkEventMappingSession(this.mappingState, sessionId);
     this.setCurrentSessionId(sessionId);
 
+    // task #365: before the native runtime session is created.
+    this.ctx.assertLaunchCurrent?.();
     const { harness, session, wrapperPath } = await this.sessionFactory(
       {
         ...this.ctx,
@@ -1251,6 +1262,8 @@ export class KimiSdkDriver implements RuntimeDriver {
    * composeStandingRoleAdditional + createKimiAgentSessionForContext.
    */
   readonly supportsNativeStandingPrompt = true;
+  /** task #13: resumeSession re-renders roleAdditional from this launch (measured on the SDK 0.34). */
+  readonly standingPromptRefreshesOnResume = true;
   readonly lifecycle = {
     kind: "persistent",
     stdin: "direct",

@@ -9,7 +9,61 @@ export type ProductFeedbackAttachment = {
   contentType: string;
 };
 
-export type ProductFeedbackClientKind = "web" | "ios" | "android";
+export type ProductFeedbackClientKind = "web" | "ios" | "android" | "ohos";
+
+/**
+ * A diagnostics zip the mobile host already uploaded through Hands' presign
+ * endpoint with its own client key. The server only checks the shape and
+ * forwards it in the create request's `presigned` field; Hands checks that the
+ * key belongs to the app, the object exists, and the size matches, before it
+ * creates the ticket.
+ */
+export type ProductFeedbackPresignedAttachment = {
+  r2_key: string;
+  filename: string;
+  content_type: "application/zip";
+  size: number;
+};
+
+export const PRODUCT_FEEDBACK_DIAGNOSTICS_MAX_BYTES = 200 * 1024 * 1024;
+const PRESIGNED_R2_KEY_RE = /^feedback\/[A-Za-z0-9-]{1,64}\/presigned\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}-[^/\u0000-\u001f\u007f]{1,255}$/;
+const DIAGNOSTICS_FILENAME_RE = /^[^/\\\u0000-\u001f\u007f]{1,251}\.zip$/i;
+
+/**
+ * Parses the optional `diagnostics` form field. Returns null when absent and
+ * throws ProductFeedbackValidationError when present but not acceptable. Only
+ * the mobile hosts upload diagnostics, so a web submission carrying one is
+ * rejected rather than forwarded.
+ */
+export function parseProductFeedbackDiagnostics(
+  raw: unknown,
+  clientKind: ProductFeedbackClientKind,
+): ProductFeedbackPresignedAttachment | null {
+  if (raw === undefined) return null;
+  if (clientKind === "web" || typeof raw !== "string" || raw.length > 2048) {
+    throw new ProductFeedbackValidationError();
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new ProductFeedbackValidationError();
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new ProductFeedbackValidationError();
+  const candidate = parsed as Record<string, unknown>;
+  const { r2_key: r2Key, filename, content_type: contentType, size } = candidate;
+  if (
+    Object.keys(candidate).length !== 4
+    || typeof r2Key !== "string" || !PRESIGNED_R2_KEY_RE.test(r2Key)
+    || typeof filename !== "string" || !DIAGNOSTICS_FILENAME_RE.test(filename)
+    || contentType !== "application/zip"
+    || typeof size !== "number" || !Number.isSafeInteger(size)
+    || size < 1 || size > PRODUCT_FEEDBACK_DIAGNOSTICS_MAX_BYTES
+  ) {
+    throw new ProductFeedbackValidationError();
+  }
+  return { r2_key: r2Key, filename, content_type: contentType, size };
+}
 
 /**
  * Server-derived reporter attribution attached to a feedback submission.
@@ -81,6 +135,8 @@ export type ProductFeedbackSubmission = {
   userId: string;
   metadata: ProductFeedbackNormalizedMetadata;
   attachments: ProductFeedbackAttachment[];
+  /** Diagnostics zip already uploaded by the mobile host; see parseProductFeedbackDiagnostics. */
+  diagnostics?: ProductFeedbackPresignedAttachment;
   /** Set when the ticket is filed from an agent's Report Issue dialog. */
   feedbackReportId?: FeedbackReportId;
 };
@@ -104,6 +160,8 @@ export class ProductFeedbackUpstreamError extends Error {
     public readonly upstreamStatus: number | null,
     public readonly retryAfter: string | null = null,
     public readonly upstreamError: string | null = null,
+    /** Hands' machine-readable `code`, exactly as sent; null when absent or not a string. */
+    public readonly upstreamCode: string | null = null,
   ) {
     super(upstreamStatus === null
       ? "Hands product feedback request failed"
@@ -115,7 +173,7 @@ export class ProductFeedbackUpstreamError extends Error {
 const UPSTREAM_ERROR_BODY_MAX_BYTES = 4 * 1024;
 const UPSTREAM_ERROR_MESSAGE_MAX_CHARS = 256;
 
-async function readUpstreamError(response: Response): Promise<string | null> {
+async function readUpstreamErrorBody(response: Response): Promise<Record<string, unknown> | null> {
   const contentType = response.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase();
   if (contentType !== "application/json" || !response.body) return null;
 
@@ -149,13 +207,31 @@ async function readUpstreamError(response: Response): Promise<string | null> {
   try {
     const parsed = JSON.parse(new TextDecoder().decode(bytes)) as unknown;
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
-    const error = (parsed as Record<string, unknown>).error;
-    if (typeof error !== "string") return null;
-    const normalized = error.replace(/[\u0000-\u001f\u007f]+/g, " ").replace(/\s+/g, " ").trim();
-    return normalized ? normalized.slice(0, UPSTREAM_ERROR_MESSAGE_MAX_CHARS) : null;
+    return parsed as Record<string, unknown>;
   } catch {
     return null;
   }
+}
+
+function upstreamErrorMessage(body: Record<string, unknown> | null): string | null {
+  const error = body?.error;
+  if (typeof error !== "string") return null;
+  const normalized = error.replace(/[\u0000-\u001f\u007f]+/g, " ").replace(/\s+/g, " ").trim();
+  return normalized ? normalized.slice(0, UPSTREAM_ERROR_MESSAGE_MAX_CHARS) : null;
+}
+
+// Hands answers 400 with one of these codes when a `presigned` reference fails
+// validation, before any ticket is written; when the submission_id already has
+// a ticket it answers 409 instead (Hands #684, #proj-hands:04b4449e). So these
+// codes mean "no ticket exists for this submission_id" and the client may
+// resubmit without the diagnostics under a new id. Matched on the exact code
+// only; error texts and any other code stay ordinary failures.
+const PRESIGNED_REJECTION_CODES = new Set(["presigned_invalid", "presigned_not_found", "presigned_size_mismatch"]);
+
+export function isPresignedRejection(error: ProductFeedbackUpstreamError): boolean {
+  return error.upstreamStatus === 400
+    && error.upstreamCode !== null
+    && PRESIGNED_REJECTION_CODES.has(error.upstreamCode);
 }
 
 export class ProductFeedbackValidationError extends Error {
@@ -225,7 +301,7 @@ function requiredBounded(value: unknown, maxLength: number): string {
 
 function optionalClientKind(value: unknown): ProductFeedbackClientKind | undefined {
   if (value === undefined || value === null) return undefined;
-  if (value === "web" || value === "ios" || value === "android") return value;
+  if (value === "web" || value === "ios" || value === "android" || value === "ohos") return value;
   throw new ProductFeedbackValidationError();
 }
 
@@ -333,6 +409,7 @@ export async function submitProductFeedback(
       attachment.filename,
     );
   }
+  if (input.diagnostics) body.set("presigned", JSON.stringify([input.diagnostics]));
 
   let response: Response;
   try {
@@ -354,10 +431,12 @@ export async function submitProductFeedback(
   options.onUpstreamServerTiming?.(response.headers.get("server-timing"));
 
   if (!response.ok) {
+    const upstreamBody = await readUpstreamErrorBody(response);
     throw new ProductFeedbackUpstreamError(
       response.status,
       response.headers.get("retry-after"),
-      await readUpstreamError(response),
+      upstreamErrorMessage(upstreamBody),
+      typeof upstreamBody?.code === "string" ? upstreamBody.code : null,
     );
   }
 

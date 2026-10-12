@@ -7,8 +7,11 @@ import { useIntl } from "react-intl";
 
 import { useLegacyTaskPanelStore } from "../../store/legacyTaskPanelStore";
 import { TASK_STATUS_UI } from "./taskStatusUi";
+import { StatusBadge } from "./StatusBadge";
 import { Button } from "raft-ui";
 import Tooltip from "../ui/Tooltip";
+
+const NON_INTERACTIVE_TOOLTIP_PROPS = { className: "pointer-events-none" };
 
 // Mirrors `STATUS_STYLES` in `task/taskStatusUi.ts` — Title Case labels +
 // `closed` uses `bg-brutal-stone` (terminal-state token), NOT `bg-brutal-red`.
@@ -138,7 +141,7 @@ export default function LegacyTaskPanel({
               <Tooltip
                 content={formatMessage({ id: "message.threadPanel.viewInChannel" })}
                 disableHoverablePopup
-                contentProps={{ className: "pointer-events-none" }}
+                contentProps={NON_INTERACTIVE_TOOLTIP_PROPS}
               >
                 <button
                   type="button"
@@ -154,7 +157,7 @@ export default function LegacyTaskPanel({
             <Tooltip
               content={formatMessage({ id: "task.modal.close" })}
               disableHoverablePopup
-              contentProps={{ className: "pointer-events-none" }}
+              contentProps={NON_INTERACTIVE_TOOLTIP_PROPS}
             >
               <CloseButton
                 type="button"
@@ -172,9 +175,9 @@ export default function LegacyTaskPanel({
 
       <div className="flex-1 overflow-y-auto bg-layer-canvas px-5 py-4 space-y-4 safe-bottom">
         <div className="flex flex-wrap items-center gap-2">
-          <span className={`shrink-0 rounded-sm border border-line-muted px-1 py-0.5 text-[10px] font-bold leading-none theme-brutal:rounded-none theme-brutal:border-black ${status.bg}`}>
+          <StatusBadge status={task.status}>
             {formatMessage({ id: status.labelId })}
-          </span>
+          </StatusBadge>
         </div>
 
         <section className="card-brutal bg-layer-panel p-4 space-y-3 theme-brutal:bg-white">

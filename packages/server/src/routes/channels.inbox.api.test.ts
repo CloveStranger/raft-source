@@ -2476,7 +2476,9 @@ test("POST /channels/inbox/read-all marks every active Inbox row read", async ({
     event: "read_state:updated_bulk",
     payload: {
       serverId: f.serverId,
-      scopes: readAllBody.scopes,
+      // The frame adds the post-read unread count (0 after read-all); the
+      // HTTP response keeps its deployed shape.
+      scopes: readAllBody.scopes.map((scope) => ({ ...scope, unreadCount: 0 })),
     },
   });
   const afterReadAllEventCount = events.length;

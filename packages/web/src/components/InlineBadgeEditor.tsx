@@ -1,14 +1,22 @@
-import { Badge, DropdownMenuPopup } from "raft-ui";
-import type { BadgeProps } from "raft-ui";
-import MenuItem from "./ui/MenuItem";
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { Badge, DropdownMenuPopup, TaskStatusBadge } from "raft-ui";
+import type { BadgeProps, TaskStatusId } from "raft-ui";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, ReactNode } from "react";
 import { createPortal } from "react-dom";
-import { Pencil, Check } from "lucide-react";
+import { Pencil } from "lucide-react";
 
+import { InlineBadgeMenuItem } from "./InlineBadgeMenuItem";
 import SelectionPopover from "./ui/SelectionPopover";
 import Tooltip from "./ui/Tooltip";
 import { dismissLayerProps } from "./ui/dismissLayer";
+
+export type InlineBadgeOption = { id: string; label: string; avatar?: ReactNode };
+
+function noop() {}
+
+function stopPropagation(event: { stopPropagation(): void }) {
+  event.stopPropagation();
+}
 
 interface InlineBadgeEditorProps {
   /** Display label shown in the badge */
@@ -17,13 +25,20 @@ interface InlineBadgeEditorProps {
   selectedId: string;
   /** `avatar` is rendered in a reserved leading slot, so a list of people lines
    *  up whether or not every entry has a picture. Status passes none. */
-  options: { id: string; label: string; avatar?: ReactNode }[];
+  options: InlineBadgeOption[];
   onSelect: (id: string) => Promise<void> | void;
   open: boolean;
   onToggle: () => void;
   onRequestClose?: () => void;
   badgeClassName: string;
   badgeVariant?: BadgeProps["variant"];
+  /**
+   * When set, the trigger renders raft-ui's `TaskStatusBadge` for this status,
+   * so the icon + colours come from the single task-status source instead of a
+   * caller-supplied `badgeClassName`. Status callsites use this; other badges
+   * (e.g. a non-status pill) keep the generic `badgeClassName` path.
+   */
+  badgeStatus?: TaskStatusId;
   capitalize?: boolean;
   /**
    * Apply the brutal uppercase + tracking-wide transform on the
@@ -72,6 +87,7 @@ export default function InlineBadgeEditor({
   onRequestClose,
   badgeClassName,
   badgeVariant = "muted",
+  badgeStatus,
   capitalize,
   uppercase = true,
   dropdownMinWidth = "min-w-[120px]",
@@ -186,6 +202,18 @@ export default function InlineBadgeEditor({
     if (input instanceof HTMLInputElement && document.activeElement !== input) input.focus();
   }, [open, searchable, dropdownStyle]);
 
+  const selectionOptions = useMemo(() => {
+    const reserveLeadingSlot = options.some((o) => o.avatar);
+    return options.map((opt) => ({
+      key: opt.id,
+      label: opt.label,
+      checked: opt.id === selectedId,
+      avatar: opt.avatar,
+      reserveLeadingSlot,
+      onClick: () => { void onSelect(opt.id); },
+    }));
+  }, [options, selectedId, onSelect]);
+
   const dropdown = open && searchable ? (
     // Same portal and same measured position as the plain list — only the panel
     // itself is delegated. SelectionPopover brings its own border/shadow, so the
@@ -194,26 +222,19 @@ export default function InlineBadgeEditor({
       ref={dropdownRef}
       style={dropdownStyle}
       data-testid={dropdownTestId}
-      onMouseDown={(event) => event.stopPropagation()}
-      onClick={(event) => event.stopPropagation()}
+      onMouseDown={stopPropagation}
+      onClick={stopPropagation}
     >
       <SelectionPopover
         searchable
         title={popoverTitle ?? ""}
         showHeader={!!popoverTitle}
         search={search}
-        onSearchChange={onSearchChange ?? (() => {})}
+        onSearchChange={onSearchChange ?? noop}
         searchPlaceholder={searchPlaceholder}
         emptyLabel={emptyLabel}
         className="w-[240px] border border-line-muted bg-layer-popover text-foreground-strong shadow-raft-md theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white theme-brutal:text-black theme-brutal:shadow-brutal"
-        options={options.map((opt) => ({
-          key: opt.id,
-          label: opt.label,
-          checked: opt.id === selectedId,
-          avatar: opt.avatar,
-          reserveLeadingSlot: options.some((o) => o.avatar),
-          onClick: () => { void onSelect(opt.id); },
-        }))}
+        options={selectionOptions}
       />
     </div>
   ) : open ? (
@@ -223,20 +244,17 @@ export default function InlineBadgeEditor({
       className={`overflow-y-auto ${dropdownMinWidth}`}
       data-testid={dropdownTestId}
       {...dismissLayerProps}
-      onMouseDown={(event) => event.stopPropagation()}
-      onClick={(event) => event.stopPropagation()}
+      onMouseDown={stopPropagation}
+      onClick={stopPropagation}
     >
       {options.map((opt) => (
-        <MenuItem
+        <InlineBadgeMenuItem
           key={opt.id}
-          role="button"
-          onClick={async () => { await onSelect(opt.id); }}
-          data-testid={optionTestIdPrefix ? `${optionTestIdPrefix}-${opt.id}` : undefined}
-          icon={opt.avatar}
-          trailing={<Check size={14} className={`shrink-0 ${opt.id === selectedId ? "opacity-100" : "opacity-0"}`} />}
-        >
-          {opt.label}
-        </MenuItem>
+          option={opt}
+          selected={opt.id === selectedId}
+          onSelect={onSelect}
+          testId={optionTestIdPrefix ? `${optionTestIdPrefix}-${opt.id}` : undefined}
+        />
       ))}
     </DropdownMenuPopup>
   ) : null;
@@ -253,7 +271,20 @@ export default function InlineBadgeEditor({
   // (transition target didn't cover opacity, so the state snapped).
   const defaultButtonClassName = `mt-0.5 inline-flex items-center gap-1 theme-brutal:border-2 theme-brutal:border-black ${badgeClassName} px-2 py-0.5 text-xs font-bold ${uppercase ? "uppercase tracking-wide " : ""}theme-brutal:text-black transition-[filter,opacity] duration-100 hover:brightness-90 disabled:cursor-not-allowed disabled:opacity-60${capitalize ? " capitalize" : ""}`;
 
-  const badge = (
+  const badge = badgeStatus ? (
+    <TaskStatusBadge
+      status={badgeStatus}
+      render={<button ref={triggerRef} type="button" disabled={disabled} />}
+      onClick={onToggle}
+      data-testid={buttonTestId}
+      data-task-status={buttonDataTaskStatus}
+      aria-label={buttonAriaLabel}
+      className={`mt-0.5 ${buttonClassName ?? ""}`.trim()}
+    >
+      {displayValue}
+      <Pencil size={10} className="opacity-40" />
+    </TaskStatusBadge>
+  ) : (
     <Badge
       render={<button ref={triggerRef} type="button" disabled={disabled} />}
       appearance="soft"

@@ -1,4 +1,4 @@
-import type { PropsWithChildren } from "react";
+import type { ComponentProps, PropsWithChildren } from "react";
 import {
   ToastAction,
   ToastActions,
@@ -18,6 +18,8 @@ import { forwardToastManager } from "./forwardToast";
 // on 0.0.15 for the legacy BottomSheet API used by the Forward mobile flow.
 const TOP_STACKED_TOAST_CLASS = "top-0 bottom-auto w-full max-w-full origin-top [--toast-y:calc(var(--toast-offset-y)+(var(--toast-index)*var(--toast-gap))+var(--toast-swipe-movement-y))] [transform:translateX(var(--toast-swipe-movement-x))_translateY(calc(var(--toast-swipe-movement-y)+(var(--toast-index)*var(--toast-peek))))_scale(var(--toast-scale))] data-[expanded]:[transform:translateX(var(--toast-swipe-movement-x))_translateY(var(--toast-y))_scale(1)] data-[starting-style]:[transform:translateY(-120%)_scale(0.98)] [&[data-ending-style]:not([data-swipe-direction])]:[transform:translateY(-120%)_scale(0.98)]";
 
+const TOP_TOAST_SWIPE_DIRECTIONS: ComponentProps<typeof ToastRoot>["swipeDirection"] = ["up", "right"];
+
 function ForwardToastList() {
   const { toasts } = useToastManager();
 
@@ -31,7 +33,7 @@ function ForwardToastList() {
         key={toastObject.id}
         layout="stacked"
         toast={toastObject}
-        swipeDirection={["up", "right"]}
+        swipeDirection={TOP_TOAST_SWIPE_DIRECTIONS}
         className={TOP_STACKED_TOAST_CLASS}
       >
         <ToastContent className="grid-cols-[minmax(0,1fr)_auto] items-center gap-x-4 gap-y-0">

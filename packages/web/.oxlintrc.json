@@ -9,9 +9,17 @@
   "jsPlugins": [
     { "name": "react-doctor", "specifier": "oxlint-plugin-react-doctor" }
   ],
-  "plugins": ["typescript", "import"],
+  "plugins": ["typescript", "import", "react", "react-perf"],
 
   "rules": {
+    // Task #709 (Artea): no new function/object/array identities as JSX props
+    // on components (native DOM elements are exempt), and complete hook deps.
+    // No inline disables: hoist, memoise, or split into a child component.
+    "react-perf/jsx-no-new-function-as-prop": ["error", { "nativeAllowList": "all" }],
+    "react-perf/jsx-no-new-object-as-prop": ["error", { "nativeAllowList": "all" }],
+    "react-perf/jsx-no-new-array-as-prop": ["error", { "nativeAllowList": "all" }],
+    "react/exhaustive-deps": "error",
+
     // Keep unused bindings out of application code. Import fixes are safe and
     // available to `pnpm lint:fix`; local-variable removal remains manual
     // because initializers may have side effects.

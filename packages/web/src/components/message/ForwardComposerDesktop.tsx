@@ -1,12 +1,17 @@
-import { Card, Field, FieldLabel } from "raft-ui";
+import { Card, Field, FieldLabel, InputGroup, InputGroupAddon, InputGroupInput } from "raft-ui";
 import CloseButton from "../ui/CloseButton";
 import type { Dispatch, ReactNode, SetStateAction } from "react";
+import { useCallback } from "react";
 import { Search, X } from "lucide-react";
 import { useIntl } from "react-intl";
 import Modal from "../Modal";
 import ForwardedBundleCard from "./ForwardedBundleCard";
 import type { ForwardedBundleAttachmentSnapshot, ForwardedBundleMetadata } from "./ForwardedBundleCard";
 import MessageInput from "./MessageInput";
+
+// No-op close handler for the Modal while a send/join is in flight. Hoisted so
+// the JSX does not allocate a fresh function per render.
+function noopClose() {}
 
 type Props = {
   sourceMessageCount: number;
@@ -57,8 +62,16 @@ export default function ForwardComposerDesktop({
 }: Props) {
   const { formatMessage } = useIntl();
   const sendLabel = formatMessage({ id: "message.forwardComposer.sendForward" });
+  // Stable handler: the target search is a rui InputGroup control now, and an
+  // inline arrow would be a new function prop on every render (react-perf gate).
+  const handleSearchChange = useCallback((event: { target: { value: string } }) => {
+    const value = event.target.value;
+    setQuery(value);
+    const trimmed = value.trim();
+    if (trimmed) search(trimmed); else resetSearch();
+  }, [setQuery, search, resetSearch]);
   return (
-    <Modal onClose={sending || joinInFlight ? () => {} : onClose} closeOnBackdrop>
+    <Modal onClose={sending || joinInFlight ? noopClose : onClose} closeOnBackdrop>
       <Card className="flex h-[min(42rem,calc(100dvh-1rem))] w-[min(48rem,calc(100vw-1rem))] max-h-[calc(100dvh-1rem)] flex-col bg-layer-panel theme-brutal:bg-white md:h-[min(clamp(30rem,72dvh,46rem),calc(100dvh-2rem))] md:w-[min(clamp(48rem,60vw,60rem),calc(100vw-2rem))]" data-testid="forward-composer-dialog">
         <div className="flex items-center justify-between border-b-2 border-line-muted theme-brutal:border-black px-4 py-3">
           <div>
@@ -69,21 +82,19 @@ export default function ForwardComposerDesktop({
         </div>
         <div className="flex min-h-0 flex-1 flex-col gap-0 md:grid md:grid-cols-[clamp(19rem,24vw,22rem)_minmax(0,1fr)]">
           <div className="flex max-h-[min(34dvh,13rem)] shrink-0 flex-col border-b-2 border-line-muted theme-brutal:border-black p-3 md:h-full md:max-h-none md:min-h-0 md:border-b-0 md:border-r-2">
-            <label className="mb-2 flex w-full items-center gap-2 border-2 border-line-muted theme-brutal:border-black bg-layer-panel theme-brutal:bg-white px-2 py-2 shadow-raft-sm theme-brutal:shadow-brutal-sm focus-within:shadow-raft-md theme-brutal:focus-within:shadow-brutal">
-              <Search size={14} className="shrink-0 text-foreground-muted theme-brutal:text-black/50" />
-              <input
+            <InputGroup className="mb-2">
+              <InputGroupAddon>
+                <Search size={14} aria-hidden="true" />
+              </InputGroupAddon>
+              <InputGroupInput
                 value={query}
-                onChange={(event) => {
-                  const value = event.target.value;
-                  setQuery(value);
-                  const trimmed = value.trim();
-                  if (trimmed) search(trimmed); else resetSearch();
-                }}
+                onChange={handleSearchChange}
                 placeholder={formatMessage({ id: "message.forwardComposer.searchPlaceholder" })}
-                className="min-w-0 flex-1 bg-transparent text-sm font-bold outline-none placeholder:text-black/35"
+                aria-label={formatMessage({ id: "message.forwardComposer.searchPlaceholder" })}
+                className="min-w-0 flex-1 text-sm font-bold"
                 autoFocus
               />
-            </label>
+            </InputGroup>
             <div className="mb-2 flex h-6 shrink-0 items-center justify-between text-xs font-bold">
               <span data-testid="forward-selected-count">{formatMessage({ id: "message.forwardComposer.selectedCount" }, { count: selectedCount })}</span>
               {selectedCount > 0 && <button type="button" onClick={clearSelection} disabled={joinInFlight} className="underline underline-offset-2">{formatMessage({ id: "message.forwardComposer.clear" })}</button>}
@@ -106,7 +117,7 @@ export default function ForwardComposerDesktop({
                   mentionChannelId={noteMentionChannelId}
                   mentionScopeChannelType={noteMentionScopeChannelType}
                   loadMentionMembers={Boolean(noteMentionChannelId)}
-                  onSendOverride={(note) => sendForwardNote(note)}
+                  onSendOverride={sendForwardNote}
                   allowEmptySubmit
                   submitDisabled={submitDisabled}
                   submitBusy={sending}

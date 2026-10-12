@@ -353,8 +353,13 @@ test("Activity row metadata uses square raft-ui Badge primitives for every infor
     ],
   );
   for (const badge of badges) {
-    assert.equal(badge.getAttribute("data-slot"), "badge");
-    assert.doesNotMatch(badge.className, /(?:^|\s)rounded(?:-|\s|$)/);
+    // The task badge is now raft-ui's TaskStatusBadge (its own slot, rounded by
+    // the rui recipe); the rest stay square rui Badge primitives.
+    const slot = badge.getAttribute("data-slot");
+    assert.ok(slot === "badge" || slot === "task-status-badge", `${badge.getAttribute("data-testid")} slot=${slot}`);
+    if (slot === "badge") {
+      assert.doesNotMatch(badge.className, /(?:^|\s)rounded(?:-|\s|$)/);
+    }
   }
 });
 
@@ -409,7 +414,7 @@ test("Activity thread rows omit agent follower counts and row-level roster reque
   );
 });
 
-test("Activity in-review task badge uses the canonical lavender status color", () => {
+test("Activity in-review task badge uses the canonical status source", () => {
   renderInbox([
     makeThreadItem({
       taskNumber: 79,
@@ -422,14 +427,17 @@ test("Activity in-review task badge uses the canonical lavender status color", (
     '[data-testid="conversation-card-task-badge"]',
   );
   assert.ok(taskBadge);
-  assert.equal(taskBadge.getAttribute("data-slot"), "badge");
+  // Appearance is raft-ui's single source now: the badge IS a TaskStatusBadge
+  // and carries the status id in its kebab-case form for the marker/token.
+  assert.equal(taskBadge.getAttribute("data-slot"), "task-status-badge");
   assert.equal(taskBadge.getAttribute("data-status"), "in_review");
-  assert.match(taskBadge.className, /(?:^|\s)bg-accent-soft(?:\s|$)/);
-  assert.match(taskBadge.className, /(?:^|\s)theme-brutal:bg-brutal-lavender(?:\s|$)/);
-  assert.doesNotMatch(taskBadge.className, /(?:^|\s)bg-accent-400(?:\s|$)/);
+  assert.ok(
+    taskBadge.querySelector("[data-slot='task-status-icon']"),
+    "the badge renders the rui status icon",
+  );
 });
 
-test("Activity todo task badge pins the same canonical orange used by Chat", () => {
+test("Activity todo task badge uses the same canonical source as Chat", () => {
   renderInbox([
     makeThreadItem({
       taskNumber: 515,
@@ -442,7 +450,7 @@ test("Activity todo task badge pins the same canonical orange used by Chat", () 
     '[data-testid="conversation-card-task-badge"]',
   );
   assert.ok(taskBadge);
+  assert.equal(taskBadge.getAttribute("data-slot"), "task-status-badge");
   assert.equal(taskBadge.getAttribute("data-status"), "todo");
-  assert.match(taskBadge.className, /(?:^|\s)bg-warning-soft(?:\s|$)/);
-  assert.match(taskBadge.className, /(?:^|\s)theme-brutal:bg-brutal-orange(?:\s|$)/);
+  assert.ok(taskBadge.querySelector("[data-slot='task-status-icon']"));
 });

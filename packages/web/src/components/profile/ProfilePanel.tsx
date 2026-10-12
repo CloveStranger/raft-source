@@ -1,6 +1,6 @@
 import CloseButton from "../ui/CloseButton";
 import Tooltip from "../ui/Tooltip";
-import { useCallback, useState, useEffect } from "react";
+import { useCallback, useMemo, useState, useEffect } from "react";
 import { useIntl } from "react-intl";
 import { X } from "lucide-react";
 import {
@@ -28,6 +28,9 @@ import {
   setCachedAgentProfile,
   setCachedHumanProfile,
 } from "./profileFallbackCache";
+import { recordProfileOpenE2eEvent } from "../../utils/profileOpenE2eTimeline";
+
+recordProfileOpenE2eEvent({ kind: "module-evaluated", module: "profile-panel" });
 
 export interface ProfilePanelTarget {
   type: "agent" | "human";
@@ -156,7 +159,12 @@ export default function ConnectedProfilePanel({
     void api.get(`/servers/${currentServerId}/members/${humanFallbackId}/profile`)
       .then(({ data }) => {
         if (!cancelled) {
-          const fallback = data as HumanProfile;
+          const fetched = data as HumanProfile;
+          // The profile endpoint is server-scoped; the joint `servers` list
+          // (RFC 075 phase 1) only comes from the channel roster row that
+          // primed this cache entry, so carry it over.
+          const primedServers = getCachedHumanProfile(currentServerId, humanFallbackId)?.servers;
+          const fallback = !fetched.servers && primedServers ? { ...fetched, servers: primedServers } : fetched;
           setCachedHumanProfile(currentServerId, fallback);
           setHumanFallbackResult({ key: humanFallbackKey, value: fallback });
         }
@@ -222,7 +230,20 @@ export default function ConnectedProfilePanel({
     ? "flex min-h-0 flex-1 flex-col"
     : "absolute inset-0 z-30 flex flex-col border-l-0 lg:relative lg:inset-auto lg:z-auto";
   const containerEdge = embedded ? "inset" : "attached";
-  const containerStyle = !embedded && isDesktop ? { width, flex: "0 0 auto" } : undefined;
+  const containerStyle = useMemo(
+    () => (!embedded && isDesktop ? { width, flex: "0 0 auto" } : undefined),
+    [embedded, isDesktop, width],
+  );
+  const agentDetailStyle = useMemo(() => (isDesktop ? { width } : undefined), [isDesktop, width]);
+  const skeletonBackTestId = profileType === "agent"
+    ? "agent-mobile-back"
+    : profileType === "external"
+      ? "external-mobile-back"
+      : "human-mobile-back";
+  const skeletonMobileBackProps = useMemo(() => ({
+    "data-testid": skeletonBackTestId,
+    title: formatMessage({ id: "common.announcement.back" }),
+  }), [formatMessage, skeletonBackTestId]);
 
   // Render order:
   // 1. External message author → provider identity detail in this same panel
@@ -299,7 +320,7 @@ export default function ConnectedProfilePanel({
         data-testid="profile-panel"
         edge="attached"
         className="absolute inset-0 z-30 flex min-h-0 min-w-0 flex-col border-l-0 bg-layer-panel lg:relative lg:inset-auto lg:z-auto"
-        style={isDesktop ? { width } : undefined}
+        style={agentDetailStyle}
       >
         <div
           className={RESIZE_HANDLE_CLASS_NAME}
@@ -353,11 +374,6 @@ export default function ConnectedProfilePanel({
   // quiet loading placeholder; the real panel takes over as soon as
   // resolvedAgent / resolvedHuman flips non-null in the next render.
   if (profileType && profileId) {
-    const testid = profileType === "agent"
-      ? "agent-mobile-back"
-      : profileType === "external"
-        ? "external-mobile-back"
-        : "human-mobile-back";
     return (
       <ProfilePanel
         data-testid="profile-panel"
@@ -379,10 +395,7 @@ export default function ConnectedProfilePanel({
           title=""
           onMobileBack={headerBack}
           backButtonVisibility={onBack ? "always" : "responsive"}
-          mobileBackProps={{
-            "data-testid": testid,
-            title: formatMessage({ id: "common.announcement.back" }),
-          }}
+          mobileBackProps={skeletonMobileBackProps}
           actions={onClose ? (
             <Tooltip content={formatMessage({ id: "common.close" })}>
               <CloseButton

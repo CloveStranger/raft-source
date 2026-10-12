@@ -42,6 +42,27 @@ type LockOwnershipState =
   | "releasing"
   | "released";
 
+// task #917: a foreground `start` runs the service loop INSIDE the command
+// that holds the mutation lock, which used to keep every later `stop`/`start`
+// (a second terminal, the installer, a systemd-managed stop) out with
+// CONCURRENT_OPERATION for the service's whole lifetime. The lock is only
+// meant to cover the command's own mutations; once the service has run its
+// startup recovery and is about to own the IPC endpoint, the command releases
+// it early through this registry (one lock per install root per process).
+const heldReleases = new Map<string, () => Promise<void>>();
+
+/**
+ * Release the mutation lock this process currently holds for `slockHome`, if
+ * any, before the enclosing `withComputerMutationLock` returns. Idempotent;
+ * returns whether a lock was actually released.
+ */
+export async function releaseHeldComputerMutationLock(slockHome: string): Promise<boolean> {
+  const release = heldReleases.get(computerDir(slockHome));
+  if (!release) return false;
+  await release();
+  return true;
+}
+
 /**
  * Acquire the SLOCK_HOME-scoped mutation lock, run `fn`, then release.
  *
@@ -134,6 +155,16 @@ export async function withComputerMutationLock<T>(
     });
     if (compromiseError) throw compromiseError;
     ownership = "owned";
+    heldReleases.set(lockTarget, async () => {
+      if (!release || ownership !== "owned") return;
+      ownership = "releasing";
+      try {
+        await release();
+      } finally {
+        ownership = "released";
+        heldReleases.delete(lockTarget);
+      }
+    });
   } catch (err) {
     const code = (err as { code?: string }).code;
     if (code === "ELOCKED" || code === "ECOMPROMISED") {
@@ -156,6 +187,7 @@ export async function withComputerMutationLock<T>(
     if (outcome.kind === "error") throw outcome.error;
     return outcome.value;
   } finally {
+    heldReleases.delete(lockTarget);
     if (release && ownership === "owned") {
       ownership = "releasing";
       try {

@@ -2,6 +2,10 @@ import { currentDate, type AgentAppEventDetail, type AgentAppEventListResponse, 
 import { and, desc, eq, lt, or, sql, type SQL } from "drizzle-orm";
 import { getDb, type DatabaseExecutor } from "../db/index";
 import { oauthClients, thirdPartyAgentEvents } from "../db/schema";
+import { THIRD_PARTY_EVENT_APP_COLUMNS } from "./oauthService";
+
+/** The RFC 074 assistant doorbell's system app (third_party_agent_events.system_app). */
+export const SYSTEM_ASSISTANT_APP = "system.assistant";
 
 // Human-facing read of the events connected apps sent to an agent (Agent panel).
 // The agent's own read path stays in oauthService (readThirdPartyAgentEventForAgent).
@@ -32,7 +36,9 @@ function displayStatus(event: EventRow["event"], now: Date): AgentAppEventSummar
 function toSummary(row: EventRow, now: Date): AgentAppEventSummary {
   return {
     id: row.event.id,
-    app: { clientId: row.event.clientId, clientKey: row.clientKey, name: row.clientName, logoUrl: row.logoUrl },
+    // A system app's events have no OAuth client: its fixed name doubles as the
+    // filter key (`clientId=system.assistant`).
+    app: { clientId: row.event.clientId ?? row.clientKey, clientKey: row.clientKey, name: row.clientName, logoUrl: row.logoUrl },
     kind: row.event.kind,
     summary: row.event.summary,
     status: displayStatus(row.event, now),
@@ -67,12 +73,12 @@ export function decodeAgentAppEventCursor(cursor: string): { createdAt: Date; id
 function selectEventRows(executor: DatabaseExecutor) {
   return executor.select({
     event: thirdPartyAgentEvents,
-    clientKey: oauthClients.clientId,
-    clientName: oauthClients.name,
+    ...THIRD_PARTY_EVENT_APP_COLUMNS,
     logoUrl: oauthClients.logoUrl,
   })
     .from(thirdPartyAgentEvents)
-    .innerJoin(oauthClients, eq(oauthClients.id, thirdPartyAgentEvents.clientId));
+    // Left join: a Raft system app's events (client_id NULL) are listed too.
+    .leftJoin(oauthClients, eq(oauthClients.id, thirdPartyAgentEvents.clientId));
 }
 
 export async function listAgentAppEvents(input: {
@@ -85,7 +91,8 @@ export async function listAgentAppEvents(input: {
   const now = currentDate();
   const limit = Math.min(Math.max(input.limit ?? AGENT_APP_EVENTS_DEFAULT_LIMIT, 1), AGENT_APP_EVENTS_MAX_LIMIT);
   const conditions: SQL[] = [eq(thirdPartyAgentEvents.agentId, input.agentId)];
-  if (input.clientId) conditions.push(eq(thirdPartyAgentEvents.clientId, input.clientId));
+  if (input.clientId === SYSTEM_ASSISTANT_APP) conditions.push(eq(thirdPartyAgentEvents.systemApp, SYSTEM_ASSISTANT_APP));
+  else if (input.clientId) conditions.push(eq(thirdPartyAgentEvents.clientId, input.clientId));
   if (input.before) {
     conditions.push(or(
       lt(thirdPartyAgentEvents.createdAt, input.before.createdAt),

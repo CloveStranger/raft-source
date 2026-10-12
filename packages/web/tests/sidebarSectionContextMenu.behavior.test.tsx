@@ -4,9 +4,7 @@ import { MemoryRouter } from "react-router-dom";
 import api from "../src/api/client";
 import Sidebar, {
   getSidebarDropIndicatorEdge,
-  getWorkspaceSidebarReorderScope,
   isSidebarCollisionCandidate,
-  reorderSidebarSubset,
 } from "../src/components/layout/Sidebar";
 import { TestIntlProvider } from "./helpers/intl";
 import { sidebarJoinedChannelsOnlyStorageKey } from "../src/components/layout/sidebarChannelVisibility";
@@ -17,7 +15,6 @@ import { useChannelStore } from "../src/store/channelStore";
 import { useMachineStore } from "../src/store/machineStore";
 import { useMessageStore } from "../src/store/messageStore";
 import { useServerStore } from "../src/store/serverStore";
-import { useWorkspaceGridNavigationStore } from "../src/components/workspace/workspaceGridNavigationStore";
 
 const originalApiGet = api.get;
 const originalApiPatch = api.patch;
@@ -41,7 +38,6 @@ afterEach(() => {
   useMachineStore.setState({ machines: [], loading: true });
   useServerStore.setState({ current: null, servers: [], members: [] });
   useAuthStore.setState({ user: null, loading: false, initialized: true });
-  useWorkspaceGridNavigationStore.setState({ active: false, enabled: false, railMode: null });
 });
 
 function installApiStub() {
@@ -148,14 +144,11 @@ function seedSidebar() {
   useAgentStore.setState({ agents: [], loading: false } as never);
 }
 
-function renderSidebar(
-  initialEntry = "/s/server/channel/joined-channel",
-  workspaceRailMode?: "humans",
-) {
+function renderSidebar(initialEntry = "/s/server/channel/joined-channel") {
   render(
     <MemoryRouter initialEntries={[initialEntry]}>
       <TestIntlProvider>
-        <Sidebar mobileInline workspaceRailMode={workspaceRailMode} />
+        <Sidebar mobileInline />
       </TestIntlProvider>
     </MemoryRouter>,
   );
@@ -181,12 +174,6 @@ test("sidebar empty and help descriptions share one typography contract across r
   renderSidebar("/s/server/members");
 
   assertSectionDescriptionTypography("No agents yet");
-
-  cleanup();
-  seedSidebar();
-  useWorkspaceGridNavigationStore.setState({ active: true, enabled: true, railMode: "humans" });
-  renderSidebar("/s/server", "humans");
-
   assertSectionDescriptionTypography("No humans");
 
   cleanup();
@@ -511,45 +498,6 @@ test("sidebar insertion edge follows the dragged row center around the target mi
   assert.equal(getSidebarDropIndicatorEdge(90, 100), "before");
   assert.equal(getSidebarDropIndicatorEdge(110, 100), "after");
   assert.equal(getSidebarDropIndicatorEdge(100, 100), "after");
-});
-
-test("native Workspace reorder preserves non-sortable channel and DM positions", () => {
-  assert.deepEqual(
-    reorderSidebarSubset(
-      ["all", "one", "joint", "two"],
-      ["one", "two"],
-      "two",
-      "one",
-    ),
-    ["all", "two", "joint", "one"],
-  );
-  assert.deepEqual(
-    reorderSidebarSubset(
-      ["visible-one", "hidden", "custom", "visible-two"],
-      ["visible-one", "visible-two"],
-      "visible-two",
-      "visible-one",
-    ),
-    ["visible-two", "hidden", "custom", "visible-one"],
-  );
-  assert.equal(reorderSidebarSubset(["one", "two"], ["one", "two"], "missing", "one"), null);
-});
-
-test("Workspace DM reorder is owned only by the visible default-DMs surface", () => {
-  const options = {
-    channelManualSort: true,
-    jointChannelManualSort: true,
-    dmManualSort: true,
-    sortableChannelIds: ["channel-one", "channel-two"],
-    sortableJointChannelIds: ["joint-one", "joint-two"],
-    sortableDmIds: ["default-one", "default-two"],
-  };
-
-  assert.equal(getWorkspaceSidebarReorderScope("dm:default-one", "dm:default-two", options), "dms");
-  assert.equal(getWorkspaceSidebarReorderScope("dm:pinned", "dm:default-two", options), null);
-  assert.equal(getWorkspaceSidebarReorderScope("dm:custom", "dm:default-two", options), null);
-  assert.equal(getWorkspaceSidebarReorderScope("dm:hidden", "dm:default-two", options), null);
-  assert.equal(getWorkspaceSidebarReorderScope("dm:default-one", "dm:pinned", options), null);
 });
 
 test("channel empty states distinguish the all-channel and joined-only views", () => {

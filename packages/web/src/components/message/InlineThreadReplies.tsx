@@ -21,6 +21,11 @@ import { memo, useMemo } from "react";
 import { useIntl } from "react-intl";
 import { Pencil } from "lucide-react";
 import {
+  getMessagePreviewSizeClass,
+  getMessagePreviewTimeSizeClass,
+  useAppearanceStore,
+} from "../../store/appearanceStore";
+import {
   MessageReplies,
   MessageRepliesItem,
   MessageRepliesItemContent,
@@ -140,6 +145,9 @@ export const InlineThreadReplies = memo(function InlineThreadReplies({
 }: InlineThreadRepliesProps) {
   const { formatMessage } = useIntl();
   const { formatMessageTime } = useTimeFormatter();
+  const messageBodyFontSize = useAppearanceStore((s) => s.messageBodyFontSize);
+  const previewSizeClass = getMessagePreviewSizeClass(messageBodyFontSize);
+  const previewTimeSizeClass = getMessagePreviewTimeSizeClass(messageBodyFontSize);
   if (!hasInlineThreadReplySurface(replies, replyCount)) return null;
 
   // The server may serve more than we show (or fewer, on an older payload);
@@ -182,7 +190,10 @@ export const InlineThreadReplies = memo(function InlineThreadReplies({
     <MessageReplies
       onClick={onOpenThread}
       data-message-affordance="inline-thread-replies"
-      className="group mt-1.5 flex min-w-0 w-full max-w-full flex-col gap-1 text-left"
+      // mb-px: the card frame's bottom sits one pixel above the text baseline
+              // that the 24 rhythm is measured from; Josh's measure of the
+              // followed case reads 23 without it (both themes).
+              className="group mt-1.5 mb-px flex min-w-0 w-full max-w-full flex-col gap-1 text-left"
     >
       {countLabel}
       {previews.map((reply) => {
@@ -202,16 +213,23 @@ export const InlineThreadReplies = memo(function InlineThreadReplies({
             {/* The clock remains fixed, so the sender must be allowed to give
                 width back on narrow panes; otherwise its intrinsic width can
                 push the entire row past the preview surface. */}
-            <MessageRepliesItemSender className="min-w-0 shrink truncate font-semibold text-foreground-muted">
+            <MessageRepliesItemSender className={`min-w-0 shrink truncate font-semibold text-foreground-muted ${previewSizeClass}`}>
               {reply.senderDisplayName || reply.senderName}
             </MessageRepliesItemSender>
-            <MessageRepliesItemContent className="min-w-0 flex-1 truncate text-foreground-muted">
+            <MessageRepliesItemContent className={`min-w-0 flex-1 truncate text-foreground-muted ${previewSizeClass}`}>
               {reply.preview}
             </MessageRepliesItemContent>
+            {/* The preview card's compact line weakens the size hierarchy, so the
+                time reads heavier than the header's own note. Elegant light steps
+                half a tier down from hint (0.48 → 0.52, cindyz's L52 pick); the
+                dark variant falls to placeholder for the deeper card wash; brutal
+                keeps its 40% black (the explicit override stays because
+                tailwind-merge would otherwise leave the plain class covering the
+                recipe colour). Single-point per cindyz/gzj/Josh: no token moves. */}
             <MessageRepliesItemTime
               dateTime={reply.createdAt}
               data-inline-thread-reply-time
-              className="ml-auto shrink-0 text-[11.5px] tabular-nums text-foreground-placeholder"
+              className={`ml-auto shrink-0 tabular-nums text-[oklch(0.52_0_0)] dark:text-foreground-placeholder theme-brutal:text-black/40 ${previewTimeSizeClass}`}
             >
               {formatMessageTime(reply.createdAt)}
             </MessageRepliesItemTime>

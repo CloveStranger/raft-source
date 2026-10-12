@@ -239,7 +239,10 @@ export async function resolveTaskChannelSurfaces(
   const fallback: string[] = [];
   for (const row of rows) {
     const { id, type } = row;
-    if (type !== "channel" && type !== "joint") { fallback.push(id); continue; }
+    // Threads need their projection mapping: per-channel fallback. private/dm
+    // follow the channel branch (the fallback's non-thread, non-joint rule:
+    // not a canonical storage row, storage = itself, no projection cutoff).
+    if (type !== "channel" && type !== "joint" && type !== "private" && type !== "dm") { fallback.push(id); continue; }
     const role = (row.role ?? null) as "host" | "participant" | null;
     const cutoff = (row.cutoffAt as Date | null) ?? null;
     const localChannel: TaskSurfaceChannel = {
@@ -250,7 +253,7 @@ export async function resolveTaskChannelSurfaces(
       deletedAt: row.deletedAt,
       taskReadOnlyBefore: role === "participant" ? cutoff : null,
     };
-    if (type === "channel") {
+    if (type !== "joint") {
       if (row.isCanonical) continue;
       surfaces.set(id, { storageChannelId: id, localChannel, isJoint: false, ...jointSurfaceFields(null, null) });
       continue;

@@ -104,7 +104,7 @@
     "reason": "Agent detail title/body shows the agent as an @name protocol handle."
   },
   {
-    "path": "src/components/agent/AgentDMConversationList.tsx",
+    "path": "src/components/agent/AgentDMConversationCard.tsx",
     "rule": "formatjs/no-literal-string-in-object",
     "source": "`@${item.peerName}`",
     "count": 1,
@@ -160,86 +160,6 @@
     "reason": "Protocol #channelName prefix in the edit-channel drawer description."
   },
   {
-    "path": "src/components/layout/MainLayout.tsx",
-    "rule": "formatjs/no-literal-string-in-object",
-    "source": "`@${agent?.displayName || agent?.name || id}`",
-    "count": 1,
-    "classification": "protocol",
-    "reason": "Agent panel title uses @displayName protocol handle form."
-  },
-  {
-    "path": "src/components/layout/MainLayout.tsx",
-    "rule": "formatjs/no-literal-string-in-object",
-    "source": "`@${dm?.peerDisplayName || dm?.peerName || dm?.name || id}`",
-    "count": 1,
-    "classification": "protocol",
-    "reason": "DM panel title uses @peerName protocol handle form."
-  },
-  {
-    "path": "src/components/layout/MainLayout.tsx",
-    "rule": "formatjs/no-literal-string-in-object",
-    "source": "`@${id}`",
-    "count": 1,
-    "classification": "protocol",
-    "reason": "Human panel uses @id as protocol-style title when display name is missing."
-  },
-  {
-    "path": "src/components/layout/MainLayout.tsx",
-    "rule": "formatjs/no-literal-string-in-object",
-    "source": "`#${channel.name}`",
-    "count": 1,
-    "classification": "protocol",
-    "reason": "Channel panel title uses #channel protocol ref form."
-  },
-  {
-    "path": "src/components/layout/MainLayout.tsx",
-    "rule": "formatjs/no-literal-string-in-object",
-    "source": "`#${fallbackChannel.name}`",
-    "count": 1,
-    "classification": "protocol",
-    "reason": "Fallback channel panel title uses #name protocol form when the route does not match."
-  },
-  {
-    "path": "src/components/layout/MainLayout.tsx",
-    "rule": "formatjs/no-literal-string-in-object",
-    "source": "`#${id}`",
-    "count": 1,
-    "classification": "protocol",
-    "reason": "Protocol-style #id fallback title when a channel name is unresolved."
-  },
-  {
-    "path": "src/components/layout/MainLayout.tsx",
-    "rule": "formatjs/no-literal-string-in-object",
-    "source": "`#${item.parentChannelName}`",
-    "count": 2,
-    "classification": "protocol",
-    "reason": "Thread panel subtitle uses #parentChannelName protocol ref."
-  },
-  {
-    "path": "src/components/layout/MainLayout.tsx",
-    "rule": "formatjs/no-literal-string-in-object",
-    "source": "`${entry.channelType === \"dm\" ? \"@\" : \"#\"}${entry.channelName}`",
-    "count": 2,
-    "classification": "protocol",
-    "reason": "Saved-entry panel title uses @/# protocol prefix by DM vs channel."
-  },
-  {
-    "path": "src/components/layout/MainLayout.tsx",
-    "rule": "formatjs/no-literal-string-in-object",
-    "source": "`${item.channelType === \"dm\" ? \"@\" : \"#\"}${item.channelName}`",
-    "count": 2,
-    "classification": "protocol",
-    "reason": "Activity/inbox panel title uses @/# protocol prefix by channel type."
-  },
-  {
-    "path": "src/components/layout/MainLayout.tsx",
-    "rule": "formatjs/no-literal-string-in-object",
-    "source": "`task #${task.taskNumber}`",
-    "count": 2,
-    "classification": "protocol",
-    "reason": "Task panel title uses the product task #N reference protocol."
-  },
-  {
     "path": "src/components/layout/Sidebar.tsx",
     "rule": "formatjs/no-literal-string-in-jsx",
     "source": "\"99+\"",
@@ -254,70 +174,6 @@
     "count": 1,
     "classification": "protocol",
     "reason": "User-visible Computer upgrade marker → v{version} in the production sidebar."
-  },
-  {
-    "path": "src/components/layout/Sidebar.tsx",
-    "rule": "formatjs/no-literal-string-in-object",
-    "source": "`@${agent?.displayName || agent?.name || agentId}`",
-    "count": 1,
-    "classification": "protocol",
-    "reason": "Opening an agent panel from the sidebar uses @handle protocol title form."
-  },
-  {
-    "path": "src/components/layout/Sidebar.tsx",
-    "rule": "formatjs/no-literal-string-in-object",
-    "source": "`@${agent.displayName || agent.name}`",
-    "count": 1,
-    "classification": "protocol",
-    "reason": "Sidebar agent-row drag panel title uses @name protocol form."
-  },
-  {
-    "path": "src/components/layout/Sidebar.tsx",
-    "rule": "formatjs/no-literal-string-in-object",
-    "source": "`@${displayName}`",
-    "count": 1,
-    "classification": "protocol",
-    "reason": "Sidebar DM drag panel title uses @displayName protocol form."
-  },
-  {
-    "path": "src/components/layout/Sidebar.tsx",
-    "rule": "formatjs/no-literal-string-in-object",
-    "source": "`@${draggedAgent.displayName || draggedAgent.name}`",
-    "count": 1,
-    "classification": "protocol",
-    "reason": "Sidebar agent drag panel title uses @name protocol form."
-  },
-  {
-    "path": "src/components/layout/Sidebar.tsx",
-    "rule": "formatjs/no-literal-string-in-object",
-    "source": "`@${human?.displayName || human?.name || userId}`",
-    "count": 1,
-    "classification": "protocol",
-    "reason": "Opening a human panel from the sidebar uses @handle protocol title form."
-  },
-  {
-    "path": "src/components/layout/Sidebar.tsx",
-    "rule": "formatjs/no-literal-string-in-object",
-    "source": "`@${human.displayName || human.name}`",
-    "count": 1,
-    "classification": "protocol",
-    "reason": "Sidebar Humans list drag/open panel title uses @name protocol form."
-  },
-  {
-    "path": "src/components/layout/Sidebar.tsx",
-    "rule": "formatjs/no-literal-string-in-object",
-    "source": "`#${draggedChannel.name}`",
-    "count": 1,
-    "classification": "protocol",
-    "reason": "Drag-to-workspace channel panel title uses #channelName protocol form."
-  },
-  {
-    "path": "src/components/machine/MachineDetailPanel.tsx",
-    "rule": "formatjs/no-literal-string-in-jsx",
-    "source": "~/.slock/agents/",
-    "count": 1,
-    "classification": "code_example",
-    "reason": "Example local agent workspace path shown on the machine detail card."
   },
   {
     "path": "src/components/machine/MachineDetailPanel.tsx",
@@ -376,7 +232,7 @@
     "reason": "Protocol @name prefix for task-badge assignees in messages."
   },
   {
-    "path": "src/components/message/MessageItem.tsx",
+    "path": "src/components/message/PermalinkReferenceChip.tsx",
     "rule": "formatjs/no-literal-string-in-jsx",
     "source": "msg",
     "count": 1,
@@ -401,27 +257,11 @@
   },
   {
     "path": "src/components/search/MessageSearchPage.tsx",
-    "rule": "formatjs/no-literal-string-in-object",
-    "source": "`@${result.channelName}`",
-    "count": 2,
-    "classification": "protocol",
-    "reason": "DM search-result panel title uses @channelName peer-ref protocol form."
-  },
-  {
-    "path": "src/components/search/MessageSearchPage.tsx",
     "rule": "formatjs/no-literal-string-in-jsx",
     "source": "#",
     "count": 1,
     "classification": "protocol",
     "reason": "Search channel filter combobox shows channel refs with # prefix."
-  },
-  {
-    "path": "src/components/search/MessageSearchPage.tsx",
-    "rule": "formatjs/no-literal-string-in-object",
-    "source": "`#${result.channelName}`",
-    "count": 2,
-    "classification": "protocol",
-    "reason": "Opening/dragging a search result panel titles the channel as #channelName."
   },
   {
     "path": "src/components/settings/AppNotificationsControls.tsx",
@@ -670,62 +510,6 @@
     "count": 2,
     "classification": "protocol",
     "reason": "User-visible unread overflow protocol (unread>99 ? \"99+\"); aligned with Sidebar/ImageLightbox."
-  },
-  {
-    "path": "src/components/workspace/WorkspaceGridDemo.tsx",
-    "rule": "formatjs/no-literal-string-in-jsx",
-    "source": "⌘W",
-    "count": 1,
-    "classification": "protocol",
-    "reason": "User-visible close-menu keycap ⌘W; keyboard-cap protocol like MessageSearchPage Esc."
-  },
-  {
-    "path": "src/components/workspace/WorkspaceGridDemo.tsx",
-    "rule": "formatjs/no-literal-string-in-object",
-    "source": "`@${dm.peerDisplayName || dm.peerName || dm.name}`",
-    "count": 1,
-    "classification": "protocol",
-    "reason": "Opening a DM from the workspace demo titles it as @peerName."
-  },
-  {
-    "path": "src/components/workspace/WorkspaceGridDemo.tsx",
-    "rule": "formatjs/no-literal-string-in-object",
-    "source": "`#${channel.name}`",
-    "count": 1,
-    "classification": "protocol",
-    "reason": "Opening/dragging a channel into the workspace titles it as #channelName."
-  },
-  {
-    "path": "src/components/workspace/WorkspaceGridRealPanel.tsx",
-    "rule": "formatjs/no-literal-string-in-object",
-    "source": "`@${displayName}`",
-    "count": 1,
-    "classification": "protocol",
-    "reason": "Opening a profile panel titles it as @displayName protocol form."
-  },
-  {
-    "path": "src/components/workspace/WorkspaceGridRealPanel.tsx",
-    "rule": "formatjs/no-literal-string-in-object",
-    "source": "`@${dm.peerDisplayName || dm.peerName || dm.name}`",
-    "count": 1,
-    "classification": "protocol",
-    "reason": "Opening a parent DM from a thread titles it as @peerName."
-  },
-  {
-    "path": "src/components/workspace/WorkspaceGridRealPanel.tsx",
-    "rule": "formatjs/no-literal-string-in-object",
-    "source": "`#${channel?.name || channelId}`",
-    "count": 1,
-    "classification": "protocol",
-    "reason": "Opening a channel panel titles it as #channelName protocol form."
-  },
-  {
-    "path": "src/components/workspace/WorkspaceGridRealPanel.tsx",
-    "rule": "formatjs/no-literal-string-in-object",
-    "source": "`task #${task.taskNumber}`",
-    "count": 1,
-    "classification": "protocol",
-    "reason": "Opening a task thread from Tasks uses task #N protocol form."
   },
   {
     "path": "src/generated/reactionSpriteManifest.ts",

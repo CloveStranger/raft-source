@@ -284,14 +284,16 @@ test("agent-facing release notice: public Alpha 1.0.24 -> 1.0.25 carries the exa
   assert.doesNotMatch(allCopy, /stable promotion|production deployment/);
 });
 
-// Repository carrier tuple after the Computer 1.0.42 stable promotion moved the
-// staging line forward (stable floor 1.0.42): Computer 1.0.43 is the next
-// carrier, CLI 0.0.33. The daemon carries the Computer number: it is not
+// Repository carrier tuple after the Computer 1.0.45 stable promotion moved the
+// staging line forward (stable floor 1.0.45): Computer 1.0.47 is the next
+// carrier (1.0.46 was bumped but never tagged or published), CLI 0.0.36 (shared
+// and CLI changed since 1.0.45, so the closure gate requires a CLI above the
+// 0.0.35 shipped in computer-v1.0.45). The daemon carries the Computer number: it is not
 // released on its own (docs/operations/computer-release-version.md). This does
 // not describe the CLI inside an already-published Computer artifact.
 // Deliberate package bumps must update this snapshot, so an unaccounted
 // version change goes red here.
-test("Computer 1.0.43 closes the Computer, CLI, and daemon carrier tuple", () => {
+test("Computer 1.0.47 closes the Computer, CLI, and daemon carrier tuple", () => {
   assert.deepEqual(
     {
       computer: readPackageVersion("computer"),
@@ -299,9 +301,9 @@ test("Computer 1.0.43 closes the Computer, CLI, and daemon carrier tuple", () =>
       daemon: readPackageVersion("daemon"),
     },
     {
-      computer: "1.0.43",
-      cli: "0.0.33",
-      daemon: "1.0.43",
+      computer: "1.0.47",
+      cli: "0.0.36",
+      daemon: "1.0.47",
     },
   );
 });

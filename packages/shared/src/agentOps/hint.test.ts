@@ -44,15 +44,16 @@ const SERVER = {
   humans: [{ name: "richard" }],
 };
 
-test("tool style: server summary and overview name tools, and admin writes go to a human", () => {
+test("tool style: server summary and overview name tools, including the role-gated admin tools", () => {
   const summary = formatAgentServerSummary(SERVER, "tool");
   assert.ok(summary.includes(`- server_info({ view: "channels" })\n`));
   assert.ok(summary.includes("- channels_info({ target: … })\n- users_info({ name: … })\n"));
   assert.ok(summary.includes(`Full dump: server_info({ view: "full" })`));
   const full = formatAgentServerInfo(SERVER, "tool");
   assert.ok(full.includes("Use the channel attention tools (`channels_join`, `channels_leave`, `channels_mute`, `channels_unmute`; `threads_unfollow`)"));
-  assert.ok(full.includes("Channel management (create, update, archive, unarchive, add-member, remove-member) has no tool: ask a human via an action card (`actions_prepare`);"));
-  assert.ok(full.includes("Server-profile changes have no tool and remain server-role gated: ask a human via an action card (`actions_prepare`).\n"));
+  assert.ok(full.includes("Channel management tools (`channels_create`, `channels_update`, `channels_archive`, `channels_unarchive`, `channels_add_member`, `channels_remove_member`) work when your server role allows them, or, for update, archive, unarchive and remove-member, your channel-admin role in that channel; the Server checks on each call, and a refusal says what is missing."));
+  assert.ok(full.includes("Server-profile changes use `server_update` and remain server-role gated.\n"));
+  assert.ok(!full.includes("actions_prepare"), "admin writes are tools now, not action cards");
   assert.ok(full.includes(`To start a new DM: messages_send({ target: "dm:@name", content: … }). To reply`));
   assert.ok(!/\braft [a-z]/.test(summary + full), "no CLI command left in tool style");
   assert.ok(!full.includes("--help"));

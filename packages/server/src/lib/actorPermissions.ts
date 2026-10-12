@@ -60,6 +60,18 @@ export async function getActorServerRoleInServer(
   return (await resolveActorContext(serverId, actorType, actorId)).serverRole;
 }
 
+/**
+ * getActorServerRoleInServer for a list of agents, in one query: roster
+ * routes read every listed agent's role, and one query per agent under
+ * Promise.all borrowed a pool connection each.
+ */
+export async function getAgentServerRolesInServer(
+  serverId: string,
+  agentIds: readonly string[],
+): Promise<Map<string, ServerRole>> {
+  return serverService.getAgentMemberRoles(serverId, agentIds);
+}
+
 export async function actorHasServerCapabilityInServer(
   serverId: string,
   actorType: ActorContextType,

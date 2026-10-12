@@ -147,7 +147,7 @@ function renderPanel(
   setServerFeatureFlagForTests("server-1", REMOTE_COMPUTER_UPGRADE_V2_FLAG_KEY, webUpgrade);
   return renderWithIntl(
     <MemoryRouter initialEntries={["/s/acme/settings/computers/computer-1"]}>
-      <MachineDetailPanel machine={machine} workspaceEmbedded deploymentEnv="production" />
+      <MachineDetailPanel machine={machine} hideHeader deploymentEnv="production" />
     </MemoryRouter>,
     { locale },
   );
@@ -533,7 +533,7 @@ function showMachine(view: ReturnType<typeof renderPanel>, machine: Machine) {
   view.rerender(
     <TestIntlProvider>
       <MemoryRouter initialEntries={["/s/acme/settings/computers/computer-1"]}>
-        <MachineDetailPanel machine={machine} workspaceEmbedded deploymentEnv="production" />
+        <MachineDetailPanel machine={machine} hideHeader deploymentEnv="production" />
       </MemoryRouter>
     </TestIntlProvider>,
   );

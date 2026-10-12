@@ -179,6 +179,11 @@ export interface AgentAppInboxNoticeOptions {
    * when it next wakes for another reason. Default true.
    */
   startStoppedAgent?: boolean;
+  /**
+   * true: never write into a running turn. A busy agent is not interrupted;
+   * the item waits for the next idle drain. Default false.
+   */
+  requireIdle?: boolean;
 }
 
 export type AgentAppInboxStore = {

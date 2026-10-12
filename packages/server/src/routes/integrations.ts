@@ -1,7 +1,8 @@
 import { Router, type Request, type Response, type Router as RouterType } from "express";
 import { and, eq, isNull } from "drizzle-orm";
 import multer from "multer";
-import type { ServerCapability } from "@botiverse/raft-shared";
+import { updateAppAgentJwtSettingsSchema, type ServerCapability } from "@botiverse/raft-shared";
+import { AgentAudienceJwtError, AgentJwtPolicyError, getAppAgentJwtSettings, setAppAgentJwtSettings } from "../services/agentAudienceJwtPolicyService";
 import { actorHasServerCapabilityInServer, getActorServerRoleInServer, roleCanInspectAgentPrivateSurfaces, userCanActOnAgentResource } from "../lib/actorPermissions";
 import { getDb } from "../db/index";
 import { agents, oauthClientInstalls, oauthClients } from "../db/schema";
@@ -11,6 +12,7 @@ import {
   decodeAgentAppEventCursor,
   getAgentAppEvent,
   listAgentAppEvents,
+  SYSTEM_ASSISTANT_APP,
 } from "../services/agentAppEventsService";
 import {
   createAvatarUpload,
@@ -37,10 +39,19 @@ import {
 } from "../services/appWebhookConfigService";
 import { oauthClientIsUserManagedPredicate } from "../services/oauthClientManagementPolicy";
 import { sendJsonServerError } from "./errorResponse";
+import { guardUuidPathParams } from "../lib/uuidPathParams";
 
 export const integrationRouter: RouterType = Router();
 export const integrationInviteRouter: RouterType = Router();
 export const integrationLogoPublicRouter: RouterType = Router();
+// Uniform 404 for non-UUID path params (task #12); every id below is a uuid column.
+guardUuidPathParams(integrationRouter, {
+  clientId: "App",
+  agentId: "Agent",
+  eventId: "Event",
+  requestId: "Access request",
+  grantId: "Grant",
+});
 const logoUpload = createAvatarUpload();
 
 function isMarketplaceReviewer(userId: string) {
@@ -137,8 +148,9 @@ integrationRouter.get("/built-in", (_req, res) => {
 
 integrationRouter.get("/marketplace", async (req, res) => {
   try {
+    const canReviewAppNotifications = isMarketplaceReviewer(req.userId!);
     const clients = await oauthService.listMarketplaceOAuthClients(req.serverId!);
-    res.json(clients);
+    res.json(clients.map((client) => ({ ...client, canReviewAppNotifications })));
   } catch (err) {
     sendJsonServerError(req, res, { error: "Failed to list marketplace OAuth clients", logPrefix: "List marketplace OAuth clients error:", err });
   }
@@ -231,6 +243,39 @@ integrationRouter.patch("/clients/:clientId", async (req, res) => {
   }
 });
 
+
+function sendAgentJwtPolicyError(req: Request, res: Response, error: unknown) {
+  if (error instanceof AgentJwtPolicyError) {
+    res.status(error.status).json({ error: error.message });
+  } else if (error instanceof AgentAudienceJwtError) {
+    res.status(503).json({ error: error.code });
+  } else {
+    sendJsonServerError(req, res, { error: "Failed to update Agent JWT settings", logPrefix: "Agent JWT settings error:", err: error });
+  }
+}
+
+integrationRouter.get("/clients/:clientId/agent-jwt", async (req, res) => {
+  res.setHeader("Cache-Control", "private, no-store");
+  try {
+    res.json(await getAppAgentJwtSettings(req.serverId!, req.params.clientId));
+  } catch (error) { sendAgentJwtPolicyError(req, res, error); }
+});
+
+integrationRouter.put("/clients/:clientId/agent-jwt", async (req, res) => {
+  res.setHeader("Cache-Control", "private, no-store");
+  if (!req.userId) { res.status(403).json({ error: "Human server administrator required" }); return; }
+  const parsed = updateAppAgentJwtSettingsSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: "Agent JWT settings require only a boolean enabled field" });
+    return;
+  }
+  try {
+    res.json(await setAppAgentJwtSettings({
+      serverId: req.serverId!, clientId: req.params.clientId, actorUserId: req.userId!, enabled: parsed.data.enabled,
+    }));
+  } catch (error) { sendAgentJwtPolicyError(req, res, error); }
+});
+
 integrationRouter.get("/clients/:clientId/app-notifications", async (req, res) => {
   try {
     if (!await currentUserHasServerCapability(req, "manageIntegrations")) {
@@ -319,12 +364,33 @@ integrationRouter.post("/clients/:clientId/app-notifications/permissions/review"
       res.status(403).json({ error: "Only marketplace reviewers can approve App Notifications permission expansions" });
       return;
     }
+    // The field is optional for legacy callers (omitted = approve-latest),
+    // but an explicitly present value must be a valid pending-revision uuid —
+    // null/wrong-type/malformed is a client bug and cannot silently downgrade
+    // to approving whatever request is currently pending.
+    let expectedRevisionId: string | undefined;
+    if (req.body && Object.prototype.hasOwnProperty.call(req.body, "expected_revision_id")) {
+      const raw = req.body.expected_revision_id;
+      if (typeof raw !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(raw.trim())) {
+        res.status(400).json({ error: "expected_revision_id must be the pending revision uuid shown to the reviewer", code: "invalid_expected_revision_id" });
+        return;
+      }
+      expectedRevisionId = raw.trim();
+    }
     const revision = await approvePendingAppOutboundPermissionRevision({
       clientId: req.params.clientId,
       reviewerUserId: req.userId!,
+      expectedRevisionId,
     });
     if (!revision) {
       res.status(404).json({ error: "Pending App Notifications permission revision not found" });
+      return;
+    }
+    if (revision === "stale") {
+      res.status(409).json({
+        error: "The displayed permission request has been replaced. Reload the app and review the latest request before approving.",
+        code: "permission_revision_stale",
+      });
       return;
     }
     res.json({
@@ -930,7 +996,7 @@ integrationRouter.get("/agents/:agentId/events", async (req, res) => {
     const agent = await loadInspectableAgent(req, res);
     if (!agent) return;
     const { clientId, before, limit } = req.query;
-    if (clientId !== undefined && (typeof clientId !== "string" || !UUID_RE.test(clientId))) {
+    if (clientId !== undefined && (typeof clientId !== "string" || !(UUID_RE.test(clientId) || clientId === SYSTEM_ASSISTANT_APP))) {
       res.status(400).json({ error: "clientId must be an app id" });
       return;
     }

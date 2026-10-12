@@ -63,9 +63,15 @@ test("every consumer formats the id — none renders the struct field raw", () =
   assert.ok(consumers.length >= 3, `expected the three surfaces, found ${consumers.length}`);
   for (const f of consumers) {
     const src = strip(readFileSync(f, "utf8"));
-    assert.doesNotMatch(src, /\{\s*detail\.copyId\s*\}/, `${f} renders the id itself, not its message`);
-    assert.doesNotMatch(src, /title=\{detail\.copyId\}/, `${f} puts a raw id in a tooltip`);
-    assert.match(src, /formatMessage\(\{ id: detail\.copyId \}\)/, `${f} never formats the copy`);
+    assert.doesNotMatch(src, /\{\s*(?:detail|OAUTH_SCOPE_PRESENTATION\[\w+\])\.copyId\s*\}/, `${f} renders the id itself, not its message`);
+    assert.doesNotMatch(src, /title=\{(?:detail|OAUTH_SCOPE_PRESENTATION\[\w+\])\.copyId\}/, `${f} puts a raw id in a tooltip`);
+    // DeclaredScopeToggle (split out of SettingsPanel) indexes the table inline
+    // instead of binding `detail` first; it must still format the copy id.
+    assert.match(
+      src,
+      /formatMessage\(\{ id: (?:detail|OAUTH_SCOPE_PRESENTATION\[\w+\])\.copyId \}\)/,
+      `${f} never formats the copy`,
+    );
   }
 });
 

@@ -5,7 +5,6 @@ import { act, cleanup, fireEvent, render, waitFor } from "@testing-library/react
 import { MemoryRouter, useLocation } from "react-router-dom";
 import api from "../src/api/client";
 import { LeftRail } from "../src/components/layout/LeftRail";
-import { useWorkspaceGridNavigationStore } from "../src/components/workspace/workspaceGridNavigationStore";
 import { TestIntlProvider } from "./helpers/intl";
 import { useAuthStore } from "../src/store/authStore";
 import { useInboxStore } from "../src/store/inboxStore";
@@ -26,7 +25,6 @@ afterEach(() => {
   useInboxStore.setState(useInboxStore.getInitialState(), true);
   useServerStore.setState(originalServerState, true);
   useThreadStore.setState(useThreadStore.getInitialState(), true);
-  useWorkspaceGridNavigationStore.setState(useWorkspaceGridNavigationStore.getInitialState(), true);
 });
 
 function seedActivityRail(
@@ -112,7 +110,7 @@ test("the rail server avatar falls back to its initial after an image load error
   const { container } = render(
     <MemoryRouter initialEntries={["/s/botiverse/channel/general"]}>
       <TestIntlProvider>
-        <LeftRail side="left" />
+        <LeftRail />
       </TestIntlProvider>
     </MemoryRouter>,
   );
@@ -188,7 +186,7 @@ test("a fresh current-server Activity total outranks a stale summary while other
   render(
     <MemoryRouter initialEntries={["/"]}>
       <TestIntlProvider>
-        <LeftRail side="left" />
+        <LeftRail />
       </TestIntlProvider>
     </MemoryRouter>,
   );
@@ -283,18 +281,17 @@ test("a fresh current-server Activity total outranks a stale summary while other
   );
 });
 
-test("classic Activity double-click navigates once and only adds first-unread focus", () => {
+test("Activity double-click navigates once and only adds first-unread focus", () => {
   const loadInboxCalls: Array<{ reset?: boolean; background?: boolean }> = [];
   const openThreadCalls: unknown[] = [];
   const paths: string[] = [];
   seedActivityRail(loadInboxCalls, openThreadCalls);
-  useWorkspaceGridNavigationStore.setState({ active: false, enabled: false });
 
   render(
     <MemoryRouter initialEntries={["/s/activity-rail/channel/general"]}>
       <TestIntlProvider>
         <LocationRecorder paths={paths} />
-        <LeftRail side="left" />
+        <LeftRail />
       </TestIntlProvider>
     </MemoryRouter>,
   );
@@ -314,55 +311,6 @@ test("classic Activity double-click navigates once and only adds first-unread fo
     ["/s/activity-rail/channel/general", "/s/activity-rail/activity"],
     "the second click in the browser double-click sequence must not navigate again",
   );
-  assert.equal(useInboxStore.getState().pendingFocusKind, "first-unread");
-  assert.deepEqual(loadInboxCalls, [{ reset: true }]);
-  assert.deepEqual(openThreadCalls, []);
-  assert.equal(useThreadStore.getState().openThreadChannelId, null);
-});
-
-test("Workspace Activity double-click selects its rail once and only adds first-unread focus", () => {
-  const loadInboxCalls: Array<{ reset?: boolean; background?: boolean }> = [];
-  const openThreadCalls: unknown[] = [];
-  const railModeCalls: string[] = [];
-  seedActivityRail(loadInboxCalls, openThreadCalls);
-  useWorkspaceGridNavigationStore.setState({
-    active: true,
-    enabled: true,
-    railMode: null,
-    activeRailSide: "left",
-    railLayout: { left: ["activity"], right: [] },
-    sidebars: {
-      left: { activeItem: null, collapsed: true },
-      right: { activeItem: null, collapsed: true },
-    },
-  });
-  const setRailMode = useWorkspaceGridNavigationStore.getState().setRailMode;
-  useWorkspaceGridNavigationStore.setState({
-    setRailMode: (mode, side, userId) => {
-      railModeCalls.push(mode ?? "null");
-      setRailMode(mode, side, userId);
-    },
-  });
-
-  render(
-    <MemoryRouter initialEntries={["/s/activity-rail/channel/general"]}>
-      <TestIntlProvider>
-        <LeftRail side="left" />
-      </TestIntlProvider>
-    </MemoryRouter>,
-  );
-
-  const activityButton = document.querySelector<HTMLButtonElement>('[data-testid="left-rail-tab-activity"]');
-  assert.ok(activityButton);
-
-  fireEvent.click(activityButton, { detail: 1 });
-  assert.deepEqual(railModeCalls, ["activity"]);
-  assert.equal(useWorkspaceGridNavigationStore.getState().sidebars.left.activeItem, "activity");
-
-  fireEvent.click(activityButton, { detail: 2 });
-  fireEvent.doubleClick(activityButton);
-
-  assert.deepEqual(railModeCalls, ["activity"], "the second click must not re-select Workspace Activity");
   assert.equal(useInboxStore.getState().pendingFocusKind, "first-unread");
   assert.deepEqual(loadInboxCalls, [{ reset: true }]);
   assert.deepEqual(openThreadCalls, []);

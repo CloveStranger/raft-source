@@ -311,6 +311,10 @@ export default function ForwardComposerDialog({
     }
   }, [formatMessage, joinSignature, joinTargets]);
 
+  const handleJoinSelectedChannels = useCallback(() => {
+    void joinSelectedChannels();
+  }, [joinSelectedChannels]);
+  const handleClearSelection = useCallback(() => setSelectedDestinations(new Map()), []);
   const resolveDestination = useCallback(async (entry: SelectedDestination) => {
     if (entry.resolvedChannelId) return entry.resolvedChannelId;
     if (entry.localTarget) return entry.localTarget.id;
@@ -342,7 +346,7 @@ export default function ForwardComposerDialog({
       ?? (entry.searchTarget ? fallbackDestination(entry.searchTarget, channelId) : null);
   }, []);
 
-  const sendForwardNote = async (note: string) => {
+  const sendForwardNote = useCallback(async (note: string) => {
     if (sending || !hasSelection || !joinReady) return;
     setSending(true);
     try {
@@ -479,7 +483,7 @@ export default function ForwardComposerDialog({
     } finally {
       setSending(false);
     }
-  };
+  }, [sending, hasSelection, joinReady, selectedEntries, resolveDestination, formatMessage, orderedSourceMessages, destinationChannel, onSent, nav, closeComposer]);
 
   const targetResults = (
     <ForwardComposerTargetList
@@ -508,7 +512,7 @@ export default function ForwardComposerDialog({
       joinTargetSummary={joinTargetSummary}
       joinTargetTitle={joinTargetTitle}
       joinInFlight={joinInFlight}
-      onJoin={() => { void joinSelectedChannels(); }}
+      onJoin={handleJoinSelectedChannels}
       hasJointDestination={hasJointDestination}
       skippedCount={skippedCount}
       nestedForwardCount={nestedForwardCount}
@@ -602,7 +606,7 @@ export default function ForwardComposerDialog({
       search={search}
       resetSearch={resetSearch}
       selectedCount={selectedDestinations.size}
-      clearSelection={() => setSelectedDestinations(new Map())}
+      clearSelection={handleClearSelection}
       targetResults={targetResults}
       warnings={warnings}
       previewMetadata={previewMetadata}

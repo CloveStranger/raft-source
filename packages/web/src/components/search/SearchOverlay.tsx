@@ -38,6 +38,11 @@ const ARROW_UP_GLYPH = "↑";
 const ARROW_DOWN_GLYPH = "↓";
 const RETURN_KEY_GLYPH = "↵";
 
+// Keep card clicks from reaching the backdrop's click-outside dismiss.
+function stopMouseDownPropagation(e: React.MouseEvent) {
+  e.stopPropagation();
+}
+
 export default function SearchOverlay({ onClose }: { onClose: () => void }) {
   const { formatMessage } = useIntl();
   useEffect(() => {
@@ -69,7 +74,7 @@ export default function SearchOverlay({ onClose }: { onClose: () => void }) {
         data-testid="desktop-search-overlay"
         className="flex min-h-0 min-w-0 flex-col"
         style={searchOverlayCardStyle()}
-        onMouseDown={(e) => e.stopPropagation()}
+        onMouseDown={stopMouseDownPropagation}
       >
         <MessageSearchPage activateResultsInChat overlayChrome />
         {/* Palette footer (task #113, Slack's "↑↓ Select"): the keyboard contract

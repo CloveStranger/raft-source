@@ -1,6 +1,6 @@
-import { useEffect, useId, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { useIntl } from "react-intl";
-import { Check, Copy, Link2, Mail, Plus, Trash2 } from "lucide-react";
+import { Check, Copy, Link2, Mail, Plus } from "lucide-react";
 import {
   Button,
   Field,
@@ -29,6 +29,7 @@ import { shareableWebOrigin } from "../../utils/desktopShell";
 import DialogCard from "../ui/DialogCard";
 import Tooltip from "../ui/Tooltip";
 import Banner from "../ui/Banner";
+import { InviteeRow } from "./InviteeRow";
 
 /**
  * The roles an invite can grant. Derived from the shared `ServerRole` union
@@ -37,14 +38,14 @@ import Banner from "../ui/Banner";
  * import, so this is the closest thing to one source of truth. If `ServerRole`
  * ever loses either member, this stops compiling instead of drifting quietly.
  */
-type InvitableRole = Extract<ServerRole, "member" | "guest">;
+export type InvitableRole = Extract<ServerRole, "member" | "guest">;
 
 /**
  * `id` is a stable React key that survives removal of an earlier row. Index
  * keys would reuse a removed row's identity and carry the wrong text into the
  * wrong box.
  */
-interface Invitee {
+export interface Invitee {
   id: string;
   email: string;
   role: InvitableRole;
@@ -61,6 +62,8 @@ interface JoinLinkRecord {
 function isBillingGateError(error: string) {
   return error.includes("seat limit") || error.includes("limit reached") || error.includes("requires the Pro plan");
 }
+
+export type InviteePatch = Partial<Omit<Invitee, "id">>;
 
 export default function InviteHumanDialog({
   onClose,
@@ -182,6 +185,19 @@ export default function InviteHumanDialog({
     void loadBilling();
   }, [loadBilling]);
 
+  // Adopt a link as the active one AND (re)seed the edit draft + the stable
+  // `linkLimits` snapshot from it. Called only on load, a successful generate,
+  // and revoke — never on the transient clear inside regenerateLink, so a
+  // failed create leaves the draft intact for retry.
+  const adoptLink = useCallback((link: JoinLinkRecord | null) => {
+    setJoinLink(link);
+    const maxUses = link?.maxUses ?? null;
+    const expiresAt = link?.expiresAt ?? null;
+    setLinkLimits({ maxUses, expiresAt });
+    setMaxUsesChoice(maxUses != null ? "keep" : "unlimited");
+    setExpiryChoice(expiresAt != null ? "keep" : "never");
+  }, []);
+
   useEffect(() => {
     if (!server) return;
     let cancelled = false;
@@ -214,47 +230,46 @@ export default function InviteHumanDialog({
     return () => {
       cancelled = true;
     };
-  }, [server, humanSeatLimitReached, formatMessage]);
+  }, [server, humanSeatLimitReached, formatMessage, adoptLink]);
 
-  // Adopt a link as the active one AND (re)seed the edit draft + the stable
-  // `linkLimits` snapshot from it. Called only on load, a successful generate,
-  // and revoke — never on the transient clear inside regenerateLink, so a
-  // failed create leaves the draft intact for retry.
-  const adoptLink = (link: JoinLinkRecord | null) => {
-    setJoinLink(link);
-    const maxUses = link?.maxUses ?? null;
-    const expiresAt = link?.expiresAt ?? null;
-    setLinkLimits({ maxUses, expiresAt });
-    setMaxUsesChoice(maxUses != null ? "keep" : "unlimited");
-    setExpiryChoice(expiresAt != null ? "keep" : "never");
-  };
-
-  const updateInvitee = (id: string, patch: Partial<Omit<Invitee, "id">>) => {
+  const updateInvitee = useCallback((id: string, patch: InviteePatch) => {
     setInvitees((prev) => prev.map((invitee) => invitee.id === id ? { ...invitee, ...patch } : invitee));
-  };
+  }, []);
 
-  const addInvitee = () => {
+  const addInvitee = useCallback(() => {
     setInvitees((prev) => [...prev, { id: `invitee-${nextInviteeId.current++}`, email: "", role: "member" }]);
-  };
+  }, []);
 
   // The last row is protected by NOT rendering its remove control (below), so
   // there is deliberately no second length check here. A redundant guard in
   // this setter would be unreachable, and unreachable code that looks like a
   // guard implies the path is live.
-  const removeInvitee = (id: string) => {
+  const removeInvitee = useCallback((id: string) => {
     setInvitees((prev) => prev.filter((invitee) => invitee.id !== id));
-  };
+  }, []);
 
-  const handleCopy = async () => {
+  const handleCopy = useCallback(async () => {
     if (!joinUrl) return;
     await navigator.clipboard.writeText(joinUrl);
     setCopied(true);
     window.setTimeout(() => setCopied(false), 1500);
-  };
+  }, [joinUrl]);
+
+  const handleInviteTabChange = useCallback((val: "email" | "link" | null) => {
+    if (val) setInviteTab(val);
+  }, []);
+
+  const handleMaxUsesChange = useCallback((value: string | null) => {
+    if (value != null) setMaxUsesChoice(value);
+  }, []);
+
+  const handleExpiryChange = useCallback((value: string | null) => {
+    if (value != null) setExpiryChoice(value);
+  }, []);
 
   // Regenerate the shareable link with the chosen usage cap / expiry. Revokes
   // the current link (so its token stops working) and creates a fresh one.
-  const regenerateLink = async () => {
+  const regenerateLink = useCallback(async () => {
     if (!server || regenerating) return;
     setRegenerating(true);
     setError("");
@@ -285,7 +300,11 @@ export default function InviteHumanDialog({
     } finally {
       setRegenerating(false);
     }
-  };
+  }, [server, regenerating, maxUsesChoice, linkLimits, expiryChoice, joinLink, adoptLink, formatMessage]);
+
+  const handleRegenerateClick = useCallback(() => {
+    void regenerateLink();
+  }, [regenerateLink]);
 
   // Revoke the current link entirely: its token stops working and no
   // replacement is created (the "Update link" button can make a fresh one).
@@ -388,12 +407,16 @@ export default function InviteHumanDialog({
             </Banner>
           )}
 
+          {/* Stopgap until per-agent access control (task #121): any member can
+              DM and direct every agent in the server, so say so before inviting. */}
+          <Banner intent="info" withIcon data-testid="invite-agent-reach-hint">
+            {formatMessage({ id: "member.invite.agentReachHint" })}
+          </Banner>
+
           {/* Invite method tabs (Phase 3): email vs shareable link. */}
           <SegmentedControl<"email" | "link">
             value={inviteTab}
-            onValueChange={(val) => {
-              if (val) setInviteTab(val);
-            }}
+            onValueChange={handleInviteTabChange}
             className="w-full"
             data-testid="invite-method-tabs"
           >
@@ -412,79 +435,17 @@ export default function InviteHumanDialog({
             </label>
             <div className="space-y-2">
               {invitees.map((invitee, index) => (
-                <div key={invitee.id} className="flex items-center gap-2">
-                  {/*
-                    * Each control gets its OWN `Field className="contents"`.
-                    *
-                    * Base UI's Field context hands every Input beneath it the
-                    * same control id and the same `aria-labelledby`, so a list
-                    * of rows would collapse into one id and every box would
-                    * announce the group's label. An inherited `aria-labelledby`
-                    * also outranks `aria-label`, so labelling them directly
-                    * does not help while they share a context. `contents` adds
-                    * no layout. (Found by @Dozy on PR #7010.)
-                    */}
-                  <Field className="contents">
-                    <Input
-                      id={`${inviteeFieldId}-email-${invitee.id}`}
-                      type="email"
-                      aria-label={formatMessage({ id: "member.invite.emailLabel" })}
-                      value={invitee.email}
-                      onChange={(event) => updateInvitee(invitee.id, { email: event.target.value })}
-                      className="min-w-0 flex-1"
-                      placeholder="name@company.com"
-                    />
-                  </Field>
-                  {canOfferGuest && (
-                    <Select
-                      // `chrome="field"` opts into rUI's field metric axis, so
-                      // the trigger takes the same height and typography as the
-                      // Input beside it. Its default chrome borrows the Button
-                      // size scale (32px / 14px) because the trigger is built on
-                      // Button — which is why the row read as two different
-                      // kinds of control. Hand-setting a height would have
-                      // matched only the number, not the type scale.
-                      chrome="field"
-                      value={invitee.role}
-                      onValueChange={(value) => {
-                        if (value != null) updateInvitee(invitee.id, { role: value as InvitableRole });
-                      }}
-                      items={roleItems}
-                    >
-                      <SelectTrigger
-                        id={`${inviteeFieldId}-role-${invitee.id}`}
-                        className="w-28 shrink-0"
-                        aria-label={formatMessage({ id: "member.invite.roleLabel" })}
-                      >
-                        <SelectValue />
-                        <SelectIcon />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectList>
-                          {roleItems.map((item) => (
-                            <SelectItem key={item.value} value={item.value}>
-                              <SelectItemText>{item.label}</SelectItemText>
-                              <SelectItemIndicator />
-                            </SelectItem>
-                          ))}
-                        </SelectList>
-                      </SelectContent>
-                    </Select>
-                  )}
-                  {/* Hidden, not disabled, at one row: removing the last row
-                      leaves no way back to a usable form. */}
-                  {invitees.length > 1 && (
-                    <Button
-                      type="button"
-                      size="icon-xs"
-                      variant="danger"
-                      onClick={() => removeInvitee(invitee.id)}
-                      aria-label={formatMessage({ id: "member.invite.removeInvitee" }, { index: index + 1 })}
-                    >
-                      <Trash2 size={14} />
-                    </Button>
-                  )}
-                </div>
+                <InviteeRow
+                  key={invitee.id}
+                  invitee={invitee}
+                  index={index}
+                  fieldIdPrefix={inviteeFieldId}
+                  canOfferGuest={canOfferGuest}
+                  canRemove={invitees.length > 1}
+                  roleItems={roleItems}
+                  onUpdate={updateInvitee}
+                  onRemove={removeInvitee}
+                />
               ))}
             </div>
             <div className="mt-2">
@@ -550,7 +511,7 @@ export default function InviteHumanDialog({
                 </span>
                 <Select
                   value={maxUsesChoice}
-                  onValueChange={(value) => { if (value != null) setMaxUsesChoice(value); }}
+                  onValueChange={handleMaxUsesChange}
                   items={maxUsesItems}
                 >
                   <SelectTrigger
@@ -579,7 +540,7 @@ export default function InviteHumanDialog({
                 </span>
                 <Select
                   value={expiryChoice}
-                  onValueChange={(value) => { if (value != null) setExpiryChoice(value); }}
+                  onValueChange={handleExpiryChange}
                   items={expiryItems}
                 >
                   <SelectTrigger
@@ -606,7 +567,7 @@ export default function InviteHumanDialog({
                 type="button"
                 size="sm"
                 variant="default"
-                onClick={() => void regenerateLink()}
+                onClick={handleRegenerateClick}
                 disabled={regenerating || linkLoading || !server}
               >
                 {formatMessage({ id: "member.invite.applyLinkOptions" })}

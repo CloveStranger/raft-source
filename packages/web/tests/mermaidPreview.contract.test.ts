@@ -42,15 +42,20 @@ test("Mermaid renderer lazy-loads official mermaid and owns a bounded result cac
 
 test("①+② attacker-controlled SVG renders in an EMPTY-sandbox iframe, never main DOM", () => {
   const src = read("src/components/mermaid/MermaidDiagramViewer.tsx");
+  const frameLayerSrc = read("src/components/mermaid/MermaidFrameLayer.tsx");
   // No string ever reaches the main document — the only safe sink is the
   // sandboxed iframe. dangerouslySetInnerHTML must not exist here at all.
   assert.doesNotMatch(src, /dangerouslySetInnerHTML/);
+  assert.doesNotMatch(frameLayerSrc, /dangerouslySetInnerHTML/);
   // SVG goes into the shared isolation primitive via srcDoc with an EMPTY
   // sandbox (no allow-scripts, no allow-same-origin) → opaque origin, zero
   // script execution, so script/onload/foreignObject/javascript: are inert.
-  assert.match(src, /import SandboxedPreviewFrame from "\.\.\/ui\/SandboxedPreviewFrame"/);
-  assert.match(src, /<SandboxedPreviewFrame\b[\s\S]*?srcDoc=\{result\.srcDoc\}[\s\S]*?sandbox=""/);
+  assert.match(src, /import \{ MermaidFrameLayer \} from "\.\/MermaidFrameLayer"/);
+  assert.match(frameLayerSrc, /import SandboxedPreviewFrame from "\.\.\/ui\/SandboxedPreviewFrame"/);
+  assert.match(src, /<MermaidFrameLayer\b[\s\S]*?srcDoc=\{result\.srcDoc\}/);
+  assert.match(frameLayerSrc, /<SandboxedPreviewFrame\b[\s\S]*?srcDoc=\{srcDoc\}[\s\S]*?sandbox=""/);
   assert.doesNotMatch(src, /sandbox="[^"]*allow-(scripts|same-origin)[^"]*"/);
+  assert.doesNotMatch(frameLayerSrc, /sandbox="[^"]*allow-(scripts|same-origin)[^"]*"/);
   const renderer = read("src/components/mermaid/mermaidRenderer.ts");
   assert.match(renderer, /buildMermaidSrcDoc\(svg\)/);
 
@@ -84,6 +89,7 @@ test("interactive Mermaid chrome keeps SVG outside React state and main DOM", ()
   const diagramSrc = read("src/components/mermaid/MermaidDiagram.tsx");
   const toolbarSrc = read("src/components/mermaid/MermaidToolbar.tsx");
   const viewerSrc = read("src/components/mermaid/MermaidDiagramViewer.tsx");
+  const frameLayerSrc = read("src/components/mermaid/MermaidFrameLayer.tsx");
   const mermaidCss = read("src/components/mermaid/mermaid.css");
   const indexCss = read("src/index.css");
   const src = [diagramSrc, toolbarSrc, viewerSrc].join("\n");
@@ -125,11 +131,13 @@ test("interactive Mermaid chrome keeps SVG outside React state and main DOM", ()
   assert.match(viewerSrc, /const MERMAID_RETIRE_PAINT_FRAMES = 6/);
   assert.match(viewerSrc, /const layers = transition[\s\S]*activeFrameId[\s\S]*transition\.id[\s\S]*retiringFrame/);
   assert.match(viewerSrc, /requestAnimationFrame\(\(\) => \{[\s\S]*requestAnimationFrame\(\(\) => \{/);
-  assert.match(viewerSrc, /width: `\$\{layer\.ratio \* 100\}%`[\s\S]*transform: `translate\(-50%, -50%\) scale\(\$\{1 \/ layer\.ratio\}\)`[\s\S]*opacity: 1,[\s\S]*zIndex: 0/);
-  assert.match(viewerSrc, /width: `\$\{100 \/ layer\.ratio\}%`[\s\S]*transform: `translate\(-50%, -50%\) scale\(\$\{layer\.ratio\}\)`[\s\S]*opacity: 1,[\s\S]*zIndex: 2/);
-  assert.match(viewerSrc, /ariaHidden=\{layer\.kind === "active" \? undefined : true\}/);
-  assert.match(viewerSrc, /tabIndex=\{layer\.kind === "active" \? undefined : -1\}/);
-  assert.match(viewerSrc, /onLoad=\{layer\.kind === "prepared" \? \(\) => finishPreparedFrame\(layer\.id\) : undefined\}/);
+  assert.match(frameLayerSrc, /width: `\$\{ratio \* 100\}%`[\s\S]*transform: `translate\(-50%, -50%\) scale\(\$\{1 \/ ratio\}\)`[\s\S]*opacity: 1,[\s\S]*zIndex: 0/);
+  assert.match(frameLayerSrc, /width: `\$\{100 \/ ratio\}%`[\s\S]*transform: `translate\(-50%, -50%\) scale\(\$\{ratio\}\)`[\s\S]*opacity: 1,[\s\S]*zIndex: 2/);
+  assert.match(frameLayerSrc, /ariaHidden=\{kind === "active" \? undefined : true\}/);
+  assert.match(frameLayerSrc, /tabIndex=\{kind === "active" \? undefined : -1\}/);
+  assert.match(viewerSrc, /onPreparedLoad=\{finishPreparedFrame\}/);
+  assert.match(frameLayerSrc, /const handleLoad = useCallback\(\(\) => onPreparedLoad\(id\), \[id, onPreparedLoad\]\)/);
+  assert.match(frameLayerSrc, /onLoad=\{kind === "prepared" \? handleLoad : undefined\}/);
   assert.match(viewerSrc, /<BufferedMermaidFrame[\s\S]*result=\{result\}[\s\S]*zoom=\{zoom\}/);
   assert.match(viewerSrc, /data-testid="mermaid-pan-zoom-viewport"/);
   assert.match(viewerSrc, /onTouchStart=\{zoom\.onTouchStart\}/);
@@ -169,7 +177,8 @@ test("interactive Mermaid chrome keeps SVG outside React state and main DOM", ()
   // with the clipboard write and the label lifecycle owned by the shared
   // copy controller.
   assert.match(toolbarSrc, /const copyController = useCopyText\(\{ resetKey: code \}\)/);
-  assert.match(toolbarSrc, /copyController\.copyText\(code\)/);
+  assert.match(toolbarSrc, /const \{ copyText \} = copyController;/);
+  assert.match(toolbarSrc, /void copyText\(code\)\.catch\(\(\) => \{\}\)/);
   assert.match(toolbarSrc, /copyController\.copied \? <Check size=\{14\} \/> : <Copy size=\{14\} \/>/);
   assert.doesNotMatch(toolbarSrc, /CopyableCode/);
   assert.match(toolbarSrc, /useBlobDownload\(\)/);

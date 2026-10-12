@@ -18,6 +18,34 @@ import {
 type DivPassthroughProps = HTMLAttributes<HTMLDivElement> & Record<`data-${string}`, string | undefined>;
 type ButtonPassthroughProps = HTMLAttributes<HTMLButtonElement> & Record<`data-${string}`, string | undefined>;
 
+const NO_CONTAINER_PROPS: DivPassthroughProps = {};
+
+/**
+ * Header chrome for profile surfaces (agent / human / external identity).
+ * These headers sit directly in a route column (no panel frame), and also
+ * wrap inside ProfilePanelBody in the overlay host — either way the
+ * attached-panel divider never reaches them and the column background shows
+ * through, so the tint + divider arrive on the header element itself via
+ * containerProps (the slot merge lets a caller className replace the recipe's
+ * bg-transparent / border-b-0 — pinned by header.chrome.test.ts).
+ * Elegant-only: brutal headers already carry their 2px black rule from the
+ * recipe, and must stay untouched. cindyz/gzj 2026-10-10, #737.
+ */
+export const PROFILE_HEADER_SURFACE_CLASS =
+  "in-data-[theme=elegant]:bg-layer-canvas-muted in-data-[theme=elegant]:border-b in-data-[theme=elegant]:border-line-muted";
+
+/**
+ * Profile handle size (cindyz 2026-10-10): the `@name` next to / under a
+ * profile name reads at 15px in elegant — the same tier as the thread channel
+ * suffix. Elegant-only; brutal keeps its own meta sizing. Used for the header
+ * subtitle (via `subtitleClassName`) and the detail-block handle.
+ */
+export const PROFILE_HANDLE_SIZE_CLASS =
+  // Handles are mono everywhere (cindyz 2026-10-10): the header subtitle now
+  // matches the creator row and the detail-block handle; brutal's meta was
+  // already mono. Size stays at the 15px note tier.
+  "in-data-[theme=elegant]:text-[15px] font-mono";
+
 /**
  * Canonical panel-header primitive — covers every panel column header
  * in the app (12 callsites: ChatPanel / AgentDetailPanel / HumanDetailPanel
@@ -66,6 +94,9 @@ export interface AppPanelHeaderProps {
   /** When true, subtitle is allowed to wrap to multiple lines instead
    *  of single-line truncation. Used for channel descriptions. */
   subtitleMultiline?: boolean;
+  /** Extra classes for the subtitle element (e.g. the profile handle size
+   *  tier — see PROFILE_HANDLE_SIZE_CLASS). */
+  subtitleClassName?: string;
   /** Optional icon node (e.g. `<Bookmark size={18} />`) — rendered
    *  inside the size-icon-header container, desktop-only (md:flex). */
   icon?: ReactNode;
@@ -79,6 +110,11 @@ export interface AppPanelHeaderProps {
    *  Mutually exclusive with `icon`. Honors the same visibility
    *  rules as `icon` (mobile hide unless `iconAlwaysVisible`). */
   iconSlot?: ReactNode;
+  /** Marks what the icon slot holds. `"avatar"` declares an identity
+   *  avatar: the elegant chip background is dropped (recipe reads
+   *  `data-icon-kind="avatar"` → bg-transparent) so a round avatar
+   *  does not sit on a square. Glyph icons keep the chip. */
+  iconKind?: "avatar";
   /** Whether the icon is visible on every viewport. Default `false`
    *  matches "non-identity" surfaces (Saved / Release Notes / Settings)
    *  that hide the icon on mobile to save header space. Set to `true`
@@ -123,9 +159,11 @@ export default function AppPanelHeader({
   titleSuffix,
   subtitle,
   subtitleMultiline = false,
+  subtitleClassName,
   icon,
   iconBg = "bg-primary",
   iconSlot,
+  iconKind,
   iconAlwaysVisible = false,
   onMobileBack,
   mobileBreakpoint = "md",
@@ -173,7 +211,7 @@ export default function AppPanelHeader({
   const mobileContentClass = (icon || iconSlot) && iconAlwaysVisible
     ? onMobileBack ? "max-md:col-start-3" : "max-md:col-start-2 max-md:col-span-2"
     : onMobileBack ? "max-md:col-start-2 max-md:col-span-2" : "max-md:col-span-3";
-  const { className: containerExtraClass, ...containerRest } = containerProps ?? {};
+  const { className: containerExtraClass, ...containerRest } = containerProps ?? NO_CONTAINER_PROPS;
   return (
     <PanelHeader
       {...containerRest}
@@ -197,13 +235,17 @@ export default function AppPanelHeader({
       )}
       {icon && (
         <PanelHeaderIcon
-          className={`${iconVisibilityClass} ${iconBg} in-data-[theme=elegant]:border-0 in-data-[theme=elegant]:bg-fill-muted`}
+          // Audit note (gzj 2026-10-10): the elegant override below is
+          // LOAD-BEARING — it neutralises caller `iconBg` tokens in elegant
+          // (tailwind-merge would otherwise let them win). Its value must stay
+          // in sync with panel-header.recipe's elegant headerIcon chip token.
+          className={`${iconVisibilityClass} ${iconBg} in-data-[theme=elegant]:border-0 in-data-[theme=elegant]:bg-fill-strong`}
         >
           {icon}
         </PanelHeaderIcon>
       )}
       {iconSlot && (
-        <PanelHeaderIcon className={iconVisibilityClass}>
+        <PanelHeaderIcon className={iconVisibilityClass} data-icon-kind={iconKind}>
           {iconSlot}
         </PanelHeaderIcon>
       )}
@@ -229,7 +271,7 @@ export default function AppPanelHeader({
               render={<p />}
               className={`${
                 subtitleMultiline ? "" : "truncate"
-              }`}
+              }${subtitleClassName ? ` ${subtitleClassName}` : ""}`}
             >
               {subtitle}
             </PanelMeta>

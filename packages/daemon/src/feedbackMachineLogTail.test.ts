@@ -3,7 +3,7 @@ import { mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { gunzipSync } from "node:zlib";
-import { BasicTracer, MemoryTraceSink } from "@botiverse/raft-shared";
+import { BasicTracer, MemoryTraceSink, formatUtcTimestamp } from "@botiverse/raft-shared";
 import { DIAGNOSTIC_REDACTION_CREDENTIAL_SAMPLES, PEM_PRIVATE_KEY_BEGIN } from "../../shared/src/test/diagnosticRedactionCredentialSamples";
 import { boundAndRedactLogTail, collectFeedbackMachineLogTailAttachment, redactLogTailText } from "./feedbackMachineLogTail";
 
@@ -203,6 +203,43 @@ describe("feedback machine log tail (tier 2)", () => {
     assert.equal(result.reachable, true);
     assert.equal(result.fallbackReason, "daemon worker URL is not configured");
     assert.equal(captured.uploaded, null);
+  });
+
+  // The daemon logger stamps lines with formatUtcTimestamp, which writes a
+  // space separator ("2026-09-15 11:50:00Z"), not ISO's "T". Build the lines
+  // with the producer itself so a format change on either side goes red here.
+  test("lines in the daemon logger's own timestamp format are window-filtered, not dropped as undated", () => {
+    const at = (iso: string, rest: string) => `${formatUtcTimestamp(iso)} ${rest}`;
+    const text = [
+      at("2026-09-15T11:30:00.000Z", "[INFO] before the window"),
+      "    continuation of the before line",
+      at(WINDOW.from, "[INFO] exactly at window start"),
+      at("2026-09-15T11:50:00.000Z", "[ERROR] synthetic runtime exit 1"),
+      "    at insideFrame (file.js:2:2)",
+      "2026-09-15T11:55:00.000Z [WARN] ISO line mixed in",
+      at(WINDOW.to, "[INFO] exactly at window end"),
+      at("2026-09-15T12:05:00.000Z", "[INFO] after the window"),
+    ].join("\n");
+    const out = boundAndRedactLogTail(text, { maxLines: 100, maxLineChars: 2000 }, WINDOW);
+    assert.deepEqual(out.lines, [
+      "2026-09-15 11:45:00Z [INFO] exactly at window start",
+      "2026-09-15 11:50:00Z [ERROR] synthetic runtime exit 1",
+      "    at insideFrame (file.js:2:2)",
+      "2026-09-15T11:55:00.000Z [WARN] ISO line mixed in",
+      "2026-09-15 12:00:00Z [INFO] exactly at window end",
+    ]);
+    assert.equal(out.linesOutsideWindow, 3);
+    assert.equal(out.undatedLines, 0);
+  });
+
+  test("a leading date-time without a zone is not trusted as a timestamp", () => {
+    const text = [
+      "2026-09-15 11:50:00 [INFO] no zone, so no instant",
+      "2026-09-15T11:50:00 [INFO] no zone either",
+    ].join("\n");
+    const out = boundAndRedactLogTail(text, { maxLines: 100, maxLineChars: 2000 }, WINDOW);
+    assert.deepEqual(out.lines, []);
+    assert.equal(out.undatedLines, 2);
   });
 
   test("boundAndRedactLogTail caps line length after redaction and passes everything through without a window", () => {

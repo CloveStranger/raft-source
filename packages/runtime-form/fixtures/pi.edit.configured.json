@@ -247,6 +247,11 @@
       "dependsOn": "/provider"
     }
   },
+  "writeOnlyKeepRequiresUnchanged": {
+    "/apiKey": [
+      "/provider"
+    ]
+  },
   "values": {
     "provider": "configured",
     "model": "my-org/pi-custom",

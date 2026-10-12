@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawnRuntimeChild } from "./runtimeChild";
 import type { AgentConfig, AxSurfaceText } from "@botiverse/raft-shared";
 import type { RuntimeDriver, SpawnContext, SpawnResult, ParsedEvent, RuntimeProbeResult } from "./types";
 import { buildCliTransportSystemPrompt, prepareCliTransport } from "./cliTransport";
@@ -136,7 +136,9 @@ export class ClaudeDriver implements RuntimeDriver {
     const claudeCommand = resolveClaudeLaunchCommand(ctx.config);
     const spawnSpec = buildClaudeSpawnSpec(claudeCommand, args, { env: spawnEnv as NodeJS.ProcessEnv });
 
-    const proc = spawn(spawnSpec.command, spawnSpec.args, {
+    // task #365: after the last await, right before the child exists.
+    ctx.assertLaunchCurrent?.();
+    const proc = spawnRuntimeChild(spawnSpec.command, spawnSpec.args, {
       cwd: ctx.workingDirectory,
       stdio: ["pipe", "pipe", "pipe"],
       env: spawnSpec.env ?? spawnEnv as NodeJS.ProcessEnv,

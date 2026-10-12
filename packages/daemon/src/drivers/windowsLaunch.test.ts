@@ -99,10 +99,33 @@ function windowsDeps(input: {
       assert.equal(command, "powershell.exe");
       const name = args[args.length - 1]!;
       const resolved = input.onPath?.[name];
-      if (!resolved) throw new Error(`not found: ${name}`);
+      // The real lookup script exits 3 when Get-Command finds nothing; any
+      // other failure is "the lookup could not decide" (task #1240).
+      if (!resolved) throw Object.assign(new Error(`not found: ${name}`), { status: 3 });
       return Buffer.from(`${resolved}\r\n`);
     }) as unknown as WindowsLaunchDeps["execFileSyncFn"],
   };
+}
+
+/** Deps whose PATH lookup fails the given way instead of answering. */
+function failingLookupDeps(failure: { code?: string; status?: number }): WindowsLaunchDeps {
+  return {
+    ...windowsDeps({ files: {} }),
+    execFileSyncFn: ((command: string) => {
+      assert.equal(command, "powershell.exe");
+      throw Object.assign(new Error(`lookup failed: ${JSON.stringify(failure)}`), failure);
+    }) as unknown as WindowsLaunchDeps["execFileSyncFn"],
+  };
+}
+
+function launchFailureError(fn: () => unknown): RuntimeExecutableNotFoundError {
+  try {
+    fn();
+  } catch (error) {
+    assert.ok(error instanceof RuntimeExecutableNotFoundError, `expected RuntimeExecutableNotFoundError, got ${String(error)}`);
+    return error;
+  }
+  assert.fail("expected the launch to be rejected");
 }
 
 function launchFailureReason(fn: () => unknown): string | undefined {
@@ -223,6 +246,57 @@ test("unresolvable launches fail with a typed reason instead of falling back to 
       windowsDeps({ host: "sea", files: { [`${NPM_BIN}\\copilot.cmd`]: NPM_JS_SHIM, [entry]: "" } }),
     )),
     "node_unavailable",
+  );
+});
+
+// task #1240: a PATH lookup that times out, errors, or is denied is not a
+// verdict that the runtime is missing. The launch failure must say so, and
+// must not tell the user to install something that may well be installed.
+test("a timed-out Windows PATH lookup is reported as lookup_timed_out, not as not_on_path", () => {
+  const error = launchFailureError(() => resolveRuntimeLaunch("codex", "codex", [], failingLookupDeps({ code: "ETIMEDOUT" })));
+  assert.equal(error.reason, "lookup_timed_out");
+  assert.equal(error.code, "runtime_not_found");
+  assert.match(error.message, /did not finish within 1000 ms/);
+  assert.match(error.message, /not evidence that codex is missing/);
+  assert.doesNotMatch(error.message, /Install it/);
+  assert.doesNotMatch(error.message, /was not found on PATH/);
+  assert.doesNotMatch(error.message, /slow to start/, "a timeout does not prove why the lookup was slow");
+});
+
+test("a Windows PATH lookup that errors or is denied keeps its own reason; only exit 3 means not_on_path", () => {
+  assert.equal(launchFailureReason(() => resolveRuntimeLaunch("codex", "codex", [], failingLookupDeps({ status: 1 }))), "lookup_failed");
+  assert.equal(launchFailureReason(() => resolveRuntimeLaunch("codex", "codex", [], failingLookupDeps({ code: "EACCES" }))), "lookup_permission_denied");
+  assert.equal(launchFailureReason(() => resolveRuntimeLaunch("codex", "codex", [], failingLookupDeps({ status: 3 }))), "not_on_path");
+  // A missing or unlaunchable powershell.exe is also no verdict about codex.
+  assert.equal(launchFailureReason(() => resolveRuntimeLaunch("codex", "codex", [], failingLookupDeps({ code: "ENOENT" }))), "lookup_failed");
+  const failed = launchFailureError(() => resolveRuntimeLaunch("codex", "codex", [], failingLookupDeps({ status: 1 })));
+  assert.match(failed.message, /did not produce a usable result/);
+  assert.doesNotMatch(failed.message, /Install it/);
+  assert.doesNotMatch(failed.message, /exited with an error|slow to start/, "the message must not claim a cause the exit status does not prove");
+});
+
+test("a Windows PATH lookup that prints nothing is lookup_failed, not not_on_path", () => {
+  const deps: WindowsLaunchDeps = {
+    ...windowsDeps({ files: {} }),
+    execFileSyncFn: (() => Buffer.from("\r\n")) as unknown as WindowsLaunchDeps["execFileSyncFn"],
+  };
+  const error = launchFailureError(() => resolveRuntimeLaunch("codex", "codex", [], deps));
+  assert.equal(error.reason, "lookup_failed");
+  assert.doesNotMatch(error.message, /Install it|was not found on PATH/);
+});
+
+test("a timed-out lookup for node behind an npm shim is not reported as node_unavailable", () => {
+  const entry = `${NPM_BIN}\\node_modules\\@github\\copilot\\npm-loader.js`;
+  const deps: WindowsLaunchDeps = {
+    ...windowsDeps({ host: "sea", files: { [`${NPM_BIN}\\copilot.cmd`]: NPM_JS_SHIM, [entry]: "" } }),
+    execFileSyncFn: ((command: string) => {
+      assert.equal(command, "powershell.exe");
+      throw Object.assign(new Error("slow powershell"), { code: "ETIMEDOUT" });
+    }) as unknown as WindowsLaunchDeps["execFileSyncFn"],
+  };
+  assert.equal(
+    launchFailureReason(() => resolveWindowsDirectLaunch("copilot", `${NPM_BIN}\\copilot.cmd`, [], deps)),
+    "lookup_timed_out",
   );
 });
 

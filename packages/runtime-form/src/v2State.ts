@@ -30,7 +30,18 @@ export type RuntimeFormV2ErrorCode =
   | "not_a_choice"
   | "unsupported_required"
   /** A required field whose option source is `unavailable` (`option_source.status`): retry, or wait. */
-  | "source_unavailable";
+  | "source_unavailable"
+  /**
+   * The selected saved provider connection option is marked `unavailable`
+   * (capability `provider.saved_connection`): the stored binding stays visible
+   * but cannot be saved over; pick something else.
+   */
+  | "connection_unavailable"
+  /**
+   * Edit: a blank secret that cannot keep the stored value because a field it
+   * is bound to changed (`writeOnlyKeepRequiresUnchanged`); a new one is needed.
+   */
+  | "secret_reentry_required";
 
 /** A source that is not live (`option_source.status`); null when live or when the source says nothing. */
 export type RuntimeFormV2SourceStatus = {
@@ -41,6 +52,33 @@ export type RuntimeFormV2SourceStatus = {
 };
 
 const str = (value: RuntimeFormV2Value | undefined) => (typeof value === "string" ? value : "");
+
+/**
+ * The selected option of a select field when it is a saved provider connection
+ * (capability `provider.saved_connection`: Option.connectionId non-empty).
+ * Undefined for any other selection or field.
+ */
+export function runtimeFormV2SelectedConnection(
+  field: RuntimeFormV2Field,
+  sources: RuntimeFormV2Sources,
+  values: RuntimeFormV2Values,
+): RuntimeFormV2Option | undefined {
+  if (field.kind !== "select") return undefined;
+  const option = selectedOption(field.key, sources, values);
+  return option && typeof option.connectionId === "string" && option.connectionId ? option : undefined;
+}
+
+/**
+ * True while any field holds a saved-connection selection: connectionOwned
+ * fields are disabled, not required, and stay out of the submission.
+ */
+export function runtimeFormV2ConnectionActive(
+  form: ParsedRuntimeFormV2,
+  sources: RuntimeFormV2Sources,
+  values: RuntimeFormV2Values,
+): boolean {
+  return form.fields.some((field) => runtimeFormV2SelectedConnection(field, sources, values) !== undefined);
+}
 
 /**
  * Label priority (`choice.labels`): FieldCopy.choices[value].label, else the
@@ -197,7 +235,33 @@ export function applyRuntimeFormV2Change(
       changed.add(field.key);
     }
   }
+  // Moving onto or off a saved-connection selection (provider.saved_connection)
+  // hands the connectionOwned fields to the connection or back to the user:
+  // either way their old value must not survive the switch.
+  if (runtimeFormV2ConnectionActive(form, sources, next) !== runtimeFormV2ConnectionActive(form, sources, values)) {
+    for (const field of form.fields) {
+      if (field.connectionOwned) next[field.key] = defaultFor(field, sources, next);
+    }
+  }
   return next;
+}
+
+/**
+ * The values a visibility rule sees for a field: the raw one, plus — when the
+ * field holds a saved-connection selection (`provider.saved_connection`) — the
+ * connection's underlying provider id. A gateway connection keeps driving the
+ * gateway schema's endpoint fields: they stay visible as disabled managed
+ * fields instead of disappearing with the raw `connection:<id>` value.
+ */
+function visibilityValuesOf(key: string, values: RuntimeFormV2Values, sources?: RuntimeFormV2Sources): string[] {
+  const raw = str(values[key]);
+  if (!sources) return [raw];
+  for (const source of Object.values(sources)) {
+    if (source.pointer !== `/${key}` || !source.options) continue;
+    const underlying = source.options.find((option) => option.value === raw)?.underlyingProviderId;
+    return typeof underlying === "string" && underlying ? [raw, underlying] : [raw];
+  }
+  return [raw];
 }
 
 /**
@@ -210,7 +274,8 @@ export function isRuntimeFormV2FieldVisible(
   sources?: RuntimeFormV2Sources,
 ): boolean {
   if (hiddenAsUnavailable(field, sources)) return false;
-  return field.visibleWhen.every((rule) => rule.in.includes(str(values[rule.key])));
+  return field.visibleWhen.every((rule) =>
+    visibilityValuesOf(rule.key, values, sources).some((candidate) => rule.in.includes(candidate)));
 }
 
 /** Errors by field key for visible fields; an empty object means the form can be submitted. */
@@ -221,10 +286,17 @@ export function validateRuntimeFormV2(
   options: { editing?: boolean } = {},
 ): Record<string, RuntimeFormV2ErrorCode> {
   const errors: Record<string, RuntimeFormV2ErrorCode> = {};
+  const connectionActive = runtimeFormV2ConnectionActive(form, sources, values);
   for (const field of form.fields) {
     if (!isRuntimeFormV2FieldVisible(field, values, sources)) continue;
     if (field.kind === "unsupported") {
       if (field.required) errors[field.key] = "unsupported_required";
+      continue;
+    }
+    // A bound-but-unavailable connection stays visible and blocks the save:
+    // the binding is never silently rewritten (provider.saved_connection).
+    if (connectionActive && runtimeFormV2SelectedConnection(field, sources, values)?.unavailable === true) {
+      errors[field.key] = "connection_unavailable";
       continue;
     }
     if (field.required && runtimeFormV2SourceStatus(field, sources)?.status === "unavailable") {
@@ -233,8 +305,18 @@ export function validateRuntimeFormV2(
     }
     const value = values[field.key];
     const text = str(value).trim();
+    // While a saved connection is selected, the fields it owns are not the
+    // user's to fill: not required, not submitted — and a changed provider
+    // binding never demands a re-entered secret for them (the connection
+    // owns the credential; there is nothing to re-enter).
+    const connectionOwnedNow = connectionActive && field.connectionOwned === true;
+    if (options.editing === true && field.kind === "secret" && !text && !connectionOwnedNow
+      && keepBindingChanged(form, sources, values, field.key)) {
+      errors[field.key] = "secret_reentry_required";
+      continue;
+    }
     // On edit a blank secret (writeOnly) field keeps the stored value.
-    const blankAllowed = options.editing === true && field.kind === "secret";
+    const blankAllowed = (options.editing === true && field.kind === "secret") || connectionOwnedNow;
     if (field.required && !blankAllowed && (field.kind === "text" || field.kind === "secret" || field.kind === "url"
       || field.kind === "select" || field.kind === "dependent_select") && !text) {
       errors[field.key] = "required";
@@ -254,6 +336,25 @@ export function validateRuntimeFormV2(
   return errors;
 }
 
+/** `writeOnlyKeepRequiresUnchanged` comparison: as strings, trimmed, trailing slashes removed. */
+const boundValue = (value: unknown) =>
+  (typeof value === "string" ? value : value === undefined || value === null ? "" : JSON.stringify(value)).trim().replace(/\/+$/, "");
+
+/** Whether a visible field the secret `key` is bound to differs from its stored value. */
+function keepBindingChanged(
+  form: ParsedRuntimeFormV2,
+  sources: RuntimeFormV2Sources,
+  values: RuntimeFormV2Values,
+  key: string,
+): boolean {
+  const bound = form.writeOnlyKeepRequiresUnchanged?.[key] ?? [];
+  return bound.some((boundKey) => {
+    const boundField = form.fields.find((candidate) => candidate.key === boundKey);
+    if (!boundField || !isRuntimeFormV2FieldVisible(boundField, values, sources)) return false;
+    return boundValue(values[boundKey]) !== boundValue(form.values?.[boundKey]);
+  });
+}
+
 /**
  * The `formValues` body: every visible field, plus the stored value of any
  * field this client could not render so it survives unchanged. An optional
@@ -266,13 +367,18 @@ export function runtimeFormV2Submission(
   sources?: RuntimeFormV2Sources,
 ): Record<string, unknown> {
   const out: Record<string, unknown> = {};
+  const connectionActive = sources ? runtimeFormV2ConnectionActive(form, sources, values) : false;
   for (const field of form.fields) {
+    // Connection-owned fields never enter formValues while a saved connection
+    // is selected — not even as empty strings. The server refuses any value
+    // for them on a connection submit (contract, provider.saved_connection).
+    if (connectionActive && field.connectionOwned) continue;
     if (hiddenAsUnavailable(field, sources)) {
       const stored = form.values?.[field.key];
       if (stored !== undefined) out[field.key] = stored;
       continue;
     }
-    if (field.kind !== "unsupported" && !isRuntimeFormV2FieldVisible(field, values)) continue;
+    if (field.kind !== "unsupported" && !isRuntimeFormV2FieldVisible(field, values, sources)) continue;
     const value = values[field.key];
     if (value === undefined) continue;
     out[field.key] = typeof value === "string" ? value.trim() || (field.kind === "derived_select" ? null : "") : value;

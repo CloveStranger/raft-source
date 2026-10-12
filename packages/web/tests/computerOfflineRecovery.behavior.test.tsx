@@ -112,7 +112,7 @@ test("offline managed Computer admin can expand and copy environment-correct Ins
   try {
     renderWithIntl(
       <MemoryRouter initialEntries={["/s/acme/settings/computers/computer-1"]}>
-        <MachineDetailPanel machine={machine} workspaceEmbedded />
+        <MachineDetailPanel machine={machine} hideHeader />
       </MemoryRouter>,
     );
 
@@ -151,7 +151,7 @@ test("offline Windows Computer recovery uses PowerShell and the Windows executab
   assert.ok(commands);
   renderWithIntl(
     <MemoryRouter initialEntries={["/s/acme/settings/computers/computer-1"]}>
-      <MachineDetailPanel machine={windowsMachine} workspaceEmbedded deploymentEnv="staging" />
+      <MachineDetailPanel machine={windowsMachine} hideHeader deploymentEnv="staging" />
     </MemoryRouter>,
   );
 
@@ -189,7 +189,7 @@ test("legacy Windows machine page offers Experimental Computer migration and no 
 
   renderWithIntl(
     <MemoryRouter initialEntries={["/s/acme/settings/computers/legacy-windows"]}>
-      <MachineDetailPanel machine={legacyWindowsMachine} workspaceEmbedded />
+      <MachineDetailPanel machine={legacyWindowsMachine} hideHeader />
     </MemoryRouter>,
   );
 
@@ -237,7 +237,7 @@ test("online Computer with a newer version and no web upgrade shows the install-
       <MemoryRouter initialEntries={["/s/acme/settings/computers/computer-1"]}>
         <MachineDetailPanel
           machine={onlineMachineWithoutRemoteUpgrade}
-          workspaceEmbedded
+          hideHeader
           deploymentEnv="staging"
         />
       </MemoryRouter>,
@@ -306,7 +306,7 @@ for (const deploymentEnv of ["staging", "slockdev"] as const) {
     try {
       renderWithIntl(
         <MemoryRouter initialEntries={["/s/acme/settings/computers/computer-1"]}>
-          <MachineDetailPanel machine={onlineMachine} workspaceEmbedded deploymentEnv={deploymentEnv} />
+          <MachineDetailPanel machine={onlineMachine} hideHeader deploymentEnv={deploymentEnv} />
         </MemoryRouter>,
       );
 
@@ -391,7 +391,7 @@ test("offline managed Computer auto-expands on each abnormal transition but stil
 
   const { rerender } = renderWithIntl(
     <MemoryRouter initialEntries={["/s/acme/settings/computers/computer-1"]}>
-      <MachineDetailPanel machine={machine} workspaceEmbedded deploymentEnv="staging" />
+      <MachineDetailPanel machine={machine} hideHeader deploymentEnv="staging" />
     </MemoryRouter>,
   );
 
@@ -413,7 +413,7 @@ test("offline managed Computer auto-expands on each abnormal transition but stil
   rerender(
     <TestIntlProvider>
       <MemoryRouter initialEntries={["/s/acme/settings/computers/computer-1"]}>
-        <MachineDetailPanel machine={onlineMachine} workspaceEmbedded deploymentEnv="staging" />
+        <MachineDetailPanel machine={onlineMachine} hideHeader deploymentEnv="staging" />
       </MemoryRouter>
     </TestIntlProvider>,
   );
@@ -422,7 +422,7 @@ test("offline managed Computer auto-expands on each abnormal transition but stil
   rerender(
     <TestIntlProvider>
       <MemoryRouter initialEntries={["/s/acme/settings/computers/computer-1"]}>
-        <MachineDetailPanel machine={machine} workspaceEmbedded deploymentEnv="staging" />
+        <MachineDetailPanel machine={machine} hideHeader deploymentEnv="staging" />
       </MemoryRouter>
     </TestIntlProvider>,
   );
@@ -437,7 +437,7 @@ test("an online-to-offline status transition overrides the stale healthy disclos
 
   const { rerender } = renderWithIntl(
     <MemoryRouter initialEntries={["/s/acme/settings/computers/computer-1"]}>
-      <MachineDetailPanel machine={onlineMachine} workspaceEmbedded deploymentEnv="staging" />
+      <MachineDetailPanel machine={onlineMachine} hideHeader deploymentEnv="staging" />
     </MemoryRouter>,
   );
 
@@ -450,7 +450,7 @@ test("an online-to-offline status transition overrides the stale healthy disclos
   rerender(
     <TestIntlProvider>
       <MemoryRouter initialEntries={["/s/acme/settings/computers/computer-1"]}>
-        <MachineDetailPanel machine={machine} workspaceEmbedded deploymentEnv="staging" />
+        <MachineDetailPanel machine={machine} hideHeader deploymentEnv="staging" />
       </MemoryRouter>
     </TestIntlProvider>,
   );
@@ -476,8 +476,8 @@ test("multiple Computer panels keep each recovery disclosure control target uniq
   renderWithIntl(
     <MemoryRouter initialEntries={["/s/acme/settings/computers/computer-1"]}>
       <div>
-        <MachineDetailPanel machine={onlineMachine} workspaceEmbedded deploymentEnv="staging" />
-        <MachineDetailPanel machine={secondMachine} workspaceEmbedded deploymentEnv="staging" />
+        <MachineDetailPanel machine={onlineMachine} hideHeader deploymentEnv="staging" />
+        <MachineDetailPanel machine={secondMachine} hideHeader deploymentEnv="staging" />
       </div>
     </MemoryRouter>,
   );

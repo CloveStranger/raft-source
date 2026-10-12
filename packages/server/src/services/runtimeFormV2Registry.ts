@@ -23,10 +23,13 @@ import {
   type RuntimeFormV2OptionSourceStatus,
   type RuntimeFormV2SubmitRef,
 } from "@botiverse/raft-runtime-form";
+import { createHash } from "node:crypto";
+
 import {
   BASE_REASONING_EFFORTS,
   getDefaultModel,
   getRuntimeProviderDisplayName,
+  isBuiltInRuntimeGatewayProviderId,
   isRuntimeDeprecated,
   PI_BUILTIN_PROVIDER_DEFAULT_MODELS,
   PI_BUILTIN_PROVIDER_ENV_KEYS,
@@ -47,10 +50,11 @@ import type { MachineLocalRoutingResult } from "../machineLocalReplay";
 import { RouteFailureError } from "../tracing/routeFailure";
 import type { AgentOrchestrator } from "./agentOrchestrator";
 import {
-  BuiltInModelCatalogError,
   filterBuiltInPiFormOptionSourceForCatalog,
   requireBuiltInCatalogCapability,
 } from "./builtinModelCatalogCompatibility";
+import { isProviderConnectionsEnabled } from "./providerConnectionFeature";
+import { listProviderConnections } from "./providerConnectionService";
 import {
   buildBuiltInPiFormDefinition,
   buildBuiltInPiFormOptionSource,
@@ -67,6 +71,57 @@ import {
 
 export const RUNTIME_FORM_V2_MARKER: RuntimeFormV2Marker = Object.freeze({ protocolVersion: 2 });
 
+/**
+ * Saved provider connections inside a v2 form (contract capability
+ * `provider.saved_connection`, task #46). An entry opts in with
+ * `savedConnection`; the served form then lists the capability, marks the
+ * connection-owned fields with `x-connectionOwned` and carries a `revision`
+ * token the client echoes on option-source requests (?formRevision=). The
+ * token binds the form's semantics — not the option data — so a flag flip or
+ * an entry change invalidates it and the client refetches the whole form
+ * (409 form_revision_stale) instead of seeing options its copy never declared.
+ * Bump the salt when the meaning of any of this changes.
+ */
+export const RUNTIME_FORM_V2_SAVED_CONNECTION_CAPABILITY = "provider.saved_connection";
+/** Option value encoding for a saved connection (contract: value === "connection:" + connectionId). */
+export const SAVED_CONNECTION_VALUE_PREFIX = "connection:";
+const SAVED_CONNECTION_REVISION_SALT = "saved-connection.v1";
+
+export function savedConnectionFormRevision(runtimeId: string, baseForm: { schemaVersion: string; requiredClientCapabilities?: string[] | null }): string {
+  return createHash("sha256")
+    .update(JSON.stringify([runtimeId, baseForm.schemaVersion, [...(baseForm.requiredClientCapabilities ?? [])].sort(), SAVED_CONNECTION_REVISION_SALT]))
+    .digest("hex")
+    .slice(0, 24);
+}
+
+/**
+ * The v2 form as a server serves it: the entry's static form, plus the
+ * saved-connection capability when the entry supports it and the server has
+ * provider connections enabled. Without the flag the form is served exactly
+ * as before — no capability, no revision, no x-connectionOwned.
+ */
+export async function buildRuntimeFormV2ForServer(runtimeId: unknown, serverId: string): Promise<RuntimeFormV2Definition | null> {
+  const entry = runtimeFormV2Entry(runtimeId);
+  if (!entry) return null;
+  const form = entry.buildForm();
+  if (!entry.savedConnection || !await isProviderConnectionsEnabled(serverId)) return form;
+  const capabilities = [...new Set([...(form.requiredClientCapabilities ?? []), RUNTIME_FORM_V2_SAVED_CONNECTION_CAPABILITY])];
+  const owned = new Set(entry.savedConnection.connectionOwnedFields);
+  const dataSchema = {
+    ...form.dataSchema,
+    properties: Object.fromEntries(
+      Object.entries(form.dataSchema.properties ?? {}).map(([key, property]) =>
+        owned.has(key) ? [key, { ...property, "x-connectionOwned": true }] : [key, property]),
+    ),
+  };
+  return {
+    ...form,
+    dataSchema,
+    requiredClientCapabilities: capabilities,
+    revision: savedConnectionFormRevision(entry.runtimeId, form),
+  };
+}
+
 export interface RuntimeFormOptionSourceContext {
   sourceId: string;
   machineId: string;
@@ -78,6 +133,18 @@ export interface RuntimeFormOptionSourceContext {
    * an entry that ever caches must honour this.
    */
   refresh?: boolean;
+  /** The server the form belongs to; saved-connection options are server-scoped. */
+  serverId?: string;
+  /**
+   * `?formRevision=` from Definition.revision (capability
+   * `provider.saved_connection`). Absent: answer with the plain direct-option
+   * protocol — never any connection options. Present: it must match the
+   * server's current build or the client gets 409 form_revision_stale and
+   * refetches the whole form.
+   */
+  formRevision?: string;
+  /** The caller may list this server's provider connections (manageExternalAuth). */
+  connectionsVisible?: boolean;
   agentOrchestrator: Pick<AgentOrchestrator, "detectMachineRuntimeModels" | "detectMachineRuntimeModelsWithAuthority">;
   /**
    * Machine-affinity routing: make sure this replica owns the Computer's
@@ -124,6 +191,14 @@ export interface RuntimeConfigWriteOnlySecret {
    */
   keepsIdentity(incoming: Record<string, unknown>, existing: Record<string, unknown>): boolean;
   /**
+   * The v2 form field carrying the secret and the form fields keepsIdentity
+   * depends on, sent on edit as `writeOnlyKeepRequiresUnchanged` so a client
+   * asks for a new secret before submit. Must name exactly what keepsIdentity
+   * checks (runtimeFormV2WriteOnlyKeep.test.ts); its comparison (trim, then
+   * trailing slashes removed) must not be stricter than the client's.
+   */
+  form?: { field: string; keepRequiresUnchanged: readonly string[] };
+  /**
    * Whether this stored config carries the secret at all. Where it does, reads
    * always show the key as "" (present, blank), matching the pre-registry
    * output for released clients even when nothing is stored.
@@ -145,12 +220,31 @@ export interface RuntimeFormValuesOptions {
    * show but the saved config keeps (Antigravity's model).
    */
   existing?: RuntimeConfig | null;
+  /**
+   * Saved-connection submits only: the providerId of the connection the route
+   * resolved server-side before mapping (capability
+   * `provider.saved_connection`). The connection's provider — never the model
+   * name — decides the model kind: a gateway connection always takes a custom
+   * model even when the typed name collides with a built-in preset id, and a
+   * preset connection only takes a model from its own list. Absent (unit
+   * tests, non-connection submits): the static fallback applies and the
+   * route's per-connection compatibility check stays the final authority.
+   */
+  savedConnectionProviderId?: string;
 }
 
 export interface RuntimeFormV2Entry {
   runtimeId: string;
   /** The form served on v2 create, and the base of the v2 edit response. */
   buildForm(): RuntimeFormV2Definition;
+  /**
+   * Saved provider connections (capability `provider.saved_connection`):
+   * present on runtimes whose form offers them. `connectionOwnedFields` are
+   * the dataSchema keys a selected connection owns — marked
+   * `x-connectionOwned` on the served form, kept out of formValues by the
+   * client and refused on submit by the server.
+   */
+  savedConnection?: { connectionOwnedFields: readonly string[] };
   /** Self-check of the served projection; any issue is a 500 drift. */
   validateProjection(): AgentCreateFormIssue[];
   resolveOptionSource(context: RuntimeFormOptionSourceContext): Promise<RuntimeFormOptionSourceResolution>;
@@ -205,8 +299,68 @@ function modelValueOf(runtimeConfig: Record<string, unknown>): string {
 const envVarsOf = (runtimeConfig: Record<string, unknown>) =>
   isPlainRecord(runtimeConfig.envVars) ? runtimeConfig.envVars : {};
 
+/**
+ * Extend a catalog-filtered Built-in source with the server's saved provider
+ * connections: saved options lead the provider list, and the model maps are
+ * keyed by the same `connection:<id>` values (one key space, contract). All
+ * connection fields are display metadata — on save the route re-resolves the
+ * connection by id in the current server scope and re-checks flag, credential
+ * and model compatibility. A gateway connection keeps the direct gateway's
+ * custom-model semantics: the Computer's catalog never narrows what it may
+ * type. Connections that are not selectable right now stay listed as
+ * `unavailable` so an edit of a bound agent can show the binding and block a
+ * silent rewrite.
+ */
+async function withSavedConnectionOptions(
+  serverId: string,
+  source: AgentCreateFormOptionSource,
+): Promise<AgentCreateFormOptionSource> {
+  const connections = await listProviderConnections(serverId);
+  if (source.kind === "select" && source.pointer === "/providerId") {
+    const saved = connections.map((connection) => ({
+      value: `${SAVED_CONNECTION_VALUE_PREFIX}${connection.id}`,
+      label: `${getRuntimeProviderDisplayName(connection.providerId as string)} · ${connection.name}`,
+      providerKind: isBuiltInRuntimeGatewayProviderId(connection.providerId) ? "gateway" as const : "preset" as const,
+      connectionId: connection.id,
+      underlyingProviderId: connection.providerId,
+      group: "saved" as const,
+      ...(connection.enabled && connection.hasCredential
+        ? {}
+        : { unavailable: true, unavailableReason: connection.enabled ? "missing_credential" : "disabled" }),
+    }));
+    return {
+      ...source,
+      options: [...saved, ...source.options.map((option) => ({ ...option, group: "direct" as const }))],
+    };
+  }
+  if (source.kind === "dependent_select" && source.pointer === "/model") {
+    const optionsByValue = { ...source.optionsByValue };
+    const defaultValueByValue = { ...source.defaultValueByValue };
+    const customValueAllowedByValue = { ...source.customValueAllowedByValue };
+    for (const connection of connections) {
+      const key = `${SAVED_CONNECTION_VALUE_PREFIX}${connection.id}`;
+      if (isBuiltInRuntimeGatewayProviderId(connection.providerId)) {
+        optionsByValue[key] = [];
+        customValueAllowedByValue[key] = true;
+        continue;
+      }
+      optionsByValue[key] = optionsByValue[connection.providerId] ?? [];
+      const presetDefault = defaultValueByValue[connection.providerId];
+      if (typeof presetDefault === "string" && presetDefault) defaultValueByValue[key] = presetDefault;
+      customValueAllowedByValue[key] = false;
+    }
+    return { ...source, optionsByValue, defaultValueByValue, customValueAllowedByValue };
+  }
+  return source;
+}
+
 const builtinEntry: RuntimeFormV2Entry = {
   runtimeId: "builtin",
+  // Saved provider connections (capability `provider.saved_connection`): the
+  // connection owns the credential and the gateway endpoint fields; the form
+  // marks them x-connectionOwned, clients keep them out of formValues and the
+  // submit mapping below refuses any client-sent value for them.
+  savedConnection: { connectionOwnedFields: ["apiKey", "baseUrl", "supportsImageInput"] },
   // v2-only copy lives here, never in the v1 definition: changing that would
   // force a schemaVersion bump that breaks every installed app still on v1
   // (packages/runtime-form/README.md, "Bumping a version"). Only v2 clients
@@ -225,33 +379,52 @@ const builtinEntry: RuntimeFormV2Entry = {
   },
   validateProjection: () => validateBuiltInPiDefinitionProjection(),
   async resolveOptionSource(context) {
+    // Form-consistency gate (contract, Definition.revision): a revisioned
+    // request is answered only when the token matches the current build;
+    // otherwise the client must refetch the whole form. An unrevisioned
+    // request keeps the plain direct-option protocol and never sees
+    // connection options, so pre-existing clients are unaffected.
+    const revisioned = context.formRevision !== undefined;
+    let savedConnectionsEnabled = false;
+    if (revisioned) {
+      savedConnectionsEnabled = context.serverId !== undefined
+        && await isProviderConnectionsEnabled(context.serverId);
+      const current = savedConnectionsEnabled
+        ? savedConnectionFormRevision("builtin", builtinEntry.buildForm())
+        : null;
+      if (context.formRevision !== current) {
+        return {
+          kind: "reply",
+          status: 409,
+          body: {
+            error: "Runtime form has changed; refetch it before loading options",
+            code: "form_revision_stale",
+            recovery: "refetch_form",
+          },
+        };
+      }
+    }
+    // Offline or unreachable Computer: the bundled catalog, so the form stays
+    // usable. Starting the agent still checks the Computer's own catalog
+    // (agentOrchestrator, builtin_catalog_*), so an unsupported pick fails there.
+    // Saved-connection enrichment still applies on this path: the connections
+    // are server data, independent of the Computer's liveness.
+    const withEnrichment = async (source: AgentCreateFormOptionSource | null): Promise<RuntimeFormOptionSourceResolution> => {
+      if (!revisioned || !savedConnectionsEnabled || !context.connectionsVisible || !context.serverId || !source) {
+        return { kind: "source", source };
+      }
+      return { kind: "source", source: await withSavedConnectionOptions(context.serverId, source) };
+    };
+    const bundled = () => withEnrichment(buildBuiltInPiFormOptionSource(context.sourceId));
     const routing = await context.routeToComputer();
     if (routing === "handled") return { kind: "handled" };
-    if (routing !== "confirmed_local") {
-      return {
-        kind: "reply",
-        status: 409,
-        body: {
-          error: "The target Computer's Built-in model catalog is unavailable",
-          code: "builtin_catalog_unavailable",
-          recovery: "retry",
-        },
-      };
-    }
+    if (routing !== "confirmed_local") return bundled();
     let detection;
     try {
       detection = await context.agentOrchestrator.detectMachineRuntimeModelsWithAuthority(context.machineId, "builtin");
     } catch (error) {
       if (!(error instanceof RouteFailureError)) throw error;
-      throw new BuiltInModelCatalogError(
-        "builtin_catalog_unavailable",
-        "The target Computer's Built-in model catalog is unavailable. Retry after the Computer reconnects.",
-        {
-          daemonVersion: context.machine.daemonVersion ?? null,
-          computerVersion: context.machine.computerVersion ?? null,
-          recovery: "retry",
-        },
-      );
+      return bundled();
     }
     const catalog = requireBuiltInCatalogCapability(detection.outcome, {
       machineId: context.machineId,
@@ -259,12 +432,10 @@ const builtinEntry: RuntimeFormV2Entry = {
       computerVersion: detection.computerVersion,
     });
     const unfilteredSource = buildBuiltInPiFormOptionSource(context.sourceId);
-    return {
-      kind: "source",
-      source: unfilteredSource
-        ? filterBuiltInPiFormOptionSourceForCatalog(unfilteredSource, catalog.supportedModelIds)
-        : null,
-    };
+    const source = unfilteredSource
+      ? filterBuiltInPiFormOptionSourceForCatalog(unfilteredSource, catalog.supportedModelIds)
+      : null;
+    return withEnrichment(source);
   },
   runtimeConfigFromValues(values, envVars, options) {
     const provider = buildBuiltInPiFormOptionSource("provider");
@@ -273,6 +444,52 @@ const builtinEntry: RuntimeFormV2Entry = {
       return { ok: false, issue: { code: "option_sources_invalid", pointer: "/formValues" } };
     }
     const providerId = typeof values.providerId === "string" ? values.providerId : "";
+    // A saved-connection selection: decode the id and refuse every field the
+    // connection owns — any client-sent value, empty string or null included
+    // (contract, `provider.saved_connection`; clients omit these fields). The
+    // route then re-resolves the connection by id in the current server scope
+    // (flag, enabled, credential, model compatibility); nothing here trusts
+    // the submitted metadata.
+    if (providerId.startsWith(SAVED_CONNECTION_VALUE_PREFIX)) {
+      const connectionId = providerId.slice(SAVED_CONNECTION_VALUE_PREFIX.length).trim();
+      if (!connectionId) return formValueIssue("select_valid_provider", "providerId");
+      for (const owned of ["apiKey", "baseUrl", "supportsImageInput"]) {
+        if (owned in values) return formValueIssue("connection_field_forbidden", owned);
+      }
+      const connectionModel = typeof values.model === "string" ? values.model.trim() : "";
+      if (!connectionModel) return formValueIssue("model_required", "model");
+      // The model kind follows the connection's server-resolved provider, not
+      // the typed name: a gateway connection always stores a custom model
+      // (even when the name collides with a built-in preset id), and a preset
+      // connection only accepts a model from its own list. Without a resolved
+      // provider (unit-level calls) the static lists are the fallback; the
+      // route's per-connection check remains the final authority either way.
+      const connectionGateway = options.savedConnectionProviderId !== undefined
+        && isBuiltInRuntimeGatewayProviderId(options.savedConnectionProviderId);
+      const connectionPresetModels = options.savedConnectionProviderId !== undefined && !connectionGateway
+        ? PI_BUILTIN_PROVIDER_MODELS[options.savedConnectionProviderId as keyof typeof PI_BUILTIN_PROVIDER_MODELS]
+        : undefined;
+      const presetKnown = connectionGateway
+        ? false
+        : connectionPresetModels
+          ? connectionPresetModels.some((candidate) => candidate.id === connectionModel)
+          : Object.values(PI_BUILTIN_PROVIDER_MODELS)
+              .some((models) => models.some((candidate) => candidate.id === connectionModel));
+      return {
+        ok: true,
+        runtimeConfig: {
+          version: RUNTIME_CONFIG_VERSION,
+          runtime: "builtin",
+          provider: { kind: "connection", connectionId },
+          model: presetKnown ? { kind: "preset", id: connectionModel } : { kind: "custom", name: connectionModel },
+          mode: { kind: "default" },
+          reasoningEffort: null,
+          envVars,
+          hostUserState: "forbidden",
+          loadLocalPlugins: values.loadLocalPlugins === true,
+        },
+      };
+    }
     const option = provider.options.find((candidate) => candidate.value === providerId);
     if (!option) return formValueIssue("select_valid_provider", "providerId");
     const apiKey = typeof values.apiKey === "string" ? values.apiKey.trim() : "";
@@ -310,7 +527,17 @@ const builtinEntry: RuntimeFormV2Entry = {
   },
   valuesFromRuntimeConfig(runtimeConfig) {
     const provider = isPlainRecord(runtimeConfig.provider) ? runtimeConfig.provider : null;
-    // Managed provider connections have no v2 form yet.
+    // A bound saved connection edits through the same v2 form: the provider
+    // field carries the connection option value; the credential itself is
+    // connection-owned and never appears in the values (writeOnly rule).
+    if (provider && provider.kind === "connection" && typeof provider.connectionId === "string" && provider.connectionId) {
+      return {
+        providerId: `${SAVED_CONNECTION_VALUE_PREFIX}${provider.connectionId}`,
+        model: modelValueOf(runtimeConfig),
+        loadLocalPlugins: runtimeConfig.loadLocalPlugins === true,
+        envVars: envVarsOf(runtimeConfig),
+      };
+    }
     if (!provider || (provider.kind !== "preset" && provider.kind !== "gateway")) return null;
     return {
       providerId: typeof provider.providerId === "string" ? provider.providerId : "",
@@ -336,8 +563,10 @@ const builtinEntry: RuntimeFormV2Entry = {
         if (next.kind === "connection" || saved.kind === "connection") return false;
         if (next.kind !== saved.kind || next.providerId !== saved.providerId) return false;
         return saved.kind !== "gateway"
-          || (typeof next.baseUrl === "string" && typeof saved.baseUrl === "string" && next.baseUrl.trim() === saved.baseUrl.trim());
+          || (typeof next.baseUrl === "string" && typeof saved.baseUrl === "string" && sameApiEndpoint(next.baseUrl, saved.baseUrl));
       },
+      // The provider kind follows providerId; baseUrl is shown (and stored) for a gateway only.
+      form: { field: "apiKey", keepRequiresUnchanged: ["providerId", "baseUrl"] },
     },
   ],
 };
@@ -348,34 +577,37 @@ const kimiSdkEntry: RuntimeFormV2Entry = {
   validateProjection: () => validateKimiSdkDefinitionProjection(),
   async resolveOptionSource(context) {
     if (context.sourceId !== "model") return { kind: "source", source: null };
+    // The declared managed default, offered when the Computer cannot answer.
+    const managedDefault = {
+      kind: "source",
+      source: buildKimiSdkFormOptionSource({
+        models: RUNTIME_MODELS["kimi-sdk"] ?? [],
+        defaultModel: getDefaultModel("kimi-sdk"),
+      }),
+    } as const;
     const routing = await context.routeToComputer();
     if (routing === "handled") return { kind: "handled" };
-    if (routing !== "confirmed_local") {
-      return {
-        kind: "reply",
-        status: 409,
-        body: {
-          error: "Computer is offline",
-          issues: [{ code: "runtime_model_source_unavailable", pointer: "/optionSources/model" }],
-        },
-      };
+    // Offline or unreachable: the managed default, like the other runtimes'
+    // bundled lists, instead of blocking the form.
+    if (routing !== "confirmed_local") return managedDefault;
+    let detected;
+    try {
+      detected = await context.agentOrchestrator.detectMachineRuntimeModels(context.machineId, "kimi-sdk");
+    } catch (error) {
+      if (!(error instanceof RouteFailureError)) throw error;
+      return managedDefault;
     }
-    const detected = await context.agentOrchestrator.detectMachineRuntimeModels(context.machineId, "kimi-sdk");
+    if (detected.kind === "error" && detected.code === "computer_offline") return managedDefault;
     if (detected.kind === "missing_config") {
       // Normal first-install shape: the machine has no ~/.kimi-code/config.toml
       // yet because nothing has been provisioned. The reviewed product
       // contract already allows creation in this state (it may still fail at
       // runtime, where the user can actually fix it); the form must not
       // hard-block it. Offer the declared managed default for missing_config
-      // only — every other non-live outcome keeps its typed 409 (this is the
-      // hard failure users saw as "model list unavailable" on fresh machines).
-      return {
-        kind: "source",
-        source: buildKimiSdkFormOptionSource({
-          models: RUNTIME_MODELS["kimi-sdk"] ?? [],
-          defaultModel: getDefaultModel("kimi-sdk"),
-        }),
-      };
+      // and offline only — every other non-live outcome keeps its typed 409
+      // (this is the hard failure users saw as "model list unavailable" on
+      // fresh machines).
+      return managedDefault;
     }
     if (detected.kind !== "live") {
       return {
@@ -602,10 +834,10 @@ interface ReasoningModelFormOptions {
 }
 
 /**
- * Effort labels and descriptions, English: the server has no locale for form
- * copy, so every v2 label is English (like "Model"). The strings are the legacy
- * web picker's en messages (agent.reasoningEffort.<id>, <id>Description), which
- * runtimeFormV2Batch3a.test.ts keeps equal; web and mobile show them as sent.
+ * Effort labels and descriptions in English, the source language of v2 copy;
+ * runtimeFormV2Copy.ts translates them per Accept-Language. The strings are the
+ * legacy web picker's en messages (agent.reasoningEffort.<id>, <id>Description),
+ * which runtimeFormV2Batch3a.test.ts keeps equal; web and mobile show them as sent.
  */
 const REASONING_EFFORT_DESCRIPTIONS: Readonly<Record<string, string>> = {
   low: "Fast responses with lighter reasoning",
@@ -850,6 +1082,12 @@ function reasoningModelProjectionIssues(form: RuntimeFormV2Definition, options: 
   return [];
 }
 
+/** The same base URL, ignoring surrounding whitespace and trailing slashes. */
+function sameApiEndpoint(a: string, b: string): boolean {
+  const endpoint = (url: string) => url.trim().replace(/\/+$/, "");
+  return endpoint(a) === endpoint(b);
+}
+
 /**
  * Claude's custom-provider API key: write-only in the v2 form (never in
  * `values`; a blank one on edit keeps the stored key while the API URL is
@@ -869,8 +1107,9 @@ const CLAUDE_CUSTOM_PROVIDER_API_KEY: RuntimeConfigWriteOnlySecret = {
     const saved = isPlainRecord(existing.provider) ? existing.provider : {};
     return next.kind === "custom" && saved.kind === "custom"
       && typeof next.apiUrl === "string" && typeof saved.apiUrl === "string"
-      && next.apiUrl.trim() === saved.apiUrl.trim();
+      && sameApiEndpoint(next.apiUrl, saved.apiUrl);
   },
+  form: { field: "apiKey", keepRequiresUnchanged: ["provider", "apiUrl"] },
   redactOnAgentRead: false,
 };
 
@@ -1260,6 +1499,7 @@ const PI_BUILTIN_PROVIDER_API_KEY: RuntimeConfigWriteOnlySecret = {
       && typeof next.providerId === "string" && typeof saved.providerId === "string"
       && next.providerId.trim() === saved.providerId.trim();
   },
+  form: { field: "apiKey", keepRequiresUnchanged: ["provider"] },
   redactOnAgentRead: false,
 };
 
@@ -1384,9 +1624,10 @@ const piEntry: RuntimeFormV2Entry = {
 const REGISTRY = new Map<string, RuntimeFormV2Entry>([
   [builtinEntry.runtimeId, builtinEntry],
   [kimiSdkEntry.runtimeId, kimiSdkEntry],
-  // Batch 2. Kimi CLI, Gemini CLI and Antigravity are deprecated: the admission
-  // row offers them (and so their v2 marker) only as an edited agent's current
-  // runtime, and a create with them is refused like any deprecated runtime.
+  // Batch 2. Kimi CLI, Gemini CLI and Antigravity are deprecated (as is Copilot
+  // CLI, batch 3b): the admission row offers them (and so their v2 marker) only
+  // as an edited agent's current runtime, and a create with them is refused like
+  // any deprecated runtime.
   ["opencode", modelFormEntry("opencode", { live: true, hint: "Models available from this computer's OpenCode configuration." })],
   ["kimi", modelFormEntry("kimi", { live: true, hint: "Models available from this computer's Kimi CLI configuration." })],
   ["gemini", modelFormEntry("gemini", { live: false })],
@@ -1396,7 +1637,8 @@ const REGISTRY = new Map<string, RuntimeFormV2Entry>([
   // legacy visibility; a create with Grok is still refused while the flag is off.
   [codexEntry.runtimeId, codexEntry],
   [grokEntry.runtimeId, grokEntry],
-  // Batch 3b: Claude, Cursor and Copilot. None has a v1 form.
+  // Batch 3b: Claude, Cursor and Copilot. None has a v1 form. Copilot CLI is
+  // deprecated, so its form is edit-only (`copilot.edit.v1`).
   [claudeEntry.runtimeId, claudeEntry],
   [cursorEntry.runtimeId, cursorEntry],
   [copilotEntry.runtimeId, copilotEntry],
@@ -1443,6 +1685,47 @@ export function buildRuntimeFormV2(runtimeId: string): RuntimeFormV2Definition {
   const entry = runtimeFormV2Entry(runtimeId);
   if (!entry) throw new Error(`runtime ${runtimeId} has no v2 form`);
   return entry.buildForm();
+}
+
+/**
+ * `writeOnlyKeepRequiresUnchanged` for the runtime's edit form, from its
+ * write-only secrets' declared bindings; undefined when it has none.
+ */
+export function runtimeFormV2WriteOnlyKeepRequiresUnchanged(runtimeId: string): Record<string, string[]> | undefined {
+  const out: Record<string, string[]> = {};
+  for (const secret of runtimeFormV2Entry(runtimeId)?.writeOnlySecrets ?? []) {
+    if (secret.form) out[`/${secret.form.field}`] = secret.form.keepRequiresUnchanged.map((key) => `/${key}`);
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+/**
+ * The body of GET /api/agents/:id/runtime-form: the create form, the agent's
+ * current values (writeOnly fields never included) and, where a stored secret
+ * is bound to other fields, writeOnlyKeepRequiresUnchanged. Null when the
+ * runtime or this config has no editable v2 form.
+ */
+export function buildRuntimeFormV2EditBody(runtimeId: string, runtimeConfig: unknown): RuntimeFormV2Definition | null {
+  const entry = runtimeFormV2Entry(runtimeId);
+  const values = runtimeFormValuesFromRuntimeConfig(runtimeConfig);
+  if (!entry || !values) return null;
+  const keep = runtimeFormV2WriteOnlyKeepRequiresUnchanged(runtimeId);
+  return { ...entry.buildForm(), ...(keep ? { writeOnlyKeepRequiresUnchanged: keep } : {}), values };
+}
+
+/**
+ * The edit body on the per-server v2 build: same as buildRuntimeFormV2EditBody,
+ * but the base form comes from buildRuntimeFormV2ForServer, so a builtin edit
+ * on a server with provider connections carries the saved-connection
+ * capability, the x-connectionOwned markers and the revision token.
+ */
+export async function buildRuntimeFormV2EditBodyForServer(runtimeId: string, runtimeConfig: unknown, serverId: string): Promise<RuntimeFormV2Definition | null> {
+  const entry = runtimeFormV2Entry(runtimeId);
+  const values = runtimeFormValuesFromRuntimeConfig(runtimeConfig);
+  if (!entry || !values) return null;
+  const base = await buildRuntimeFormV2ForServer(runtimeId, serverId) ?? entry.buildForm();
+  const keep = runtimeFormV2WriteOnlyKeepRequiresUnchanged(runtimeId);
+  return { ...base, ...(keep ? { writeOnlyKeepRequiresUnchanged: keep } : {}), values };
 }
 
 /**

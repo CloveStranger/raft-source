@@ -22,6 +22,7 @@ import { createAgent } from "../services/agentService";
 import { addAgent, addHuman, createChannel } from "../services/channelService";
 import { mintAgentCredential } from "../services/agentCredentialService";
 import { AGENT_API_IDEMPOTENCY_KEY_TTL_MS, __setAgentApiIdempotencyRaceHooksForTests } from "../services/agentApiIdempotencyService";
+import { withChannelDelivery } from "../test/orchestratorStub";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 
@@ -47,9 +48,9 @@ async function withRealPgApp(run: (app: TestApp) => Promise<void>) {
     onboardingOpenerFlagDefaultEnabled: false,
     skipAuthRateLimit: true,
   });
-  app.app.set("agentOrchestrator", {
+  app.app.set("agentOrchestrator", withChannelDelivery({
     deliverMessage: async () => ({ status: "queued", reason: "local_inbox" }),
-  });
+  }));
   try {
     await run(app);
   } finally {

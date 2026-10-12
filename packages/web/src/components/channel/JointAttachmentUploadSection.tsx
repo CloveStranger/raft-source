@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { FileUp, X } from "lucide-react";
 import { useIntl } from "react-intl";
 import api from "../../api/client";
 import {
@@ -8,8 +7,7 @@ import {
 } from "../../utils/directAttachmentUpload";
 import type { RecoveryView } from "../../utils/directAttachmentUpload";
 import Banner from "../ui/Banner";
-import { Button } from "raft-ui";
-import Tooltip from "../ui/Tooltip";
+import { ActiveUploadRow } from "./ActiveUploadRow";
 import {
   notifyAttachmentUploadChanged,
   subscribeAttachmentUploadChanged,
@@ -156,42 +154,13 @@ export default function JointAttachmentUploadSection({
         <div className="space-y-2">
           <ul className="space-y-2" data-testid="channel-settings-joint-uploads-list">
             {uploads.map((upload) => (
-              <li
+              <ActiveUploadRow
                 key={upload.uploadId}
-                className="flex min-w-0 flex-wrap items-center justify-between gap-2 border-t border-line-muted pt-2 first:border-t-0 first:pt-0 theme-brutal:border-black/20"
-                data-testid={`channel-settings-joint-upload-${upload.uploadId}`}
-              >
-                <Tooltip content={upload.filename}>
-                  <span className="flex min-w-0 flex-1 items-center gap-1.5 truncate text-xs font-bold">
-                    <FileUp size={14} aria-hidden="true" className="shrink-0" />
-                    <span className="truncate">{upload.filename}</span>
-                  </span>
-                </Tooltip>
-                <div className="flex shrink-0 flex-wrap justify-end gap-2">
-                  <Button
-                    type="button"
-                    size="sm"
-                    variant="outline"
-                    onClick={onOpenChannel}
-                    data-testid={`channel-settings-joint-upload-open-${upload.uploadId}`}
-                  >
-                    {formatMessage({ id: "channel.edit.continueUpload" })}
-                  </Button>
-                  <Button
-                    type="button"
-                    size="sm"
-                    variant="outline"
-                    onClick={() => onCancel(upload.uploadId)}
-                    disabled={cancelBusyId === upload.uploadId}
-                    data-testid={`channel-settings-joint-upload-cancel-${upload.uploadId}`}
-                  >
-                    <X size={14} aria-hidden="true" />
-                    {cancelBusyId === upload.uploadId
-                      ? formatMessage({ id: "channel.edit.cancelingUpload" })
-                      : formatMessage({ id: "channel.edit.cancelUpload" })}
-                  </Button>
-                </div>
-              </li>
+                upload={upload}
+                cancelBusy={cancelBusyId === upload.uploadId}
+                onOpenChannel={onOpenChannel}
+                onCancel={onCancel}
+              />
             ))}
           </ul>
         </div>

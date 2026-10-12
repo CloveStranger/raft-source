@@ -177,21 +177,32 @@ test("joint channels can edit shared metadata but cannot change visibility", () 
   assert.doesNotMatch(editDialog, /isJointChannel[\s\S]{0,200}<Trash2 size=\{14\} \/>[\s\S]{0,80}channel\.edit\.deleteChannel/);
 });
 
-test("joint member list labels peer agents and humans with source server beside display name", () => {
-  const source = readSource("components/agent/ChannelMembers.tsx");
+test("joint member list labels peer agents and humans with every source server beside display name", () => {
+  const source = [
+    readSource("components/agent/ChannelMembers.tsx"),
+    readSource("components/agent/MemberRoleActions.tsx"),
+  ].join("\n");
 
   assert.match(source, /function JointPeerBadge/);
+  assert.match(source, /function JointServerBadges/);
   assert.doesNotMatch(source, /Joint · \{label\}/);
-  assert.match(source, /const peerLabel = jointPeerLabel\(agent\.serverId, agent\.serverName, agent\.serverSlug\);/);
-  assert.match(source, /<span className="truncate">\{agent\.displayName \|\| agent\.name\}<\/span>\s*\{peerLabel && <JointPeerBadge label=\{peerLabel\} \/>}/);
-  assert.match(source, /const peerLabel = jointPeerLabel\(human\.serverId, human\.serverName, human\.serverSlug\);/);
-  assert.match(source, /<span className="truncate">\{human\.displayName \|\| human\.name\}<\/span>\s*\{peerLabel && <JointPeerBadge label=\{peerLabel\} \/>}/);
-  assert.doesNotMatch(source, /jointPeerLabel=\{jointPeerLabel\(human\.serverId, human\.serverName, human\.serverSlug\)\}/);
+  // RFC 075 phase 1: one badge per server the member takes part through.
+  assert.match(source, /memberServerBadgeLabels\(member, currentChannel\.serverId\)/);
+  assert.match(source, /const serverLabels = jointServerLabels\(agent\);/);
+  assert.match(source, /<span className="min-w-0 truncate">\{agent\.displayName \|\| agent\.name\}<\/span>\s*<JointServerBadges labels=\{serverLabels\} \/>/);
+  assert.match(source, /const serverLabels = jointServerLabels\(human\);/);
+  assert.match(source, /<span className="min-w-0 truncate">\{human\.displayName \|\| human\.name\}<\/span>\s*<JointServerBadges labels=\{serverLabels\} \/>/);
+  assert.doesNotMatch(source, /jointPeerLabel/);
+  // #9527: the badges take at most half the row, so the name stays readable.
+  assert.match(source, /<span className="flex max-w-1\/2 shrink-0 items-center gap-1 overflow-hidden">/);
 });
 
 test("joint add-member candidate filters use only the current local projection", () => {
   const helper = readSource("utils/channelLocalMembership.ts");
-  const channelMembers = readSource("components/agent/ChannelMembers.tsx");
+  const channelMembers = [
+    readSource("components/agent/ChannelMembers.tsx"),
+    readSource("components/agent/MemberRoleActions.tsx"),
+  ].join("\n");
   const addMembersDialog = readSource("components/channel/AddMembersDialog.tsx");
 
   assert.match(helper, /return member\.serverId === channel\.serverId/);

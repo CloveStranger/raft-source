@@ -1,4 +1,5 @@
 import "./helpers/domSetup";
+import { comboboxText, openCombobox, optionText } from "./helpers/combobox";
 
 import assert from "node:assert/strict";
 import { assertOptionFieldLabels } from "./helpers/optionFieldLabels";
@@ -174,43 +175,48 @@ test("official identity update sits under the profile name and requires a field-
   await waitFor(() => assert.equal(adoptionCalls, 1, "the update is sent only after explicit confirmation"));
 });
 
-test("agent detail keeps current deprecated runtime visible with warning", async () => {
-  const agent = seedPanelState("server-legacy-runtime", makeAgent({
-    serverId: "server-legacy-runtime",
-    runtime: "antigravity",
-    model: "default",
-    runtimeConfig: {
-      version: 1,
-      runtime: "antigravity",
-      model: { kind: "preset", id: "default" },
-      mode: { kind: "default" },
-      reasoningEffort: null,
-      envVars: null,
-    },
-  }));
-  stubAgentDetailApi();
-  api.post = async (url: string, body?: unknown) => {
-    if (url === "/feature-flags/evaluate") {
-      assert.deepEqual(body, {
-        serverId: "server-legacy-runtime",
-        platform: "web",
-        keys: REGISTERED_SERVER_FEATURE_FLAG_KEYS,
-      });
-      return { data: { evaluations: [{ key: AGENT_MIGRATION_FEATURE_FLAG_KEY, enabled: false }] } } as never;
-    }
-    throw new Error(`unexpected POST ${url}`);
-  };
+for (const [runtime, model, label] of [
+  ["antigravity", "default", "Antigravity CLI"],
+  ["copilot", "gpt-5.4", "Copilot CLI"],
+] as const) {
+  test(`agent detail keeps current deprecated runtime visible with warning (${runtime})`, async () => {
+    const agent = seedPanelState("server-legacy-runtime", makeAgent({
+      serverId: "server-legacy-runtime",
+      runtime,
+      model,
+      runtimeConfig: {
+        version: 1,
+        runtime,
+        model: { kind: "preset", id: model },
+        mode: { kind: "default" },
+        reasoningEffort: null,
+        envVars: null,
+      },
+    }));
+    stubAgentDetailApi();
+    api.post = async (url: string, body?: unknown) => {
+      if (url === "/feature-flags/evaluate") {
+        assert.deepEqual(body, {
+          serverId: "server-legacy-runtime",
+          platform: "web",
+          keys: REGISTERED_SERVER_FEATURE_FLAG_KEYS,
+        });
+        return { data: { evaluations: [{ key: AGENT_MIGRATION_FEATURE_FLAG_KEY, enabled: false }] } } as never;
+      }
+      throw new Error(`unexpected POST ${url}`);
+    };
 
-  renderPanel(agent);
+    renderPanel(agent);
 
-  assert.ok(screen.getByText("Antigravity CLI (deprecated)"));
-  assert.ok(screen.getByText("This agent uses a deprecated runtime. It can keep running, but new agents cannot select this runtime."));
+    assert.ok(screen.getByText(`${label} (deprecated)`));
+    assert.ok(screen.getByText("This agent uses a deprecated runtime. It can keep running, but new agents cannot select this runtime."));
 
-  fireEvent.click(screen.getByRole("button", { name: "Edit runtime config" }));
+    fireEvent.click(screen.getByRole("button", { name: "Edit runtime config" }));
 
-  assert.ok(await screen.findByRole("heading", { name: "Edit runtime config" }));
-  assert.ok(screen.getByText("Antigravity CLI (deprecated) (not installed)"));
-});
+    assert.ok(await screen.findByRole("heading", { name: "Edit runtime config" }));
+    assert.ok(screen.getByText(`${label} (deprecated) (not installed)`));
+  });
+}
 
 test("flag-off current Grok stays editable only while its Computer capability is available", async () => {
   const agent = seedPanelState("server-grok-grandfathered", makeAgent({
@@ -253,11 +259,11 @@ test("flag-off current Grok stays editable only while its Computer capability is
 
   const modelSelect = await waitFor(() => {
     const select = screen.getAllByRole("combobox")
-      .find((candidate) => candidate.textContent?.includes("Grok 4.5"));
+      .find((candidate) => comboboxText(candidate).includes("Grok 4.5"));
     assert.ok(select);
     return select;
   });
-  fireEvent.click(modelSelect);
+  openCombobox(modelSelect);
   const composerOption = await screen.findByRole("option", { name: "Composer 2.5" });
   fireEvent.pointerDown(composerOption);
   fireEvent.click(composerOption);
@@ -313,18 +319,18 @@ test("Claude runtime editor renders the canonical model list and persists an exa
 
   const modelSelect = await waitFor(() => {
     const select = screen.getAllByRole("combobox")
-      .find((candidate) => candidate.textContent?.includes("Claude Opus 4.8"));
+      .find((candidate) => comboboxText(candidate).includes("Claude Opus 4.8"));
     assert.ok(select);
     return select;
   });
-  fireEvent.click(modelSelect);
+  openCombobox(modelSelect);
   expect(
-    screen.getAllByRole("option").map((option) => option.textContent?.trim() ?? ""),
+    screen.getAllByRole("option").map(optionText),
   ).toMatchSnapshot();
   const opus5Option = await screen.findByRole("option", { name: "Claude Opus 5" });
   fireEvent.pointerDown(opus5Option);
   fireEvent.click(opus5Option);
-  await waitFor(() => assert.match(modelSelect.textContent ?? "", /Claude Opus 5/));
+  await waitFor(() => assert.match(comboboxText(modelSelect), /Claude Opus 5/));
 
   const saveButton = screen.getByRole("button", { name: "Save runtime config" }) as HTMLButtonElement;
   await waitFor(() => assert.equal(saveButton.disabled, false));
@@ -420,11 +426,11 @@ test("Built-in edit can change model while omitting the redacted provider secret
 
   const modelSelect = await waitFor(() => {
     const select = screen.getAllByRole("combobox")
-      .find((candidate) => candidate.textContent?.includes("DeepSeek V4 Pro"));
+      .find((candidate) => comboboxText(candidate).includes("DeepSeek V4 Pro"));
     assert.ok(select);
     return select;
   });
-  fireEvent.click(modelSelect);
+  openCombobox(modelSelect);
   const nextModel = await screen.findByRole("option", { name: "DeepSeek V4.1 Flash" });
   fireEvent.pointerDown(nextModel);
   fireEvent.click(nextModel);
@@ -518,7 +524,7 @@ test("Persisted Built-in model omitted from catalog remains selectable and shows
   // The persisted model is not in the live catalog, but is preserved in the combobox options
   const modelSelect = await waitFor(() => {
     const select = screen.getAllByRole("combobox")
-      .find((candidate) => candidate.textContent?.includes("deepseek/deepseek-v4-flash") || candidate.textContent?.includes("DeepSeek"));
+      .find((candidate) => comboboxText(candidate).includes("deepseek/deepseek-v4-flash") || comboboxText(candidate).includes("DeepSeek"));
     assert.ok(select);
     return select;
   });
@@ -531,7 +537,7 @@ test("Persisted Built-in model omitted from catalog remains selectable and shows
   );
 
   // Clicking the select still exposes the persisted option
-  fireEvent.click(modelSelect);
+  openCombobox(modelSelect);
   const persistedOption = await screen.findByRole("option", { name: /deepseek-v4-flash|DeepSeek/i });
   assert.ok(persistedOption);
 });
@@ -852,7 +858,7 @@ test("retryable model error offers persisted Kimi as unverified without inventin
   assert.ok(screen.getByText(/尚未验证/));
   const modelSelect = screen.getAllByRole("combobox")[1];
   assert.ok(modelSelect);
-  fireEvent.click(modelSelect);
+  openCombobox(modelSelect);
   const option = screen.getByRole("option", { name: /Kimi for Coding/ });
   fireEvent.pointerDown(option);
   fireEvent.click(option);
@@ -908,7 +914,7 @@ test("Cursor probe error permits editing with persisted Auto labeled unverified"
   const modelSelect = screen.getAllByRole("combobox")[1];
   assert.ok(modelSelect);
   assert.ok(screen.getByText(/not been verified/));
-  fireEvent.click(modelSelect);
+  openCombobox(modelSelect);
   const option = screen.getByRole("option", { name: "Auto" });
   fireEvent.pointerDown(option);
   fireEvent.click(option);
@@ -972,6 +978,6 @@ test("live catalog shrink preserves the persisted edit model as unverified", asy
 
   const modelSelect = screen.getAllByRole("combobox")[1];
   assert.ok(modelSelect, "edit must expose the live model catalog");
-  fireEvent.click(modelSelect);
+  openCombobox(modelSelect);
   assert.ok(await screen.findByRole("option", { name: /Kimi for Coding.*not in this computer's config/ }));
 });

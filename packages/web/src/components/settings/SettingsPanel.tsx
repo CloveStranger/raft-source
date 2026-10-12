@@ -1,4 +1,6 @@
-import { Progress, ProgressTrack, ProgressIndicator, Status, ToggleGroup, ToggleGroupItem, Checkbox, Textarea, TextareaCounter, Skeleton,
+import { AppWhenToUseField } from "./AppWhenToUseField";
+import { AgentJwtSettings } from "./AgentJwtSettings";
+import { ToggleGroup, ToggleGroupItem, Checkbox, Textarea, TextareaCounter, Skeleton,
   Badge,
   Button,
   Card,
@@ -20,7 +22,7 @@ import { Progress, ProgressTrack, ProgressIndicator, Status, ToggleGroup, Toggle
   useThemeFamily } from "raft-ui";
 import CloseButton from "../ui/CloseButton";
 import Tooltip from "../ui/Tooltip";
-import { useState, useEffect, useMemo, useReducer, useRef } from "react";
+import { useCallback, useState, useEffect, useEffectEvent, useMemo, useReducer, useRef } from "react";
 import type { ChangeEvent, FormEvent, ReactNode } from "react";
 import { useNavigate } from "react-router-dom";
 import {
@@ -50,7 +52,6 @@ import {
   FileText,
   Tag,
   Type,
-  Pencil,
   FlaskConical,
   LayoutGrid,
   List,
@@ -63,30 +64,23 @@ import { MOBILE_DOWNLOAD_CHOOSER_PATH, mobileDownloadUrl } from "../../utils/mob
 import { getApiErrorResponse } from "../../utils/apiErrorResponse";
 import {
   DEFAULT_BILLING_INTERVAL,
-  PLAN_CONFIG,
   DOWNGRADE_GRACE_PERIOD_DAYS,
-  FREE_MONTHLY_FILE_UPLOAD_LIMIT_BYTES,
   OAUTH_CLIENT_CATEGORIES,
-  PRO_AGENT_SEAT_FRACTION,
-  PRO_AGENT_SEAT_BLOCK_SIZE,
-  PRO_SEAT_ANNUAL_USD,
-  PRO_SEAT_MONTHLY_USD,
   PROVIDER_CONNECTIONS_FEATURE_FLAG_KEY,
   PUBLIC_SERVER_FEATURE_FLAG_KEY,
   SERVER_GUEST_FEATURE_FLAG_KEY,
   SERVER_LABS_UI_FEATURE_FLAG_KEY,
   SLACK_BRIDGE_FEATURE_FLAG_KEYS,
-  formatProAgentSeatFraction,
   getEffectiveLimits,
   getFinitePlanLimitExcess,
-  isTrialActive,
   renderThirdPartyInertText,
   buildIntegrationInviteUrl,
+  isAppWhenToUseTooLong,
+  APP_WHEN_TO_USE_MAX_CODE_POINTS,
 } from "@botiverse/raft-shared";
 import type {
   BillingInterval,
   OAuthClientCategory,
-  ServerPlan,
   ServerRole,
   TimeFormatPreference,
 } from "@botiverse/raft-shared";
@@ -108,7 +102,7 @@ import Modal from "../Modal";
 import Banner from "../ui/Banner";
 import api from "../../api/client";
 import { shareableWebOrigin } from "../../utils/desktopShell";
-import { FormattedMessage, useIntl } from "react-intl";
+import { useIntl } from "react-intl";
 import type { IntlShape } from "react-intl";
 import type { MessageId } from "../../i18n/messages";
 import { useLocale } from "../../i18n/LocaleProvider";
@@ -136,10 +130,10 @@ import { UsageDataSettingsCard, WorkspaceProductAnalyticsSection } from "./Usage
 import CopyButton from "../ui/CopyButton";
 import FormField from "../ui/FormField";
 import AvatarSlot from "../ui/AvatarSlot";
-import AvatarListRow from "../ui/AvatarListRow";
 import SelectionPopover from "../ui/SelectionPopover";
 import SurfaceListItem from "../ui/SurfaceListItem";
 import SlugInput, { PrefixedInput } from "../ui/SlugInput";
+import DeleteServerConfirmDialog from "./DeleteServerConfirmDialog";
 import {
   AGENT_INBOUND_NEGATIVE_CAPABILITY_ID,
   AGENT_DIRECTORY_OAUTH_SCOPES,
@@ -167,15 +161,14 @@ import type { AuthProvider, SocialAuthProviderId } from "../../hooks/useAuthProv
 import type { Message } from "../../store/messageStore";
 import type { Agent } from "../../store/agentStore";
 import { useChannelStore } from "../../store/channelStore";
+import { hasChatSurfaces } from "../../embed";
 import type { Channel } from "../../store/channelStore";
 import {
-  canRemoveAdminPrincipal,
   getAdminCandidatePrincipals,
   getAdminPrincipalKey,
   getAdminPrincipalLabel,
   getAdminPrincipalRoleOptions,
   getAdminPrincipals,
-  getMemberLabel,
 } from "../../utils/serverAdminSettings";
 import type {
   ServerAdminSettingsPrincipal,
@@ -183,8 +176,6 @@ import type {
 import {
   createServerLabEnrollmentMutation,
   createServerLabMasterMutation,
-  getServerLabDescriptionMessageId,
-  getServerLabEnrollmentDisabledReasonMessageId,
   getServerLabSettingsAuthority,
   isServerLabEnrollmentEditable,
   normalizeServerLabSettingsReadback,
@@ -205,21 +196,6 @@ import {
 import type {
   ServerLabsStoreContext,
 } from "../../store/serverLabsSettingsStore";
-import { getBillingControlsState, getSettingsBillingPlanPresentation } from "../../utils/billingControls";
-import { formatGlobalTrialCutoffDate } from "../../utils/trialCutoff";
-import {
-  applyBillingSeatInputChange,
-  applyBillingSeatInputCommit,
-  getBillingSeatDraftState,
-  getBillingCurrentTotalLabel,
-  getBillingSeatCopyLabels,
-  getBillingSeatInputValue,
-  getBillingSelectedTotalLabels,
-  getBillingTotalSummaryLabels,
-} from "../../utils/billingSeatInput";
-import type {
-  BillingPricedTotal,
-} from "../../utils/billingSeatInput";
 import { getTimezoneOptions, getTranslationLanguageOptions, useTranslationStore } from "../../store/translationStore";
 import type { PreferredTranslationMode } from "../../store/translationStore";
 import AgreementBody from "../server/AgreementBody";
@@ -227,10 +203,7 @@ import { AppleLogo, GitHubLogo, GoogleLogo } from "../icons/ProviderLogos";
 import {
   useAppearanceStore,
 } from "../../store/appearanceStore";
-import { useWorkspaceGridAvailability } from "../workspace/workspaceGridAvailability";
-import { useWorkspaceGridNavigationStore } from "../workspace/workspaceGridNavigationStore";
 import {
-  BillingIntervalSegmentedControl,
   ConnectedAppsTabSegmentedControl,
   MessageBodyFontSizeSegmentedControl,
 } from "./SettingsSegmentedControls";
@@ -256,6 +229,16 @@ import { AgentMcpTab } from "../agent/AgentMcpTab";
 import AppearanceThemePicker from "./AppearanceThemePicker";
 import { useOptionalAppTheme } from "../../hooks/useAppTheme";
 import ProviderConnectionsSettings from "./ProviderConnectionsSettings";
+import { ProviderAccountRow } from "./ProviderAccountRow";
+import { ServerLabRow } from "./ServerLabRow";
+import { AdminPrincipalRow } from "./AdminPrincipalRow";
+import { PendingInviteRow } from "./PendingInviteRow";
+import { JoinLinkRow } from "./JoinLinkRow";
+import { PlanSectionContent } from "./PlanSectionContent";
+import { DeclaredScopeToggle } from "./DeclaredScopeToggle";
+import { InstalledConnectedAppItem } from "./InstalledConnectedAppItem";
+import { RegisteredConnectedAppItem } from "./RegisteredConnectedAppItem";
+import { ConnectedAppEditorRailButton } from "./ConnectedAppEditorRailButton";
 import {
   AppNotificationRequestSummary,
   DeveloperAppNotifications,
@@ -331,6 +314,8 @@ const APPEARANCE_PREVIEW_CHANNEL: Channel = {
   createdAt: "2026-05-19T00:00:00.000Z",
 };
 
+const APPEARANCE_PREVIEW_CHANNELS: Channel[] = [APPEARANCE_PREVIEW_CHANNEL];
+
 const APPEARANCE_PREVIEW_MENTION_MAP = new Map<string, MentionEntry>([
   ["joy", { displayName: "Joy", type: "user", id: "appearance-preview-joy" }],
 ]);
@@ -341,7 +326,7 @@ const PRE_JOIN_AGREEMENT_BODY_MAX_LENGTH_LABEL = "5,000";
 // ── Account Section ──
 
 
-function SocialProviderIcon({ providerId }: { providerId: SocialAuthProviderId }) {
+export function SocialProviderIcon({ providerId }: { providerId: SocialAuthProviderId }) {
   if (providerId === "google") {
     return (
       <span className="inline-flex size-[18px] shrink-0 items-center justify-center">
@@ -364,8 +349,7 @@ function SocialProviderIcon({ providerId }: { providerId: SocialAuthProviderId }
 }
 
 // Exported for the sub-batch-A i18n DOM smoke test: renders the Account section
-// in isolation without SettingsPanel's account-tab WorkspaceModeSettingsCard,
-// which reads the Vite-only `import.meta.env` graph the node harness cannot shim.
+// in isolation.
 export function AccountSection({
   initialError,
   passwordChangeIntent = false,
@@ -462,7 +446,7 @@ export function AccountSection({
     && linkedIdentityCount === 1
     && passwordConfigured === false;
 
-  const applyAuthMethods = (data: {
+  const applyAuthMethods = useCallback((data: {
     identities?: Array<{ provider?: string; providerEmail?: string | null }>;
     passwordConfigured?: boolean;
   }) => {
@@ -474,9 +458,9 @@ export function AccountSection({
     }
     setLinkedIdentities(next);
     setPasswordConfigured(data.passwordConfigured === true);
-  };
+  }, []);
 
-  const handleConnectProvider = async (provider: AuthProvider) => {
+  const handleConnectProvider = useCallback(async (provider: AuthProvider) => {
     setError("");
     setLinkingProviderId(provider.id);
     try {
@@ -488,9 +472,15 @@ export function AccountSection({
       setError(err.response?.data?.error || formatMessage({ id: "settings.account.failedConnectProvider" }, { label: provider.label }));
       setLinkingProviderId(null);
     }
-  };
+  }, [formatMessage]);
 
-  const handleDisconnectProvider = async (provider: AuthProvider) => {
+  const handleRequestDisconnectProvider = useCallback((provider: AuthProvider) => {
+    setPasswordSetupError("");
+    setPasswordSetupSentForProvider(null);
+    setPendingDisconnectProvider(provider);
+  }, []);
+
+  const handleDisconnectProvider = useCallback(async (provider: AuthProvider) => {
     try {
       const { data } = await api.delete(`/auth/identities/${provider.id}`);
       applyAuthMethods(data);
@@ -507,13 +497,14 @@ export function AccountSection({
       }
       throw err;
     }
-  };
+  }, [applyAuthMethods]);
 
-  const handleSendPasswordSetup = async (provider?: AuthProvider) => {
+  const userEmail = user?.email;
+  const handleSendPasswordSetup = useCallback(async (provider?: AuthProvider) => {
     setPasswordSetupError("");
     setPasswordSetupLoading(true);
     try {
-      await api.post("/auth/forgot-password", { email: user?.email });
+      await api.post("/auth/forgot-password", { email: userEmail });
       setPasswordSetupEmailSent(true);
       setPasswordSetupSentForProvider(provider ?? null);
       setPendingDisconnectProvider(null);
@@ -524,7 +515,29 @@ export function AccountSection({
     } finally {
       setPasswordSetupLoading(false);
     }
-  };
+  }, [formatMessage, userEmail]);
+
+  const handleSetPasswordByEmail = useCallback(() => {
+    void handleSendPasswordSetup();
+  }, [handleSendPasswordSetup]);
+
+  const handleConfirmDisconnect = useCallback(() => {
+    if (!pendingDisconnectProvider) return;
+    return pendingDisconnectRequiresPassword
+      ? handleSendPasswordSetup(pendingDisconnectProvider)
+      : handleDisconnectProvider(pendingDisconnectProvider);
+  }, [handleDisconnectProvider, handleSendPasswordSetup, pendingDisconnectProvider, pendingDisconnectRequiresPassword]);
+
+  const handleCloseDisconnect = useCallback(() => setPendingDisconnectProvider(null), []);
+
+  const handleDisplayNameChange = useCallback((e: ChangeEvent<HTMLInputElement>) => {
+    setDisplayName(e.target.value);
+    setSaved(false);
+  }, []);
+
+  const handleCurrentPasswordChange = useCallback((e: ChangeEvent<HTMLInputElement>) => setCurrentPassword(e.target.value), []);
+  const handleNewPasswordChange = useCallback((e: ChangeEvent<HTMLInputElement>) => setNewPassword(e.target.value), []);
+  const handleConfirmPasswordChange = useCallback((e: ChangeEvent<HTMLInputElement>) => setConfirmPassword(e.target.value), []);
 
   const handleSaveProfile = async (e: FormEvent) => {
     e.preventDefault();
@@ -642,10 +655,7 @@ export function AccountSection({
                 data-testid="account-profile-display-name-input"
                 type="text"
                 value={displayName}
-                onChange={(e) => {
-                  setDisplayName(e.target.value);
-                  setSaved(false);
-                }}
+                onChange={handleDisplayNameChange}
                 className={themeFamily === "brutal" ? "p-2 text-sm" : "text-sm"}
               />
             </FormField>
@@ -702,55 +712,16 @@ export function AccountSection({
             <div>
               <div className="mb-2 text-sm font-bold">{formatMessage({ id: "settings.account.connectedAccounts" })}</div>
               <div className="space-y-2">
-                {visibleProviders.map((provider) => {
-                  const identity = linkedIdentities[provider.id];
-                  return (
-                    <div
-                      key={provider.id}
-                      role="group"
-                      aria-label={formatMessage({ id: "settings.account.providerAccountAria" }, { label: provider.label })}
-                      className="relative flex items-start justify-between gap-3 border border-line-muted theme-brutal:border-2 theme-brutal:border-black/30 bg-layer-panel theme-brutal:bg-white p-3 text-left transition-colors hover:border-line-strong hover:shadow-raft-sm theme-brutal:hover:border-black theme-brutal:hover:shadow-brutal-sm"
-                    >
-                      <div className="min-w-0 flex-1">
-                        <div className="mb-1 flex items-center gap-2 text-xs">
-                          <SocialProviderIcon providerId={provider.id} />
-                          <span className="font-bold text-foreground-strong theme-brutal:text-black">{provider.label}</span>
-                        </div>
-                        <div className="truncate text-xs text-foreground-muted theme-brutal:text-black/50">
-                          {identity?.providerEmail
-                            ? formatMessage({ id: "settings.account.connectedAs" }, { email: identity.providerEmail })
-                            : formatMessage({ id: "settings.account.notConnected" })}
-                        </div>
-                      </div>
-                      {!identity && (
-                        <Button
-                          variant="outline" size="sm"
-                          type="button"
-                          onClick={() => handleConnectProvider(provider)}
-                          disabled={linkingProviderId === provider.id}
-                          className="shrink-0"
-                        >
-                          {linkingProviderId === provider.id ? formatMessage({ id: "settings.account.connecting" }) : formatMessage({ id: "settings.account.connect" })}
-                        </Button>
-                      )}
-                      {identity && (
-                        <Button
-                          variant="outline" size="sm"
-                          type="button"
-                          onClick={() => {
-                            setPasswordSetupError("");
-                            setPasswordSetupSentForProvider(null);
-                            setPendingDisconnectProvider(provider);
-                          }}
-                          aria-label={formatMessage({ id: "settings.account.disconnectAria" }, { label: provider.label })}
-                          className="shrink-0"
-                        >
-                          {formatMessage({ id: "settings.account.disconnect" })}
-                        </Button>
-                      )}
-                    </div>
-                  );
-                })}
+                {visibleProviders.map((provider) => (
+                  <ProviderAccountRow
+                    key={provider.id}
+                    provider={provider}
+                    identity={linkedIdentities[provider.id]}
+                    linking={linkingProviderId === provider.id}
+                    onConnect={handleConnectProvider}
+                    onRequestDisconnect={handleRequestDisconnectProvider}
+                  />
+                ))}
               </div>
               {passwordSetupSentForProvider && (
                 <Banner intent="success" density="sm" className="mt-3 font-bold">
@@ -806,7 +777,7 @@ export function AccountSection({
               <Button
                 variant="accent" size="sm"
                 type="button"
-                onClick={() => void handleSendPasswordSetup()}
+                onClick={handleSetPasswordByEmail}
                 disabled={passwordSetupLoading}
               >
                 {passwordSetupLoading
@@ -837,7 +808,7 @@ export function AccountSection({
                   autoComplete="current-password"
                   aria-label={formatMessage({ id: "settings.account.currentPassword" })}
                   value={currentPassword}
-                  onChange={(e) => setCurrentPassword(e.target.value)}
+                  onChange={handleCurrentPasswordChange}
                   className="w-full text-sm"
                   required
                 />
@@ -849,7 +820,7 @@ export function AccountSection({
                   autoComplete="new-password"
                   aria-label={formatMessage({ id: "settings.account.newPassword" })}
                   value={newPassword}
-                  onChange={(e) => setNewPassword(e.target.value)}
+                  onChange={handleNewPasswordChange}
                   className="w-full text-sm"
                   placeholder={formatMessage({ id: "settings.account.minCharsPlaceholder" })}
                   required
@@ -862,7 +833,7 @@ export function AccountSection({
                   autoComplete="new-password"
                   aria-label={formatMessage({ id: "settings.account.confirmPassword" })}
                   value={confirmPassword}
-                  onChange={(e) => setConfirmPassword(e.target.value)}
+                  onChange={handleConfirmPasswordChange}
                   className="w-full text-sm"
                   required
                 />
@@ -922,10 +893,8 @@ export function AccountSection({
             ? "bg-brutal-pink"
             : undefined}
           chromeLocale="active"
-          onConfirm={() => pendingDisconnectRequiresPassword
-            ? handleSendPasswordSetup(pendingDisconnectProvider)
-            : handleDisconnectProvider(pendingDisconnectProvider)}
-          onClose={() => setPendingDisconnectProvider(null)}
+          onConfirm={handleConfirmDisconnect}
+          onClose={handleCloseDisconnect}
         />
       )}
 
@@ -940,6 +909,9 @@ function AccountSignOutSection() {
   const { formatMessage } = useIntl();
   const logout = useAuthStore((s) => s.logout);
   const [showConfirm, setShowConfirm] = useState(false);
+  const handleOpenConfirm = useCallback(() => setShowConfirm(true), []);
+  const handleCloseConfirm = useCallback(() => setShowConfirm(false), []);
+  const handleConfirmLogout = useCallback(() => { logout(); }, [logout]);
 
   return (
     <div className="mb-6">
@@ -962,7 +934,7 @@ function AccountSignOutSection() {
           <Button
             variant="warning" size="md"
             type="button"
-            onClick={() => setShowConfirm(true)}
+            onClick={handleOpenConfirm}
             data-testid="account-logout"
             className="[@media(max-height:600px)]:py-1 flex items-center gap-1.5 shrink-0 ml-4"
           >
@@ -979,8 +951,8 @@ function AccountSignOutSection() {
           loadingLabel={formatMessage({ id: "settings.session.confirmLoadingLabel" })}
           confirmColor="bg-brutal-orange"
           confirmTestId="account-logout-confirm-button"
-          onConfirm={() => { logout(); }}
-          onClose={() => setShowConfirm(false)}
+          onConfirm={handleConfirmLogout}
+          onClose={handleCloseConfirm}
         />
       )}
     </div>
@@ -1168,6 +1140,45 @@ function LanguageRegionSection() {
     }
   };
 
+  const handleDisplayLanguageChange = useCallback((next: string | null) => {
+    if (next == null) return;
+    setLanguageRegionSaved(false);
+    setLanguageError("");
+    setDisplayLanguage(next as Locale);
+  }, []);
+
+  const handleTranslationModeChange = useCallback((next: PreferredTranslationMode) => {
+    setLanguageRegionSaved(false);
+    setLanguageError("");
+    setTranslationMode(next);
+  }, []);
+
+  const handleTranslationTargetChange = useCallback((next: string | null) => {
+    if (next == null) return;
+    setLanguageRegionSaved(false);
+    setLanguageError("");
+    setTranslationTarget(next);
+  }, []);
+
+  const handleTranslationDisplayChange = useCallback((next: "translated" | "original" | "bilingual") => {
+    setLanguageRegionSaved(false);
+    setTranslationDisplayError("");
+    setTranslationDisplay(next);
+  }, []);
+
+  const handleTimezoneChange = useCallback((next: string | null) => {
+    if (next == null) return;
+    setDateTimeSaved(false);
+    setTimezoneError("");
+    setTimezone(next);
+  }, []);
+
+  const handleTimeFormatChange = useCallback((next: "12h" | "24h") => {
+    setDateTimeSaved(false);
+    setTimeFormatError("");
+    setTimeFormat(next);
+  }, []);
+
   if (!currentServer) return null;
 
   return (
@@ -1191,12 +1202,7 @@ function LanguageRegionSection() {
             </div>
             <Select
               value={displayLanguage}
-              onValueChange={(next) => {
-                if (next == null) return;
-                setLanguageRegionSaved(false);
-                setLanguageError("");
-                setDisplayLanguage(next as Locale);
-              }}
+              onValueChange={handleDisplayLanguageChange}
               disabled={savingLanguageRegion || settingsLoading}
               items={displayLanguageOptions}
             >
@@ -1245,11 +1251,7 @@ function LanguageRegionSection() {
             <SegmentedControl<PreferredTranslationMode>
               value={translationMode}
               aria-label={formatMessage({ id: "settings.language.translationModeAria" })}
-              onValueChange={(next) => {
-                setLanguageRegionSaved(false);
-                setLanguageError("");
-                setTranslationMode(next);
-              }}
+              onValueChange={handleTranslationModeChange}
               disabled={savingLanguageRegion || settingsLoading}
             >
               <SegmentedControlItem value="auto" data-testid="translation-mode-auto">
@@ -1274,12 +1276,7 @@ function LanguageRegionSection() {
               </div>
               <Select
                 value={translationTarget}
-                onValueChange={(next) => {
-                  if (next == null) return;
-                  setLanguageRegionSaved(false);
-                  setLanguageError("");
-                  setTranslationTarget(next);
-                }}
+                onValueChange={handleTranslationTargetChange}
                 disabled={savingLanguageRegion || settingsLoading}
                 items={languageOptions}
               >
@@ -1307,11 +1304,7 @@ function LanguageRegionSection() {
               <SegmentedControl<"translated" | "original" | "bilingual">
                 value={translationDisplay}
                 aria-label={formatMessage({ id: "settings.language.defaultViewAria" })}
-                onValueChange={(next) => {
-                  setLanguageRegionSaved(false);
-                  setTranslationDisplayError("");
-                  setTranslationDisplay(next);
-                }}
+                onValueChange={handleTranslationDisplayChange}
                 disabled={savingLanguageRegion || settingsLoading}
               >
                 <SegmentedControlItem value="translated" data-testid="translation-display-translated">
@@ -1362,12 +1355,7 @@ function LanguageRegionSection() {
             </div>
             <Select
               value={timezone}
-              onValueChange={(next) => {
-                if (next == null) return;
-                setDateTimeSaved(false);
-                setTimezoneError("");
-                setTimezone(next);
-              }}
+              onValueChange={handleTimezoneChange}
               disabled={savingDateTime || settingsLoading}
               items={timezoneOptions}
             >
@@ -1390,11 +1378,7 @@ function LanguageRegionSection() {
             <SegmentedControl<"12h" | "24h">
               value={timeFormat}
               aria-label={formatMessage({ id: "settings.dateTime.timeFormatAria" })}
-              onValueChange={(next) => {
-                setDateTimeSaved(false);
-                setTimeFormatError("");
-                setTimeFormat(next);
-              }}
+              onValueChange={handleTimeFormatChange}
               disabled={savingDateTime || settingsLoading}
             >
               <SegmentedControlItem value="12h" data-testid="time-format-12h">
@@ -1454,7 +1438,7 @@ function DesktopNativeNotificationsCard() {
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
 
-  const handleTest = () => {
+  const handleTest = useCallback(() => {
     setError("");
     setMessage("");
     const posted = showDesktopTestNotification({
@@ -1463,7 +1447,7 @@ function DesktopNativeNotificationsCard() {
     });
     if (posted) setMessage(formatMessage({ id: "settings.notifications.desktop.testSent" }));
     else setError(formatMessage({ id: "settings.notifications.desktop.errTestFailed" }));
-  };
+  }, [formatMessage]);
 
   return (
     <div>
@@ -1531,7 +1515,7 @@ function WebPushNotificationsCard({ channel }: { channel: Exclude<NotificationCh
   const [savedServerPushMuted, setSavedServerPushMuted] = useState(false);
   const serverPrefsVersionRef = useRef(currentServer?.notificationPrefsVersion ?? -1);
 
-  const refreshState = async () => {
+  const refreshState = useCallback(async () => {
     const serverId = currentServerId;
     setLoading(true);
     setPermission(getPushPermissionState());
@@ -1575,14 +1559,15 @@ function WebPushNotificationsCard({ channel }: { channel: Exclude<NotificationCh
       });
     }
     setLoading(false);
-  };
+  }, [applyServerPatch, currentServerId]);
 
-  // oxlint-disable react-hooks/exhaustive-deps -- refetch push/notification state only when the active server id changes; `refreshState` is recreated each render and closes over the current `currentServer`, so depending on it would loop every render.
+  // Refetch push/notification state only when the active server id changes:
+  // `refreshState` is keyed on `currentServerId`, and the prefs version is read
+  // from the store so later prefs-version bumps do not trigger a refetch.
   useEffect(() => {
-    serverPrefsVersionRef.current = currentServer?.notificationPrefsVersion ?? -1;
+    serverPrefsVersionRef.current = useServerStore.getState().current?.notificationPrefsVersion ?? -1;
     void refreshState();
-  }, [currentServerId]);
-  // oxlint-enable react-hooks/exhaustive-deps
+  }, [refreshState]);
 
   // oxlint-disable-next-line react-doctor/no-cascading-set-state -- Realtime server notification-pref updates must refresh the open settings form and clear stale save status together.
   useEffect(() => {
@@ -1602,7 +1587,7 @@ function WebPushNotificationsCard({ channel }: { channel: Exclude<NotificationCh
     };
   }, [currentServerId]);
 
-  const handleEnable = async () => {
+  const handleEnable = useCallback(async () => {
     setBusy(true);
     setError("");
     setMessage("");
@@ -1616,9 +1601,9 @@ function WebPushNotificationsCard({ channel }: { channel: Exclude<NotificationCh
     }
     await refreshState();
     setBusy(false);
-  };
+  }, [formatMessage, refreshState]);
 
-  const handleDisable = async () => {
+  const handleDisable = useCallback(async () => {
     setBusy(true);
     setError("");
     setMessage("");
@@ -1628,9 +1613,9 @@ function WebPushNotificationsCard({ channel }: { channel: Exclude<NotificationCh
     }
     await refreshState();
     setBusy(false);
-  };
+  }, [formatMessage, refreshState]);
 
-  const handleSendTest = async () => {
+  const handleSendTest = useCallback(async () => {
     setTesting(true);
     setError("");
     setMessage("");
@@ -1646,7 +1631,13 @@ function WebPushNotificationsCard({ channel }: { channel: Exclude<NotificationCh
     }
     await refreshState();
     setTesting(false);
-  };
+  }, [formatMessage, refreshState]);
+
+  const handleServerPushMutedChange = useCallback((checked: boolean) => {
+    setServerPushMuted(checked);
+    setMessage("");
+    setError("");
+  }, []);
 
   const handleSaveServerMute = async (event: FormEvent) => {
     event.preventDefault();
@@ -1782,11 +1773,7 @@ function WebPushNotificationsCard({ channel }: { channel: Exclude<NotificationCh
                   size="md"
                   checked={serverPushMuted}
                   disabled={loading || busy || testing || muting}
-                  onCheckedChange={(checked) => {
-                    setServerPushMuted(checked);
-                    setMessage("");
-                    setError("");
-                  }}
+                  onCheckedChange={handleServerPushMutedChange}
                   className="mt-0.5"
                 />
                 <span className="min-w-0">
@@ -1815,13 +1802,13 @@ function WebPushNotificationsCard({ channel }: { channel: Exclude<NotificationCh
 
 // ── Invites Section ──
 
-interface PendingInvite {
+export interface PendingInvite {
   id: string;
   invitedEmail: string;
   createdAt: string;
 }
 
-interface JoinLinkRecord {
+export interface JoinLinkRecord {
   id: string;
   token: string;
   createdAt: string;
@@ -1831,7 +1818,7 @@ interface JoinLinkRecord {
   revokedAt: string | null;
 }
 
-interface OAuthClientRecord {
+export interface OAuthClientRecord {
   id: string;
   serverId: string;
   clientId: string;
@@ -1865,6 +1852,10 @@ interface MarketplaceOAuthClientRecord extends OAuthClientRecord {
   appNotificationGroups: AppNotificationSelection["groups"];
   appNotificationEvents: AppNotificationSelection["events"];
   appNotificationReviewPending: boolean;
+  appNotificationPendingRevisionId: string | null;
+  appNotificationPendingGroups: AppNotificationSelection["groups"];
+  appNotificationPendingEvents: AppNotificationSelection["events"];
+  canReviewAppNotifications: boolean;
 }
 
 type MarketplaceInstallBadge =
@@ -1912,6 +1903,8 @@ function ProfileSection() {
   useEffect(() => {
     setName(server?.name ?? "");
   }, [server?.id, server?.name]);
+
+  const handleNameChange = useCallback((e: ChangeEvent<HTMLInputElement>) => setName(e.target.value), []);
 
   if (!server) return null;
 
@@ -2007,7 +2000,7 @@ function ProfileSection() {
                 data-testid="server-profile-name-input"
                 type="text"
                 value={name}
-                onChange={(e) => setName(e.target.value)}
+                onChange={handleNameChange}
                 maxLength={100}
                 className="w-full text-sm"
               />
@@ -2105,6 +2098,8 @@ function publicVisibilityUiReducer(state: PublicVisibilityUiState, action: Publi
   }
 }
 
+const NO_PUBLIC_CHANNELS: PublicVisibilityReadback["exposedChannels"] = [];
+
 function PublicChannelList({ channels }: { channels: PublicVisibilityReadback["exposedChannels"] }) {
   const { formatMessage } = useIntl();
   // Keep the exposure inventory compact in both the settings page and the
@@ -2170,40 +2165,60 @@ export function PublicVisibilitySection() {
     };
   }, [formatMessage, publicServerEnabled, role, server?.id]);
 
-  if (!server || role !== "owner" || !publicServerEnabled) return null;
-
-  const updateVisibility = async (publiclyVisible: boolean) => {
+  const serverId = server?.id;
+  const updateVisibility = useCallback(async (publiclyVisible: boolean) => {
+    if (!serverId) return;
     dispatch({ type: "saving" });
     try {
-      const { data } = await api.patch<{ publiclyVisible: boolean; publicGuestJoinEnabled: boolean }>(`/servers/${server.id}/public-visibility`, { publiclyVisible });
-      if (useServerStore.getState().current?.id !== server.id) return;
+      const { data } = await api.patch<{ publiclyVisible: boolean; publicGuestJoinEnabled: boolean }>(`/servers/${serverId}/public-visibility`, { publiclyVisible });
+      if (useServerStore.getState().current?.id !== serverId) return;
       dispatch({ type: "saved", publiclyVisible: data.publiclyVisible, publicGuestJoinEnabled: data.publicGuestJoinEnabled });
     } catch (err: unknown) {
-      if (useServerStore.getState().current?.id !== server.id) return;
+      if (useServerStore.getState().current?.id !== serverId) return;
       const response = getApiErrorResponse(err);
       dispatch({ type: "failed", error: response?.error || formatMessage({ id: "settings.publicVisibility.failedUpdate" }) });
       throw err;
     }
-  };
+  }, [formatMessage, serverId]);
 
-  const updateGuestJoin = async (publicGuestJoinEnabled: boolean) => {
+  const updateGuestJoin = useCallback(async (publicGuestJoinEnabled: boolean) => {
+    if (!serverId) return;
     dispatch({ type: "saving" });
     try {
       const { data } = await api.patch<{ publicGuestJoinEnabled: boolean }>(
-        `/servers/${server.id}/public-guest-join`,
+        `/servers/${serverId}/public-guest-join`,
         { publicGuestJoinEnabled },
       );
-      if (useServerStore.getState().current?.id !== server.id) return;
+      if (useServerStore.getState().current?.id !== serverId) return;
       dispatch({ type: "guestJoinSaved", publicGuestJoinEnabled: data.publicGuestJoinEnabled });
     } catch (err: unknown) {
-      if (useServerStore.getState().current?.id !== server.id) return;
+      if (useServerStore.getState().current?.id !== serverId) return;
       const response = getApiErrorResponse(err);
       dispatch({ type: "failed", error: response?.error || formatMessage({ id: "settings.publicVisibility.failedGuestJoinUpdate" }) });
       throw err;
     }
-  };
+  }, [formatMessage, serverId]);
 
-  const channels = readback?.exposedChannels ?? [];
+  const handleVisibilityCheckedChange = useCallback((checked: boolean) => {
+    if (checked) dispatch({ type: "confirm", open: true });
+    else void updateVisibility(false).catch(() => {});
+  }, [updateVisibility]);
+
+  const handleGuestJoinCheckedChange = useCallback((checked: boolean) => {
+    void updateGuestJoin(checked).catch(() => {});
+  }, [updateGuestJoin]);
+
+  const handleCopyUrlError = useCallback(() => dispatch({
+    type: "failed",
+    error: formatMessage({ id: "settings.publicVisibility.failedCopyUrl" }),
+  }), [formatMessage]);
+
+  const handleConfirmPublic = useCallback(() => updateVisibility(true), [updateVisibility]);
+  const handleCloseConfirm = useCallback(() => dispatch({ type: "confirm", open: false }), []);
+
+  if (!server || role !== "owner" || !publicServerEnabled) return null;
+
+  const channels = readback?.exposedChannels ?? NO_PUBLIC_CHANNELS;
   const publicUrl = readback?.publiclyVisible
     ? `${shareableWebOrigin()}/s/${readback.slug}`
     : "";
@@ -2229,10 +2244,7 @@ export function PublicVisibilitySection() {
             size="md"
             checked={readback?.publiclyVisible === true}
             disabled={loading || saving || !readback}
-            onCheckedChange={(checked) => {
-              if (checked) dispatch({ type: "confirm", open: true });
-              else void updateVisibility(false).catch(() => {});
-            }}
+            onCheckedChange={handleVisibilityCheckedChange}
             aria-labelledby="public-visibility-label"
             data-testid="public-visibility-switch"
           />
@@ -2257,10 +2269,7 @@ export function PublicVisibilitySection() {
               <CopyButton
                 text={publicUrl}
                 resetKey={publicUrl}
-                onCopyError={() => dispatch({
-                  type: "failed",
-                  error: formatMessage({ id: "settings.publicVisibility.failedCopyUrl" }),
-                })}
+                onCopyError={handleCopyUrlError}
               >
                 {({ copied, disabled, onClick, onMouseDown }) => (
                   <Button
@@ -2300,7 +2309,7 @@ export function PublicVisibilitySection() {
               size="md"
               checked={readback?.publicGuestJoinEnabled === true}
               disabled={loading || saving || !readback || !readback.publiclyVisible}
-              onCheckedChange={(checked) => void updateGuestJoin(checked).catch(() => {})}
+              onCheckedChange={handleGuestJoinCheckedChange}
               aria-labelledby="public-guest-join-label"
               data-testid="public-guest-join-switch"
             />
@@ -2340,8 +2349,8 @@ export function PublicVisibilitySection() {
           plainMessage
           maxWidthClass="max-w-lg"
           chromeLocale="active"
-          onConfirm={() => updateVisibility(true)}
-          onClose={() => dispatch({ type: "confirm", open: false })}
+          onConfirm={handleConfirmPublic}
+          onClose={handleCloseConfirm}
         />
       ) : null}
     </div>
@@ -2353,6 +2362,11 @@ interface ServerLabsSavingTarget {
   serverEpoch: number;
   token: number;
   target: string;
+}
+
+function isActiveServerLabsContext(context: ServerLabsStoreContext) {
+  const serverState = useServerStore.getState();
+  return serverState.current?.id === context.serverId && serverState.serverEpoch === context.serverEpoch;
 }
 
 function LabsSection() {
@@ -2372,20 +2386,13 @@ function LabsSection() {
     [activeReadback?.permissions, role],
   );
 
-  const isActiveServerLabsContext = (context: ServerLabsStoreContext) => {
-    const serverState = useServerStore.getState();
-    return serverState.current?.id === context.serverId && serverState.serverEpoch === context.serverEpoch;
-  };
-
   useEffect(() => {
     if (!current?.id) return;
     const requestContext = createServerLabsStoreContext(current.id, serverEpoch);
     loadServerLabsSettings(requestContext).catch(() => {});
   }, [current?.id, serverEpoch]);
 
-  if (!current) return null;
-
-  const applyReadbackMutation = async (
+  const applyReadbackMutation = useCallback(async (
     target: string,
     requestFactory: (serverId: string, snapshot: ServerLabSettingsReadback) => Promise<{ data: ServerLabSettingsReadback | CanonicalServerLabSettingsReadback | { data: ServerLabSettingsReadback | CanonicalServerLabSettingsReadback } }>,
   ) => {
@@ -2423,17 +2430,17 @@ function LabsSection() {
         ));
       }
     }
-  };
+  }, [activeReadback, activeServerId, serverEpoch]);
 
-  const handleMasterChange = (enabled: boolean) => {
+  const handleMasterChange = useCallback((enabled: boolean) => {
     if (!activeReadback || !authority.canSetMasterAccess) return;
     void applyReadbackMutation(
       "master",
       (serverId, snapshot) => api.patch(`/servers/${serverId}/labs/access`, createServerLabMasterMutation(snapshot, enabled)),
     );
-  };
+  }, [activeReadback, applyReadbackMutation, authority.canSetMasterAccess]);
 
-  const handleEnrollmentChange = (labKey: string, enabled: boolean) => {
+  const handleEnrollmentChange = useCallback((labKey: string, enabled: boolean) => {
     if (!activeReadback) return;
     const lab = activeReadback.labs.find((candidate) => candidate.key === labKey);
     if (!lab || !isServerLabEnrollmentEditable(lab, authority, activeReadback.masterEnabled)) return;
@@ -2441,7 +2448,9 @@ function LabsSection() {
       `lab:${labKey}`,
       (serverId, snapshot) => api.put(`/servers/${serverId}/labs/${encodeURIComponent(labKey)}`, createServerLabEnrollmentMutation(snapshot, enabled)),
     );
-  };
+  }, [activeReadback, applyReadbackMutation, authority]);
+
+  if (!current) return null;
 
   const error = errorId ? formatMessage({ id: errorId }) : "";
 
@@ -2494,59 +2503,17 @@ function LabsSection() {
               <div className="text-xs text-foreground-muted theme-brutal:text-black/40 italic">{formatMessage({ id: "settings.labs.emptyState" })}</div>
             ) : (
               <div className="divide-y-2 divide-black/10" data-testid="server-labs-list">
-                {activeReadback.labs.map((lab) => {
-                  const editable = isServerLabEnrollmentEditable(lab, authority, activeReadback.masterEnabled);
-                  const disabledReasonId = getServerLabEnrollmentDisabledReasonMessageId(lab, authority, activeReadback.masterEnabled);
-                  const disabledReason = disabledReasonId ? formatMessage({ id: disabledReasonId }) : "";
-                  const descriptionId = getServerLabDescriptionMessageId(lab.key);
-                  const description = descriptionId ? formatMessage({ id: descriptionId }) : lab.description;
-                  const checked = activeReadback.masterEnabled && lab.enrolled;
-                  const saving = activeSavingTarget?.target === `lab:${lab.key}`;
-                  return (
-                    <div
-                      key={lab.key}
-                      data-testid="server-lab-row"
-                      className={`grid grid-cols-[minmax(0,1fr)_44px] items-start gap-4 py-3 first:pt-0 last:pb-0 ${!editable ? "opacity-60" : ""}`}
-                    >
-                      <div className="min-w-0">
-                        <div className="flex min-w-0 flex-wrap items-center gap-2">
-                          <span className="min-w-0 truncate text-sm font-bold text-foreground-strong theme-brutal:text-black">{lab.name}</span>
-                        </div>
-                        <div className="mt-1 text-xs leading-5 text-foreground-muted theme-brutal:text-black/60">{description}</div>
-                        {disabledReason && (
-                          <div className="mt-1 text-xs font-mono text-foreground-muted theme-brutal:text-black/45">{disabledReason}</div>
-                        )}
-                      </div>
-                      {disabledReason ? (
-                        <Tooltip content={disabledReason}>
-                          <Switch
-                            size="md"
-                            checked={checked}
-                            disabled={!editable || activeSavingTarget != null}
-                            onCheckedChange={(enabled) => handleEnrollmentChange(lab.key, enabled)}
-                            aria-label={formatMessage({ id: "settings.labs.enrollmentAria" }, { name: lab.name })}
-                            className="mt-0.5 justify-self-end"
-                            data-slot="switch"
-                          />
-                        </Tooltip>
-                      ) : (
-                        <Switch
-                          size="md"
-                          checked={checked}
-                          disabled={!editable || activeSavingTarget != null}
-                          onCheckedChange={(enabled) => handleEnrollmentChange(lab.key, enabled)}
-                          aria-label={formatMessage({ id: "settings.labs.enrollmentAria" }, { name: lab.name })}
-                          className="mt-0.5 justify-self-end"
-                        />
-                      )}
-                      {saving && (
-                        <span className="sr-only">
-                          {formatMessage({ id: "settings.labs.savingEnrollment" }, { name: lab.name })}
-                        </span>
-                      )}
-                    </div>
-                  );
-                })}
+                {activeReadback.labs.map((lab) => (
+                  <ServerLabRow
+                    key={lab.key}
+                    lab={lab}
+                    authority={authority}
+                    masterEnabled={activeReadback.masterEnabled}
+                    mutationPending={activeSavingTarget != null}
+                    saving={activeSavingTarget?.target === `lab:${lab.key}`}
+                    onEnrollmentChange={handleEnrollmentChange}
+                  />
+                ))}
               </div>
             )}
 
@@ -2566,6 +2533,28 @@ function LabsSection() {
   );
 }
 
+type AdminRole = Extract<ServerRole, "owner" | "admin">;
+
+export function renderPrincipalAvatar(principal: ServerAdminSettingsPrincipal, context: "surface-list" | "compact-list") {
+  return principal.kind === "human" ? (
+    <AvatarSlot
+      context={context}
+      type="human"
+      humanAvatarUrl={principal.avatarUrl}
+      gravatarHash={principal.gravatarHash}
+      email={principal.email}
+      className={context === "surface-list" ? "self-start" : ""}
+    />
+  ) : (
+    <AvatarSlot
+      context={context}
+      type="agent"
+      agentAvatarUrl={principal.avatarUrl}
+      className={context === "surface-list" ? "self-start" : ""}
+    />
+  );
+}
+
 function AdminsSection() {
   const { formatMessage } = useIntl();
   const members = useServerStore((s) => s.members);
@@ -2579,7 +2568,7 @@ function AdminsSection() {
   const pickerRef = useRef<HTMLDivElement>(null);
   const agents = useMemo(() => allAgents.filter((agent) => !agent.deletedAt), [allAgents]);
   const [selectedPrincipalKey, setSelectedPrincipalKey] = useState("");
-  const [selectedRole, setSelectedRole] = useState<Extract<ServerRole, "owner" | "admin">>("admin");
+  const [selectedRole, setSelectedRole] = useState<AdminRole>("admin");
   const [adminPrincipalSearch, setAdminPrincipalSearch] = useState("");
   const [principalPickerOpen, setPrincipalPickerOpen] = useState(false);
   const [savingPrincipalKey, setSavingPrincipalKey] = useState<string | null>(null);
@@ -2590,11 +2579,14 @@ function AdminsSection() {
   const candidates = useMemo(() => getAdminCandidatePrincipals(members, agents, role), [members, agents, role]);
   // oxlint-disable-next-line react-doctor/no-event-handler -- YMNNE-family: pre-existing non-bug site grandfathered; rule now gates new code (see docs/frontend/render-cost-contract.md)
   const selectedCandidate = candidates.find((principal) => getAdminPrincipalKey(principal) === selectedPrincipalKey) ?? null;
-  const selectedRoleOptions = selectedCandidate ? getAdminPrincipalRoleOptions(role, selectedCandidate) : [];
-  const adminRoleSelectOptions: SelectOption[] = [
+  const selectedRoleOptions = useMemo(
+    () => (selectedCandidate ? getAdminPrincipalRoleOptions(role, selectedCandidate) : []),
+    [role, selectedCandidate],
+  );
+  const adminRoleSelectOptions = useMemo<SelectOption[]>(() => [
     { value: "owner", label: formatMessage({ id: "settings.admins.owner" }), disabled: !selectedRoleOptions.includes("owner") },
     { value: "admin", label: formatMessage({ id: "settings.admins.admin" }), disabled: !selectedRoleOptions.includes("admin") },
-  ];
+  ], [formatMessage, selectedRoleOptions]);
   const ownerCount = members.filter((member) => member.role === "owner").length;
   const filteredCandidates = useMemo(() => {
     if (!adminPrincipalSearch.trim()) return candidates;
@@ -2657,42 +2649,7 @@ function AdminsSection() {
     }
   }, [role, selectedCandidate, selectedRole]);
 
-  if (!canManageAdminRoles) return null;
-
-  const formatAdminRoleLabel = (role: string) => {
-    if (role === "owner") return formatMessage({ id: "member.roles.owner" });
-    if (role === "admin") return formatMessage({ id: "member.roles.admin" });
-    if (role === "member") return formatMessage({ id: "member.roles.member" });
-    return role;
-  };
-  const getPrincipalSubtitle = (principal: ServerAdminSettingsPrincipal) => {
-    const roleLabel = formatAdminRoleLabel(principal.role);
-    return principal.kind === "human"
-      ? principal.email ? `${principal.email} · ${roleLabel}` : roleLabel
-      : formatMessage({ id: "settings.admins.agentPrefix" }, { role: roleLabel });
-  };
-
-  const renderPrincipalAvatar = (principal: ServerAdminSettingsPrincipal, context: "surface-list" | "compact-list") => (
-    principal.kind === "human" ? (
-      <AvatarSlot
-        context={context}
-        type="human"
-        humanAvatarUrl={principal.avatarUrl}
-        gravatarHash={principal.gravatarHash}
-        email={principal.email}
-        className={context === "surface-list" ? "self-start" : ""}
-      />
-    ) : (
-      <AvatarSlot
-        context={context}
-        type="agent"
-        agentAvatarUrl={principal.avatarUrl}
-        className={context === "surface-list" ? "self-start" : ""}
-      />
-    )
-  );
-
-  const popoverOptions = filteredCandidates.map((principal) => {
+  const popoverOptions = useMemo(() => filteredCandidates.map((principal) => {
     const key = getAdminPrincipalKey(principal);
     return {
       key,
@@ -2711,9 +2668,9 @@ function AdminsSection() {
       reserveLeadingSlot: true,
       avatar: renderPrincipalAvatar(principal, "compact-list"),
     };
-  });
+  }), [filteredCandidates, formatMessage, selectedPrincipalKey]);
 
-  const updateAdminPrincipalRole = (
+  const updateAdminPrincipalRole = useCallback((
     principal: ServerAdminSettingsPrincipal,
     nextRole: Extract<ServerRole, "owner" | "admin" | "member">,
   ) => {
@@ -2722,9 +2679,9 @@ function AdminsSection() {
     }
     const agentRole: Extract<ServerRole, "admin" | "member"> = nextRole === "member" ? "member" : "admin";
     return updateAgent(principal.id, { serverRole: agentRole });
-  };
+  }, [updateAgent, updateMemberRole]);
 
-  const handlePromote = async () => {
+  const handlePromote = useCallback(async () => {
     if (!selectedCandidate) return;
     const key = getAdminPrincipalKey(selectedCandidate);
     setSavingPrincipalKey(key);
@@ -2737,9 +2694,9 @@ function AdminsSection() {
     } finally {
       setSavingPrincipalKey(null);
     }
-  };
+  }, [formatMessage, selectedCandidate, selectedRole, updateAdminPrincipalRole]);
 
-  const handleDemote = async (principal: ServerAdminSettingsPrincipal) => {
+  const handleDemote = useCallback(async (principal: ServerAdminSettingsPrincipal) => {
     const key = getAdminPrincipalKey(principal);
     setSavingPrincipalKey(key);
     setError("");
@@ -2750,7 +2707,19 @@ function AdminsSection() {
     } finally {
       setSavingPrincipalKey(null);
     }
-  };
+  }, [formatMessage, updateAdminPrincipalRole]);
+
+  const handleClearPrincipal = useCallback(() => {
+    setSelectedPrincipalKey("");
+    setPrincipalPickerOpen(false);
+  }, []);
+
+  const handleSelectedRoleChange = useCallback((value: string | null) => {
+    if (value == null) return;
+    setSelectedRole(value as AdminRole);
+  }, []);
+
+  if (!canManageAdminRoles) return null;
 
   return (
     <div className="mb-6">
@@ -2793,20 +2762,14 @@ function AdminsSection() {
                   emptyLabel={formatMessage({ id: "settings.admins.noMatchingMembers" })}
                   options={popoverOptions}
                   showClear={!!selectedCandidate}
-                  onClear={() => {
-                    setSelectedPrincipalKey("");
-                    setPrincipalPickerOpen(false);
-                  }}
+                  onClear={handleClearPrincipal}
                 />
               )}
             </div>
             <div className="sm:w-[120px] sm:shrink-0">
               <Select
                 value={selectedRole}
-                onValueChange={(value) => {
-                  if (value == null) return;
-                  setSelectedRole(value as Extract<ServerRole, "owner" | "admin">);
-                }}
+                onValueChange={handleSelectedRoleChange}
                 items={adminRoleSelectOptions}
                 disabled={!selectedCandidate || selectedRoleOptions.length === 0 || savingPrincipalKey != null}
               >
@@ -2836,44 +2799,16 @@ function AdminsSection() {
         <div className="border-t-2 border-line-muted theme-brutal:border-black pt-4">
           {admins.length > 0 ? (
             <div className="space-y-2">
-              {admins.map((admin) => {
-                const canRemove = canRemoveAdminPrincipal(role, admin, ownerCount);
-                const label = admin.kind === "human" ? getMemberLabel(admin, formatMessage) : getAdminPrincipalLabel(admin, formatMessage);
-                const key = getAdminPrincipalKey(admin);
-                return (
-                  <AvatarListRow
-                    key={key}
-                    avatar={
-                      // stdrc #wg-theme:7470ca2a: admin avatar pins to the
-                      // top of the row (so the avatar lines up with the
-                      // first line — the name) while the Remove button on
-                      // the right stays vertically centered. self-start on
-                      // the avatar achieves that without disrupting the
-                      // shared row alignment.
-                      renderPrincipalAvatar(admin, "surface-list")
-                    }
-                    name={label}
-                    subtitle={getPrincipalSubtitle(admin)}
-                    rightContent={
-                      canRemove ? (
-                        <Button
-                          variant="outline" size="sm"
-                          type="button"
-                          onClick={() => handleDemote(admin)}
-                          disabled={savingPrincipalKey != null}
-                          className="shrink-0"
-                        >
-                          {savingPrincipalKey === key ? formatMessage({ id: "settings.common.saving" }) : admin.role === "owner" ? formatMessage({ id: "settings.admins.removeOwner" }) : formatMessage({ id: "settings.admins.removeAdmin" })}
-                        </Button>
-                      ) : (
-                        <span className="shrink-0 text-[10px] font-mono text-foreground-muted theme-brutal:text-black/40">
-                          {admin.role === "owner" && ownerCount <= 1 ? formatMessage({ id: "settings.admins.lastOwner" }) : formatMessage({ id: "settings.admins.ownerOnly" })}
-                        </span>
-                      )
-                    }
-                  />
-                );
-              })}
+              {admins.map((admin) => (
+                <AdminPrincipalRow
+                  key={getAdminPrincipalKey(admin)}
+                  admin={admin}
+                  role={role}
+                  ownerCount={ownerCount}
+                  savingPrincipalKey={savingPrincipalKey}
+                  onDemote={handleDemote}
+                />
+              ))}
             </div>
           ) : (
             <div className="text-xs text-foreground-muted theme-brutal:text-black/40 italic">
@@ -2893,8 +2828,9 @@ function AdminsSection() {
 }
 
 function InvitesSection() {
-  const { formatDate, formatMessage } = useIntl();
+  const { formatMessage } = useIntl();
   const current = useServerStore((s) => s.current);
+  const serverId = current?.id;
   const { capabilities } = useServerPermissions();
 
   const [invites, setInvites] = useState<PendingInvite[]>([]);
@@ -2903,35 +2839,41 @@ function InvitesSection() {
 
   const canInvite = capabilities.inviteMembers;
 
-  useEffect(() => {
-    if (current && canInvite) {
-      loadInvites();
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [current?.id, canInvite]);
-
-  const loadInvites = async () => {
-    if (!current) return;
+  const loadInvites = useCallback(async () => {
+    if (!serverId) return;
     setLoading(true);
     try {
-      const { data } = await api.get(`/servers/${current.id}/invites`);
+      const { data } = await api.get(`/servers/${serverId}/invites`);
       setInvites(data);
     } catch {
       // Ignore errors
     } finally {
       setLoading(false);
     }
-  };
+  }, [serverId]);
 
-  const handleRevoke = async (inviteId: string) => {
-    if (!current) return;
+  // Reload when the active server id (via `loadInvites`) or permission changes.
+  useEffect(() => {
+    if (serverId && canInvite) {
+      void loadInvites();
+    }
+  }, [canInvite, loadInvites, serverId]);
+
+  const handleRevoke = useCallback(async (inviteId: string) => {
+    if (!serverId) return;
     try {
-      await api.delete(`/servers/${current.id}/invites/${inviteId}`);
+      await api.delete(`/servers/${serverId}/invites/${inviteId}`);
       await loadInvites();
     } catch {
       // Ignore
     }
-  };
+  }, [loadInvites, serverId]);
+
+  const handleConfirmRevoke = useCallback(
+    () => (revokeTarget ? handleRevoke(revokeTarget.id) : undefined),
+    [handleRevoke, revokeTarget],
+  );
+  const handleCloseRevoke = useCallback(() => setRevokeTarget(null), []);
 
   if (!canInvite) return null;
 
@@ -2948,31 +2890,7 @@ function InvitesSection() {
         {invites.length > 0 ? (
           <div className="space-y-1.5">
             {invites.map((invite) => (
-              <div
-                key={invite.id}
-                className="flex items-center gap-2 border border-line-muted theme-brutal:border-2 theme-brutal:border-black/30 px-3 py-2"
-              >
-                <span className="flex-1 font-mono text-xs text-foreground-strong theme-brutal:text-black truncate">
-                  {invite.invitedEmail}
-                </span>
-                <span className="text-[10px] text-foreground-muted theme-brutal:text-black/40 font-mono shrink-0">
-                  {formatDate(invite.createdAt, {
-                    month: "short",
-                    day: "numeric",
-                  })}
-                </span>
-                <Tooltip content={formatMessage({ id: "settings.invites.revokeInviteTitle" })}>
-                <Button
-                  variant="outline" size="icon-sm" type="button"
-                  onClick={() => setRevokeTarget(invite)}
-                  className="shrink-0"
-                  aria-label={formatMessage({ id: "settings.invites.revokeInviteTitle" })}
-                  data-slot="button"
-                >
-                  <X size={12} />
-                </Button>
-                </Tooltip>
-              </div>
+              <PendingInviteRow key={invite.id} invite={invite} onRequestRevoke={setRevokeTarget} />
             ))}
           </div>
         ) : !loading ? (
@@ -2989,17 +2907,24 @@ function InvitesSection() {
           message={formatMessage({ id: "settings.invites.confirmMessage" }, { email: revokeTarget.invitedEmail })}
           confirmLabel={formatMessage({ id: "settings.invites.confirmLabel" })}
           loadingLabel={formatMessage({ id: "settings.invites.revoking" })}
-          onConfirm={() => handleRevoke(revokeTarget.id)}
-          onClose={() => setRevokeTarget(null)}
+          onConfirm={handleConfirmRevoke}
+          onClose={handleCloseRevoke}
         />
       )}
     </div>
   );
 }
 
+// Shareable web origin, not window.location.origin: the desktop shell's origin
+// is `app://raft`, which produces an unopenable invite link. Web is unchanged.
+export function buildJoinLinkUrl(token: string) {
+  return `${shareableWebOrigin()}/join/${token}`;
+}
+
 function JoinLinksSection() {
   const { formatMessage } = useIntl();
   const current = useServerStore((s) => s.current);
+  const serverId = current?.id;
   const { capabilities } = useServerPermissions();
   const { formatShortDateTime } = useTimeFormatter();
 
@@ -3014,25 +2939,25 @@ function JoinLinksSection() {
 
   const canManageLinks = capabilities.inviteMembers;
 
-  useEffect(() => {
-    if (current && canManageLinks) {
-      loadLinks();
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [current?.id, canManageLinks]);
-
-  const loadLinks = async () => {
-    if (!current) return;
+  const loadLinks = useCallback(async () => {
+    if (!serverId) return;
     setLoading(true);
     try {
-      const { data } = await api.get(`/servers/${current.id}/join-links`);
+      const { data } = await api.get(`/servers/${serverId}/join-links`);
       setLinks(data);
     } catch {
       // Ignore
     } finally {
       setLoading(false);
     }
-  };
+  }, [serverId]);
+
+  // Reload when the active server id (via `loadLinks`) or permission changes.
+  useEffect(() => {
+    if (serverId && canManageLinks) {
+      void loadLinks();
+    }
+  }, [canManageLinks, loadLinks, serverId]);
 
   const handleCreate = async (e: FormEvent) => {
     e.preventDefault();
@@ -3052,25 +2977,29 @@ function JoinLinksSection() {
     }
   };
 
-  // Shareable web origin, not window.location.origin: the desktop shell's origin
-  // is `app://raft`, which produces an unopenable invite link. Web is unchanged.
-  const buildJoinLinkUrl = (token: string) => `${shareableWebOrigin()}/join/${token}`;
-
-  const handleCopy = async (linkId: string, token: string) => {
+  const handleCopy = useCallback(async (linkId: string, token: string) => {
     await navigator.clipboard.writeText(buildJoinLinkUrl(token));
     setCopiedLinkId(linkId);
     window.setTimeout(() => setCopiedLinkId((current) => current === linkId ? null : current), 1500);
-  };
+  }, []);
 
-  const handleRevoke = async (linkId: string) => {
-    if (!current) return;
+  const handleRevoke = useCallback(async (linkId: string) => {
+    if (!serverId) return;
     try {
-      await api.delete(`/servers/${current.id}/join-links/${linkId}`);
+      await api.delete(`/servers/${serverId}/join-links/${linkId}`);
       setLinks((prev) => prev.filter((link) => link.id !== linkId));
     } catch {
       // Ignore
     }
-  };
+  }, [serverId]);
+
+  const handleConfirmRevoke = useCallback(
+    () => (revokeTarget ? handleRevoke(revokeTarget.id) : undefined),
+    [handleRevoke, revokeTarget],
+  );
+  const handleCloseRevoke = useCallback(() => setRevokeTarget(null), []);
+  const handleMaxUsesChange = useCallback((e: ChangeEvent<HTMLInputElement>) => setMaxUses(e.target.value), []);
+  const handleExpiresAtChange = useCallback((e: ChangeEvent<HTMLInputElement>) => setExpiresAt(e.target.value), []);
 
   if (!canManageLinks) return null;
 
@@ -3092,7 +3021,7 @@ function JoinLinksSection() {
                 type="number"
                 min="1"
                 value={maxUses}
-                onChange={(e) => setMaxUses(e.target.value)}
+                onChange={handleMaxUsesChange}
                 placeholder={formatMessage({ id: "settings.joinLinks.unlimited" })}
                 className="w-full text-sm"
               />
@@ -3103,7 +3032,7 @@ function JoinLinksSection() {
                 id="join-link-expires-at"
                 type="datetime-local"
                 value={expiresAt}
-                onChange={(e) => setExpiresAt(e.target.value)}
+                onChange={handleExpiresAtChange}
                 className="w-full text-sm"
               />
             </FormField>
@@ -3131,47 +3060,14 @@ function JoinLinksSection() {
           {links.length > 0 ? (
             <div className="space-y-2">
               {links.map((link) => (
-                <div
+                <JoinLinkRow
                   key={link.id}
-                  className="border border-line-muted theme-brutal:border-2 theme-brutal:border-black/30 px-3 py-2.5 space-y-1.5"
-                >
-                  <div className="flex items-center gap-2">
-                    <div className="min-w-0 flex-1 border border-line-muted bg-layer-panel theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white px-2 py-1 font-mono text-[11px] truncate select-all">
-                      {buildJoinLinkUrl(link.token)}
-                    </div>
-                    <Tooltip content={formatMessage({ id: "settings.joinLinks.copyLink" })}>
-                    <Button
-                      variant="outline" size="icon-sm" type="button"
-                      onClick={() => handleCopy(link.id, link.token)}
-                      className="shrink-0"
-                      aria-label={formatMessage({ id: "settings.joinLinks.copyLink" })}
-                      data-slot="button"
-                    >
-                      {copiedLinkId === link.id ? <Check size={14} /> : <Copy size={14} />}
-                    </Button>
-                    </Tooltip>
-                    <Tooltip content={formatMessage({ id: "settings.joinLinks.revokeLink" })}>
-                    <Button
-                      variant="outline" size="icon-sm" type="button"
-                      onClick={() => setRevokeTarget(link)}
-                      className="shrink-0"
-                      aria-label={formatMessage({ id: "settings.joinLinks.revokeLink" })}
-                      data-slot="button"
-                    >
-                      <X size={14} />
-                    </Button>
-                    </Tooltip>
-                  </div>
-                  <div className="text-[11px] text-foreground-muted theme-brutal:text-black/50 font-mono">
-                    {link.maxUses != null
-                      ? formatMessage({ id: "settings.joinLinks.usesWithMax" }, { used: link.useCount, max: link.maxUses })
-                      : formatMessage({ id: "settings.joinLinks.uses" }, { used: link.useCount })}
-                    {" · "}
-                    {link.expiresAt
-                      ? formatMessage({ id: "settings.joinLinks.expires" }, { when: formatShortDateTime(link.expiresAt) })
-                      : formatMessage({ id: "settings.joinLinks.noExpiry" })}
-                  </div>
-                </div>
+                  link={link}
+                  copied={copiedLinkId === link.id}
+                  formatShortDateTime={formatShortDateTime}
+                  onCopy={handleCopy}
+                  onRequestRevoke={setRevokeTarget}
+                />
               ))}
             </div>
           ) : !loading ? (
@@ -3189,8 +3085,8 @@ function JoinLinksSection() {
           message={formatMessage({ id: "settings.joinLinks.confirmMessage" })}
           confirmLabel={formatMessage({ id: "settings.joinLinks.confirmLabel" })}
           loadingLabel={formatMessage({ id: "settings.joinLinks.revoking" })}
-          onConfirm={() => handleRevoke(revokeTarget.id)}
-          onClose={() => setRevokeTarget(null)}
+          onConfirm={handleConfirmRevoke}
+          onClose={handleCloseRevoke}
         />
       )}
     </div>
@@ -3220,32 +3116,38 @@ function OnboardingAgentSection() {
   } | null>(null);
   const [reopeningSetup, setReopeningSetup] = useState(false);
 
+  const serverId = current?.id;
+  const serverSlug = current?.slug;
   const canManageLinks = capabilities.editServerSettings;
-  const onboardingAgentOptions: SelectOption[] = [
+  const onboardingAgentOptions = useMemo<SelectOption[]>(() => [
     { value: "", label: formatMessage({ id: "settings.onboarding.disabledOption" }) },
     ...agents.map((agent) => ({
       value: agent.id,
       label: `@${agent.name}${agent.displayName ? ` (${agent.displayName})` : ""}`,
     })),
-  ];
-  const agentGreetingOptions: SelectOption[] = [
+  ], [agents, formatMessage]);
+  const agentGreetingOptions = useMemo<SelectOption[]>(() => [
     { value: "yes", label: formatMessage({ id: "settings.onboarding.yes" }) },
     { value: "no", label: formatMessage({ id: "settings.onboarding.no" }) },
-  ];
+  ], [formatMessage]);
 
-  // oxlint-disable react-hooks/exhaustive-deps -- load onboarding settings only when the active server id (or permission) changes; depending on the whole `current` store object would refetch on unrelated server-store churn.
-  // Async-loader: load onboarding-settings on server change. Same FP family
-  // as PR #2530 useChannelMembers / InviteAcceptPage / AgentSkills loaders.
+  // Read at failure time so a locale switch does not refetch the settings.
+  const formatLoadError = useEffectEvent(() => formatMessage({ id: "settings.onboarding.failedLoad" }));
+
+  // Async-loader: load onboarding-settings on server change (keyed on the
+  // server id, not the whole `current` store object, so unrelated server-store
+  // churn does not refetch). Same FP family as PR #2530 useChannelMembers /
+  // InviteAcceptPage / AgentSkills loaders.
   // oxlint-disable-next-line react-doctor/no-cascading-set-state
   useEffect(() => {
-    if (!current || !canManageLinks) return;
+    if (!serverId || !canManageLinks) return;
     // oxlint-disable-next-line react-doctor/no-adjust-state-on-prop-change
     setLoading(true);
     // oxlint-disable-next-line react-doctor/no-adjust-state-on-prop-change
     setError("");
     void Promise.all([
       loadServerSettings(),
-      api.get(`/servers/${current.id}/setup-projection`).catch(() => null),
+      api.get(`/servers/${serverId}/setup-projection`).catch(() => null),
     ])
       .then(([settings, projectionResponse]) => {
         if (!settings) throw new Error("Server settings unavailable");
@@ -3260,25 +3162,24 @@ function OnboardingAgentSection() {
         setSaved(false);
       })
       .catch(() => {
-        setError(formatMessage({ id: "settings.onboarding.failedLoad" }));
+        setError(formatLoadError());
       })
       .finally(() => {
         setLoading(false);
       });
-  }, [canManageLinks, current?.id, loadServerSettings]);
-  // oxlint-enable react-hooks/exhaustive-deps
+  }, [canManageLinks, loadServerSettings, serverId]);
 
   const dirty =
     onboardingAgentId !== savedOnboardingAgentId
     || agentAllChannelGreetingEnabled !== savedAgentAllChannelGreetingEnabled;
 
-  const handleSave = async () => {
-    if (!current || !canManageLinks) return;
+  const handleSave = useCallback(async () => {
+    if (!serverId || !canManageLinks) return;
     setSaving(true);
     setSaved(false);
     setError("");
     try {
-      await api.patch(`/servers/${current.id}/onboarding-settings`, {
+      await api.patch(`/servers/${serverId}/onboarding-settings`, {
         onboardingAgentId: onboardingAgentId || null,
         agentAllChannelGreetingEnabled,
       });
@@ -3292,26 +3193,38 @@ function OnboardingAgentSection() {
     } finally {
       setSaving(false);
     }
-  };
+  }, [agentAllChannelGreetingEnabled, canManageLinks, formatMessage, loadServerSettings, onboardingAgentId, serverId]);
 
-  const handleFinishSetup = async () => {
-    if (!current || !isAdminOrOwner || reopeningSetup) return;
+  const handleFinishSetup = useCallback(async () => {
+    if (!serverId || !isAdminOrOwner || reopeningSetup) return;
     setReopeningSetup(true);
     setError("");
     try {
-      const { data } = await api.post(`/servers/${current.id}/setup-transition`, { action: "start" });
+      const { data } = await api.post(`/servers/${serverId}/setup-transition`, { action: "start" });
       setSetupProjection(data);
       // Tell the gate. Without this the server reopened setup and the only visible effect
       // was a navigation: the modal that was supposed to appear never heard about it.
       bumpServerSetupRevision();
-      navigate(`/s/${current.slug}`);
+      navigate(`/s/${serverSlug}`);
     } catch (error: unknown) {
       const responseError = (error as { response?: { data?: { error?: unknown } } }).response?.data?.error;
       setError(typeof responseError === "string" ? responseError : formatMessage({ id: "settings.onboarding.reopenSetupFailed" }));
     } finally {
       setReopeningSetup(false);
     }
-  };
+  }, [formatMessage, isAdminOrOwner, navigate, reopeningSetup, serverId, serverSlug]);
+
+  const handleOnboardingAgentChange = useCallback((value: string | null) => {
+    if (value == null) return;
+    setOnboardingAgentId(value);
+    setSaved(false);
+  }, []);
+
+  const handleGreetingChange = useCallback((value: string | null) => {
+    if (value == null) return;
+    setAgentAllChannelGreetingEnabled(value === "yes");
+    setSaved(false);
+  }, []);
 
   if (!canManageLinks) return null;
 
@@ -3337,11 +3250,7 @@ function OnboardingAgentSection() {
             <div className="w-full sm:w-80 sm:shrink-0">
               <Select
                 value={onboardingAgentId}
-                onValueChange={(value) => {
-                  if (value == null) return;
-                  setOnboardingAgentId(value);
-                  setSaved(false);
-                }}
+                onValueChange={handleOnboardingAgentChange}
                 disabled={!canManageLinks || saving || loading}
                 items={onboardingAgentOptions}
               >
@@ -3370,11 +3279,7 @@ function OnboardingAgentSection() {
             <div className="w-full sm:w-28 sm:shrink-0">
               <Select
                 value={agentAllChannelGreetingEnabled ? "yes" : "no"}
-                onValueChange={(value) => {
-                  if (value == null) return;
-                  setAgentAllChannelGreetingEnabled(value === "yes");
-                  setSaved(false);
-                }}
+                onValueChange={handleGreetingChange}
                 disabled={!canManageLinks || saving || loading}
                 items={agentGreetingOptions}
               >
@@ -3425,7 +3330,7 @@ function OnboardingAgentSection() {
             <Button
               variant="outline" size="sm"
               type="button"
-              onClick={() => void handleFinishSetup()}
+              onClick={handleFinishSetup}
               disabled={reopeningSetup}
               className="inline-flex items-center gap-1.5"
               data-testid="finish-server-setup"
@@ -3463,6 +3368,8 @@ function MemberPermissionsSection() {
     setError("");
   }, [server?.id, server?.hideHumansFromMembers]);
 
+  const handleHideHumansChange = useCallback((checked: boolean) => setHideHumansFromMembers(checked), []);
+
   if (!server) return null;
 
   const dirty = hideHumansFromMembers !== server.hideHumansFromMembers;
@@ -3497,7 +3404,7 @@ function MemberPermissionsSection() {
             size="md"
             checked={hideHumansFromMembers}
             disabled={!canEdit || saving}
-            onCheckedChange={(checked) => setHideHumansFromMembers(checked)}
+            onCheckedChange={handleHideHumansChange}
             className="mt-0.5"
           />
           <span className="min-w-0">
@@ -3555,6 +3462,11 @@ function SystemChannelsSection() {
     setError("");
   }, [currentAllChannelHidden]);
 
+  const handleAllChannelHiddenChange = useCallback((checked: boolean) => {
+    setAllChannelHidden(checked);
+    setSaved(false);
+  }, []);
+
   if (!showSystemChannelSettings) return null;
 
   const dirty = allChannelHidden !== currentAllChannelHidden;
@@ -3596,10 +3508,7 @@ function SystemChannelsSection() {
             size="md"
             checked={allChannelHidden}
             disabled={saving}
-            onCheckedChange={(checked) => {
-              setAllChannelHidden(checked);
-              setSaved(false);
-            }}
+            onCheckedChange={handleAllChannelHiddenChange}
             className="mt-0.5"
           />
           <span className="min-w-0">
@@ -3659,6 +3568,8 @@ function ServerTranslationSection() {
     setError("");
   }, [settings.serverTranslationEnabled]);
 
+  const handleEnabledChange = useCallback((checked: boolean) => setEnabled(checked), []);
+
   if (!currentServer) return null;
 
   const dirty = enabled !== settings.serverTranslationEnabled;
@@ -3694,7 +3605,7 @@ function ServerTranslationSection() {
             size="md"
             checked={enabled}
             disabled={saving || settingsLoading || !settings.canManageServerTranslation}
-            onCheckedChange={(checked) => setEnabled(checked)}
+            onCheckedChange={handleEnabledChange}
             className="mt-0.5"
           />
           <span className="min-w-0">
@@ -3815,7 +3726,7 @@ function PlanBillingLoadingSection() {
   );
 }
 
-function DowngradeWarningCard({ server, usage }: { server: { planDowngradedAt: string | null }; usage: { agents: number; machines: number; channels?: number } | null }) {
+export function DowngradeWarningCard({ server, usage }: { server: { planDowngradedAt: string | null }; usage: { agents: number; machines: number; channels?: number } | null }) {
   const { formatMessage } = useIntl();
   if (!server.planDowngradedAt) return null;
 
@@ -3895,7 +3806,7 @@ function DowngradeWarningCard({ server, usage }: { server: { planDowngradedAt: s
   );
 }
 
-interface BillingSeatUpdatePreview {
+export interface BillingSeatUpdatePreview {
   status: "preview";
   currentPackQuantity: number;
   requestedPackQuantity: number;
@@ -3915,15 +3826,10 @@ interface BillingSeatUpdatePreview {
 }
 
 // Stryker disable all: Settings billing UI wiring is covered by billingSeatInput behavior tests, source-copy contracts, and visual preview screenshots.
-export function PlanSection() {
-  const { formatMessage, locale: intlLocale } = useIntl();
-  const server = useServerStore((s) => s.current);
-  const usage = useServerStore((s) => s.usage);
-  const billing = useServerStore((s) => s.billing);
-  const loadingUsage = useServerStore((s) => s.loadingUsage);
-  const loadingBilling = useServerStore((s) => s.loadingBilling);
-  const loadUsage = useServerStore((s) => s.loadUsage);
-  const loadBilling = useServerStore((s) => s.loadBilling);
+// The billing draft lives above PlanSection's loading gate: `loadBilling()`
+// flips the section back to its skeleton mid-action, and the notice, error and
+// draft it leaves behind must survive that remount of PlanSectionContent.
+export function usePlanBillingDraft() {
   const [billingAction, setBillingAction] = useState<"checkout" | "portal" | "preview" | "update" | "cancel" | null>(null);
   const [billingError, setBillingError] = useState("");
   const [billingNotice, setBillingNotice] = useState("");
@@ -3934,6 +3840,29 @@ export function PlanSection() {
   const [confirmBillingAction, setConfirmBillingAction] = useState<"checkout" | "update" | null>(null);
   const [promotionCode, setPromotionCode] = useState("");
   const [seatUpdatePreview, setSeatUpdatePreview] = useState<BillingSeatUpdatePreview | null>(null);
+  return {
+    billingAction, setBillingAction,
+    billingError, setBillingError,
+    billingNotice, setBillingNotice,
+    desiredSeatOverride, setDesiredSeatOverride,
+    desiredSeatInput, setDesiredSeatInput,
+    billingInterval, setBillingInterval,
+    showCancelSubscriptionConfirm, setShowCancelSubscriptionConfirm,
+    confirmBillingAction, setConfirmBillingAction,
+    promotionCode, setPromotionCode,
+    seatUpdatePreview, setSeatUpdatePreview,
+  };
+}
+
+export function PlanSection() {
+  const server = useServerStore((s) => s.current);
+  const usage = useServerStore((s) => s.usage);
+  const billing = useServerStore((s) => s.billing);
+  const loadingUsage = useServerStore((s) => s.loadingUsage);
+  const loadingBilling = useServerStore((s) => s.loadingBilling);
+  const loadUsage = useServerStore((s) => s.loadUsage);
+  const loadBilling = useServerStore((s) => s.loadBilling);
+  const draft = usePlanBillingDraft();
 
   useEffect(() => {
     loadUsage();
@@ -3944,888 +3873,9 @@ export function PlanSection() {
     return <PlanBillingLoadingSection />;
   }
 
-  const plan = (billing?.plan ?? server.plan) as ServerPlan;
-  const config = PLAN_CONFIG[plan];
-  const limits = getEffectiveLimits(plan);
-  const pricedLimits = config.limits;
-  const capacity = billing?.capacity;
-
-  const agentCount = billing?.usage.agents ?? usage?.agents ?? 0;
-  const humanCount = billing?.usage.humans;
-  const usesUniversalSeats = capacity != null && capacity.maxUniversalSeats !== -1;
-  const universalSeatLimit = usesUniversalSeats ? capacity?.maxUniversalSeats ?? 0 : 0;
-  const usedHumanUniversalSeats = Math.max(0, humanCount ?? 0);
-  const usedAgentUniversalSeats = Math.max(0, agentCount * PRO_AGENT_SEAT_FRACTION);
-  const usedUniversalSeats = Math.max(
-    0,
-    billing?.usage.universalSeats ?? usedHumanUniversalSeats + usedAgentUniversalSeats,
-  );
-  const seatUsageScale = universalSeatLimit > 0 && usedUniversalSeats > universalSeatLimit
-    ? universalSeatLimit / usedUniversalSeats
-    : 1;
-  const humanSeatUsagePercent = universalSeatLimit > 0
-    ? Math.min(100, (usedHumanUniversalSeats * seatUsageScale / universalSeatLimit) * 100)
-    : 0;
-  const agentSeatUsagePercent = universalSeatLimit > 0
-    ? Math.min(100, (usedAgentUniversalSeats * seatUsageScale / universalSeatLimit) * 100)
-    : 0;
-  const canManageBilling = billing?.permissions.canManageBilling === true;
-  const billingControlsState = getBillingControlsState({
-    plan: billing?.plan ?? server?.plan ?? null,
-    subscriptionStatus: billing?.subscription?.status ?? null,
-  });
-  const isProPlan = plan === "pro";
-  const showSeatUsage = isProPlan;
-  const billingControlsDisabledReason = !canManageBilling
-    ? formatMessage({ id: "billing.onlyServerOwnersCanChangeBilling" })
-    : !billing?.stripeConfigured
-      ? formatMessage({ id: "billing.paidPlansAreNotAvailableYet" })
-      : null;
-  const formatLimit = (value: number | undefined) => value == null
-    ? "..."
-    : value === -1 ? formatMessage({ id: "billing.unlimited" }) : String(value);
-  const formatBytes = (value: number | undefined) => {
-    if (value == null || value < 0) return formatMessage({ id: "billing.unlimited" });
-    if (value >= 1024 * 1024) return `${Math.round(value / 1024 / 1024)} MB`;
-    return `${Math.round(value / 1024)} KB`;
-  };
-  const formatSeatUsageNumber = (value: number) => value.toFixed(1).replace(/\.0$/, "");
-  const finalTrialActive = isTrialActive();
-  const formatUsd = (value: number) => Number.isInteger(value) ? String(value) : value.toFixed(2);
-  const currentHumanSeats = billing?.provisioned.humans ?? 0;
-  const currentAgentSeats = billing?.provisioned.agents ?? 0;
-  const currentSeatQuantity = billing?.provisioned.proPackQuantity ?? 0;
-  const minimumUsageSeatQuantity = Math.max(1, Math.ceil(usedUniversalSeats));
-  const minimumSeatQuantity = isProPlan ? Math.max(1, currentSeatQuantity) : 1;
-  const isCheckoutMode = billingControlsState.canCheckout;
-  const isManageSeatMode = !isCheckoutMode && billingControlsState.canUpdatePacks && isProPlan;
-  const showManagePlanSection = isCheckoutMode || billingControlsState.canUpdatePacks;
-  const isCancelScheduled = billing?.subscription?.cancelAtPeriodEnd === true;
-  const minimumManageSeatQuantity = Math.max(1, minimumUsageSeatQuantity);
-  const defaultSeatInputQuantity = isManageSeatMode
-    ? Math.max(minimumManageSeatQuantity, currentSeatQuantity)
-    : Math.max(minimumUsageSeatQuantity, minimumSeatQuantity);
-  const requestedSeatInputQuantity = desiredSeatOverride ?? defaultSeatInputQuantity;
-  const draftRequestedSeatQuantity = requestedSeatInputQuantity;
-  const billingSeatDraftState = getBillingSeatDraftState({
-    requestedSeatQuantity: draftRequestedSeatQuantity,
-    draftSeatQuantity: draftRequestedSeatQuantity,
-    minimumUsageSeatQuantity,
-    minimumSeatQuantity: isManageSeatMode ? 1 : minimumSeatQuantity,
-  });
-  const requestedSeatQuantity = billingSeatDraftState.requestedSeatQuantity;
-  const draftSeatQuantity = billingSeatDraftState.draftSeatQuantity;
-  const draftProvisionedAgentSeats = draftSeatQuantity * PRO_AGENT_SEAT_BLOCK_SIZE;
-  const requestedHumanSeatCapacity = requestedSeatQuantity;
-  const requestedAgentSeatCapacity = requestedSeatQuantity * PRO_AGENT_SEAT_BLOCK_SIZE;
-  const draftBelowRequiredCoverage = billingSeatDraftState.belowCurrentUsage;
-  const checkoutRequest = {
-    targetPlan: "pro",
-    billingInterval,
-    seatQuantity: requestedSeatQuantity,
-    humanSeatQuantity: requestedHumanSeatCapacity,
-    agentSeatQuantity: requestedAgentSeatCapacity,
-  };
-  const managePlanTitle = isCheckoutMode
-    ? formatMessage({ id: "billing.upgradeToPro" })
-    : isManageSeatMode ? (formatMessage({ id: "billing.manageSeats" })) : formatMessage({ id: "billing.managePlan" });
-  const currentBillingInterval = billing?.subscription?.billingInterval ?? billing?.price?.billingInterval ?? DEFAULT_BILLING_INTERVAL;
-  const currentBillingIntervalLabel = currentBillingInterval === "annual" ? formatMessage({ id: "billing.yearly" }) : formatMessage({ id: "billing.monthly" });
-  const currentTotalLabel = billing?.price
-    ? getBillingCurrentTotalLabel(
-      currentBillingInterval,
-      billing.price.monthlyUsd,
-      billing.price.annualUsd,
-      formatUsd,
-    )
-    : null;
-  const currentPlanPresentation = getSettingsBillingPlanPresentation(
-    plan,
-    config.displayName,
-    currentHumanSeats,
-    currentAgentSeats,
-    currentSeatQuantity,
-    formatProAgentSeatFraction(),
-  );
-  const currentPlanDisplayName = formatMessage({ id: currentPlanPresentation.displayName });
-  const currentPlanDescription = formatMessage(
-    { id: currentPlanPresentation.description },
-    currentPlanPresentation.descriptionValues,
-  );
-  const pricedFileUploadLimitLabel = plan === "free" ? `${formatBytes(FREE_MONTHLY_FILE_UPLOAD_LIMIT_BYTES)}/${formatMessage({ id: "billing.month" })}` : formatMessage({ id: "billing.unlimited" });
-  const comparePlansHref = "https://raft.build/#pricing";
-  const currentIncludedFeatures = currentPlanPresentation.includedFeatures.map((id) => formatMessage({ id }));
-  const currentNotIncludedFeatures = currentPlanPresentation.notIncludedFeatures.map((id) => formatMessage({ id }));
-  const hasNotIncludedFeatures = currentNotIncludedFeatures.length > 0;
-  const selectedTotalLabels = getBillingSelectedTotalLabels(
-    isManageSeatMode ? currentBillingInterval : billingInterval,
-    draftSeatQuantity,
-    PRO_SEAT_MONTHLY_USD,
-    PRO_SEAT_ANNUAL_USD,
-    formatUsd,
-  );
-  // Priced totals arrive as {id, amount}; the "/ year" | "/ 年" period is part of
-  // the translation now, so there is nothing left to patch after the fact.
-  const formatPricedTotal = (total: BillingPricedTotal | null) =>
-    total == null ? null : formatMessage({ id: total.id }, { amount: total.amount });
-  const localizedSelectedTotalLabels = {
-    totalLabel: formatPricedTotal(selectedTotalLabels.totalLabel)!,
-    originalLabel: formatPricedTotal(selectedTotalLabels.originalLabel),
-  };
-  const localizedCurrentTotalLabel = formatPricedTotal(currentTotalLabel);
-  const seatDelta = draftSeatQuantity - currentSeatQuantity;
-  const additionalSeats = Math.max(0, seatDelta);
-  const removedSeats = Math.max(0, -seatDelta);
-  const normalizedPromotionCode = promotionCode.trim();
-  const formatBillingAmount = (amount: number, currency: string) => new Intl.NumberFormat(
-    intlLocale.toLowerCase().startsWith("zh") ? "zh-CN" : "en-US",
-    { style: "currency", currency: currency.toUpperCase() },
-  ).format(amount / 100);
-  const formatSeatLabel = (count: number) => formatMessage({ id: "billing.seatCount" }, { count });
-  const formatHumanCapacityLabel = (count: number) => formatMessage({ id: "billing.upToHumans" }, { count });
-  const formatAgentCapacityLabel = (count: number) => formatMessage({ id: "billing.orAgents" }, { count });
-  const handleSeatInputChange = (event: ChangeEvent<HTMLInputElement>) => {
-    applyBillingSeatInputChange(
-      event.currentTarget.value,
-      setDesiredSeatInput,
-      setDesiredSeatOverride,
-    );
-  };
-  // Stryker disable next-line BlockStatement: component wiring delegates to billingSeatInput helpers covered by DOM-gate behavior tests.
-  const commitSeatInput = () => {
-    applyBillingSeatInputCommit(
-      desiredSeatInput,
-      requestedSeatInputQuantity,
-      isManageSeatMode ? minimumManageSeatQuantity : Math.max(minimumUsageSeatQuantity, minimumSeatQuantity),
-      setDesiredSeatOverride,
-      setDesiredSeatInput,
-    );
-  };
-  const noSeatChangeSelected = requestedSeatQuantity === currentSeatQuantity;
-  const updateSeatButtonDisabled = !!billingControlsDisabledReason
-    || draftBelowRequiredCoverage
-    || billingAction != null
-    || (!isCancelScheduled && noSeatChangeSelected);
-  const updateSeatButtonTitle = billingControlsDisabledReason
-    ?? (draftBelowRequiredCoverage
-      ? formatMessage({ id: "billing.keepAtLeastSeats" }, { min: minimumUsageSeatQuantity })
-      : null)
-    ?? (isCancelScheduled
-      ? noSeatChangeSelected
-        ? formatMessage({ id: "billing.reactivateThisProSubscriptionBeforeTheCurren" })
-        : formatMessage({ id: "billing.reactivateThisSubscriptionAndUpdateSeats" })
-      : noSeatChangeSelected
-        ? formatMessage({ id: "billing.enterADifferentSeatTotal" })
-      : formatMessage({ id: "billing.reviewProSeatUpdateBeforeConfirming" }));
-  const updateSeatButtonLabel = isCancelScheduled
-    ? noSeatChangeSelected ? formatMessage({ id: "billing.reactivateSubscription" }) : formatMessage({ id: "billing.reactivateAndUpdateSeats" })
-    : formatMessage({ id: "billing.reviewSeatUpdate" });
-  const updateSeatButtonBusyLabel = billingAction === "preview"
-    ? formatMessage({ id: "billing.reviewing" })
-    : isCancelScheduled && noSeatChangeSelected ? formatMessage({ id: "billing.reactivating" }) : formatMessage({ id: "billing.updating" });
-  const capacityLabel = isManageSeatMode
-    ? seatDelta > 0
-      ? formatMessage({ id: "billing.addsSeats" }, { seats: formatSeatLabel(additionalSeats) })
-      : seatDelta < 0
-        ? formatMessage({ id: "billing.removesSeats" }, { seats: formatSeatLabel(removedSeats) })
-        : formatMessage({ id: "billing.keepsCurrentSeats" })
-    : formatMessage({ id: "billing.selectedSeats" }, { seats: formatSeatLabel(draftSeatQuantity) });
-  const billingSeatCopyMode = isManageSeatMode ? "manageSeats" : "default";
-  const billingSeatCopyLabels = getBillingSeatCopyLabels(billingSeatCopyMode);
-  const billingTotalSummaryLabels = getBillingTotalSummaryLabels(
-    billingSeatCopyMode,
-    isManageSeatMode ? currentBillingInterval : billingInterval,
-  );
-  // The two `localized…Labels` objects used to hold a full parallel Chinese copy
-  // of these label groups behind `locale === "zh-CN"`, so every label existed
-  // twice and could drift independently. The ids carry both languages now, so
-  // the branch is gone and there is only one place to change a label.
-  // Format at this boundary so the ~11 consumers below keep receiving STRINGS.
-  // Without this the ids typecheck perfectly and the UI renders the literal text
-  // "billing.totalSeats" — the same trap as the plan-presentation change in
-  // #5774: the type system proves every value is a valid id and says nothing
-  // about whether the consumer formats it.
-  const localizedBillingSeatCopyLabels = {
-    seatQuantityLabel: formatMessage({ id: billingSeatCopyLabels.seatQuantityLabel }),
-    seatSummaryLabel: formatMessage({ id: billingSeatCopyLabels.seatSummaryLabel }),
-    billableSeatsSummaryLabel: formatMessage({ id: billingSeatCopyLabels.billableSeatsSummaryLabel }),
-    capacitySummaryLabel: formatMessage({ id: billingSeatCopyLabels.capacitySummaryLabel }),
-    quantityHelpLabel: formatMessage(
-      { id: billingSeatCopyLabels.quantityHelpLabel },
-      { capacity: capacityLabel },
-    ),
-  };
-  const localizedBillingTotalSummaryLabels = {
-    currentTotalLabel: billingTotalSummaryLabels.currentTotalLabel
-      ? formatMessage({ id: billingTotalSummaryLabels.currentTotalLabel })
-      : null,
-    totalLabel: formatMessage({ id: billingTotalSummaryLabels.totalLabel }),
-  };
-  const billingSeatDraftError = draftBelowRequiredCoverage
-    ? isManageSeatMode
-      ? formatMessage({ id: "billing.keepAtLeastSeats" }, { min: minimumUsageSeatQuantity })
-      : formatMessage({ id: "billing.enterAtLeastSeats" }, { min: minimumUsageSeatQuantity })
-    : null;
-  // Stryker disable next-line StringLiteral: validated by source-copy contracts and visual preview, not by the DOM mutation corpus.
-  const managePlanInputPrompt = isCheckoutMode
-    ? formatMessage({ id: "billing.enterTheNumberOfSeatsToBuy" })
-    : formatMessage({ id: "billing.enterTheTotalSeatsAfterThisUpdate" });
-  const seatInputValue = getBillingSeatInputValue(desiredSeatInput, requestedSeatInputQuantity);
-  const seatSummaryValue = draftSeatQuantity;
-
-  const handleCheckout = async () => {
-    if (billingControlsDisabledReason || !billingControlsState.canCheckout) return;
-    setBillingError("");
-    setBillingNotice("");
-    setBillingAction("checkout");
-    try {
-      const { data } = await api.post("/billing/checkout", {
-        ...checkoutRequest,
-        successUrl: window.location.href,
-        cancelUrl: window.location.href,
-      });
-      window.location.href = data.url;
-    } catch (err: any) {
-      setBillingError(err.response?.data?.error || formatMessage({ id: "billing.failedToStartCheckout" }));
-      setBillingAction(null);
-    }
-  };
-
-  const handlePortal = async () => {
-    if (billingControlsDisabledReason || !billingControlsState.canOpenPortal) return;
-    setBillingError("");
-    setBillingNotice("");
-    setBillingAction("portal");
-    try {
-      const { data } = await api.post("/billing/portal", {
-        returnUrl: window.location.href,
-      });
-      window.location.href = data.url;
-    } catch (err: any) {
-      setBillingError(err.response?.data?.error || formatMessage({ id: "billing.failedToOpenBillingPortal" }));
-      setBillingAction(null);
-    }
-  };
-
-  const handlePackQuantityUpdate = async () => {
-    if (billingControlsDisabledReason || !billingControlsState.canUpdatePacks) return;
-    setBillingError("");
-    setBillingNotice("");
-    setBillingAction("update");
-    try {
-      const { data } = await api.post("/billing/seat-pack-quantity", {
-        seatQuantity: requestedSeatQuantity,
-        humanSeatQuantity: requestedHumanSeatCapacity,
-        agentSeatQuantity: requestedAgentSeatCapacity,
-        ...(seatUpdatePreview ? { previewToken: seatUpdatePreview.previewToken } : {}),
-      });
-      if (data.status === "pending_payment") {
-        setBillingNotice(formatMessage({ id: "billing.seatUpdateIsPendingStripePaymentConfirmation" }));
-      } else if (data.status === "unchanged") {
-        setBillingNotice(formatMessage({ id: "billing.seatQuantitiesAreAlreadyUpToDate" }));
-      } else if (data.status === "reactivated") {
-        setBillingNotice(formatMessage({ id: "billing.subscriptionReactivatedYourCurrentProSeatCap" }));
-      } else if (data.status === "updated" || data.effectiveAt === "current") {
-        setBillingNotice(formatMessage({ id: "billing.seatUpdateConfirmedCapacityHasBeenRefreshedFro" }));
-      } else {
-        setBillingNotice(formatMessage({ id: "billing.seatUpdateRequestedCapacityWillUpdateAfterStri" }));
-      }
-      await loadBilling();
-      setDesiredSeatOverride(null);
-      setDesiredSeatInput(null);
-      setPromotionCode("");
-      setSeatUpdatePreview(null);
-    } catch (err: any) {
-      setBillingError(err.response?.data?.error || formatMessage({ id: "billing.failedToUpdateSeats" }));
-    } finally {
-      setBillingAction(null);
-    }
-  };
-
-  const handleCancelSubscription = async () => {
-    if (billingControlsDisabledReason || !billingControlsState.canOpenPortal) return;
-    setBillingError("");
-    setBillingNotice("");
-    setBillingAction("cancel");
-    try {
-      await api.post("/billing/cancel");
-      await loadBilling();
-      setBillingNotice(formatMessage({ id: "billing.subscriptionCancellationScheduledForTheEndOf" }));
-      setShowCancelSubscriptionConfirm(false);
-    } catch (err: any) {
-      setBillingError(err.response?.data?.error || formatMessage({ id: "billing.failedToCancelSubscription" }));
-    } finally {
-      setBillingAction(null);
-    }
-  };
-
-  const openCheckoutConfirm = () => {
-    if (billingControlsDisabledReason || billingSeatDraftError || !billingControlsState.canCheckout) return;
-    setConfirmBillingAction("checkout");
-  };
-
-  const openSeatUpdateConfirm = async () => {
-    if (updateSeatButtonDisabled || !billingControlsState.canUpdatePacks) return;
-    setBillingError("");
-    setBillingNotice("");
-    setSeatUpdatePreview(null);
-    if (seatDelta <= 0 || !normalizedPromotionCode) {
-      setConfirmBillingAction("update");
-      return;
-    }
-    setBillingAction("preview");
-    try {
-      const { data } = await api.post<BillingSeatUpdatePreview>("/billing/seat-pack-quantity/preview", {
-        seatQuantity: requestedSeatQuantity,
-        humanSeatQuantity: requestedHumanSeatCapacity,
-        agentSeatQuantity: requestedAgentSeatCapacity,
-        promotionCode: normalizedPromotionCode,
-      });
-      setSeatUpdatePreview(data);
-      setConfirmBillingAction("update");
-    } catch (err: unknown) {
-      const axiosErr = err as { response?: { data?: { error?: string } } };
-      setBillingError(axiosErr.response?.data?.error || formatMessage({ id: "billing.failedToPreviewSeatUpdate" }));
-    } finally {
-      setBillingAction(null);
-    }
-  };
-
-  return (
-    <div className="mb-6">
-      <SectionHeader
-        className="mb-3"
-        icon={<CreditCard size={16} />}
-        label={formatMessage({ id: "billing.currentPlan" })}
-      />
-
-      {/* Downgrade warning */}
-      {server?.planDowngradedAt && (
-        <DowngradeWarningCard server={server} usage={usage} />
-      )}
-
-      {/* Free trial notice */}
-      {plan === "free" && finalTrialActive && (
-        <div className="mb-4 border border-line-muted theme-brutal:border-2 theme-brutal:border-black bg-primary-soft theme-brutal:bg-soft-signal/30 shadow-raft-sm theme-brutal:shadow-brutal-sm p-4">
-          <div className="flex items-center gap-2 mb-1">
-            <span className="text-sm font-bold">{formatMessage({ id: "billing.finalTrialPeriod" })}</span>
-          </div>
-          <p className="text-xs text-foreground-muted theme-brutal:text-black/60 font-mono">
-                  {formatMessage(
-                    { id: "billing.trialActiveThrough" },
-                    {
-                      date: formatGlobalTrialCutoffDate(intlLocale),
-                    },
-                  )}
-          </p>
-        </div>
-      )}
-
-      <div
-        className="mb-6 border border-line-muted bg-layer-panel shadow-raft-sm theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white theme-brutal:shadow-brutal-sm"
-        data-testid="billing-current-plan-card"
-      >
-        <div className="border-b-2 border-line-muted theme-brutal:border-black bg-layer-canvas-muted theme-brutal:bg-brutal-cream px-4 py-4">
-          <div className="flex flex-wrap items-center gap-3">
-            <div className="min-w-0">
-              <div className="text-lg font-bold text-foreground-strong theme-brutal:text-black">{currentPlanDisplayName}</div>
-              <div className="text-sm text-foreground-muted theme-brutal:text-black/60">
-                {currentPlanDescription}
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <div className={`grid gap-4 p-4 ${hasNotIncludedFeatures ? "lg:grid-cols-2" : ""}`}>
-          <div>
-            <div className="mb-3 text-sm font-bold text-foreground-strong theme-brutal:text-black">{formatMessage({ id: "billing.included" })}</div>
-            <div className="space-y-3">
-              {currentIncludedFeatures.map((feature) => (
-                <div key={feature} className="flex items-start gap-3 text-sm text-foreground-strong theme-brutal:text-black">
-                  <Check size={16} className="mt-0.5 shrink-0 text-green-700" />
-                  <span>{feature}</span>
-                </div>
-              ))}
-            </div>
-          </div>
-
-          {hasNotIncludedFeatures && (
-            <div>
-              <div className="mb-3 text-sm font-bold text-foreground-muted theme-brutal:text-black/60">{formatMessage({ id: "billing.notIncluded" })}</div>
-              <div className="space-y-3">
-                {currentNotIncludedFeatures.map((feature) => (
-                  <div key={feature} className="flex items-start gap-3 text-sm text-foreground-strong theme-brutal:text-black">
-                    <X size={16} className="mt-0.5 shrink-0 text-brutal-red" />
-                    <span>{feature}</span>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-        </div>
-
-        <div className="border-t-2 border-line-muted theme-brutal:border-black/10 px-4 py-4">
-          {showSeatUsage && usesUniversalSeats && (
-            <div className="space-y-3">
-              <div className="flex items-center justify-between gap-3">
-                <span className="text-xs font-bold text-foreground-strong theme-brutal:text-black">{formatMessage({ id: "billing.seat" })}</span>
-                <span className="text-xs font-mono text-foreground-muted theme-brutal:text-black/60">
-                  {formatSeatUsageNumber(usedUniversalSeats)} / {formatLimit(universalSeatLimit)} {formatMessage({ id: "billing.used" })}
-                </span>
-              </div>
-              <Progress value={Math.min(100, humanSeatUsagePercent + agentSeatUsagePercent)} aria-label={formatMessage({ id: "billing.seat" })}>
-              <ProgressTrack className="flex !overflow-hidden">
-                {humanSeatUsagePercent > 0 && (
-                  <Tooltip content={formatMessage(
-                    { id: "billing.humansUsingSeats" },
-                    {
-                      people: humanCount ?? 0,
-                      seatsText: formatSeatUsageNumber(usedHumanUniversalSeats),
-                      seatCount: usedHumanUniversalSeats,
-                    },
-                  )}>
-                  <ProgressIndicator
-                    className="rounded-none h-full bg-primary-strong theme-brutal:bg-soft-signal"
-                    style={{ width: `${humanSeatUsagePercent}%` }}
-                    data-slot="progress-indicator"
-                  />
-                  </Tooltip>
-                )}
-                {agentSeatUsagePercent > 0 && (
-                  <Tooltip content={formatMessage(
-                    { id: "billing.agentsUsingSeats" },
-                    {
-                      people: agentCount,
-                      seatsText: formatSeatUsageNumber(usedAgentUniversalSeats),
-                      seatCount: usedAgentUniversalSeats,
-                    },
-                  )}>
-                  <ProgressIndicator
-                    className="rounded-none h-full bg-accent-strong theme-brutal:bg-brutal-pink"
-                    style={{ width: `${agentSeatUsagePercent}%` }}
-                    data-slot="progress-indicator"
-                  />
-                  </Tooltip>
-                )}
-              </ProgressTrack>
-              </Progress>
-              <div className="flex flex-wrap items-center gap-4 text-xs">
-                <div className="flex items-center gap-2">
-                  <span className="flex items-center gap-2 font-bold text-foreground-strong">
-                    <Status variant="primary" size="sm" />
-                    {formatMessage({ id: "billing.humans" })}
-                  </span>
-                </div>
-                <div className="flex items-center gap-2">
-                  <span className="flex items-center gap-2 font-bold text-foreground-strong">
-                    <Status variant="accent" size="sm" />
-                    {formatMessage({ id: "billing.agents" })}
-                  </span>
-                </div>
-              </div>
-            </div>
-          )}
-          {showSeatUsage && !usesUniversalSeats && (
-            <div className="grid gap-3 sm:grid-cols-2">
-              {humanCount != null && (
-                <div className="flex items-center justify-between gap-3">
-                  <span className="text-xs font-bold text-foreground-strong theme-brutal:text-black">{formatMessage({ id: "billing.humans" })}</span>
-                  <span className="text-xs font-mono text-foreground-muted theme-brutal:text-black/60">
-                    {humanCount} / {formatLimit(capacity?.maxHumans)}
-                  </span>
-                </div>
-              )}
-              <div className="flex items-center justify-between gap-3">
-                <span className="text-xs font-bold text-foreground-strong theme-brutal:text-black">{formatMessage({ id: "billing.agents" })}</span>
-                <span className="text-xs font-mono text-foreground-muted theme-brutal:text-black/60">
-                  {agentCount} / {formatLimit(capacity?.maxAgents ?? limits.maxAgents)}
-                </span>
-              </div>
-            </div>
-          )}
-          <div className="grid gap-3 sm:grid-cols-2">
-            {plan === "free" && (
-              <div className="flex items-center justify-between gap-3">
-                <span className="text-xs font-bold text-foreground-strong theme-brutal:text-black">{formatMessage({ id: "billing.messageHistory" })}</span>
-                <span className="text-xs font-mono text-foreground-muted theme-brutal:text-black/60">
-                  {pricedLimits.messageHistoryDays === -1 ? formatMessage({ id: "billing.unlimited" }) : `${pricedLimits.messageHistoryDays} ${formatMessage({ id: "billing.days" })}`}
-                </span>
-              </div>
-            )}
-            {plan === "free" && billing?.fileUploadQuota && (
-              <div className="flex items-center justify-between gap-3">
-                <span className="text-xs font-bold text-foreground-strong theme-brutal:text-black">{formatMessage({ id: "billing.fileUploads" })}</span>
-                <span className="text-xs font-mono text-foreground-muted theme-brutal:text-black/60">
-                  {billing.fileUploadQuota.limited
-                    ? `${formatBytes(billing.fileUploadQuota.usedBytes)} / ${formatBytes(billing.fileUploadQuota.limitBytes)} ${formatMessage({ id: "billing.thisMonth" })}`
-                    : pricedFileUploadLimitLabel}
-                </span>
-              </div>
-            )}
-          </div>
-        </div>
-        <div className="flex flex-wrap items-center justify-between gap-3 border-t-2 border-line-muted theme-brutal:border-black/10 px-4 py-4">
-          {billingControlsState.canOpenPortal ? (
-            <div className="flex min-w-0 flex-wrap gap-2">
-              <div className="flex flex-wrap gap-2">
-                <Tooltip content={billingControlsDisabledReason ?? formatMessage({ id: "billing.openStripeBillingPortal" })}>
-                <Button
-                  variant="outline" size="sm"
-                  type="button"
-                  disabled={!!billingControlsDisabledReason || billingAction != null}
-                  onClick={handlePortal}
-                  data-slot="button"
-                >
-                  {billingAction === "portal" ? formatMessage({ id: "billing.opening" }) : formatMessage({ id: "billing.billingPortal" })}
-                </Button>
-                </Tooltip>
-                {!isCancelScheduled && (
-                  <Tooltip content={billingControlsDisabledReason ?? formatMessage({ id: "billing.cancelTheWholeProSubscriptionAtPeriodEnd" })}>
-                  <Button
-                    variant="outline" size="sm"
-                    type="button"
-                    disabled={!!billingControlsDisabledReason || billingAction != null}
-                    onClick={() => setShowCancelSubscriptionConfirm(true)}
-                    data-slot="button"
-                  >
-                    {formatMessage({ id: "billing.cancelSubscription2" })}
-                  </Button>
-                  </Tooltip>
-                )}
-              </div>
-            </div>
-          ) : (
-            <span />
-          )}
-          <Button
-            render={<a href={comparePlansHref} aria-label={formatMessage({ id: "billing.seeAllFeaturesAndComparePlans" })} />}
-            nativeButton={false}
-            size="sm"
-            variant="outline"
-          >
-            <FormattedMessage id="billing.seeAllFeaturesAndComparePlans" />
-          </Button>
-        </div>
-      </div>
-
-      {showManagePlanSection && (
-        <>
-          <SectionHeader
-            className="mb-3"
-            icon={isCheckoutMode ? <CreditCard size={16} /> : <Plus size={16} />}
-            label={managePlanTitle}
-          />
-
-          <div className="mb-6 grid gap-4 border border-line-muted bg-layer-panel theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white p-4 shadow-raft-sm theme-brutal:shadow-brutal-sm lg:grid-cols-[minmax(0,1fr)_280px]">
-            <div>
-              {isCheckoutMode && (
-                <div className="mb-4">
-                  <div className="mb-2 text-sm font-bold text-foreground-strong theme-brutal:text-black">{formatMessage({ id: "billing.howOftenDoYouWantToBeBilled" })}</div>
-                  <BillingIntervalSegmentedControl
-                    value={billingInterval}
-                    onValueChange={setBillingInterval}
-                    disabled={!!billingControlsDisabledReason || billingAction != null}
-                  />
-                </div>
-              )}
-
-              {billing?.subscription && (
-                <div className="mb-4 text-xs font-mono text-foreground-muted theme-brutal:text-black/60">
-                  {formatMessage({ id: "billing.billingInterval" })}: {isCancelScheduled
-                    ? formatMessage(
-                        { id: "billing.intervalWithCancellationScheduled" },
-                        { interval: currentBillingIntervalLabel },
-                      )
-                    : currentBillingIntervalLabel}
-                </div>
-              )}
-
-              <div className="flex min-w-0 flex-col gap-3">
-                <span className="text-sm font-bold text-foreground-strong theme-brutal:text-black">
-                  {managePlanInputPrompt}
-                </span>
-                <div className="flex flex-wrap items-end gap-3">
-                  <label className="flex flex-col gap-1">
-                    <span className="text-xs font-bold text-foreground-muted theme-brutal:text-black/60">{localizedBillingSeatCopyLabels.seatQuantityLabel}</span>
-                    <Input
-                      className="w-28 text-sm font-mono"
-                      type="text"
-                      inputMode="numeric"
-                      pattern="[0-9]*"
-                      min={isManageSeatMode ? minimumManageSeatQuantity : Math.max(minimumUsageSeatQuantity, minimumSeatQuantity)}
-                      step={1}
-                      aria-label={localizedBillingSeatCopyLabels.seatQuantityLabel}
-                      value={seatInputValue}
-                      disabled={!!billingControlsDisabledReason || billingAction != null}
-                      onChange={handleSeatInputChange}
-                      onBlur={commitSeatInput}
-                    />
-                  </label>
-                  {isManageSeatMode && seatDelta > 0 && (
-                    <label className="flex w-64 max-w-full flex-col gap-1">
-                      <span className="text-xs font-bold text-foreground-muted theme-brutal:text-black/60">{formatMessage({ id: "billing.promotionCodeOptional" })}</span>
-                      <Input
-                        className="w-full text-sm font-mono uppercase"
-                        type="text"
-                        autoComplete="off"
-                        aria-label={formatMessage({ id: "billing.promotionCodeOptional" })}
-                        value={promotionCode}
-                        disabled={!!billingControlsDisabledReason || billingAction != null}
-                        onChange={(event) => {
-                          setPromotionCode(event.currentTarget.value);
-                          setSeatUpdatePreview(null);
-                        }}
-                      />
-                    </label>
-                  )}
-                </div>
-                {isManageSeatMode && seatDelta > 0 && (
-                  <span className="text-[11px] font-mono text-foreground-muted theme-brutal:text-black/50">
-                    {formatMessage({ id: "billing.enterACodeApprovedForExistingSeatUpdate" })}
-                  </span>
-                )}
-                <span className="text-xs font-mono text-foreground-muted theme-brutal:text-black/60">
-                    {localizedBillingSeatCopyLabels.quantityHelpLabel} {formatMessage(
-                      { id: "billing.seatCoverageHelp" },
-                      { min: minimumUsageSeatQuantity, price: PRO_SEAT_MONTHLY_USD },
-                    )}
-                </span>
-                {billingSeatDraftError && (
-                  <span className="text-xs font-mono text-brutal-red">
-                    {billingSeatDraftError}
-                  </span>
-                )}
-              </div>
-
-              <div className="mt-4 flex flex-wrap gap-2">
-                {isCheckoutMode && (
-                  <Tooltip content={billingControlsDisabledReason ?? billingSeatDraftError ?? formatMessage(
-                    { id: "billing.startCheckoutTitle" },
-                    {
-                      interval: formatMessage({
-                        id: billingInterval === "annual" ? "billing.yearly" : "billing.monthly",
-                      }),
-                      seats: requestedSeatQuantity,
-                    },
-                  )}>
-                  <Button
-                    variant="accent" size="sm"
-                    type="button"
-                    disabled={!!billingControlsDisabledReason || !!billingSeatDraftError || billingAction != null}
-                    onClick={openCheckoutConfirm}
-                    data-slot="button"
-                  >
-                    {billingAction === "checkout" ? formatMessage({ id: "billing.opening" }) : formatMessage({ id: "billing.upgradeToPro" })}
-                  </Button>
-                  </Tooltip>
-                )}
-                {billingControlsState.canUpdatePacks && (
-                  <Tooltip content={updateSeatButtonTitle}>
-                  <Button
-                    variant="accent" size="sm"
-                    type="button"
-                    disabled={updateSeatButtonDisabled}
-                    onClick={openSeatUpdateConfirm}
-                    data-slot="button"
-                  >
-                    {billingAction === "update" || billingAction === "preview" ? updateSeatButtonBusyLabel : updateSeatButtonLabel}
-                  </Button>
-                  </Tooltip>
-                )}
-              </div>
-              {billingControlsDisabledReason && (
-                <p className="mt-2 text-xs font-mono text-foreground-muted theme-brutal:text-black/60">{billingControlsDisabledReason}</p>
-              )}
-              {billingNotice && (
-                <p className="mt-2 text-xs font-mono text-foreground-muted theme-brutal:text-black/60">{billingNotice}</p>
-              )}
-              {billingError && (
-                <p className="mt-2 text-xs font-mono text-brutal-red">{billingError}</p>
-              )}
-            </div>
-
-            <Card
-              variant="option"
-              data-testid="billing-summary-card"
-              className="bg-layer-canvas-muted p-4 theme-brutal:border-black theme-brutal:bg-brutal-cream"
-            >
-              <div className="mb-3 text-xs font-bold uppercase tracking-widest text-foreground-muted theme-brutal:text-black/50">
-                {isCheckoutMode ? formatMessage({ id: "billing.checkoutSummary" }) : isManageSeatMode ? (formatMessage({ id: "billing.manageSeatsSummary" })) : formatMessage({ id: "billing.subscriptionSummary" })}
-              </div>
-              <div className="space-y-3">
-                <div className="flex items-center justify-between gap-3">
-                  <span className="text-sm font-bold text-foreground-strong theme-brutal:text-black">{localizedBillingSeatCopyLabels.seatSummaryLabel}</span>
-                  <span className="text-sm font-mono text-foreground-muted theme-brutal:text-black/60">{seatSummaryValue}</span>
-                </div>
-                <div className="flex items-center justify-between gap-3">
-                  <span className="text-sm font-bold text-foreground-strong theme-brutal:text-black">{localizedBillingSeatCopyLabels.billableSeatsSummaryLabel}</span>
-                  <span className="text-sm font-mono text-foreground-muted theme-brutal:text-black/60">{draftSeatQuantity}</span>
-                </div>
-                <div className="flex items-center justify-between gap-3">
-                  <span className="text-sm font-bold text-foreground-strong theme-brutal:text-black">{localizedBillingSeatCopyLabels.capacitySummaryLabel}</span>
-                  <span className="inline-flex flex-col items-end text-sm font-mono leading-5 text-foreground-muted theme-brutal:text-black/60">
-                    <span>{formatHumanCapacityLabel(draftSeatQuantity)}</span>
-                    <span>{formatAgentCapacityLabel(draftProvisionedAgentSeats)}</span>
-                  </span>
-                </div>
-                {isCheckoutMode ? (
-                  <>
-                    <div className="flex items-center justify-between gap-3">
-                      <span className="text-sm font-bold text-foreground-strong theme-brutal:text-black">{localizedBillingTotalSummaryLabels.totalLabel}</span>
-                      <span className="inline-flex flex-col items-end text-sm font-mono leading-5 text-foreground-muted theme-brutal:text-black/60">
-                        {localizedSelectedTotalLabels.originalLabel && (
-                          <span className="text-foreground-muted theme-brutal:text-black/40 line-through">{localizedSelectedTotalLabels.originalLabel}</span>
-                        )}
-                        <span>{localizedSelectedTotalLabels.totalLabel}</span>
-                      </span>
-                    </div>
-                  </>
-                ) : (
-                  <>
-                    {isManageSeatMode && (
-                      <div className="flex items-center justify-between gap-3">
-                        <span className="text-sm font-bold text-foreground-strong theme-brutal:text-black">{formatMessage({ id: "billing.currentSeats" })}</span>
-                        <span className="text-sm font-mono text-foreground-muted theme-brutal:text-black/60">{currentSeatQuantity}</span>
-                      </div>
-                    )}
-                    {isManageSeatMode && seatDelta !== 0 && (
-                      <div className="flex items-center justify-between gap-3">
-                        <span className="text-sm font-bold text-foreground-strong theme-brutal:text-black">{seatDelta > 0 ? formatMessage({ id: "billing.addedCapacity" }) : formatMessage({ id: "billing.removedCapacity" })}</span>
-                        <span className="inline-flex flex-col items-end text-sm font-mono leading-5 text-foreground-muted theme-brutal:text-black/60">
-                          <span>{formatHumanCapacityLabel(Math.abs(seatDelta))}</span>
-                          <span>{formatAgentCapacityLabel(Math.abs(seatDelta) * PRO_AGENT_SEAT_BLOCK_SIZE)}</span>
-                        </span>
-                      </div>
-                    )}
-                    {isManageSeatMode && localizedCurrentTotalLabel && localizedBillingTotalSummaryLabels.currentTotalLabel && (
-                      <div className="flex items-center justify-between gap-3">
-                        <span className="text-sm font-bold text-foreground-strong theme-brutal:text-black">{localizedBillingTotalSummaryLabels.currentTotalLabel}</span>
-                        <span className="text-sm font-mono text-foreground-muted theme-brutal:text-black/60">{localizedCurrentTotalLabel}</span>
-                      </div>
-                    )}
-                    {isManageSeatMode && (
-                      <div className="flex items-center justify-between gap-3">
-                        <span className="text-sm font-bold text-foreground-strong theme-brutal:text-black">{localizedBillingTotalSummaryLabels.totalLabel}</span>
-                        <span className="inline-flex flex-col items-end text-sm font-mono leading-5 text-foreground-muted theme-brutal:text-black/60">
-                          {localizedSelectedTotalLabels.originalLabel && (
-                            <span className="text-foreground-muted theme-brutal:text-black/40 line-through">{localizedSelectedTotalLabels.originalLabel}</span>
-                          )}
-                          <span>{localizedSelectedTotalLabels.totalLabel}</span>
-                        </span>
-                      </div>
-                    )}
-                    <div className="border-t-2 border-line-muted theme-brutal:border-black pt-3 text-xs font-mono text-foreground-muted theme-brutal:text-black/60">
-                      {formatMessage({ id: "billing.seatIncreasesMayBillImmediatelyAfterStripeConf" })}
-                    </div>
-                  </>
-                )}
-              </div>
-            </Card>
-          </div>
-        </>
-      )}
-
-      {showCancelSubscriptionConfirm && (
-        <ConfirmDialog
-          chromeLocale="active"
-          title={formatMessage({ id: "billing.cancelSubscription" })}
-          message={formatMessage({ id: "billing.cancelTheWholeProSubscriptionAtTheEndOfTheCu" })}
-          confirmLabel={formatMessage({ id: "billing.cancelSubscription2" })}
-          loadingLabel={formatMessage({ id: "billing.canceling" })}
-          confirmColor="bg-brutal-orange"
-          onConfirm={handleCancelSubscription}
-          onClose={() => setShowCancelSubscriptionConfirm(false)}
-        />
-      )}
-      {/* Stryker restore all: the real PlanSection composition test owns this complete dialog boundary. */}
-      {confirmBillingAction && (
-        <ConfirmDialog
-          chromeLocale="active"
-          title={confirmBillingAction === "checkout"
-            ? formatMessage({ id: "billing.confirmProCheckout" })
-            : formatMessage({ id: "billing.confirmSeatUpdate" })}
-          message={(
-            <div className="space-y-2">
-              <p>
-                {confirmBillingAction === "checkout"
-                  ? formatMessage({ id: "billing.youAreAboutToStartProCheckout" })
-                  : formatMessage({ id: "billing.youAreAboutToUpdateThisProSubscription" })}
-              </p>
-              <div className="font-mono text-xs">
-                {confirmBillingAction === "update" ? (
-                  <>
-                    <div>{formatMessage({ id: "billing.currentSeats" })}: {currentSeatQuantity}</div>
-                    {seatDelta > 0 && <div>{formatMessage({ id: "billing.seatsToAdd" })}: {additionalSeats}</div>}
-                    {seatDelta < 0 && <div>{formatMessage({ id: "billing.seatsToRemove" })}: {removedSeats}</div>}
-                    <div>{formatMessage({ id: "billing.totalSeatsAfterUpdate" })}: {draftSeatQuantity}</div>
-                    <div>{formatMessage({ id: "billing.capacityAfterUpdate" })}: {formatMessage(
-                        { id: "billing.capacityPair" },
-                        {
-                          human: formatHumanCapacityLabel(draftSeatQuantity),
-                          agent: formatAgentCapacityLabel(draftProvisionedAgentSeats),
-                        },
-                      )}</div>
-                    {seatUpdatePreview && (
-                      <>
-                        {seatUpdatePreview.promotion && (
-                          <div>{formatMessage({ id: "billing.appliedPromotion" })}: {seatUpdatePreview.promotion.code}</div>
-                        )}
-                        <div>{formatMessage({ id: "billing.estimatedProratedCharge" })}: {formatBillingAmount(seatUpdatePreview.prorationAmount, seatUpdatePreview.currency)}</div>
-                        {seatUpdatePreview.discountAmount > 0 && (
-                          <div>{formatMessage({ id: "billing.discount" })}: {formatBillingAmount(-seatUpdatePreview.discountAmount, seatUpdatePreview.currency)}</div>
-                        )}
-                        <div>
-                          {currentBillingInterval === "annual" ? formatMessage({ id: "billing.estimatedNextYearlyTotal" }) : formatMessage({ id: "billing.estimatedNextMonthlyTotal" })}: {formatBillingAmount(seatUpdatePreview.recurringAmount, seatUpdatePreview.currency)}
-                        </div>
-                      </>
-                    )}
-                  </>
-                ) : (
-                  <>
-                    <div>{formatMessage({ id: "billing.seats" })}: {draftSeatQuantity}</div>
-                    <div>{formatMessage({ id: "billing.capacity" })}: {formatMessage(
-                        { id: "billing.capacityPair" },
-                        {
-                          human: formatHumanCapacityLabel(draftSeatQuantity),
-                          agent: formatAgentCapacityLabel(draftProvisionedAgentSeats),
-                        },
-                      )}</div>
-                  </>
-                )}
-                <div>{localizedBillingTotalSummaryLabels.totalLabel}: {localizedSelectedTotalLabels.totalLabel}</div>
-              </div>
-              <p>
-                {confirmBillingAction === "checkout"
-                  ? formatMessage({ id: "billing.theNextPageIsStripeCheckoutWhereThePaymentAmou" })
-                  : seatDelta > 0
-                    ? formatMessage({ id: "billing.stripeMayBillThisSeatIncreaseImmediatelyAfterY" })
-                    : seatDelta < 0
-                      ? formatMessage({ id: "billing.stripeWillUpdateTheSubscriptionQuantityAfterYo" })
-                      : formatMessage({ id: "billing.stripeWillReactivateThisSubscriptionWithoutCha" })}
-              </p>
-              {seatUpdatePreview && (
-                <p>{formatMessage({ id: "billing.thisStripeEstimateExpiresAfter5MinutesRe" })}</p>
-              )}
-            </div>
-          )}
-          confirmLabel={confirmBillingAction === "checkout"
-            ? formatMessage({ id: "billing.continueToStripe" })
-            : formatMessage({ id: "billing.confirmAndUpdateSeats" })}
-          loadingLabel={confirmBillingAction === "checkout"
-            ? formatMessage({ id: "billing.opening2" })
-            : formatMessage({ id: "billing.updating2" })}
-          confirmColor="bg-brutal-pink"
-          onConfirm={confirmBillingAction === "checkout" ? handleCheckout : handlePackQuantityUpdate}
-          onClose={() => {
-            setConfirmBillingAction(null);
-            setSeatUpdatePreview(null);
-          }}
-        />
-      )}
-      {/* Stryker disable all: remaining billing wiring is covered by the broader billing contract suite. */}
-    </div>
-  );
+  return <PlanSectionContent server={server} usage={usage} billing={billing} loadBilling={loadBilling} draft={draft} />;
 }
+
 // Stryker restore all
 
 // ── Danger Zone Section ──
@@ -4878,27 +3928,26 @@ function DangerActionCard({
 function DangerZoneSection() {
   const { formatMessage } = useIntl();
   const server = useServerStore((s) => s.current);
-  const deleteServer = useServerStore((s) => s.deleteServer);
   const leaveServer = useServerStore((s) => s.leaveServer);
   const { isOwner, role } = useServerPermissions();
 
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
-  const [confirmSlug, setConfirmSlug] = useState("");
 
   const [showLeaveConfirm, setShowLeaveConfirm] = useState(false);
 
+  const handleCloseDelete = useCallback(() => setShowDeleteConfirm(false), []);
+
+  const handleLeave = useCallback(async () => {
+    requestServerSelection();
+    await leaveServer();
+  }, [leaveServer]);
+
+  const handleOpenLeave = useCallback(() => setShowLeaveConfirm(true), []);
+  const handleCloseLeave = useCallback(() => setShowLeaveConfirm(false), []);
+  const handleOpenDelete = useCallback(() => setShowDeleteConfirm(true), []);
+
   if (!server) return null;
   const canLeave = role === "admin" || role === "member" || role === "guest";
-
-  const handleDelete = async () => {
-    requestServerSelection();
-    await deleteServer();
-  };
-
-  const handleCloseDelete = () => {
-    setShowDeleteConfirm(false);
-    setConfirmSlug("");
-  };
 
   return (
     <div className="mb-6">
@@ -4920,7 +3969,7 @@ function DangerZoneSection() {
             <Button
               variant="warning" size="md" type="button"
               data-testid="server-danger-leave-button"
-              onClick={() => setShowLeaveConfirm(true)}
+              onClick={handleOpenLeave}
               className="[@media(max-height:600px)]:py-1 flex items-center gap-1.5 shrink-0 ml-4"
             >
               {formatMessage({ id: "settings.dangerZone.leaveServer" })}
@@ -4937,7 +3986,7 @@ function DangerZoneSection() {
           description={formatMessage({ id: "settings.dangerZone.deleteServerDescription" })}
           actionLabel={formatMessage({ id: "settings.dangerZone.deleteServer" })}
           actionIcon={<Trash2 size={14} />}
-          onAction={() => setShowDeleteConfirm(true)}
+          onAction={handleOpenDelete}
         />
       )}
 
@@ -4950,59 +3999,24 @@ function DangerZoneSection() {
           loadingLabel={formatMessage({ id: "settings.dangerZone.leaving" })}
           confirmColor="bg-brutal-orange"
           confirmTestId="server-leave-confirm-button"
-          onConfirm={async () => {
-            requestServerSelection();
-            await leaveServer();
-          }}
-          onClose={() => setShowLeaveConfirm(false)}
+          onConfirm={handleLeave}
+          onClose={handleCloseLeave}
         />
       )}
 
-      {showDeleteConfirm && (
-        <ConfirmDialog
-          chromeLocale="active"
-          title={formatMessage({ id: "settings.dangerZone.deleteServerTitle" })}
-          message={(
-            <div className="space-y-4">
-              <p>
-                {formatMessage({ id: "settings.dangerZone.deleteWarningPrefix" })}<span className="font-bold">{server.name}</span>{formatMessage({ id: "settings.dangerZone.deleteWarningSuffix" })}
-              </p>
-              <div>
-                <p className="text-sm text-foreground-muted theme-brutal:text-black/60 mb-2">
-                  {formatMessage({ id: "settings.dangerZone.typeToConfirmPrefix" })}<span className="font-mono font-bold text-foreground-strong theme-brutal:text-black">{server.slug}</span>{formatMessage({ id: "settings.dangerZone.typeToConfirmSuffix" })}
-                </p>
-                <SlugInput
-                  data-testid="server-delete-slug-input"
-                  type="text"
-                  value={confirmSlug}
-                  onChange={(e) => setConfirmSlug(e.target.value)}
-                  inputClassName="text-sm font-mono"
-                  placeholder={server.slug}
-                  autoFocus
-                />
-              </div>
-            </div>
-          )}
-          confirmLabel={formatMessage({ id: "settings.dangerZone.deleteServer" })}
-          loadingLabel={formatMessage({ id: "settings.dangerZone.deleting" })}
-          confirmDisabled={confirmSlug !== server.slug}
-          confirmTestId="server-delete-confirm-button"
-          onConfirm={handleDelete}
-          onClose={handleCloseDelete}
-        />
-      )}
+      {showDeleteConfirm && <DeleteServerConfirmDialog onClose={handleCloseDelete} />}
     </div>
   );
 }
 
 export type ConnectedAppStatus = "private" | "publish_requested" | "in_review" | "published" | "rejected" | "unpublish_requested";
-type ConnectedAppsViewMode = "grid" | "list";
+export type ConnectedAppsViewMode = "grid" | "list";
 
 const CONNECTED_APPS_VIEW_MODE_STORAGE_KEY = "raft:connected-apps:view-mode";
 const CONNECTED_APP_EDITOR_SECTION_IDS = ["profile", "login", "permissions", "notifications", "distribution", "danger"] as const;
-type ConnectedAppEditorSectionId = typeof CONNECTED_APP_EDITOR_SECTION_IDS[number];
+export type ConnectedAppEditorSectionId = typeof CONNECTED_APP_EDITOR_SECTION_IDS[number];
 
-function canEditSourceOwnedConnectedApp(status: ConnectedAppStatus) {
+export function canEditSourceOwnedConnectedApp(status: ConnectedAppStatus) {
   return status === "private" || status === "publish_requested" || status === "in_review" || status === "published" || status === "rejected";
 }
 
@@ -5076,13 +4090,15 @@ function ConnectedAppsViewToggle({
   const { formatMessage } = useIntl();
   const gridLabel = formatMessage({ id: "settings.connectedApps.gridView" });
   const listLabel = formatMessage({ id: "settings.connectedApps.listView" });
+  const groupValue = useMemo(() => [value], [value]);
+  const handleGroupValueChange = useCallback((values: string[]) => {
+    const next = values[0];
+    if (next === "grid" || next === "list") onValueChange(next);
+  }, [onValueChange]);
   return (
     <ToggleGroup
-      value={[value]}
-      onValueChange={(values) => {
-        const next = values[0];
-        if (next === "grid" || next === "list") onValueChange(next);
-      }}
+      value={groupValue}
+      onValueChange={handleGroupValueChange}
       aria-label={formatMessage({ id: "settings.connectedApps.viewMode" })}
       className="box-border shrink-0"
       data-testid="connected-apps-view-toggle"
@@ -5177,9 +4193,13 @@ type ConnectedAppListing = {
   appNotificationGroups: AppNotificationSelection["groups"];
   appNotificationEvents: AppNotificationSelection["events"];
   appNotificationReviewPending: boolean;
+  appNotificationPendingRevisionId: string | null;
+  appNotificationPendingGroups: AppNotificationSelection["groups"];
+  appNotificationPendingEvents: AppNotificationSelection["events"];
+  canReviewAppNotifications: boolean;
 };
 
-type InstalledConnectedApp = {
+export type InstalledConnectedApp = {
   id: string;
   clientId: string;
   name: string;
@@ -5215,7 +4235,7 @@ export function ConnectedAppOriginBadges({ app, className = "" }: { app: Install
   );
 }
 
-type ServerRegisteredApp = OAuthClientRecord & {
+export type ServerRegisteredApp = OAuthClientRecord & {
   status: ConnectedAppStatus;
   logoUrl: string | null;
   defaultLogoSeed: string;
@@ -5228,7 +4248,7 @@ const CONNECTED_APP_CATEGORY_OPTIONS: { value: ConnectedAppCategory | "all" }[] 
 const CONNECTED_APP_PUBLISH_CATEGORY_OPTIONS = OAUTH_CLIENT_CATEGORIES.map((value) => ({ value }));
 
 // Category enum values are data; the display labels live in the catalog.
-const CONNECTED_APP_CATEGORY_LABEL_ID: Record<string, MessageId> = {
+export const CONNECTED_APP_CATEGORY_LABEL_ID: Record<string, MessageId> = {
   all: "settings.connectedApps.categoryAll",
   "AI & Automation": "settings.connectedApps.categoryAiAutomation",
   Communication: "settings.connectedApps.categoryCommunication",
@@ -5252,7 +4272,7 @@ export function matchesConnectedAppFilter(
     .some((value) => value?.toLowerCase().includes(normalizedSearch));
 }
 
-function getDomainFromUrl(raw: string | null | undefined): string | null {
+export function getDomainFromUrl(raw: string | null | undefined): string | null {
   const trimmed = raw?.trim();
   if (!trimmed) return null;
   try {
@@ -5270,7 +4290,7 @@ function initialsForApp(name: string) {
   return letters.toUpperCase() || "A";
 }
 
-function ConnectedAppSummary({ description }: { description?: string | null }) {
+export function ConnectedAppSummary({ description }: { description?: string | null }) {
   const text = description?.trim();
   if (!text) return null;
   return (
@@ -5304,7 +4324,7 @@ export function ConnectedAppMarketplaceInstallBadge({ badge }: { badge: Marketpl
   );
 }
 
-function ConnectedAppLogo({ name, logoUrl, seed, size = "md" }: { name: string; logoUrl?: string | null; seed: string; size?: "sm" | "md" | "lg" }) {
+export function ConnectedAppLogo({ name, logoUrl, seed, size = "md" }: { name: string; logoUrl?: string | null; seed: string; size?: "sm" | "md" | "lg" }) {
   return (
     <AvatarSlot
       context={size === "lg" ? "account-tile" : size === "md" ? "mention-card" : "surface-list"}
@@ -5316,7 +4336,7 @@ function ConnectedAppLogo({ name, logoUrl, seed, size = "md" }: { name: string; 
   );
 }
 
-function ConnectedAppUrlLink({ url, label, className = "" }: { url?: string | null; label?: string | null; className?: string }) {
+export function ConnectedAppUrlLink({ url, label, className = "" }: { url?: string | null; label?: string | null; className?: string }) {
   const href = url?.trim();
   if (!href) return null;
   const visibleLabel = label?.trim() || href;
@@ -5492,9 +4512,9 @@ export function DeclaredScopesPicker({
 }) {
   const { formatMessage } = useIntl();
   const selected = new Set<RaftOAuthScopeId>([...IDENTITY_OAUTH_SCOPES, ...value]);
-  const updateScope = (scope: RaftOAuthScopeId, checked: boolean) => {
+  const updateScope = useCallback((scope: RaftOAuthScopeId, checked: boolean) => {
     if (IDENTITY_OAUTH_SCOPES.includes(scope)) return;
-    const next = new Set(selected);
+    const next = new Set<RaftOAuthScopeId>([...IDENTITY_OAUTH_SCOPES, ...value]);
     if (checked) next.add(scope);
     else next.delete(scope);
     onChange([
@@ -5503,7 +4523,7 @@ export function DeclaredScopesPicker({
       ...AGENT_DIRECTORY_OAUTH_SCOPES.filter((item) => next.has(item)),
       ...AGENT_INBOUND_OAUTH_SCOPES.filter((item) => next.has(item)),
     ]);
-  };
+  }, [onChange, value]);
 
   return (
     <div className="border border-line-muted bg-layer-panel theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white p-3 shadow-raft-sm theme-brutal:shadow-brutal-sm" data-testid="connected-app-declared-scopes">
@@ -5524,21 +4544,15 @@ export function DeclaredScopesPicker({
                 </Tooltip>
               );
             })}
-            {OPTIONAL_IDENTITY_OAUTH_SCOPES.map((scope) => {
-              const detail = OAUTH_SCOPE_PRESENTATION[scope];
-              return (
-                <Tooltip key={scope} content={formatMessage({ id: detail.copyId })}>
-                <label className="inline-flex items-center gap-2 border border-line-strong theme-brutal:border-black/20 bg-layer-panel theme-brutal:bg-white px-2 py-1 text-[11px] font-bold text-foreground-muted theme-brutal:text-black/70">
-                  <Checkbox
-                    size="sm"
-                    checked={selected.has(scope)}
-                    onCheckedChange={(checked) => updateScope(scope, checked)}
-                  />
-                  <span>{scope}</span>
-                </label>
-                </Tooltip>
-              );
-            })}
+            {OPTIONAL_IDENTITY_OAUTH_SCOPES.map((scope) => (
+              <DeclaredScopeToggle
+                key={scope}
+                scope={scope}
+                checked={selected.has(scope)}
+                className="inline-flex items-center gap-2 border border-line-strong theme-brutal:border-black/20 bg-layer-panel theme-brutal:bg-white px-2 py-1 text-[11px] font-bold text-foreground-muted theme-brutal:text-black/70"
+                onScopeChange={updateScope}
+              />
+            ))}
           </div>
         </div>
 
@@ -5547,21 +4561,15 @@ export function DeclaredScopesPicker({
             {formatMessage({ id: "settings.connectedApps.agentMessagingSection" })}
           </div>
           <div className="mt-2 flex flex-wrap gap-2">
-            {AGENT_INBOUND_OAUTH_SCOPES.map((scope) => {
-              const detail = OAUTH_SCOPE_PRESENTATION[scope];
-              return (
-                <Tooltip key={scope} content={formatMessage({ id: detail.copyId })}>
-                <label className="inline-flex items-center gap-2 border border-line-strong theme-brutal:border-black/20 bg-layer-panel theme-brutal:bg-white px-2 py-1.5 text-xs font-bold text-foreground-muted theme-brutal:text-black/70">
-                  <Checkbox
-                    size="sm"
-                    checked={selected.has(scope)}
-                    onCheckedChange={(checked) => updateScope(scope, checked)}
-                  />
-                  <span>{scope}</span>
-                </label>
-                </Tooltip>
-              );
-            })}
+            {AGENT_INBOUND_OAUTH_SCOPES.map((scope) => (
+              <DeclaredScopeToggle
+                key={scope}
+                scope={scope}
+                checked={selected.has(scope)}
+                className="inline-flex items-center gap-2 border border-line-strong theme-brutal:border-black/20 bg-layer-panel theme-brutal:bg-white px-2 py-1.5 text-xs font-bold text-foreground-muted theme-brutal:text-black/70"
+                onScopeChange={updateScope}
+              />
+            ))}
           </div>
           {hasAgentInboundOAuthScope(value) && (
             <div className="mt-2 text-xs font-bold text-foreground-muted theme-brutal:text-black/55">
@@ -5603,6 +4611,10 @@ function mapClientToMarketplaceApp(
     appNotificationGroups: client.appNotificationGroups ?? [],
     appNotificationEvents: client.appNotificationEvents ?? [],
     appNotificationReviewPending: client.appNotificationReviewPending ?? false,
+    appNotificationPendingRevisionId: client.appNotificationPendingRevisionId ?? null,
+    appNotificationPendingGroups: client.appNotificationPendingGroups ?? [],
+    appNotificationPendingEvents: client.appNotificationPendingEvents ?? [],
+    canReviewAppNotifications: client.canReviewAppNotifications ?? false,
   };
 }
 
@@ -5614,6 +4626,24 @@ function mapClientToRegisteredApp(client: OAuthClientRecord): ServerRegisteredAp
     defaultLogoSeed: client.clientId,
   };
 }
+
+function emptyAppNotificationState(): AppNotificationsDeveloperState {
+  return {
+    request_revision: 0,
+    current_revision_id: null,
+    current_groups: [],
+    current_events: [],
+    pending_revision: null,
+    webhook: null,
+  };
+}
+
+export type ConnectedAppEditorRailSection = {
+  id: ConnectedAppEditorSectionId;
+  label: ReactNode;
+  status: string;
+  icon: ReactNode;
+};
 
 export function IntegrationsSection() {
   const { formatDate, formatMessage } = useIntl();
@@ -5627,6 +4657,7 @@ export function IntegrationsSection() {
   const [connectedAppsCategory, setConnectedAppsCategory] = useState<ConnectedAppCategory | "all">("all");
   const [connectedAppsViewMode, setConnectedAppsViewMode] = useState<ConnectedAppsViewMode>(getInitialConnectedAppsViewMode);
   const [selectedListing, setSelectedListing] = useState<ConnectedAppListing | null>(null);
+  const [reviewingPermissionClientId, setReviewingPermissionClientId] = useState<string | null>(null);
   const [selectedInstalledApp, setSelectedInstalledApp] = useState<InstalledConnectedApp | null>(null);
   const [marketplaceClients, setMarketplaceClients] = useState<MarketplaceOAuthClientRecord[]>([]);
   const [clients, setClients] = useState<OAuthClientRecord[]>([]);
@@ -5670,8 +4701,9 @@ export function IntegrationsSection() {
   const secretCopyResetRef = useRef<ReturnType<typeof window.setTimeout> | null>(null);
   const shareCopyResetRef = useRef<ReturnType<typeof window.setTimeout> | null>(null);
 
-  const load = async () => {
-    if (!current) return;
+  const serverId = current?.id;
+  const load = useCallback(async () => {
+    if (!serverId) return;
     setLoading(true);
     setError("");
     try {
@@ -5691,18 +4723,29 @@ export function IntegrationsSection() {
           .find((app) => app.id === requestedMarketplaceId || app.clientId === requestedMarketplaceId);
         if (requestedListing) setSelectedListing(requestedListing);
       }
+      // Keep an open detail modal in sync with the reloaded rows — e.g. a
+      // permission-update approve must drop the pending badge instead of
+      // showing a stale snapshot of the pre-review listing.
+      setSelectedListing((currentListing) => {
+        if (!currentListing) return currentListing;
+        const fresh = nextMarketplaceClients
+          .map((client) => mapClientToMarketplaceApp(client, formatMessage))
+          .find((app) => app.id === currentListing.id || app.clientId === currentListing.clientId);
+        return fresh ?? null;
+      });
       setIntegrationOverview(overviewRes.data);
     } catch (err: any) {
       setError(err.response?.data?.error || formatMessage({ id: "settings.connectedApps.failedLoad" }));
     } finally {
       setLoading(false);
     }
-  };
+  }, [formatMessage, serverId]);
 
+  // Load once per server; a locale switch (new `formatMessage`) must not refetch.
+  const loadForServer = useEffectEvent(load);
   useEffect(() => {
-    void load();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [current?.id]);
+    void loadForServer();
+  }, [serverId]);
 
   useEffect(() => {
     return () => {
@@ -5723,7 +4766,7 @@ export function IntegrationsSection() {
     rail.scrollTo?.({ left: Math.max(0, left), behavior: "smooth" });
   }, [appEditorSection]);
 
-  const resetForm = () => {
+  const resetForm = useCallback(() => {
     setClientName("");
     setClientId("");
     setClientDescription("");
@@ -5737,15 +4780,15 @@ export function IntegrationsSection() {
     setAppNotificationLoading(false);
     setAppNotificationConfigurationOpen(false);
     setClientCategory("Other");
-  };
+  }, []);
 
-  const resetShareState = () => {
+  const resetShareState = useCallback(() => {
     setShareLink(null);
     setShareUrl("");
     setShareCopied(false);
-  };
+  }, []);
 
-  const openRegisterDrawer = () => {
+  const openRegisterDrawer = useCallback(() => {
     setEditingClient(null);
     setAppEditorSection("profile");
     resetForm();
@@ -5755,9 +4798,9 @@ export function IntegrationsSection() {
     setError("");
     resetShareState();
     setShowRegisterDrawer(true);
-  };
+  }, [resetForm, resetShareState]);
 
-  const loadShareLink = async (clientId: string) => {
+  const loadShareLink = useCallback(async (clientId: string) => {
     setShareLoading(true);
     resetShareState();
     try {
@@ -5770,9 +4813,9 @@ export function IntegrationsSection() {
     } finally {
       setShareLoading(false);
     }
-  };
+  }, [formatMessage, resetShareState]);
 
-  const loadAppNotificationState = async (clientId: string) => {
+  const loadAppNotificationState = useCallback(async (clientId: string) => {
     setAppNotificationLoading(true);
     try {
       const { data } = await api.get(`/integrations/clients/${clientId}/app-notifications`);
@@ -5798,9 +4841,9 @@ export function IntegrationsSection() {
     } finally {
       setAppNotificationLoading(false);
     }
-  };
+  }, [formatMessage]);
 
-  const beginEditClient = (client: OAuthClientRecord) => {
+  const beginEditClient = useCallback((client: OAuthClientRecord) => {
     setEditingClient(client);
     setAppEditorSection("profile");
     setClientName(client.name);
@@ -5824,39 +4867,30 @@ export function IntegrationsSection() {
     void loadShareLink(client.id);
     void loadAppNotificationState(client.id);
     setShowRegisterDrawer(true);
-  };
+  }, [createdSecretClientId, loadAppNotificationState, loadShareLink]);
 
-  const closeRegisterDrawer = () => {
+  const closeRegisterDrawer = useCallback(() => {
     setShowRegisterDrawer(false);
     setEditingClient(null);
     setAppEditorSection("profile");
     setError("");
     resetShareState();
     resetForm();
-  };
+  }, [resetForm, resetShareState]);
 
-  const applyUpdatedClient = (client: OAuthClientRecord) => {
+  const applyUpdatedClient = useCallback((client: OAuthClientRecord) => {
     setClients((items) => items.map((item) => item.id === client.id ? client : item));
     setEditingClient((currentClient) => currentClient?.id === client.id ? client : currentClient);
-  };
+  }, []);
 
-  const saveAppNotificationPermissions = async (clientRowId: string) => {
+  const saveAppNotificationPermissions = useCallback(async (clientRowId: string) => {
     await api.put(`/integrations/clients/${clientRowId}/app-notifications/permissions`, {
       groups: appNotificationSelection.groups,
       events: appNotificationSelection.events,
     });
-  };
+  }, [appNotificationSelection]);
 
-  const emptyAppNotificationState = (): AppNotificationsDeveloperState => ({
-    request_revision: 0,
-    current_revision_id: null,
-    current_groups: [],
-    current_events: [],
-    pending_revision: null,
-    webhook: null,
-  });
-
-  const appNotificationRequestChanged = () => {
+  const appNotificationRequestChanged = useCallback(() => {
     if (!appNotificationState) return appNotificationSelection.groups.length > 0 || appNotificationSelection.events.length > 0;
     const requested = appNotificationState.pending_revision ?? {
       groups: appNotificationState.current_groups,
@@ -5864,11 +4898,15 @@ export function IntegrationsSection() {
     };
     return requested.groups.join("\0") !== appNotificationSelection.groups.join("\0")
       || requested.events.join("\0") !== appNotificationSelection.events.join("\0");
-  };
+  }, [appNotificationSelection, appNotificationState]);
 
-  const handleSaveClient = async (event: FormEvent) => {
+  const handleSaveClient = useCallback(async (event: FormEvent) => {
     event.preventDefault();
-    if (!current) return;
+    if (!serverId) return;
+    if (isAppWhenToUseTooLong(clientWhenToUse)) {
+      setError(formatMessage({ id: "settings.connectedApps.whenToUseTooLong" }, { limit: APP_WHEN_TO_USE_MAX_CODE_POINTS }));
+      return;
+    }
     setSubmitting(true);
     setSavingClientId(editingClient?.id ?? null);
     setError("");
@@ -5923,9 +4961,29 @@ export function IntegrationsSection() {
       setSubmitting(false);
       setSavingClientId(null);
     }
-  };
+  }, [
+    appNotificationRequestChanged,
+    appNotificationState,
+    applyUpdatedClient,
+    clientAgentManifestUrl,
+    clientAllowedScopes,
+    clientCategory,
+    clientDescription,
+    clientHomepageUrl,
+    clientId,
+    clientName,
+    clientReturnUrl,
+    clientWhenToUse,
+    closeRegisterDrawer,
+    editingClient,
+    formatMessage,
+    load,
+    resetForm,
+    saveAppNotificationPermissions,
+    serverId,
+  ]);
 
-  const handleCopyCreatedSecret = async () => {
+  const handleCopyCreatedSecret = useCallback(async () => {
     if (!createdSecret) return;
     setError("");
     try {
@@ -5941,9 +4999,9 @@ export function IntegrationsSection() {
     } catch (err: any) {
       setError(err?.message || formatMessage({ id: "settings.connectedApps.failedCopySecret" }));
     }
-  };
+  }, [createdSecret, formatMessage]);
 
-  const handleRegenerateClientSecret = async (client: OAuthClientRecord) => {
+  const handleRegenerateClientSecret = useCallback(async (client: OAuthClientRecord) => {
     setRegeneratingClientId(client.id);
     setError("");
     try {
@@ -5959,9 +5017,9 @@ export function IntegrationsSection() {
     } finally {
       setRegeneratingClientId(null);
     }
-  };
+  }, [applyUpdatedClient, formatMessage]);
 
-  const handleCreateShareLink = async () => {
+  const handleCreateShareLink = useCallback(async () => {
     if (!editingClient) return;
     setShareLoading(true);
     setError("");
@@ -5976,9 +5034,9 @@ export function IntegrationsSection() {
     } finally {
       setShareLoading(false);
     }
-  };
+  }, [applyUpdatedClient, editingClient, formatMessage]);
 
-  const handleRevokeShareLink = async () => {
+  const handleRevokeShareLink = useCallback(async () => {
     if (!editingClient) return;
     setShareLoading(true);
     setError("");
@@ -5990,9 +5048,9 @@ export function IntegrationsSection() {
     } finally {
       setShareLoading(false);
     }
-  };
+  }, [editingClient, formatMessage, resetShareState]);
 
-  const handleCopyShareUrl = async () => {
+  const handleCopyShareUrl = useCallback(async () => {
     if (!shareUrl) return;
     setError("");
     try {
@@ -6008,7 +5066,7 @@ export function IntegrationsSection() {
     } catch (err: any) {
       setError(err?.message || formatMessage({ id: "settings.connectedApps.failedCopyShare" }));
     }
-  };
+  }, [formatMessage, shareUrl]);
 
   const handleLogoFileChange = async (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -6028,7 +5086,7 @@ export function IntegrationsSection() {
     }
   };
 
-  const handleClearLogo = async () => {
+  const handleClearLogo = useCallback(async () => {
     if (!editingClient) return;
     setLogoUploading(true);
     setError("");
@@ -6040,17 +5098,22 @@ export function IntegrationsSection() {
     } finally {
       setLogoUploading(false);
     }
-  };
+  }, [applyUpdatedClient, editingClient, formatMessage]);
 
-  const handleDeleteClient = async (client: ServerRegisteredApp) => {
+  const editingClientId = editingClient?.id;
+  const handleDeleteClient = useCallback(async (client: ServerRegisteredApp) => {
     await api.delete(`/integrations/clients/${client.id}`);
     setClients((items) => items.filter((item) => item.id !== client.id));
-    if (editingClient?.id === client.id) {
+    if (editingClientId === client.id) {
       closeRegisterDrawer();
     }
-  };
+  }, [closeRegisterDrawer, editingClientId]);
 
-  const handleRequestPublish = async (client: ServerRegisteredApp) => {
+  const handleRequestPublish = useCallback(async (client: ServerRegisteredApp) => {
+    if (isAppWhenToUseTooLong(clientWhenToUse)) {
+      setError(formatMessage({ id: "settings.connectedApps.whenToUseTooLong" }, { limit: APP_WHEN_TO_USE_MAX_CODE_POINTS }));
+      return;
+    }
     setSavingClientId(client.id);
     setError("");
     try {
@@ -6071,9 +5134,20 @@ export function IntegrationsSection() {
     } finally {
       setSavingClientId(null);
     }
-  };
+  }, [
+    applyUpdatedClient,
+    clientAgentManifestUrl,
+    clientAllowedScopes,
+    clientCategory,
+    clientDescription,
+    clientHomepageUrl,
+    clientName,
+    clientReturnUrl,
+    clientWhenToUse,
+    formatMessage,
+  ]);
 
-  const handleRequestOffline = async (client: ServerRegisteredApp) => {
+  const handleRequestOffline = useCallback(async (client: ServerRegisteredApp) => {
     setSavingClientId(client.id);
     setError("");
     try {
@@ -6086,9 +5160,9 @@ export function IntegrationsSection() {
     } finally {
       setSavingClientId(null);
     }
-  };
+  }, [applyUpdatedClient, formatMessage]);
 
-  const handleInstallMarketplaceApp = async (listing: ConnectedAppListing) => {
+  const handleInstallMarketplaceApp = useCallback(async (listing: ConnectedAppListing) => {
     setSavingClientId(listing.id);
     setError("");
     try {
@@ -6100,9 +5174,9 @@ export function IntegrationsSection() {
     } finally {
       setSavingClientId(null);
     }
-  };
+  }, [formatMessage, load]);
 
-  const handleUninstallMarketplaceApp = async (app: InstalledConnectedApp | ConnectedAppListing) => {
+  const handleUninstallMarketplaceApp = useCallback(async (app: InstalledConnectedApp | ConnectedAppListing) => {
     setSavingClientId(app.id);
     setError("");
     try {
@@ -6115,7 +5189,31 @@ export function IntegrationsSection() {
     } finally {
       setSavingClientId(null);
     }
-  };
+  }, [formatMessage, load]);
+
+  const handleApproveSelectedAppPermissionUpdate = useCallback(async () => {
+    const listing = selectedListing;
+    if (!listing) return;
+    setReviewingPermissionClientId(listing.id);
+    setError("");
+    try {
+      await api.post(`/integrations/clients/${listing.id}/app-notifications/permissions/review`, {
+        // Bind the approval to the exact revision the reviewer displayed so a
+        // publisher replacing the request mid-review cannot smuggle unseen
+        // groups into the grant (server returns 409 and we surface the error).
+        expected_revision_id: listing.appNotificationPendingRevisionId ?? undefined,
+      });
+      await load();
+    } catch (err: unknown) {
+      const axiosError = err as { response?: { data?: { error?: string } } };
+      setError(axiosError.response?.data?.error || formatMessage({ id: "settings.connectedApps.appNotifications.reviewFailed" }));
+    } finally {
+      setReviewingPermissionClientId(null);
+    }
+  }, [formatMessage, load, selectedListing]);
+  const handleApproveAppPermissionUpdateClick = useCallback(() => {
+    void handleApproveSelectedAppPermissionUpdate();
+  }, [handleApproveSelectedAppPermissionUpdate]);
 
   const registeredApps = clients.map(mapClientToRegisteredApp);
   const grantedScopesByClientId = integrationOverview
@@ -6184,11 +5282,21 @@ export function IntegrationsSection() {
   const filteredRegisteredApps = registeredApps
     .filter((app) => matchesConnectedAppFilter(app, normalizedSearch, connectedAppsCategory));
   const marketplaceCount = publicMarketplaceClients.length;
-  const connectedAppsTabOptions = [
+  const installedCount = installedApps.length;
+  const registeredCount = registeredApps.length;
+  const connectedAppsTabOptions = useMemo(() => [
     { value: "marketplace" as const, label: formatMessage({ id: "settings.connectedApps.tabMarketplace" }), count: marketplaceCount, testId: "connected-apps-tab-marketplace" },
-    { value: "installed" as const, label: formatMessage({ id: "settings.connectedApps.installed" }), count: installedApps.length, testId: "connected-apps-tab-installed" },
-    { value: "myapps" as const, label: formatMessage({ id: "settings.connectedApps.tabMyApps" }), count: registeredApps.length, testId: "connected-apps-tab-my-apps" },
-  ];
+    { value: "installed" as const, label: formatMessage({ id: "settings.connectedApps.installed" }), count: installedCount, testId: "connected-apps-tab-installed" },
+    { value: "myapps" as const, label: formatMessage({ id: "settings.connectedApps.tabMyApps" }), count: registeredCount, testId: "connected-apps-tab-my-apps" },
+  ], [formatMessage, installedCount, marketplaceCount, registeredCount]);
+  const connectedAppsCategoryItems = useMemo(() => CONNECTED_APP_CATEGORY_OPTIONS.map((option) => ({
+    value: option.value,
+    label: formatMessage({ id: CONNECTED_APP_CATEGORY_LABEL_ID[option.value] }),
+  })), [formatMessage]);
+  const publishCategoryItems = useMemo(() => CONNECTED_APP_PUBLISH_CATEGORY_OPTIONS.map((option) => ({
+    value: option.value,
+    label: formatMessage({ id: CONNECTED_APP_CATEGORY_LABEL_ID[option.value] }),
+  })), [formatMessage]);
   const connectedAppsErrorSurface = getConnectedAppsErrorSurface(
     error,
     selectedListing,
@@ -6197,14 +5305,14 @@ export function IntegrationsSection() {
     offlineRequestTarget,
     marketplaceUninstallTarget,
   );
-  const updateConnectedAppsViewMode = (viewMode: ConnectedAppsViewMode) => {
+  const updateConnectedAppsViewMode = useCallback((viewMode: ConnectedAppsViewMode) => {
     setConnectedAppsViewMode(viewMode);
     try {
       window.localStorage.setItem(CONNECTED_APPS_VIEW_MODE_STORAGE_KEY, viewMode);
     } catch {
       // The preference is optional; the view switch must keep working when storage is unavailable.
     }
-  };
+  }, []);
 
   const renderClientSecretReveal = () => {
     if (!createdSecret) return null;
@@ -6218,7 +5326,7 @@ export function IntegrationsSection() {
           <Button
             variant="outline" size="icon-sm"
             type="button"
-            onClick={() => void handleCopyCreatedSecret()}
+            onClick={handleCopyCreatedSecret}
             className="shrink-0"
             data-testid="connected-app-secret-copy-button"
             data-slot="button"
@@ -6252,12 +5360,7 @@ export function IntegrationsSection() {
           ? "settings.connectedApps.editor.status.setup"
           : "settings.connectedApps.editor.status.off" });
   const distributionStatus = formatMessage({ id: connectedAppDistributionStatus(editingClient?.publishStatus ?? null) });
-  const appEditorSections: Array<{
-    id: ConnectedAppEditorSectionId;
-    label: ReactNode;
-    status: string;
-    icon: ReactNode;
-  }> = [
+  const appEditorSections: ConnectedAppEditorRailSection[] = [
     { id: "profile", label: formatMessage({ id: "settings.connectedApps.section.profile" }), status: profileStatus, icon: <User size={14} /> },
     { id: "login", label: formatMessage({ id: "settings.connectedApps.section.loginWithRaft" }), status: loginStatus, icon: <Shield size={14} /> },
     { id: "permissions", label: formatMessage({ id: "settings.connectedApps.section.appPermissions" }), status: appPermissionsStatus, icon: <Shield size={14} /> },
@@ -6265,7 +5368,7 @@ export function IntegrationsSection() {
     { id: "distribution", label: formatMessage({ id: "settings.connectedApps.section.distribution" }), status: distributionStatus, icon: <Link2 size={14} /> },
     { id: "danger", label: formatMessage({ id: "settings.connectedApps.section.dangerZone" }), status: formatMessage({ id: editingClient ? "settings.connectedApps.editor.dangerStatusRestricted" : "settings.connectedApps.editor.dangerStatusAvailableAfterSave" }), icon: <AlertTriangle size={14} /> },
   ];
-  const scrollToAppEditorSection = (sectionId: ConnectedAppEditorSectionId) => {
+  const scrollToAppEditorSection = useCallback((sectionId: ConnectedAppEditorSectionId) => {
     setAppEditorSection(sectionId);
     const content = appEditorContentRef.current;
     const target = content?.querySelector<HTMLElement>(`#connected-app-editor-${sectionId}`);
@@ -6275,7 +5378,7 @@ export function IntegrationsSection() {
       + content.scrollTop
       - 16;
     content.scrollTo?.({ top, behavior: "smooth" });
-  };
+  }, []);
   const syncAppEditorSectionFromScroll = () => {
     const content = appEditorContentRef.current;
     if (!content) return;
@@ -6294,6 +5397,79 @@ export function IntegrationsSection() {
     }
     setAppEditorSection((current) => current === nextSection ? current : nextSection);
   };
+
+  const handleConnectedAppsSearchChange = useCallback((event: ChangeEvent<HTMLInputElement>) => setConnectedAppsSearch(event.target.value), []);
+  const handleConnectedAppsCategoryChange = useCallback((value: string | null) => {
+    if (value == null) return;
+    setConnectedAppsCategory(value as ConnectedAppCategory | "all");
+  }, []);
+  const handleOpenInstalledApp = useCallback((app: InstalledConnectedApp) => {
+    setError("");
+    setSelectedInstalledApp(app);
+  }, []);
+  const handleEditInstalledApp = useCallback((app: InstalledConnectedApp) => {
+    const match = clients.find((client) => client.id === (app.sourceClientId ?? app.id));
+    if (match) beginEditClient(match);
+  }, [beginEditClient, clients]);
+  const handleRequestMarketplaceUninstall = useCallback((app: InstalledConnectedApp | ConnectedAppListing) => {
+    setError("");
+    setMarketplaceUninstallTarget(app);
+  }, []);
+  const handleCloseInstalledApp = useCallback(() => setSelectedInstalledApp(null), []);
+  const handleCloseListing = useCallback(() => setSelectedListing(null), []);
+  const handleRequestUninstallSelectedListing = useCallback(() => {
+    if (selectedListing) handleRequestMarketplaceUninstall(selectedListing);
+  }, [handleRequestMarketplaceUninstall, selectedListing]);
+  const handleInstallSelectedListing = useCallback(() => {
+    if (selectedListing) void handleInstallMarketplaceApp(selectedListing);
+  }, [handleInstallMarketplaceApp, selectedListing]);
+  const handlePickLogo = useCallback(() => logoInputRef.current?.click(), []);
+  const handleClientNameChange = useCallback((event: ChangeEvent<HTMLInputElement>) => setClientName(event.target.value), []);
+  const handleClientHomepageUrlChange = useCallback((event: ChangeEvent<HTMLInputElement>) => setClientHomepageUrl(event.target.value), []);
+  const handleClientCategoryChange = useCallback((value: string | null) => {
+    if (value == null) return;
+    setClientCategory(value as ConnectedAppCategory);
+  }, []);
+  const handleClientDescriptionChange = useCallback((event: ChangeEvent<HTMLTextAreaElement>) => setClientDescription(event.target.value), []);
+  const handleClientWhenToUseChange = useCallback((event: ChangeEvent<HTMLInputElement>) => setClientWhenToUse(event.target.value), []);
+  const handleClientIdChange = useCallback((event: ChangeEvent<HTMLInputElement>) => setClientId(event.target.value), []);
+  const handleClientReturnUrlChange = useCallback((event: ChangeEvent<HTMLInputElement>) => setClientReturnUrl(event.target.value), []);
+  const handleClientAgentManifestUrlChange = useCallback((event: ChangeEvent<HTMLInputElement>) => setClientAgentManifestUrl(event.target.value), []);
+  const handleAppNotificationStateChange = useCallback((next: AppNotificationsDeveloperState) => {
+    setAppNotificationState(next);
+    const requested = next.pending_revision ?? { groups: next.current_groups, events: next.current_events };
+    setAppNotificationSelection({ groups: requested.groups, events: requested.events });
+  }, []);
+  const handleRequestPublishEditingClient = useCallback(() => {
+    if (editingClient) void handleRequestPublish(mapClientToRegisteredApp(editingClient));
+  }, [editingClient, handleRequestPublish]);
+  const handleRequestRegenerateSecret = useCallback(() => setRegenerateSecretTarget(editingClient), [editingClient]);
+  const handleRequestOfflineEditingClient = useCallback(() => {
+    if (editingClient) setOfflineRequestTarget(mapClientToRegisteredApp(editingClient));
+  }, [editingClient]);
+  const handleRequestDeleteEditingClient = useCallback(() => {
+    if (editingClient) setDeleteClientTarget(mapClientToRegisteredApp(editingClient));
+  }, [editingClient]);
+  const handleCloseDeleteClient = useCallback(() => setDeleteClientTarget(null), []);
+  const handleConfirmDeleteClient = useCallback(
+    () => (deleteClientTarget ? handleDeleteClient(deleteClientTarget) : undefined),
+    [deleteClientTarget, handleDeleteClient],
+  );
+  const handleCloseRegenerateSecret = useCallback(() => setRegenerateSecretTarget(null), []);
+  const handleConfirmRegenerateSecret = useCallback(
+    () => (regenerateSecretTarget ? handleRegenerateClientSecret(regenerateSecretTarget) : undefined),
+    [handleRegenerateClientSecret, regenerateSecretTarget],
+  );
+  const handleCloseOfflineRequest = useCallback(() => setOfflineRequestTarget(null), []);
+  const handleConfirmOfflineRequest = useCallback(
+    () => (offlineRequestTarget ? handleRequestOffline(offlineRequestTarget) : undefined),
+    [handleRequestOffline, offlineRequestTarget],
+  );
+  const handleCloseMarketplaceUninstall = useCallback(() => setMarketplaceUninstallTarget(null), []);
+  const handleConfirmMarketplaceUninstall = useCallback(
+    () => (marketplaceUninstallTarget ? handleUninstallMarketplaceApp(marketplaceUninstallTarget) : undefined),
+    [handleUninstallMarketplaceApp, marketplaceUninstallTarget],
+  );
 
   if (!current) return null;
 
@@ -6343,7 +5519,7 @@ export function IntegrationsSection() {
           <Input
             type="search"
             value={connectedAppsSearch}
-            onChange={(event) => setConnectedAppsSearch(event.target.value)}
+            onChange={handleConnectedAppsSearchChange}
             placeholder={formatMessage({ id: "settings.connectedApps.searchApps" })}
             aria-label={formatMessage({ id: "settings.connectedApps.searchAppsAriaLabel" })}
             className="box-border h-10 min-h-10 w-full text-sm"
@@ -6353,24 +5529,15 @@ export function IntegrationsSection() {
         <div className="h-10 min-h-10 min-w-0 sm:col-span-1 md:w-[220px]">
           <Select
             value={connectedAppsCategory}
-            onValueChange={(value) => {
-              if (value == null) return;
-              setConnectedAppsCategory(value as ConnectedAppCategory | "all");
-            }}
-            items={CONNECTED_APP_CATEGORY_OPTIONS.map((option) => ({
-              value: option.value,
-              label: formatMessage({ id: CONNECTED_APP_CATEGORY_LABEL_ID[option.value] }),
-            }))}
+            onValueChange={handleConnectedAppsCategoryChange}
+            items={connectedAppsCategoryItems}
           >
             <SelectTrigger className="box-border h-10 min-h-10 w-full" data-testid="connected-apps-category-filter" aria-label={formatMessage({ id: "settings.connectedApps.filterByCategoryAriaLabel" })}>
               <SelectValue placeholder={formatMessage({ id: "settings.connectedApps.categoryLabel" })} />
               <SelectIcon />
             </SelectTrigger>
             <SelectContent>
-              <SelectList>{renderSelectItems(CONNECTED_APP_CATEGORY_OPTIONS.map((option) => ({
-                value: option.value,
-                label: formatMessage({ id: CONNECTED_APP_CATEGORY_LABEL_ID[option.value] }),
-              })))}</SelectList>
+              <SelectList>{renderSelectItems(connectedAppsCategoryItems)}</SelectList>
             </SelectContent>
           </Select>
         </div>
@@ -6443,85 +5610,16 @@ export function IntegrationsSection() {
             data-view={connectedAppsViewMode}
           >
           {filteredInstalledApps.map((app) => (
-            <SurfaceListItem
+            <InstalledConnectedAppItem
               key={`${app.origin}-${app.id}`}
-              interactive={false}
-              className={connectedAppsViewMode === "grid"
- ? "flex min-h-[184px] w-full flex-col gap-3"
- : "flex w-full flex-col gap-3 sm:flex-row sm:items-center sm:justify-between"}
-            >
-              <div className="flex min-w-0 flex-1 items-start gap-3">
-                <ConnectedAppLogo name={app.name} logoUrl={app.logoUrl} seed={app.defaultLogoSeed} size="sm" />
-                <div className="min-w-0 flex-1">
-                  {app.editable ? (
-                    <div className="min-w-0 break-words font-bold text-foreground-strong theme-brutal:text-black">{app.name}</div>
-                  ) : (
-                    <div
-                      role="button"
-                      tabIndex={0}
-                      aria-label={app.name}
-                      onClick={() => {
-                        setError("");
-                        setSelectedInstalledApp(app);
-                      }}
-                      onKeyDown={(event) => {
-                        if (event.key !== "Enter" && event.key !== " " && event.key !== "Spacebar") return;
-                        event.preventDefault();
-                        setError("");
-                        setSelectedInstalledApp(app);
-                      }}
-                      className="w-fit max-w-full break-words font-bold text-foreground-strong theme-brutal:text-black underline-offset-2 hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-foreground-strong theme-brutal:focus-visible:outline-black"
-                    >
-                      {app.name}
-                    </div>
-                  )}
-                  <div className="mt-0.5 text-xs text-foreground-muted theme-brutal:text-black/50">
-                    <span>{formatMessage({ id: CONNECTED_APP_CATEGORY_LABEL_ID[app.category] ?? "settings.connectedApps.categoryOther" })}</span>
-                    <span aria-hidden="true"> · </span>
-                    <span>{app.developer}</span>
-                  </div>
-                  <div className="mt-2 flex flex-wrap items-center gap-1.5">
-                    <ConnectedAppDistributionBadge status={app.publishStatus} />
-                    <ConnectedAppOriginBadges app={app} />
-                  </div>
-                  {connectedAppsViewMode === "list" && (
-                    <ConnectedAppSummary description={app.description} />
-                  )}
-                  {connectedAppsViewMode === "grid" && (
-                    <ConnectedAppUrlLink url={app.homepageUrl} label={app.homepageDomain} className="mt-1" />
-                  )}
-                </div>
-              </div>
-              {canManage && (app.editable ? (
-                <Button size="sm" variant="outline"
-                  type="button"
-                  onClick={() => {
-                    const match = clients.find((client) => client.id === (app.sourceClientId ?? app.id));
-                    if (match) beginEditClient(match);
-                  }}
-                  className={` inline-flex w-fit items-center justify-center gap-1.5 bg-layer-panel theme-brutal:bg-white px-2.5 py-1 text-xs ${connectedAppsViewMode === "grid" ? "mt-auto self-end" : "self-end sm:self-auto"}`}
-                >
-                  <Pencil size={14} />
-                  {formatMessage({ id: "settings.connectedApps.edit" })}
-                </Button>
-              ) : (
-                <div className={`flex w-full flex-wrap justify-end gap-2 sm:w-auto ${connectedAppsViewMode === "grid" ? "mt-auto self-end" : "self-end sm:self-auto"}`}>
-                  <Button
-                    variant="outline" size="sm"
-                    type="button"
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      setError("");
-                      setMarketplaceUninstallTarget(app);
-                    }}
-                    disabled={savingClientId === app.id}
-                    className="inline-flex items-center justify-center gap-1.5"
-                  >
-                    {savingClientId === app.id ? formatMessage({ id: "settings.connectedApps.uninstalling" }) : formatMessage({ id: "settings.connectedApps.uninstall" })}
-                  </Button>
-                </div>
-              ))}
-            </SurfaceListItem>
+              app={app}
+              viewMode={connectedAppsViewMode}
+              canManage={canManage}
+              uninstalling={savingClientId === app.id}
+              onOpen={handleOpenInstalledApp}
+              onEdit={handleEditInstalledApp}
+              onRequestUninstall={handleRequestMarketplaceUninstall}
+            />
           ))}
           </div>
           {filteredInstalledApps.length === 0 && (
@@ -6552,50 +5650,13 @@ export function IntegrationsSection() {
               data-view={connectedAppsViewMode}
             >
               {filteredRegisteredApps.map((app) => (
-                <SurfaceListItem
+                <RegisteredConnectedAppItem
                   key={app.id}
-                  interactive={false}
-                  className={connectedAppsViewMode === "grid"
- ? "flex min-h-[184px] w-full flex-col gap-3"
- : "flex w-full flex-col gap-3 sm:flex-row sm:items-center sm:justify-between"}
-                >
-                  <div className="flex min-w-0 flex-1 items-start gap-3">
-                    <ConnectedAppLogo name={app.name} logoUrl={app.logoUrl} seed={app.defaultLogoSeed} size="sm" />
-                    <div className="min-w-0 flex-1">
-                      <div className="min-w-0 break-words font-bold text-foreground-strong theme-brutal:text-black">{app.name}</div>
-                      <div className="mt-0.5 text-xs text-foreground-muted theme-brutal:text-black/50">{formatMessage({ id: CONNECTED_APP_CATEGORY_LABEL_ID[app.category] ?? "settings.connectedApps.categoryOther" })}</div>
-                      <div className="mt-2 flex flex-wrap items-center gap-1.5">
-                        <ConnectedAppDistributionBadge status={app.status} />
-                      </div>
-                      {connectedAppsViewMode === "list" && (
-                        <ConnectedAppSummary description={app.description} />
-                      )}
-                      {connectedAppsViewMode === "grid" && (
-                        <>
-                          {sourceOwnedConnectedAppStatusHint(app.status) && (
-                            <Tooltip content={formatMessage({ id: sourceOwnedConnectedAppStatusHint(app.status)! })}>
-                            <div className="mt-1 line-clamp-2 text-xs leading-relaxed text-foreground-muted theme-brutal:text-black/55">
-                              {formatMessage({ id: sourceOwnedConnectedAppStatusHint(app.status)! })}
-                            </div>
-                            </Tooltip>
-                          )}
-                          <ConnectedAppUrlLink url={app.homepageUrl} label={getDomainFromUrl(app.homepageUrl)} className="mt-1" />
-                        </>
-                      )}
-                    </div>
-                  </div>
-                  {canManage && (
-                    <div className={`flex w-full flex-wrap items-center justify-end gap-2 sm:w-auto ${connectedAppsViewMode === "grid" ? "mt-auto" : ""}`}>
-                      {canEditSourceOwnedConnectedApp(app.status) && (
-                        <Button
-                          variant="outline" size="sm" type="button" onClick={() => beginEditClient(app)} className="inline-flex items-center justify-center gap-1.5">
-                          <Pencil size={14} />
-                          {formatMessage({ id: "settings.connectedApps.edit" })}
-                        </Button>
-                      )}
-                    </div>
-                  )}
-                </SurfaceListItem>
+                  app={app}
+                  viewMode={connectedAppsViewMode}
+                  canManage={canManage}
+                  onEdit={beginEditClient}
+                />
               ))}
             </div>
           )}
@@ -6603,7 +5664,7 @@ export function IntegrationsSection() {
       )}
 
       {selectedInstalledApp && (
-        <Modal onClose={() => setSelectedInstalledApp(null)}>
+        <Modal onClose={handleCloseInstalledApp}>
           <Card className="w-full max-w-2xl space-y-4 p-5">
             <div className="flex items-start justify-between gap-3">
               <div className="flex min-w-0 items-start gap-3">
@@ -6615,7 +5676,7 @@ export function IntegrationsSection() {
                 </div>
               </div>
               <CloseButton
-                type="button" onClick={() => setSelectedInstalledApp(null)}  aria-label={formatMessage({ id: "settings.connectedApps.closeInstalledAppDetail" })}>
+                type="button" onClick={handleCloseInstalledApp}  aria-label={formatMessage({ id: "settings.connectedApps.closeInstalledAppDetail" })}>
                 <X size={14} />
               </CloseButton>
             </div>
@@ -6626,6 +5687,7 @@ export function IntegrationsSection() {
               scopes={selectedInstalledApp.grantedScopes}
               defaultToDeclared={false}
             />
+            <AgentJwtSettings serverId={serverId ?? null} clientId={selectedInstalledApp.id} canManage={canManage} />
             <InstalledAppNotifications
               clientId={selectedInstalledApp.id}
               canManage={canManage}
@@ -6633,14 +5695,14 @@ export function IntegrationsSection() {
             />
             <div className="flex justify-end border-t-2 border-line-muted theme-brutal:border-black pt-4">
               <Button
-                type="button" onClick={() => setSelectedInstalledApp(null)} size="md">{formatMessage({ id: "settings.common.close" })}</Button>
+                type="button" onClick={handleCloseInstalledApp} size="md">{formatMessage({ id: "settings.common.close" })}</Button>
             </div>
           </Card>
         </Modal>
       )}
 
       {selectedListing && (
-        <Modal onClose={() => setSelectedListing(null)}>
+        <Modal onClose={handleCloseListing}>
           <Card className="w-full max-w-2xl space-y-4 p-5" aria-labelledby="connected-app-detail-title">
             <div className="flex items-start justify-between gap-3">
               <div className="flex items-start gap-3">
@@ -6655,7 +5717,7 @@ export function IntegrationsSection() {
                 </div>
               </div>
               <CloseButton
-                type="button" onClick={() => setSelectedListing(null)}  aria-label={formatMessage({ id: "settings.connectedApps.closeAppDetail" })}>
+                type="button" onClick={handleCloseListing}  aria-label={formatMessage({ id: "settings.connectedApps.closeAppDetail" })}>
                 <X size={14} />
               </CloseButton>
             </div>
@@ -6688,11 +5750,18 @@ export function IntegrationsSection() {
                 scopes={selectedListing.allowedScopes}
               />
             </ConnectedAppDetailSection>
+            {selectedListing.installed ? <AgentJwtSettings serverId={serverId ?? null} clientId={selectedListing.id} canManage={canManage} /> : null}
             <ConnectedAppDetailSection title={formatMessage({ id: "settings.connectedApps.section.appPermissions" })} tone="cream">
               <AppNotificationRequestSummary
                 groups={selectedListing.appNotificationGroups}
                 events={selectedListing.appNotificationEvents}
+                pendingGroups={selectedListing.appNotificationPendingGroups}
+                pendingEvents={selectedListing.appNotificationPendingEvents}
+                pendingRevisionId={selectedListing.appNotificationPendingRevisionId}
                 reviewPending={selectedListing.appNotificationReviewPending}
+                canReview={selectedListing.canReviewAppNotifications}
+                reviewing={reviewingPermissionClientId === selectedListing.id}
+                onApprove={handleApproveAppPermissionUpdateClick}
               />
             </ConnectedAppDetailSection>
             <ConnectedAppDetailSection title={formatMessage({ id: "settings.connectedApps.section.distribution" })} tone="cream">
@@ -6709,10 +5778,7 @@ export function IntegrationsSection() {
                   <Button
                     type="button"
                     disabled={savingClientId === selectedListing.id}
-                    onClick={() => {
-                      setError("");
-                      setMarketplaceUninstallTarget(selectedListing);
-                    }}
+                    onClick={handleRequestUninstallSelectedListing}
                     variant="danger"
                     size="md"
                   >
@@ -6723,14 +5789,14 @@ export function IntegrationsSection() {
             )}
             <div className="flex items-center justify-end gap-2 border-t-2 border-line-muted theme-brutal:border-black pt-4">
               <Button
-                type="button" onClick={() => setSelectedListing(null)} size="md">
+                type="button" onClick={handleCloseListing} size="md">
                 {canManage ? formatMessage({ id: "settings.common.cancel" }) : formatMessage({ id: "settings.common.close" })}
               </Button>
               {canManage && !selectedListing.installed && (
                 <Button
                   type="button"
                   disabled={savingClientId === selectedListing.id}
-                  onClick={() => void handleInstallMarketplaceApp(selectedListing)}
+                  onClick={handleInstallSelectedListing}
                   variant="accent"
                   size="md"
                 >
@@ -6777,7 +5843,7 @@ export function IntegrationsSection() {
                   <X size={16} />
                 </CloseButton>
                 <Button
-                  type="submit" disabled={submitting || appNotificationLoading || savingClientId === editingClient?.id} variant="accent" size="sm">
+                  type="submit" disabled={isAppWhenToUseTooLong(clientWhenToUse) || submitting || appNotificationLoading || savingClientId === editingClient?.id} variant="accent" size="sm">
                   {submitting ? formatMessage({ id: "settings.common.saving" }) : editingClient ? formatMessage({ id: "settings.common.save" }) : formatMessage({ id: "settings.connectedApps.registerApp" })}
                 </Button>
               </div>
@@ -6797,26 +5863,12 @@ export function IntegrationsSection() {
                 data-testid="connected-app-editor-rail"
               >
                 {appEditorSections.map((section) => (
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    type="button"
+                  <ConnectedAppEditorRailButton
                     key={section.id}
-                    data-app-editor-section={section.id}
-                    onClick={() => scrollToAppEditorSection(section.id)}
-                    aria-current={appEditorSection === section.id ? "true" : undefined}
-                    className={`h-auto min-w-[155px] flex-col items-start justify-start gap-0 border border-line-muted px-3 py-2 text-left shadow-raft-sm hover:shadow-raft-md md:min-w-0 md:w-full theme-brutal:border-2 theme-brutal:border-black theme-brutal:shadow-brutal-sm ${
- appEditorSection === section.id ? "bg-primary-soft theme-brutal:bg-soft-signal theme-brutal:shadow-brutal-sm" : "bg-layer-panel theme-brutal:bg-white"
- }`}
-                  >
-                    <span className="flex min-w-0 flex-col items-start">
-                      <span className="flex items-center gap-2 text-xs font-black text-foreground-strong theme-brutal:text-black">
-                        {section.icon}
-                        {section.label}
-                      </span>
-                      <span className="mt-1 block truncate text-[10px] font-bold text-foreground-muted theme-brutal:text-black/50">{section.status}</span>
-                    </span>
-                  </Button>
+                    section={section}
+                    active={appEditorSection === section.id}
+                    onSelect={scrollToAppEditorSection}
+                  />
                 ))}
               </nav>
               <div
@@ -6860,7 +5912,7 @@ export function IntegrationsSection() {
                         />
                         <Button
                           type="button"
-                          onClick={() => logoInputRef.current?.click()}
+                          onClick={handlePickLogo}
                           disabled={logoUploading}
                           size="sm"
                           
@@ -6871,7 +5923,7 @@ export function IntegrationsSection() {
                         {editingClient.logoUrl && (
                           <Button
                             type="button"
-                            onClick={() => void handleClearLogo()}
+                            onClick={handleClearLogo}
                             disabled={logoUploading}
                             size="sm"
                           >
@@ -6888,7 +5940,7 @@ export function IntegrationsSection() {
                   <Input
                     type="text"
                     value={clientName}
-                    onChange={(event) => setClientName(event.target.value)}
+                    onChange={handleClientNameChange}
                     className="w-full text-sm"
                     placeholder={formatMessage({ id: "settings.connectedApps.appNamePlaceholder" })}
                     required
@@ -6898,7 +5950,7 @@ export function IntegrationsSection() {
                   <Input
                     type="url"
                     value={clientHomepageUrl}
-                    onChange={(event) => setClientHomepageUrl(event.target.value)}
+                    onChange={handleClientHomepageUrlChange}
                     className="w-full text-sm"
                     render={<input placeholder="https://example.com" />}
                   />
@@ -6906,24 +5958,15 @@ export function IntegrationsSection() {
                 <FormField label={formatMessage({ id: "settings.connectedApps.categoryLabel" })} labelStyle="plain" size="compact">
                   <Select
                     value={clientCategory}
-                    onValueChange={(value) => {
-                      if (value == null) return;
-                      setClientCategory(value as ConnectedAppCategory);
-                    }}
-                    items={CONNECTED_APP_PUBLISH_CATEGORY_OPTIONS.map((option) => ({
-                      value: option.value,
-                      label: formatMessage({ id: CONNECTED_APP_CATEGORY_LABEL_ID[option.value] }),
-                    }))}
+                    onValueChange={handleClientCategoryChange}
+                    items={publishCategoryItems}
                   >
                     <SelectTrigger className="w-full" aria-label={formatMessage({ id: "settings.connectedApps.appCategoryAriaLabel" })}>
                       <SelectValue placeholder={formatMessage({ id: "settings.connectedApps.categoryLabel" })} />
                       <SelectIcon />
                     </SelectTrigger>
                     <SelectContent>
-                      <SelectList>{renderSelectItems(CONNECTED_APP_PUBLISH_CATEGORY_OPTIONS.map((option) => ({
-                        value: option.value,
-                        label: formatMessage({ id: CONNECTED_APP_CATEGORY_LABEL_ID[option.value] }),
-                      })))}</SelectList>
+                      <SelectList>{renderSelectItems(publishCategoryItems)}</SelectList>
                     </SelectContent>
                   </Select>
                 </FormField>
@@ -6932,7 +5975,7 @@ export function IntegrationsSection() {
             <FormField label={formatMessage({ id: "settings.connectedApps.descriptionLabel" })} labelStyle="plain" size="compact">
               <Textarea
                 value={clientDescription}
-                onChange={(event) => setClientDescription(event.target.value)}
+                onChange={handleClientDescriptionChange}
                 rows={3}
                 placeholder={formatMessage({ id: "settings.connectedApps.descriptionPlaceholder" })}
                 className="resize-none"
@@ -6942,21 +5985,13 @@ export function IntegrationsSection() {
               <Input
                 type="text"
                 value={clientId}
-                onChange={(event) => setClientId(event.target.value)}
+                onChange={handleClientIdChange}
                 className="w-full font-mono text-sm disabled:bg-fill-muted disabled:text-foreground-muted theme-brutal:disabled:bg-black/5 theme-brutal:disabled:text-black/45"
                 placeholder={formatMessage({ id: "settings.connectedApps.clientIdPlaceholder" })}
                 disabled={!!editingClient}
               />
             </FormField>
-            <FormField label={formatMessage({ id: "settings.connectedApps.whenToUseLabel" })} labelStyle="plain" size="compact" hint={formatMessage({ id: "settings.connectedApps.whenToUseHint" })} optional>
-              <Input
-                type="text"
-                value={clientWhenToUse}
-                onChange={(event) => setClientWhenToUse(event.target.value)}
-                className="w-full text-sm"
-                render={<input maxLength={160} placeholder={formatMessage({ id: "settings.connectedApps.whenToUsePlaceholder" })} />}
-              />
-            </FormField>
+            <AppWhenToUseField value={clientWhenToUse} onChange={handleClientWhenToUseChange} />
             </ConnectedAppEditorSection>
 
             <ConnectedAppEditorSection
@@ -6969,7 +6004,7 @@ export function IntegrationsSection() {
               <Input
                 type="url"
                 value={clientReturnUrl}
-                onChange={(event) => setClientReturnUrl(event.target.value)}
+                onChange={handleClientReturnUrlChange}
                 className="w-full text-sm"
                 render={<input placeholder="https://example.com/login/callback" />}
               />
@@ -6978,12 +6013,13 @@ export function IntegrationsSection() {
               <Input
                 type="url"
                 value={clientAgentManifestUrl}
-                onChange={(event) => setClientAgentManifestUrl(event.target.value)}
+                onChange={handleClientAgentManifestUrlChange}
                 className="w-full text-sm"
                 render={<input placeholder="https://example.com/.well-known/raft-agent-manifest.json" />}
               />
             </FormField>
             <DeclaredScopesPicker value={clientAllowedScopes} onChange={setClientAllowedScopes} />
+            <AgentJwtSettings serverId={serverId ?? null} clientId={editingClient?.id ?? null} canManage={canManage} />
             </ConnectedAppEditorSection>
             <ConnectedAppEditorSection
               sectionId="permissions"
@@ -7007,11 +6043,7 @@ export function IntegrationsSection() {
               state={appNotificationState}
               loading={appNotificationLoading}
               onConfigurationOpenChange={setAppNotificationConfigurationOpen}
-              onStateChange={(next) => {
-                setAppNotificationState(next);
-                const requested = next.pending_revision ?? { groups: next.current_groups, events: next.current_events };
-                setAppNotificationSelection({ groups: requested.groups, events: requested.events });
-              }}
+              onStateChange={handleAppNotificationStateChange}
               onError={setError}
             />
             </ConnectedAppEditorSection>
@@ -7047,12 +6079,12 @@ export function IntegrationsSection() {
                   </div>
                   <div className="flex flex-wrap justify-end gap-2">
                     <Button
-                      type="button" size="sm" onClick={() => void handleCreateShareLink()} disabled={shareLoading}>
+                      type="button" size="sm" onClick={handleCreateShareLink} disabled={shareLoading}>
                       {shareLoading ? formatMessage({ id: "settings.connectedApps.working" }) : shareLink ? formatMessage({ id: "settings.connectedApps.regenerate" }) : formatMessage({ id: "settings.connectedApps.createLink" })}
                     </Button>
                     {shareLink && (
                       <Button
-                        type="button" size="sm" onClick={() => void handleRevokeShareLink()} disabled={shareLoading}>
+                        type="button" size="sm" onClick={handleRevokeShareLink} disabled={shareLoading}>
                         {formatMessage({ id: "settings.connectedApps.revoke" })}
                       </Button>
                     )}
@@ -7068,7 +6100,7 @@ export function IntegrationsSection() {
                       aria-label={formatMessage({ id: "settings.connectedApps.privateShareUrlAria" })}
                     />
                     <Button
-                      type="button" size="sm"  onClick={() => void handleCopyShareUrl()}>
+                      type="button" size="sm"  onClick={handleCopyShareUrl}>
                       {shareCopied ? <Check size={14} /> : <Copy size={14} />}
                       {shareCopied ? formatMessage({ id: "settings.connectedApps.copied" }) : formatMessage({ id: "settings.connectedApps.copy" })}
                     </Button>
@@ -7085,8 +6117,8 @@ export function IntegrationsSection() {
                 <div className="mt-3 flex justify-end">
                   <Button
                     type="button"
-                    onClick={() => void handleRequestPublish(mapClientToRegisteredApp(editingClient))}
-                    disabled={savingClientId === editingClient.id}
+                    onClick={handleRequestPublishEditingClient}
+                    disabled={isAppWhenToUseTooLong(clientWhenToUse) || savingClientId === editingClient.id}
                     variant="accent"
                     size="sm"
                   >
@@ -7126,7 +6158,7 @@ export function IntegrationsSection() {
                       type="button"
                       size="sm"
                       variant="primary"
-                      onClick={() => setRegenerateSecretTarget(editingClient)}
+                      onClick={handleRequestRegenerateSecret}
                       disabled={submitting || regeneratingClientId === editingClient.id}
                       data-testid="connected-app-regenerate-secret-button"
                     >
@@ -7142,7 +6174,7 @@ export function IntegrationsSection() {
                         <div className="mt-1 text-xs leading-relaxed text-foreground-muted theme-brutal:text-black/60">{formatMessage({ id: "settings.connectedApps.editor.marketplaceLifecycleDescription" })}</div>
                       </div>
                       <Button
-                        type="button" size="sm" onClick={() => setOfflineRequestTarget(mapClientToRegisteredApp(editingClient))}>
+                        type="button" size="sm" onClick={handleRequestOfflineEditingClient}>
                         {formatMessage({ id: "settings.connectedApps.editor.requestOffline" })}
                       </Button>
                     </div>
@@ -7155,7 +6187,7 @@ export function IntegrationsSection() {
                       actionLabel={formatMessage({ id: "settings.connectedApps.delete" })}
                       actionIcon={<Trash2 size={14} />}
                       actionSize="sm"
-                      onAction={() => setDeleteClientTarget(mapClientToRegisteredApp(editingClient))}
+                      onAction={handleRequestDeleteEditingClient}
                     />
                   ) : null}
                 </>
@@ -7183,8 +6215,8 @@ export function IntegrationsSection() {
           confirmIcon={<Trash2 size={14} />}
           confirmTestId="connected-app-delete-confirm-button"
           layer={showRegisterDrawer ? 1 : undefined}
-          onClose={() => setDeleteClientTarget(null)}
-          onConfirm={() => handleDeleteClient(deleteClientTarget)}
+          onClose={handleCloseDeleteClient}
+          onConfirm={handleConfirmDeleteClient}
         />
       )}
 
@@ -7207,8 +6239,8 @@ export function IntegrationsSection() {
           confirmVariant="primary"
           confirmTestId="connected-app-regenerate-secret-confirm-button"
           layer={1}
-          onClose={() => setRegenerateSecretTarget(null)}
-          onConfirm={() => handleRegenerateClientSecret(regenerateSecretTarget)}
+          onClose={handleCloseRegenerateSecret}
+          onConfirm={handleConfirmRegenerateSecret}
         />
       )}
 
@@ -7229,8 +6261,8 @@ export function IntegrationsSection() {
           loadingLabel={formatMessage({ id: "settings.connectedApps.editor.requestOfflineConfirmLoading" })}
           confirmIcon={<Upload size={14} className="rotate-180" />}
           layer={showRegisterDrawer ? 1 : undefined}
-          onClose={() => setOfflineRequestTarget(null)}
-          onConfirm={() => handleRequestOffline(offlineRequestTarget)}
+          onClose={handleCloseOfflineRequest}
+          onConfirm={handleConfirmOfflineRequest}
         />
       )}
 
@@ -7253,8 +6285,8 @@ export function IntegrationsSection() {
           confirmIcon={<Trash2 size={14} />}
           confirmTestId="connected-app-uninstall-confirm-button"
           layer={selectedListing?.id === marketplaceUninstallTarget.id ? 1 : undefined}
-          onClose={() => setMarketplaceUninstallTarget(null)}
-          onConfirm={() => handleUninstallMarketplaceApp(marketplaceUninstallTarget)}
+          onClose={handleCloseMarketplaceUninstall}
+          onConfirm={handleConfirmMarketplaceUninstall}
         />
       )}
     </div>
@@ -7274,19 +6306,24 @@ function PreJoinAgreementSection() {
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState("");
+  const serverId = currentServer?.id;
 
-  // oxlint-disable react-hooks/exhaustive-deps -- load the agreement only when the active server id changes; depending on the whole `currentServer` store object would refetch on unrelated server-store churn.
-  // Async-loader: load agreement on server change. Same FP family as L1696.
+  // Read at failure time so a locale switch does not refetch the agreement.
+  const formatLoadError = useEffectEvent(() => formatMessage({ id: "settings.preJoinAgreement.failedLoad" }));
+
+  // Async-loader: load the agreement only when the active server id changes,
+  // not on unrelated churn of the `currentServer` store object. Same FP family
+  // as L1696.
   // oxlint-disable-next-line react-doctor/no-cascading-set-state
   useEffect(() => {
-    if (!currentServer) return;
+    if (!serverId) return;
     let cancelled = false;
     // oxlint-disable-next-line react-doctor/no-adjust-state-on-prop-change
     setLoading(true);
     // oxlint-disable-next-line react-doctor/no-adjust-state-on-prop-change
     setError("");
     void api
-      .get(`/servers/${currentServer.id}/agreement`)
+      .get(`/servers/${serverId}/agreement`)
       .then(({ data }) => {
         if (cancelled) return;
         const nextEnabled = !!data.enabled;
@@ -7306,7 +6343,7 @@ function PreJoinAgreementSection() {
         setError(
           typeof responseError === "string" && responseError.trim()
             ? responseError
-            : formatMessage({ id: "settings.preJoinAgreement.failedLoad" }),
+            : formatLoadError(),
         );
       })
       .finally(() => {
@@ -7315,27 +6352,32 @@ function PreJoinAgreementSection() {
     return () => {
       cancelled = true;
     };
-  }, [currentServer?.id]);
-  // oxlint-enable react-hooks/exhaustive-deps
+  }, [serverId]);
 
-  if (!currentServer) return null;
+  const handleEnabledChange = useCallback((checked: boolean) => {
+    setEnabled(checked);
+    setSaved(false);
+  }, []);
 
-  const dirty =
-    enabled !== savedEnabled
-    || title !== savedTitle
-    || bodyMarkdown !== savedBodyMarkdown;
+  const handleTitleChange = useCallback((event: ChangeEvent<HTMLInputElement>) => {
+    setTitle(event.target.value);
+    setSaved(false);
+  }, []);
+
+  const handleBodyMarkdownChange = useCallback((event: ChangeEvent<HTMLTextAreaElement>) => {
+    setBodyMarkdown(event.target.value);
+    setSaved(false);
+  }, []);
+
   const bodyMarkdownTooLong = bodyMarkdown.length > PRE_JOIN_AGREEMENT_BODY_MAX_LENGTH;
-  const bodyMarkdownError = bodyMarkdownTooLong
-    ? formatMessage({ id: "settings.preJoinAgreement.bodyTooLong" }, { max: PRE_JOIN_AGREEMENT_BODY_MAX_LENGTH_LABEL })
-    : "";
 
-  const handleSave = async () => {
-    if (bodyMarkdownTooLong) return;
+  const handleSave = useCallback(async () => {
+    if (!serverId || bodyMarkdownTooLong) return;
     setSaving(true);
     setSaved(false);
     setError("");
     try {
-      const { data } = await api.put(`/servers/${currentServer.id}/agreement`, {
+      const { data } = await api.put(`/servers/${serverId}/agreement`, {
         enabled,
         title,
         bodyMarkdown,
@@ -7356,7 +6398,17 @@ function PreJoinAgreementSection() {
     } finally {
       setSaving(false);
     }
-  };
+  }, [bodyMarkdown, bodyMarkdownTooLong, enabled, formatMessage, serverId, title]);
+
+  if (!currentServer) return null;
+
+  const dirty =
+    enabled !== savedEnabled
+    || title !== savedTitle
+    || bodyMarkdown !== savedBodyMarkdown;
+  const bodyMarkdownError = bodyMarkdownTooLong
+    ? formatMessage({ id: "settings.preJoinAgreement.bodyTooLong" }, { max: PRE_JOIN_AGREEMENT_BODY_MAX_LENGTH_LABEL })
+    : "";
 
   return (
     <div className="mb-6">
@@ -7372,10 +6424,7 @@ function PreJoinAgreementSection() {
             size="md"
             checked={enabled}
             disabled={saving || loading}
-            onCheckedChange={(checked) => {
-              setEnabled(checked);
-              setSaved(false);
-            }}
+            onCheckedChange={handleEnabledChange}
             className="mt-0.5"
           />
           <span className="min-w-0">
@@ -7391,10 +6440,7 @@ function PreJoinAgreementSection() {
             <FormField label={formatMessage({ id: "settings.preJoinAgreement.titleLabel" })} labelStyle="plain" size="compact">
               <Input
                 value={title}
-                onChange={(event) => {
-                  setTitle(event.target.value);
-                  setSaved(false);
-                }}
+                onChange={handleTitleChange}
                 maxLength={160}
                 disabled={saving || loading}
                 className="w-full text-sm disabled:opacity-60"
@@ -7403,10 +6449,7 @@ function PreJoinAgreementSection() {
             <FormField label={formatMessage({ id: "settings.preJoinAgreement.bodyLabel" })} labelStyle="plain" size="compact">
               <Textarea
                 value={bodyMarkdown}
-                onChange={(event) => {
-                  setBodyMarkdown(event.target.value);
-                  setSaved(false);
-                }}
+                onChange={handleBodyMarkdownChange}
                 rows={7}
                 maxLength={PRE_JOIN_AGREEMENT_BODY_MAX_LENGTH}
                 aria-invalid={bodyMarkdownError ? true : undefined}
@@ -7629,7 +6672,7 @@ function AppearanceSection() {
             <MessageItem
               message={previewMessage}
               mentionMap={APPEARANCE_PREVIEW_MENTION_MAP}
-              channels={[APPEARANCE_PREVIEW_CHANNEL]}
+              channels={APPEARANCE_PREVIEW_CHANNELS}
               previewSenderAgent={APPEARANCE_PREVIEW_AGENT}
               hideThreadActions
             />
@@ -7839,34 +6882,6 @@ function McpSettingsSection() {
   );
 }
 
-// NOT exported for tests: this card is gated by useWorkspaceGridAvailability(),
-// which reads `import.meta.env.DEV` — undefined in the node test harness, so it
-// throws before rendering. Its `settings.workspaceMode.*` ids therefore have only
-// catalog-parity coverage in settingsSubBatchC.i18n.behavior.test.tsx, not a
-// render tooth; see the GAP note there.
-function WorkspaceModeSettingsCard() {
-  const { formatMessage } = useIntl();
-  const availability = useWorkspaceGridAvailability();
-  const userId = useAuthStore((s) => s.user?.id ?? null);
-  const enabled = useWorkspaceGridNavigationStore((s) => s.enabled);
-  const setEnabled = useWorkspaceGridNavigationStore((s) => s.setEnabled);
-  if (!availability.resolved || !availability.enabled) return null;
-
-  return (
-    <label className="mb-4 flex items-center justify-between gap-4 border border-line-muted theme-brutal:border-2 theme-brutal:border-black bg-layer-canvas-muted theme-brutal:bg-brutal-cream p-4 shadow-raft-sm theme-brutal:shadow-brutal-sm">
-      <span className="min-w-0">
-        <span className="block text-sm font-bold">{formatMessage({ id: "settings.workspaceMode.title" })}</span>
-        <span className="mt-1 block text-xs leading-5 text-foreground-muted theme-brutal:text-black/60">{formatMessage({ id: "settings.workspaceMode.description" })}</span>
-      </span>
-      <Checkbox
-        checked={enabled}
-        onCheckedChange={(checked) => setEnabled(checked, userId)}
-        aria-label={formatMessage({ id: "settings.workspaceMode.title" })}
-      />
-    </label>
-  );
-}
-
 export default function SettingsPanel({
   tab: tabProp,
   accountInitialError,
@@ -7879,6 +6894,13 @@ export default function SettingsPanel({
   showAboutWorkspace?: boolean;
 }) {
   const { formatMessage } = useIntl();
+  // A host-shell embed skips the chat startup loads, and the channel list is one
+  // of them. Two sections here read it (system channels, archived channels), so
+  // settings asks for it itself there.
+  const settingsServerId = useServerStore((s) => s.current?.id ?? null);
+  useEffect(() => {
+    if (!hasChatSurfaces() && settingsServerId) void useChannelStore.getState().loadChannels();
+  }, [settingsServerId]);
   const requestedSettingsTab = normalizeSettingsTab(tabProp);
   const providerConnectionsEnabled = useServerFeatureFlag(PROVIDER_CONNECTIONS_FEATURE_FLAG_KEY).enabled;
   const slackBridgeGate = useServerFeatureFlag(SLACK_BRIDGE_FEATURE_FLAG_KEYS.master);
@@ -7908,6 +6930,14 @@ export default function SettingsPanel({
   // own native header (Administration/Billing pattern, botiverse/mobile#868).
   // Drop the panel header so the page isn't double-chromed; content only.
   const embedded = typeof window !== "undefined" && new URLSearchParams(window.location.search).get("embed") === "1";
+  const headerContainerProps = useMemo(() => ({
+    "data-testid": "settings-panel-header",
+    "data-slock-settings-tab": settingsTab,
+  }), [settingsTab]);
+  const mobileBackProps = useMemo(
+    () => ({ "data-testid": "settings-mobile-back", title: formatMessage({ id: "settings.tabs.back" }) }),
+    [formatMessage],
+  );
 
   return (
     <Panel edge="attached" className="flex min-h-0 flex-1 flex-col bg-layer-canvas-muted text-foreground-strong">
@@ -7916,12 +6946,9 @@ export default function SettingsPanel({
           title={activeLabel}
           icon={<ActiveIcon size={18} />}
           iconBg="bg-primary-soft text-foreground-strong theme-brutal:bg-soft-signal theme-brutal:text-black"
-          containerProps={{
-            "data-testid": "settings-panel-header",
-            "data-slock-settings-tab": settingsTab,
-          }}
+          containerProps={headerContainerProps}
           onMobileBack={onMobileBack}
-          mobileBackProps={{ "data-testid": "settings-mobile-back", title: formatMessage({ id: "settings.tabs.back" }) }}
+          mobileBackProps={mobileBackProps}
         />
       )}
 
@@ -7930,7 +6957,6 @@ export default function SettingsPanel({
  ? "min-h-0 flex-1 bg-layer-panel dark:bg-layer-card theme-brutal:bg-white"
  : "flex-1 overflow-y-auto bg-layer-panel px-5 py-4 text-foreground-strong mobile-nav-clearance theme-brutal:bg-white theme-brutal:text-black"}
       >
-        {settingsTab === "account" && <WorkspaceModeSettingsCard />}
         {settingsTab === "account" && (
           <AccountSection
             initialError={accountInitialError}

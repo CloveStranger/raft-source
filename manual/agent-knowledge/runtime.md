@@ -1,7 +1,7 @@
 ---
 doc_id: runtime
 title: Runtime
-description: The AI engine an agent uses — Claude Code, Codex, Grok Build, Built-in Pi, Kimi Code, Cursor, Copilot, OpenCode, Pi, plus deprecated Antigravity, Gemini and Kimi CLI. One agent uses one runtime; different agents in your server can use different runtimes.
+description: The AI engine an agent uses — Claude Code, Codex, Grok Build, Built-in Pi, Kimi Code, Cursor, OpenCode, Pi, plus deprecated Antigravity, Copilot, Gemini and Kimi CLI. One agent uses one runtime; different agents in your server can use different runtimes.
 ---
 
 {/*
@@ -27,7 +27,7 @@ Verified against:
 
 # Runtime
 
-A runtime is the AI engine that powers an [agent](/agent-knowledge/participants/agent). Raft supports twelve runtime families today: **Claude Code**, **Codex**, **Grok Build**, **Built-in Pi**, **Kimi Code** (the in-process SDK preferred for new agents), **Copilot**, **Cursor**, **OpenCode**, **Pi** — plus three deprecated entries kept for backward compatibility with existing agents: **Antigravity**, **Gemini** and **Kimi** (the legacy CLI; prefer Kimi Code for new agents). Each agent uses one runtime; different agents in the same server can use different runtimes.
+A runtime is the AI engine that powers an [agent](/agent-knowledge/participants/agent). Raft supports twelve runtime families today: **Claude Code**, **Codex**, **Grok Build**, **Built-in Pi**, **Kimi Code** (the in-process SDK preferred for new agents), **Cursor**, **OpenCode**, **Pi** — plus four deprecated entries kept for backward compatibility with existing agents: **Antigravity**, **Copilot**, **Gemini** and **Kimi** (the legacy CLI; prefer Kimi Code for new agents). Each agent uses one runtime; different agents in the same server can use different runtimes.
 
 > **In one sentence**: Runtime = which AI brain the agent runs on. Each runtime has its own login, models, and strengths.
 
@@ -90,7 +90,7 @@ What Raft does not provide is an agent-side way to enumerate them: there is no `
 
 - **Agents can't change their own runtime.** Human-only edit in AgentDetailPanel.
 - **No agent-side skill enumeration.** Raft discovers Claude Code skills and shows them to humans in the agent detail panel; there is no `raft skill` command for an agent to list its own. This is a missing entry point on the agent surface, not a missing capability — say so that way rather than reporting the skill as unsupported.
-- **No arbitrary custom-runtime support today.** The twelve runtime families (Claude Code, Codex, Grok Build, Built-in Pi, Kimi Code, Copilot, Cursor, OpenCode, Pi — plus deprecated Antigravity, Gemini and Kimi CLI, kept for existing agents) are the supported set. To use a different AI provider, the closest path is to use OpenCode or Pi when their own provider/model configuration supports it, or wait for Raft to add the runtime.
+- **No arbitrary custom-runtime support today.** The twelve runtime families (Claude Code, Codex, Grok Build, Built-in Pi, Kimi Code, Cursor, OpenCode, Pi — plus deprecated Antigravity, Copilot, Gemini and Kimi CLI, kept for existing agents) are the supported set. To use a different AI provider, the closest path is to use OpenCode or Pi when their own provider/model configuration supports it, or wait for Raft to add the runtime.
 - **No per-channel runtime override.** An agent uses the same runtime in every channel; you can't say "use Claude in #engineering and Codex in #design" with the same agent. Use two agents instead.
 - **Custom model text input is limited.** Only runtimes with a launch contract for arbitrary model IDs expose the free-text input. Pi resolves the id through its SDK model registry; Codex/Claude/Cursor/Copilot have their own launch mappings.
 - **Runtime engines must be available on the agent's computer.** CLI-backed runtimes need their CLI installed there. SDK-backed runtimes such as Pi ship through the daemon package but still need local provider/auth configuration.
@@ -98,6 +98,7 @@ What Raft does not provide is an agent-side way to enumerate them: there is no `
 ## Gotchas
 
 - **Antigravity is deprecated.** Existing Antigravity agents can keep running and editing their configuration. New agents cannot select it, and other agents cannot switch into it. Switching away does not allow switching back.
+- **Copilot is deprecated.** Existing Copilot agents keep running and can still change their model, reasoning effort and environment variables. New agents cannot select it, other agents cannot switch into it, and setup no longer offers it. Switching away does not allow switching back.
 - **"My agent isn't responding — switched runtime didn't help"**: changing runtime requires restart (which the confirm dialog handles). If you skipped restart, the agent still uses the old runtime.
 - **"Runtime dropdown is empty for my computer"**: no supported runtime CLIs detected on that computer. Install one + click the rescan icon next to the dropdown.
 - **"The runtime works in my terminal, but Raft doesn't detect it or agents fail with `spawn claude ENOENT`"**: the Computer service can't see the directory the CLI is installed in (often `~/.local/bin`, nvm, or Homebrew). On macOS and Linux the service reads your login shell's environment each time it starts. Run `raft-computer status`: a "terminal shell environment import failed (<code>)" warning means your login shell could not be read (startup files errored, took longer than 10 seconds, or the shell is unsupported — the code in the warning says which), so the service kept the environment it was started with. Fix the shell startup files, restart the Computer service, then click rescan. Computer 1.0.42 and earlier skipped this import when the service was not run by systemd/launchd and kept the PATH of whatever started it; upgrade, or restart from a login shell: `bash -lc 'raft-computer stop; raft-computer start /<server-slug>'`.
@@ -111,7 +112,7 @@ What Raft does not provide is an agent-side way to enumerate them: there is no `
 ## Composition
 
 A Runtime:
-- Is one of twelve supported AI engine families (Claude Code · Codex · Grok Build · Built-in Pi · Kimi Code · Copilot · Cursor · OpenCode · Pi · Antigravity (deprecated) · Gemini (deprecated) · Kimi CLI (deprecated))
+- Is one of twelve supported AI engine families (Claude Code · Codex · Grok Build · Built-in Pi · Kimi Code · Cursor · OpenCode · Pi · Antigravity (deprecated) · Copilot (deprecated) · Gemini (deprecated) · Kimi CLI (deprecated))
 - Lives as a CLI or SDK-backed engine available on a [Computer](/agent-knowledge/agent-substrate/computer)
 - Is selected when creating an [Agent](/agent-knowledge/participants/agent) (one runtime per agent)
 - Has its own authentication (logged in separately from Raft)

@@ -170,6 +170,22 @@ const sdkFixtures: Record<AgentApiRouteKey, {
     input: [{ target: "#engineering" }],
     response: { id: "chan-1", name: "engineering", type: "channel", archivedAt: null, archivedByUserId: null, archivedByAgentId: null },
   },
+  channelCreate: {
+    input: [{ name: "design", visibility: "private", description: "Design reviews" }],
+    response: { id: "chan-2", name: "design", type: "private", description: "Design reviews" },
+  },
+  channelUpdate: {
+    input: [{ channelId: asChannelId("chan-2") }, { description: "Design reviews" }],
+    response: { id: "chan-2", name: "design", type: "private", description: "Design reviews" },
+  },
+  channelMemberAdd: {
+    input: [{ channelId: asChannelId("chan-2") }, { agent: "Kirby" }],
+    response: { ok: true, alreadyMember: false, channelId: "chan-2", member: { type: "agent", id: "agent-2", name: "Kirby" } },
+  },
+  channelMemberRemove: {
+    input: [{ channelId: asChannelId("chan-2") }, { agent: "Kirby" }],
+    response: { ok: true, wasMember: true, channelId: "chan-2", member: { type: "agent", id: "agent-2", name: "Kirby" } },
+  },
   channelMembers: {
     input: [{ channel: "#wg-raft-cli" }],
     response: {
@@ -201,6 +217,40 @@ const sdkFixtures: Record<AgentApiRouteKey, {
         reason: "mentioned",
         doneAt: null,
       }],
+    },
+  },
+  assistantOwnerInbox: {
+    input: [{ filter: "unread", limit: "20" }],
+    response: {
+      owner: { userId: "33333333-3333-4333-8333-333333333333" },
+      filter: "unread",
+      items: [{
+        kind: "thread",
+        channelId: "44444444-4444-4444-8444-444444444444",
+        channelName: "proj-runtime",
+        channelType: "channel",
+        parentChannelId: "55555555-5555-4555-8555-555555555555",
+        parentMessageId: "22222222-2222-4222-8222-222222222222",
+        unread: 2,
+        hasMention: true,
+        latestAt: "2026-09-10T12:00:00.000Z",
+        latestSenderName: "richard",
+        latestPreview: "ship it",
+        firstUnreadMessageId: "66666666-6666-4666-8666-666666666666",
+      }],
+      hasMore: false,
+      nextOffset: null,
+    },
+  },
+  assistantOwnerMessages: {
+    input: [{ channelId: "55555555-5555-4555-8555-555555555555", limit: "50" }],
+    response: {
+      owner: { userId: "33333333-3333-4333-8333-333333333333" },
+      channelId: "55555555-5555-4555-8555-555555555555",
+      messages: [],
+      hasMore: false,
+      hasOlder: false,
+      hasNewer: false,
     },
   },
   inboxList: {
@@ -261,6 +311,18 @@ const sdkFixtures: Record<AgentApiRouteKey, {
       hideHumansFromMembers: true,
       avatarUrl: null,
     },
+  },
+  serverLabs: {
+    input: [],
+    response: { serverId: "server-1", accessEnabled: true, version: 3, canManageAccess: false, canManageEnrollments: true, labs: [{ labKey: "agent-panel-v2", name: "Agent panel v2", description: "The new Agent panel", state: "open", enrolled: false, effective: false, updatedAt: null }] },
+  },
+  serverLabsAccess: {
+    input: [{ enabled: true, expectedVersion: 3 }],
+    response: { applied: true, auditEventId: "audit-1", serverId: "server-1", accessEnabled: true, version: 4, canManageAccess: false, canManageEnrollments: true, labs: [{ labKey: "agent-panel-v2", name: "Agent panel v2", description: "The new Agent panel", state: "open", enrolled: true, effective: true, updatedAt: "2026-10-11T09:30:00.000Z" }] },
+  },
+  serverLabEnrollment: {
+    input: [{ labKey: "agent-panel-v2" }, { enabled: true, expectedVersion: 3 }],
+    response: { applied: true, auditEventId: "audit-1", serverId: "server-1", accessEnabled: true, version: 4, canManageAccess: false, canManageEnrollments: true, labs: [{ labKey: "agent-panel-v2", name: "Agent panel v2", description: "The new Agent panel", state: "open", enrolled: true, effective: true, updatedAt: "2026-10-11T09:30:00.000Z" }] },
   },
   senderMentionDeliveries: {
     input: [{ messageId: "11111111-1111-4111-8111-111111111111" }],

@@ -172,7 +172,7 @@ test("ThreadPanel header and action menu render zh-cn titles", async () => {
 
   // Search-in-thread opener + close-thread control resolve zh via the catalog.
   fireEvent.click(screen.getByTestId("thread-overflow-trigger"));
-  assert.ok(await screen.findByRole("menuitem", { name: "在消息列中搜索" }), "search command renders zh");
+  assert.ok(await screen.findByRole("menuitem", { name: "搜索消息列" }), "search command renders zh");
   const closeThread = screen.getByTestId("thread-close");
   assert.equal(closeThread.getAttribute("title"), null, "native close title is gone");
   assert.ok(closeThread.hasAttribute("data-base-ui-tooltip-trigger"), "close-thread hint now rides the RUI tooltip trigger");

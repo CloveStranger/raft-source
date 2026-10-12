@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { MouseEvent as ReactMouseEvent } from "react";
 import { clearClockTimeout, setClockTimeout } from "@botiverse/raft-shared";
 import {
@@ -190,6 +190,14 @@ function SortableServerRow({
   );
 }
 
+function handleAuxSelectServer(event: ReactMouseEvent, selected: Server, targetHref: string) {
+  openServerSwitcherAuxClickTarget(event, selected.id, selected.slug, { targetHref });
+}
+
+function stopMouseDownPropagation(event: ReactMouseEvent) {
+  event.stopPropagation();
+}
+
 export default function ServerSwitcherMenu({
   open,
   onClose,
@@ -323,10 +331,6 @@ export default function ServerSwitcherMenu({
     onClose();
   }, [intl, navigate, navigationMode, onClose, server?.id]);
 
-  const handleAuxSelectServer = (event: ReactMouseEvent, selected: Server, targetHref: string) => {
-    openServerSwitcherAuxClickTarget(event, selected.id, selected.slug, { targetHref });
-  };
-
   const handleServerDragEnd = useCallback(({ active, over }: DragEndEvent) => {
     if (!over || active.id === over.id) return;
     const activeId = String(active.id);
@@ -338,13 +342,16 @@ export default function ServerSwitcherMenu({
     void updateServerOrder(reordered);
   }, [servers, updateServerOrder]);
 
+  const sortableServerIds = useMemo(() => servers.map((candidate) => candidate.id), [servers]);
+  const closeInviteDialog = useCallback(() => setShowInviteHuman(false), []);
+
   // Stay mounted while the invite dialog is open even after the menu itself
   // closes — the dialog is a child here, so an early `!open` return would
   // unmount it the moment the menu dismisses (invite click closes the menu).
   if (!open && !showInviteHuman) return null;
 
   const inviteDialog = showInviteHuman ? (
-    <InviteHumanDialog onClose={() => setShowInviteHuman(false)} />
+    <InviteHumanDialog onClose={closeInviteDialog} />
   ) : null;
 
   // When only the dialog is up (menu already dismissed), render just the dialog.
@@ -371,7 +378,7 @@ export default function ServerSwitcherMenu({
       // Height cap + upward shift are applied imperatively by the layout effect above
       // (task #83) so the menu always fits the window; the list scrolls internally.
       className={`card-brutal z-50 flex flex-col overflow-hidden outline-none ${className ?? ""}`}
-      onMouseDown={(e) => e.stopPropagation()}
+      onMouseDown={stopMouseDownPropagation}
     >
       {hostedSwitchError ? (
         <div role="alert" className="m-2 border-2 border-black bg-brutal-orange/20 p-2 text-xs font-bold">
@@ -380,7 +387,7 @@ export default function ServerSwitcherMenu({
       ) : null}
       <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
         <DndContext sensors={dndSensors} collisionDetection={closestCenter} onDragEnd={handleServerDragEnd}>
-          <SortableContext items={servers.map((s) => s.id)} strategy={verticalListSortingStrategy}>
+          <SortableContext items={sortableServerIds} strategy={verticalListSortingStrategy}>
             {servers.map((s) => (
               <div key={s.id} aria-disabled={hostedSwitchPending || undefined} className={hostedSwitchPending ? "pointer-events-none opacity-60" : ""}>
                 <SortableServerRow

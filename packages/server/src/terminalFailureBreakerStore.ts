@@ -20,9 +20,11 @@ import {
   type WakeCrashLoopRules,
   type WakeCrashLoopStartRecord,
   type WakeCrashLoopStateRecord,
+  applyWakeCrashLoopStartFailureOwned,
 } from "./services/wakeCrashLoopBreaker";
 import {
   TERMINAL_BREAKER_UNREADABLE,
+  applyCatchupBuild,
   applyTerminalDaemonReady,
   applyTerminalFailureFrame,
   applyTerminalLift,
@@ -44,6 +46,7 @@ import {
   rollbackTerminalClaim,
   terminalBreakerStateFromUnreadable,
   type AttachCatchupBatchResult,
+  type CatchupBuildApplied,
   type CatchupBatch,
   type TerminalClaimInput,
   type TerminalClaimToken,
@@ -326,7 +329,37 @@ export class TerminalFailureBreaker {
    * (store error, CAS not converging): the caller must not acknowledge then,
    * so the daemon resends and the frame is judged again.
    */
-  async applyOutboxFrame(agentId: string, frame: TerminalOutboxFrame, input: TerminalOutboxFrameInput): Promise<{ duplicate: boolean; outcome: string }> {
+  async applyOutboxFrame(
+    agentId: string,
+    frame: TerminalOutboxFrame,
+    input: TerminalOutboxFrameInput,
+  ): Promise<{ duplicate: boolean; outcome: string; startFailureWithdrawn?: boolean; startFailureUnblocked?: boolean }> {
+    if (frame.kind === "start_not_spawned" && frame.reason === "spawn_error") {
+      // task #365: when this commit counts the spawn error, the #1119 record
+      // learns in the SAME compare-and-set that the RFC 071 breaker owns that
+      // start's failure (see applyWakeCrashLoopStartFailureOwned).
+      for (let attempt = 0; attempt < CAS_MAX_ATTEMPTS; attempt += 1) {
+        const terminal = await this.readRecord(agentId, input.nowMs);
+        const applied = applyTerminalOutboxFrame(terminal.state, frame, input);
+        if (applied.outcome !== "spawn_error_counted") {
+          if (!applied.write) return { duplicate: applied.duplicate, outcome: applied.outcome };
+          if (await this.store.compareAndSetTerminalFailureBreakerState(agentId, terminal.version, applied.state)) {
+            return { duplicate: applied.duplicate, outcome: applied.outcome };
+          }
+          continue;
+        }
+        const wake = (await this.store.getWakeCrashLoopState(agentId)) ?? { state: freshWakeCrashLoopEpisode(1), version: 0 };
+        const owned = applyWakeCrashLoopStartFailureOwned(wake.state, frame.launchId);
+        const written = await this.store.compareAndSetTerminalAndWakeCrashLoop(agentId, {
+          terminal: { expectedVersion: terminal.version, state: applied.state },
+          wakeCrashLoop: { expectedVersion: wake.version, state: owned.state },
+        });
+        if (written) {
+          return { duplicate: false, outcome: applied.outcome, startFailureWithdrawn: owned.withdrawn, startFailureUnblocked: owned.unblocked };
+        }
+      }
+      throw new Error(`terminal-failure breaker outbox frame for agent ${agentId}: did not converge after ${CAS_MAX_ATTEMPTS} attempts`);
+    }
     return this.mutate(agentId, input.nowMs, (state) => {
       const applied = applyTerminalOutboxFrame(state, frame, input);
       return { state: applied.state, result: { duplicate: applied.duplicate, outcome: applied.outcome }, write: applied.write };
@@ -384,6 +417,22 @@ export class TerminalFailureBreaker {
     return this.mutate(agentId, nowMs, (state) => {
       const applied = applyTerminalStartRejectedBeforeSpawn(state, input);
       return { state: applied.state, result: applied.write, write: applied.write };
+    });
+  }
+
+  /** RFC 6: settle owed conversations the read cursor passed, then attach the start's batch (one CAS). */
+  async recordCatchupBuild(
+    agentId: string,
+    nowMs: number,
+    input: { readCursors: Record<string, number>; batch: CatchupBatch | null },
+  ): Promise<Omit<CatchupBuildApplied, "state" | "write">> {
+    return this.mutate(agentId, nowMs, (state) => {
+      const applied = applyCatchupBuild(state, input);
+      return {
+        state: applied.state,
+        result: { attached: applied.attached, settled: applied.settled, obligationCleared: applied.obligationCleared },
+        write: applied.write,
+      };
     });
   }
 

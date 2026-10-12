@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { SERVER_CAPABILITY_RUNTIME_OUTCOME_ACK_V1, type MachineToServerMessage, type ServerToMachineMessage } from "@botiverse/raft-shared";
+import { SERVER_CAPABILITY_RUNTIME_OUTCOME_ACK_V1, SERVER_CAPABILITY_START_SPAWN_ERROR_V1, type MachineToServerMessage, type ServerToMachineMessage } from "@botiverse/raft-shared";
 import {
   RUNTIME_OUTCOME_ACK_ENABLED,
   RUNTIME_OUTCOME_OUTBOX_MESSAGE_TYPES,
@@ -58,7 +58,14 @@ class RecordingStore implements TerminalFailureBreakerStore {
     return ok;
   }
   getWakeCrashLoopState(agentId: string) { return this.inner.getWakeCrashLoopState(agentId); }
-  compareAndSetTerminalAndWakeCrashLoop(agentId: string, write: TerminalAndWakeCrashLoopWrite) {
+  /** task #365: the combined CAS can throw or lose a race too. */
+  combinedFail: "reject_once" | "throw" | null = null;
+  async compareAndSetTerminalAndWakeCrashLoop(agentId: string, write: TerminalAndWakeCrashLoopWrite) {
+    if (this.combinedFail === "throw") throw new Error("redis unavailable");
+    if (this.combinedFail === "reject_once") {
+      this.combinedFail = null;
+      return false;
+    }
     return this.inner.compareAndSetTerminalAndWakeCrashLoop(agentId, write);
   }
   version(): number { return this.inner.getRawForTest(AGENT)?.version ?? 0; }
@@ -134,9 +141,22 @@ test("capability: agent:runtime-outcome-ack-v1 is NOT advertised in machine:cont
   const context = JSON.parse(sent[0]!) as { capabilities?: string[] };
   assert.equal(context.capabilities, undefined, "no capabilities field while the switch is off");
 
-  assert.deepEqual(serverMachineContextCapabilities(true), [SERVER_CAPABILITY_RUNTIME_OUTCOME_ACK_V1]);
+  // task #365: start-spawn-error-v1 rides on the ack switch, never alone.
+  assert.deepEqual(serverMachineContextCapabilities(true), [SERVER_CAPABILITY_RUNTIME_OUTCOME_ACK_V1, SERVER_CAPABILITY_START_SPAWN_ERROR_V1]);
   sendAuthenticatedMachineContext({ send: (data) => sent.push(data) }, { machineId: "m1", serverId: "s1" }, serverMachineContextCapabilities(true));
-  assert.deepEqual((JSON.parse(sent[1]!) as { capabilities?: string[] }).capabilities, [SERVER_CAPABILITY_RUNTIME_OUTCOME_ACK_V1]);
+  assert.deepEqual((JSON.parse(sent[1]!) as { capabilities?: string[] }).capabilities, [SERVER_CAPABILITY_RUNTIME_OUTCOME_ACK_V1, SERVER_CAPABILITY_START_SPAWN_ERROR_V1]);
+});
+
+test("task #365: machine:context carries connectionEpochId only together with start-spawn-error-v1 (truth table)", () => {
+  const contextFor = (capabilities: readonly string[]) => {
+    const sent: string[] = [];
+    sendAuthenticatedMachineContext({ send: (data) => sent.push(data) }, { machineId: "m1", serverId: "s1", connectionEpochId: "epoch-1" }, capabilities);
+    return JSON.parse(sent[0]!) as { capabilities?: string[]; connectionEpochId?: string };
+  };
+  // Switch off (today): the frame is byte-for-byte what it was.
+  assert.deepEqual(contextFor(serverMachineContextCapabilities()), { type: "machine:context", machineId: "m1", serverId: "s1" });
+  assert.equal(contextFor([SERVER_CAPABILITY_RUNTIME_OUTCOME_ACK_V1]).connectionEpochId, undefined);
+  assert.equal(contextFor(serverMachineContextCapabilities(true)).connectionEpochId, "epoch-1");
 });
 
 // --- Commit, then ack ---
@@ -272,6 +292,46 @@ test("start outcomes: rebound binds the identity like a rebind ack; not_spawned 
   });
   assert.equal(notSpawned.kind === "acked" && notSpawned.outcome, "pending_removed");
   assert.equal(h2.store.state().unexited.length, 0);
+});
+
+test("task #365: not_spawned carries its reason over the wire; only spawn_error counts, an unknown reason counts nothing", async () => {
+  const outcomeFor = async (reason: string) => {
+    const h = harness();
+    assert.ok((await h.breaker.claimStart(AGENT, claimInput("L1", 0))).ok);
+    const result = await h.ingest({
+      type: "agent:start:outcome", agentId: AGENT, daemonInstanceId: D1, launchId: "L1", clientSeq: 2,
+      result: { kind: "not_spawned", reason } as Extract<MachineToServerMessage, { type: "agent:start:outcome" }>["result"],
+    });
+    return { outcome: result.kind === "acked" ? result.outcome : result.kind, state: h.store.state(), sent: h.sent };
+  };
+  const counted = await outcomeFor("spawn_error");
+  assert.equal(counted.outcome, "spawn_error_counted");
+  assert.equal(counted.state.state, "open");
+  assert.equal(counted.state.spawnError?.count, 1);
+  assert.deepEqual(counted.sent, [ackFor(2)]);
+  for (const reason of ["admission_full", "terminal_failure_outcome_storage_blocked", "stale_dispatch", "spawn_failed", "a_future_reason"]) {
+    const other = await outcomeFor(reason);
+    assert.equal(other.outcome, reason === "stale_dispatch" ? "stale_dispatch_released" : "pending_removed", reason);
+    assert.equal(other.state.state, "closed", reason);
+    assert.equal(other.state.spawnError, null, reason);
+  }
+});
+
+test("task #365: two replicas that both find the retry due produce one probe (the claim compare-and-set)", async () => {
+  const h = harness();
+  assert.ok((await h.breaker.claimStart(AGENT, claimInput("L1", 0))).ok);
+  await h.ingest({ type: "agent:start:outcome", agentId: AGENT, daemonInstanceId: D1, launchId: "L1", clientSeq: 2, result: { kind: "not_spawned", reason: "spawn_error" } });
+  await h.breaker.gate(AGENT, { nowMs: 60_000, capability: true, wakeMessage: null, wakeDemand: true });
+  const due = 10 * 60_000;
+  // Both replicas read the same due record, then both claim.
+  const [a, b] = await Promise.all([
+    h.breaker.claimStart(AGENT, claimInput("R1", due)),
+    h.breaker.claimStart(AGENT, claimInput("R2", due)),
+  ]);
+  assert.deepEqual([a.ok, b.ok].sort(), [false, true]);
+  const loser = a.ok ? b : a;
+  assert.equal(!loser.ok && loser.reason, "terminal_failure_probe_in_flight");
+  assert.equal(h.store.state().state, "half_open");
 });
 
 test("held: only a frame with no identity to acknowledge (neither applied nor acked)", async () => {
@@ -614,6 +674,7 @@ test("E2 with a catch-up echo: applied; the batch is fulfilled only when every b
       batchId: "B1", launchId: "L1", builtAtMs: 0,
       coverage: [{ conversationId: "c1", fromSeqExclusive: 3, coveredUpToSeq: 5, truncated: false }],
       messages: [{ id: "m4", conversationId: "c1", seq: 4, inPrefix: true }, { id: "m5", conversationId: "c1", seq: 5, inPrefix: true }],
+      settledByCursor: [],
       candidateCapHit: false, allUnreadCovered: true,
     });
     assert.ok(attached.attached);
@@ -649,4 +710,30 @@ test("a frame the server cannot read but can identify is committed as lost evide
   assert.equal(h.store.state().needsManual?.reason, "outcome_evidence_lost");
   assert.equal(terminalOutboxWatermark(h.store.state(), D1), 9);
   assert.deepEqual(h.sent, [ackFor(7), ackFor(8), ackFor(9)]);
+});
+
+test("task #365 × #9150: the spawn_error commit and its #1119 ownership are one compare-and-set: a failed write changes neither and is resent; a lost race retries; a replay changes nothing", async () => {
+  const h = harness();
+  assert.ok((await h.breaker.claimStart(AGENT, claimInput("L1", 0))).ok);
+  const frame: MachineToServerMessage = { type: "agent:start:outcome", agentId: AGENT, daemonInstanceId: D1, launchId: "L1", clientSeq: 2, result: { kind: "not_spawned", reason: "spawn_error" } };
+  const wakeBefore = (await h.store.getWakeCrashLoopState(AGENT))!.state;
+  // The store is down: nothing is written, nothing acked; the daemon resends.
+  h.store.combinedFail = "throw";
+  const failed = await h.ingest(frame);
+  assert.equal(failed.kind, "commit_failed");
+  assert.deepEqual(h.sent, []);
+  assert.equal(h.store.state().spawnError, null);
+  assert.deepEqual((await h.store.getWakeCrashLoopState(AGENT))!.state, wakeBefore);
+  // The resend loses one race, then commits both records together.
+  h.store.combinedFail = "reject_once";
+  const committed = await h.ingest(frame);
+  assert.deepEqual(committed, { kind: "acked", duplicate: false, outcome: "spawn_error_counted", sent: true });
+  assert.equal(h.store.state().spawnError?.count, 1);
+  assert.equal((await h.store.getWakeCrashLoopState(AGENT))!.state.startFailureOwnedLaunchId, "L1");
+  // A replay of the committed frame: acked again, nothing applied again.
+  const wakeAfter = (await h.store.getWakeCrashLoopState(AGENT))!.state;
+  const replay = await h.ingest(frame);
+  assert.equal(replay.kind === "acked" && replay.duplicate, true);
+  assert.equal(h.store.state().spawnError?.count, 1);
+  assert.deepEqual((await h.store.getWakeCrashLoopState(AGENT))!.state, wakeAfter);
 });

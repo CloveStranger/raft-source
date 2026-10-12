@@ -83,6 +83,11 @@ export interface ComputerSetupCommandOptions {
 export interface ComputerCommands {
   install: string;
   setup: string;
+  // mac/Linux production only: install, then run setup with the installed
+  // binary, in one paste (`… | sh -s -- --setup /slug`). The entry script
+  // never depends on the new PATH entry. Null where install and setup stay
+  // separate steps (Windows, isolated test deployments).
+  installAndSetup: string | null;
   status: string;
   doctor: string;
   // Restart the whole Computer service and every attached server runner.
@@ -139,6 +144,7 @@ export function getComputerCommands(
       return {
         install: `${environment} ${windowsComputerInstallCommand(deploymentEnv, options.version)}`,
         setup: `${environment} ${binary} setup /${slug}${setupArgs}`,
+        installAndSetup: null,
         status: `${environment} ${binary} status`,
         doctor: `${environment} ${binary} doctor`,
         restartService: `${environment} ${binary} restart`,
@@ -154,6 +160,7 @@ export function getComputerCommands(
     return {
       install: `${environment} sh -c '${computerInstallCommand(deploymentEnv, options.version)}'`,
       setup: `${environment} ${binary} setup /${slug}${setupArgs}`,
+      installAndSetup: null,
       status: `${environment} ${binary} status`,
       doctor: `${environment} ${binary} doctor`,
       restartService: `${environment} ${binary} restart`,
@@ -168,6 +175,9 @@ export function getComputerCommands(
       ? windowsComputerInstallCommand(deploymentEnv, options.version)
       : computerInstallCommand(deploymentEnv, options.version),
     setup: `raft-computer setup /${slug}${setupArgs}`,
+    installAndSetup: platform === "windows"
+      ? null
+      : `${computerInstallCommand(deploymentEnv, options.version)} -s -- --setup /${slug}${setupArgs}`,
     status: "raft-computer status",
     doctor: "raft-computer doctor",
     restartService: "raft-computer restart",

@@ -19,7 +19,19 @@
 // it is never read by the service, never logged, never printed.
 import { readChannel } from "./lib/channelState";
 import type { UpgradeStartParams, UpgradeStartResult } from "./lib/types";
-import { installerArgs, launchInstallerDetached, readLastRemoteUpgradeReceipt, recordRemoteUpgradeLaunch } from "./externalInstaller";
+import { installerArgs, launchInstallerDetached, readLastRemoteUpgradeReceipt, recordRemoteUpgradeLaunch, recordRemoteUpgradeRefusal } from "./externalInstaller";
+import {
+  SUPERVISED_RELAUNCH_EXIT_CODE,
+  UPGRADE_SAFE_KILL_MODES,
+  clearSupervisorRecord,
+  describeKillModeRequirement,
+  detectSystemdSupervisor,
+  externalSupervisorOptIn,
+  runSystemctl,
+  showUnitProperty,
+  writeSupervisorRecord,
+  type ExternalSupervisorRecord,
+} from "./externalSupervisor";
 import { spawn, type ChildProcess } from "node:child_process";
 import { createRequire } from "node:module";
 import { COMPUTER_VERSION } from "./version";
@@ -101,7 +113,7 @@ import {
 } from "./lib/serviceIdentity";
 import { retireCliLoginCarrier } from "./macosLoginCarrier";
 import { OS_SUPERVISOR_KIND_ENV_VAR } from "./osSupervisorLifecycle";
-import { buildRunnerChildEnv, PARENT_LOCK_HELD_ENV_VAR, SOURCE_SERVICE_PID_ENV_VAR } from "./runnerChildEnv";
+import { buildRunnerChildEnv, PARENT_LOCK_HELD_ENV_VAR, pinRaftHomeEnv, SOURCE_SERVICE_PID_ENV_VAR } from "./runnerChildEnv";
 import { handleRunnerLockConflict } from "./runnerLockConflict";
 import {
   checkServiceControlAvailability,
@@ -123,7 +135,6 @@ export {
 export type {
   InFlightServiceControl,
 } from "./serviceControl";
-export { OS_SUPERVISOR_KIND_ENV_VAR } from "./osSupervisorLifecycle";
 export { startServiceIpcSeam, type ServiceIpcMutations } from "./serviceIpcSeam";
 export { buildRunnerChildEnv, PARENT_LOCK_HELD_ENV_VAR, SOURCE_SERVICE_PID_ENV_VAR } from "./runnerChildEnv";
 export {
@@ -212,8 +223,8 @@ export function buildDetachedServiceEnv(
   } else {
     delete env[SOURCE_SERVICE_PID_ENV_VAR];
   }
-  // A detached Computer replacement is never owned by a legacy OS manager,
-  // even when the incumbent was originally launched by one.
+  // Deprecated marker (see OS_SUPERVISOR_KIND_ENV_VAR): scrub any stale value
+  // so a detached replacement never carries it forward.
   delete env[OS_SUPERVISOR_KIND_ENV_VAR];
   return env;
 }
@@ -272,7 +283,7 @@ export async function spawnDetachedService(
     detached: true,
     stdio: ["ignore", supLogFd.fd, supLogFd.fd],
     windowsHide: true,
-    env: buildDetachedServiceEnv(process.env, opts),
+    env: pinRaftHomeEnv(buildDetachedServiceEnv(process.env, opts), slockHome),
   });
   child.on("error", (err) => {
     process.stderr.write(formatHumanError("SUPERVISOR_SPAWN_FAILED", err.message));
@@ -810,6 +821,12 @@ export async function hasRunnerReadyEvidence(
 
 export interface RunServiceDeps {
   requestSelfRestart?: ReplacementHandoffRequest;
+  /** task #917 seams: how the service learns it runs under systemd / an opted-in supervisor. */
+  detectSystemdSupervisorFn?: typeof detectSystemdSupervisor;
+  externalSupervisorOptInFn?: typeof externalSupervisorOptIn;
+  systemctl?: typeof runSystemctl;
+  /** How the supervised hand-off asks this process to shut down (default: SIGTERM to self). */
+  signalSelfForRelaunch?: () => void;
   serviceSelfRestartDeps?: Omit<
     ServiceSelfRestartDeps,
     "releaseServiceOwnership" | "restoreServiceOwnership"
@@ -856,7 +873,32 @@ export async function runService(deps: RunServiceDeps = {}): Promise<void> {
   let inFlightControl: InFlightServiceControl | null = null;
   let inFlightControlOwner: symbol | null = null;
   let kRecoveryChild: ChildProcess | null = null;
-  const requestSelfRestart = deps.requestSelfRestart ?? ((expectedComputerVersion, beforeCommitExit) => requestServiceSelfRestart(slockHome, {
+  // task #917: who owns this process's lifecycle. Under systemd (or an
+  // opted-in supervisor) restart and upgrade must EXIT and let the supervisor
+  // relaunch; spawning our own replacement would leave a process systemd
+  // either kills with the cgroup or never tracks. The record is what
+  // `raft-computer start`/`stop` consult to delegate to systemctl; it is
+  // cleared when we are not supervised so a stale unit never captures a
+  // plain detached start.
+  const systemdSupervisor: ExternalSupervisorRecord | null =
+    await (deps.detectSystemdSupervisorFn ?? detectSystemdSupervisor)({ systemctl: deps.systemctl });
+  if (systemdSupervisor) await writeSupervisorRecord(slockHome, systemdSupervisor).catch(() => undefined);
+  else await clearSupervisorRecord(slockHome).catch(() => undefined);
+  const relaunchOnExit = systemdSupervisor !== null || (deps.externalSupervisorOptInFn ?? externalSupervisorOptIn)(process.env);
+  let supervisedExitCode: number | undefined;
+  const requestSelfRestart = deps.requestSelfRestart ?? (relaunchOnExit
+    ? (async (_expectedComputerVersion, beforeCommitExit) => {
+      // Supervised hand-off: durable work first, then exit with the relaunch
+      // code. No replacement is spawned; the supervisor's Restart= policy
+      // brings the (possibly upgraded) binary back from the stable path.
+      await beforeCommitExit?.();
+      supervisedExitCode = SUPERVISED_RELAUNCH_EXIT_CODE;
+      process.stderr.write(`Service: handing off to the external supervisor (exit ${SUPERVISED_RELAUNCH_EXIT_CODE}); it relaunches the service.\n`);
+      const signalSelf = deps.signalSelfForRelaunch ?? (() => process.kill(process.pid, "SIGTERM"));
+      const immediate = setImmediate(signalSelf);
+      immediate.unref();
+    })
+    : ((expectedComputerVersion, beforeCommitExit) => requestServiceSelfRestart(slockHome, {
     ...deps.serviceSelfRestartDeps,
     releaseServiceOwnership: async () => {
       if (!ipc) {
@@ -878,7 +920,7 @@ export async function runService(deps: RunServiceDeps = {}): Promise<void> {
     },
     ...(expectedComputerVersion ? { expectedComputerVersion } : {}),
     ...(beforeCommitExit ? { beforeCommitExit } : {}),
-  }));
+  })));
   const replacementHandoff = createReplacementHandoff(requestSelfRestart);
 
   // Strip the parent-mutation-lock marker before spawning per-server
@@ -887,7 +929,7 @@ export async function runService(deps: RunServiceDeps = {}): Promise<void> {
   // hint for a child SUPERVISOR; daemons don't run startup recovery and
   // shouldn't observe it. Defensive even though `runResident` doesn't
   // currently read this var. See Dayu nit (msg=29336624).
-  const childEnv = buildRunnerChildEnv(process.env);
+  const childEnv = buildRunnerChildEnv(process.env, slockHome);
 
   const emitTransition = (
     serverId: string,
@@ -1070,6 +1112,31 @@ export async function runService(deps: RunServiceDeps = {}): Promise<void> {
     if (params.scope === "remote") {
       await recordRemoteUpgradeLaunch(slockHome, { requestId: upgradeId, ...(params.targetVersion ? { targetVersion: params.targetVersion } : {}) });
     }
+    // task #917: the installer stops and restarts the service through
+    // `raft-computer stop`/`start`, which under systemd delegate to the unit.
+    // The detached installer lives in that unit's control group, so the unit
+    // must not kill the whole group on stop (KillMode=process|mixed). A
+    // generic opted-in supervisor relaunches on every exit, which the
+    // installer would read as "the service never stopped". Either way the
+    // refusal is settled as this request's receipt so the server closes the
+    // request now instead of waiting out its deadline (archer, #9526).
+    const refuseUpgrade = async (reason: string): Promise<never> => {
+      if (params.scope === "remote") {
+        await recordRemoteUpgradeRefusal(slockHome, { requestId: upgradeId, targetVersion: params.targetVersion, reason }).catch(() => undefined);
+      }
+      throw new ServiceClientError("UPGRADE_START_REJECTED", reason);
+    };
+    if (systemdSupervisor) {
+      const killMode = await showUnitProperty(deps.systemctl ?? runSystemctl, systemdSupervisor.scope, systemdSupervisor.unit, "KillMode");
+      if (killMode === null || !UPGRADE_SAFE_KILL_MODES.includes(killMode)) {
+        await refuseUpgrade(describeKillModeRequirement(systemdSupervisor.unit, killMode));
+      }
+    } else if (relaunchOnExit) {
+      await refuseUpgrade(
+        "The Computer service runs under an external supervisor (RAFT_COMPUTER_EXTERNAL_SUPERVISOR) that relaunches it on every exit, "
+        + "so the installer cannot stop it for an upgrade. Upgrade from the host: stop the supervisor, run `raft-computer upgrade`, start it again.",
+      );
+    }
     const pid = await launchInstallerDetached(slockHome, installerArgs({ targetVersion: params.targetVersion, channel }), upgradeId);
     if (pid === null) throw new Error("external_installer_launch_failed");
     return { status: "started", upgradeId, ...(params.targetVersion ? { targetVersion: params.targetVersion } : { channel }) };
@@ -1150,6 +1217,7 @@ export async function runService(deps: RunServiceDeps = {}): Promise<void> {
       isProcessAlive,
       clearServicePidfile: () => clearPidfileAt(servicePidPath(slockHome)),
       restartRequested: replacementHandoff.requested(),
+      ...(supervisedExitCode !== undefined ? { exitCode: supervisedExitCode } : {}),
     });
   };
   if (deps.afterIpcReady) return void (await deps.afterIpcReady(shutdown));

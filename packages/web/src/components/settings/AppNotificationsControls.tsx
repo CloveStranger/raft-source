@@ -1,4 +1,5 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useEffectEvent, useMemo, useState } from "react";
+import type { FocusEvent } from "react";
 import { useIntl } from "react-intl";
 import type { IntlShape } from "react-intl";
 import {
@@ -10,9 +11,12 @@ import type {
   AppNotificationGroup,
 } from "@botiverse/raft-shared";
 import { Bell, Check, Copy, KeyRound, RotateCw } from "lucide-react";
-import { Badge, Switch, Button, Checkbox, Table, TableHeader, TableBody, TableRow, TableHead, TableCell, Input, Select, SelectContent, SelectIcon, SelectItem, SelectItemIndicator, SelectItemText, SelectList, SelectTrigger, SelectValue } from "raft-ui";
+import { Badge, Switch, Button, Table, TableHeader, TableBody, TableRow, TableHead, Input } from "raft-ui";
 import api from "../../api/client";
 import SectionEyebrow from "../ui/SectionEyebrow";
+import { AppNotificationGroupCheckbox } from "./AppNotificationGroupCheckbox";
+import { AppNotificationEventCheckbox } from "./AppNotificationEventCheckbox";
+import { AppPermissionAccessRow } from "./AppPermissionAccessRow";
 import type { MessageId } from "../../i18n/messages";
 
 // Holds catalog IDS, not display text: module scope cannot call formatMessage.
@@ -25,7 +29,9 @@ const GROUP_META: Record<AppNotificationGroup, { labelId: MessageId; summaryId: 
   agent_reminder_write: { labelId: "settings.connectedApps.appNotifications.group.agent_reminder_write.label", summaryId: "settings.connectedApps.appNotifications.group.agent_reminder_write.summary" },
 };
 
-function permissionGroupLabel(group: AppNotificationGroup, formatMessage: IntlShape["formatMessage"]): string {
+export { GROUP_META as APP_NOTIFICATION_GROUP_META };
+
+export function permissionGroupLabel(group: AppNotificationGroup, formatMessage: IntlShape["formatMessage"]): string {
   const resource = formatMessage({ id: GROUP_META[group].labelId });
   return group === "agent_reminder_write" ? resource : formatMessage({ id: "settings.connectedApps.appPermissions.readLabel" }, { resource });
 }
@@ -202,11 +208,12 @@ export function AppNotificationPermissionPicker({
               key={group}
               className={`flex min-h-[68px] items-start gap-2 border-2 p-2.5 ${selectedGroups.has(group) ? "border-accent bg-accent-soft theme-brutal:border-black theme-brutal:bg-brutal-lime/20" : "border-line-muted bg-layer-panel theme-brutal:border-black/15 theme-brutal:bg-white"} ${allowed ? "" : "opacity-45"}`}
             >
-              <Checkbox
-                size="sm"
+              <AppNotificationGroupCheckbox
+                group={group}
+                value={value}
                 checked={selectedGroups.has(group)}
                 disabled={disabled || !allowed}
-                onCheckedChange={(checked) => onChange(toggleAppNotificationGroup(value, group, checked))}
+                onChange={onChange}
               />
               <span className="min-w-0">
                 <span className="block text-xs font-black text-foreground-strong theme-brutal:text-black">{permissionGroupLabel(group, formatMessage)}</span>
@@ -230,11 +237,12 @@ export function AppNotificationPermissionPicker({
                   && (!allowedEventSet || allowedEventSet.has(event));
                 return (
                   <label key={event} className={`flex min-h-[38px] items-start gap-2 border border-line-muted bg-layer-panel theme-brutal:border-black/15 theme-brutal:bg-white px-2 py-1.5 text-xs font-bold text-foreground-muted theme-brutal:text-black/70 ${available ? "" : "opacity-45"}`}>
-                    <Checkbox
-                      size="sm"
+                    <AppNotificationEventCheckbox
+                      event={event}
+                      value={value}
                       checked={selectedEvents.has(event)}
                       disabled={disabled || !available}
-                      onCheckedChange={(checked) => onChange(toggleAppNotificationEvent(value, event, checked))}
+                      onChange={onChange}
                     />
                     <span className="min-w-0 break-words">
                       {formatMessage({ id: EVENT_LABEL_ID[event] })}
@@ -256,6 +264,10 @@ export function AppNotificationPermissionPicker({
   );
 }
 
+function selectInputOnFocus(event: FocusEvent<HTMLInputElement>) {
+  event.target.select();
+}
+
 export function DeveloperAppPermissions({ clientId, value, onChange, state, loading }: {
   clientId: string | null;
   value: AppNotificationSelection;
@@ -274,47 +286,15 @@ export function DeveloperAppPermissions({ clientId, value, onChange, state, load
           </TableRow>
         </TableHeader>
         <TableBody>
-          {APP_NOTIFICATION_GROUPS.map((group) => {
-            const selected = value.groups.includes(group);
-            const accessOptions = [
-              { value: "none", label: formatMessage({ id: "settings.connectedApps.appPermissions.none" }) },
-              { value: "enabled", label: formatMessage({ id: group === "agent_reminder_write" ? "settings.connectedApps.appPermissions.write" : "settings.connectedApps.appPermissions.read" }) },
-            ];
-            return (
-              <TableRow key={group}>
-                <TableCell>
-                  <div className="font-bold text-foreground-strong">{formatMessage({ id: GROUP_META[group].labelId })}</div>
-                  <div className="mt-1 text-[11px] text-foreground-muted">{formatMessage({ id: GROUP_META[group].summaryId })}</div>
-                </TableCell>
-                <TableCell className="align-middle">
-                  <Select
-                    items={accessOptions}
-                    value={selected ? "enabled" : "none"}
-                    disabled={loading || (clientId !== null && state === null)}
-                    onValueChange={(access) => {
-                      if (access === null) return;
-                      onChange(toggleAppNotificationGroup(value, group, access === "enabled"));
-                    }}
-                  >
-                    <SelectTrigger aria-label={permissionGroupLabel(group, formatMessage)} className="w-full text-xs">
-                      <SelectValue />
-                      <SelectIcon />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectList>
-                        {accessOptions.map((option) => (
-                          <SelectItem key={option.value} value={option.value}>
-                            <SelectItemText>{option.label}</SelectItemText>
-                            <SelectItemIndicator />
-                          </SelectItem>
-                        ))}
-                      </SelectList>
-                    </SelectContent>
-                  </Select>
-                </TableCell>
-              </TableRow>
-            );
-          })}
+          {APP_NOTIFICATION_GROUPS.map((group) => (
+            <AppPermissionAccessRow
+              key={group}
+              group={group}
+              value={value}
+              disabled={loading || (clientId !== null && state === null)}
+              onChange={onChange}
+            />
+          ))}
         </TableBody>
       </Table>
       <p className="text-xs text-foreground-muted">{formatMessage({ id: "settings.connectedApps.appPermissions.credentialHint" })}</p>
@@ -331,7 +311,7 @@ export function DeveloperAppPermissions({ clientId, value, onChange, state, load
               : "settings.connectedApps.appNotifications.sourceActive" })}</div>
           <label className="block text-xs font-bold">
             {formatMessage({ id: "settings.connectedApps.appNotifications.installationId" })}
-            <Input readOnly value={state.source_installation.installation_id} onFocus={(event) => event.target.select()}
+            <Input readOnly value={state.source_installation.installation_id} onFocus={selectInputOnFocus}
               className="mt-1 w-full font-mono text-xs" />
           </label>
           <div className="text-xs text-foreground-muted theme-brutal:text-black/60">{formatMessage({ id: "settings.connectedApps.appNotifications.sourceUse" })}</div>
@@ -392,13 +372,13 @@ export function DeveloperAppNotifications({
     ? configurationDraft.open
     : !!state?.webhook?.enabled;
 
-  const refresh = async () => {
+  const refresh = useCallback(async () => {
     if (!clientId) return;
     const { data } = await api.get(`/integrations/clients/${clientId}/app-notifications`);
     onStateChange(data);
-  };
+  }, [clientId, onStateChange]);
 
-  const saveEndpoint = async () => {
+  const saveEndpoint = useCallback(async () => {
     if (!clientId) return;
     setBusy("endpoint");
     onError("");
@@ -411,9 +391,9 @@ export function DeveloperAppNotifications({
     } finally {
       setBusy(null);
     }
-  };
+  }, [clientId, endpoint, formatMessage, onError, refresh]);
 
-  const rotateSecret = async () => {
+  const rotateSecret = useCallback(async () => {
     if (!clientId) return;
     setBusy("rotate");
     onError("");
@@ -426,9 +406,9 @@ export function DeveloperAppNotifications({
     } finally {
       setBusy(null);
     }
-  };
+  }, [clientId, formatMessage, onError, refresh]);
 
-  const disableEndpoint = async (): Promise<boolean> => {
+  const disableEndpoint = useCallback(async (): Promise<boolean> => {
     if (!clientId) return false;
     setBusy("disable");
     onError("");
@@ -443,9 +423,9 @@ export function DeveloperAppNotifications({
     } finally {
       setBusy(null);
     }
-  };
+  }, [clientId, formatMessage, onError, refresh]);
 
-  const toggleConfiguration = async (enabled: boolean) => {
+  const toggleConfiguration = useCallback(async (enabled: boolean) => {
     if (!clientId) return;
     if (enabled) {
       setConfigurationDraft({ clientId, open: true });
@@ -455,9 +435,9 @@ export function DeveloperAppNotifications({
     if (state?.webhook?.enabled && !(await disableEndpoint())) return;
     setConfigurationDraft({ clientId, open: false });
     onConfigurationOpenChange?.(false);
-  };
+  }, [clientId, disableEndpoint, onConfigurationOpenChange, state?.webhook?.enabled]);
 
-  const copySecret = async () => {
+  const copySecret = useCallback(async () => {
     if (!signingSecret) return;
     try {
       await navigator.clipboard.writeText(signingSecret);
@@ -467,7 +447,7 @@ export function DeveloperAppNotifications({
     } catch (error: unknown) {
       onError(apiErrorMessage(error, formatMessage({ id: "settings.connectedApps.appNotifications.failedCopySecret" })));
     }
-  };
+  }, [clientId, formatMessage, onError, signingSecret]);
 
   return (
     <section className={embedded ? "space-y-3" : "space-y-3 border-t-2 border-line-strong theme-brutal:border-black pt-4"} data-testid="developer-app-notifications">
@@ -506,7 +486,7 @@ export function DeveloperAppNotifications({
           <Switch
             size="md"
             checked={configurationOpen}
-            onCheckedChange={(enabled) => void toggleConfiguration(enabled)}
+            onCheckedChange={toggleConfiguration}
             disabled={!clientId || loading || !state || !!busy}
             aria-labelledby="app-notifications-enabled-label"
             aria-describedby="app-notifications-enabled-description"
@@ -530,7 +510,7 @@ export function DeveloperAppNotifications({
                   placeholder="https://example.com/raft/events"
                 />
               </label>
-              <Button type="button" size="sm" className="h-9" onClick={() => void saveEndpoint()} disabled={!!busy || !endpoint.trim()}>
+              <Button type="button" size="sm" className="h-9" onClick={saveEndpoint} disabled={!!busy || !endpoint.trim()}>
                 {busy === "endpoint" ? formatMessage({ id: "settings.connectedApps.appNotifications.saving" }) : formatMessage({ id: "settings.connectedApps.appNotifications.saveEndpoint" })}
               </Button>
             </div>
@@ -539,7 +519,7 @@ export function DeveloperAppNotifications({
             ? formatMessage({ id: "settings.connectedApps.appNotifications.enabledRevision" }, { revision: state.webhook.config_revision })
             : formatMessage({ id: "settings.connectedApps.appNotifications.enterEndpointToEnable" })}</span>
               {state?.webhook?.enabled ? (
-                <Button type="button" size="sm" onClick={() => void rotateSecret()} disabled={!!busy}>
+                <Button type="button" size="sm" onClick={rotateSecret} disabled={!!busy}>
                   <RotateCw size={13} /> {busy === "rotate" ? formatMessage({ id: "settings.connectedApps.appNotifications.rotating" }) : formatMessage({ id: "settings.connectedApps.appNotifications.rotateSecret" })}
                 </Button>
               ) : null}
@@ -549,7 +529,7 @@ export function DeveloperAppNotifications({
                 <div className="flex items-center gap-2 text-xs font-black text-foreground-strong theme-brutal:text-black"><KeyRound size={14} /> {formatMessage({ id: "settings.connectedApps.appNotifications.signingSecretShownOnce" })}</div>
                 <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
                   <code className="min-w-0 flex-1 break-all border border-line-strong bg-layer-panel theme-brutal:border-black/20 theme-brutal:bg-white p-2 text-[11px]">{signingSecret}</code>
-                  <Button type="button" size="sm" onClick={() => void copySecret()}>
+                  <Button type="button" size="sm" onClick={copySecret}>
                     {secretState?.copied ? <Check size={13} /> : <Copy size={13} />} {secretState?.copied ? formatMessage({ id: "settings.connectedApps.appNotifications.copied" }) : formatMessage({ id: "settings.connectedApps.appNotifications.copy" })}
                   </Button>
                 </div>
@@ -591,13 +571,35 @@ function ScopeChips({ values, empty }: { values: readonly string[]; empty: strin
 export function AppNotificationRequestSummary({
   groups,
   events,
+  pendingGroups,
+  pendingEvents,
+  pendingRevisionId,
   reviewPending = false,
+  canReview = false,
+  reviewing = false,
+  onApprove,
 }: {
   groups: readonly AppNotificationGroup[];
   events: readonly AppNotificationEvent[];
+  pendingGroups?: readonly AppNotificationGroup[];
+  pendingEvents?: readonly AppNotificationEvent[];
+  pendingRevisionId?: string | null;
   reviewPending?: boolean;
+  canReview?: boolean;
+  reviewing?: boolean;
+  onApprove?: () => void;
 }) {
   const { formatMessage } = useIntl();
+  const shownGroups = reviewPending && pendingGroups ? pendingGroups : groups;
+  const shownEvents = reviewPending && pendingEvents ? pendingEvents : events;
+  const groupLabels = useMemo(
+    () => shownGroups.map((group) => permissionGroupLabel(group, formatMessage)),
+    [formatMessage, shownGroups],
+  );
+  const eventLabels = useMemo(
+    () => shownEvents.map((event) => formatMessage({ id: EVENT_LABEL_ID[event] })),
+    [formatMessage, shownEvents],
+  );
   return (
     <section className="space-y-3 border-t-2 border-line-strong theme-brutal:border-black pt-4" data-testid="app-notifications-request-summary">
       <div className="flex flex-wrap items-start justify-between gap-2">
@@ -614,18 +616,30 @@ export function AppNotificationRequestSummary({
             </div>
           </div>
         </div>
-        {reviewPending ? <Badge variant="warning" uppercase>{formatMessage({ id: "settings.connectedApps.appNotifications.appReviewPending" })}</Badge> : null}
+        {reviewPending ? <Badge variant="warning" uppercase>{formatMessage({ id: "settings.connectedApps.appNotifications.permissionUpdatePending" })}</Badge> : null}
       </div>
       <div className="grid gap-3 sm:grid-cols-2">
         <div className="min-w-0 space-y-2 border-t-2 border-line-muted theme-brutal:border-black/15 pt-2">
-          <div className="text-[10px] font-black uppercase tracking-widest text-foreground-muted theme-brutal:text-black/50">{formatMessage({ id: "settings.connectedApps.appNotifications.dataGroups" })}</div>
-          <ScopeChips values={groups.map((group) => permissionGroupLabel(group, formatMessage))} empty={formatMessage({ id: "settings.connectedApps.appNotifications.noDataAccess" })} />
+          <div className="text-[10px] font-black uppercase tracking-widest text-foreground-muted theme-brutal:text-black/50">{formatMessage({ id: reviewPending ? "settings.connectedApps.appNotifications.requestedDataGroups" : "settings.connectedApps.appNotifications.dataGroups" })}</div>
+          <ScopeChips values={groupLabels} empty={formatMessage({ id: "settings.connectedApps.appNotifications.noDataAccess" })} />
         </div>
         <div className="min-w-0 space-y-2 border-t-2 border-line-muted theme-brutal:border-black/15 pt-2">
-          <div className="text-[10px] font-black uppercase tracking-widest text-foreground-muted theme-brutal:text-black/50">{formatMessage({ id: "settings.connectedApps.appNotifications.notificationEvents" })}</div>
-          <ScopeChips values={events.map((event) => formatMessage({ id: EVENT_LABEL_ID[event] }))} empty={formatMessage({ id: "settings.connectedApps.appNotifications.noEvents" })} />
+          <div className="text-[10px] font-black uppercase tracking-widest text-foreground-muted theme-brutal:text-black/50">{formatMessage({ id: reviewPending ? "settings.connectedApps.appNotifications.requestedNotificationEvents" : "settings.connectedApps.appNotifications.notificationEvents" })}</div>
+          <ScopeChips values={eventLabels} empty={formatMessage({ id: "settings.connectedApps.appNotifications.noEvents" })} />
         </div>
       </div>
+      {reviewPending && canReview && onApprove ? (
+        <div className="flex flex-col gap-3 border-l-4 border-warning bg-warning-soft px-3 py-2 theme-brutal:border-soft-signal theme-brutal:bg-soft-signal/20 sm:flex-row sm:items-center sm:justify-between" data-testid="app-notifications-review-action">
+          <div className="text-xs font-bold text-foreground-muted theme-brutal:text-black/70">
+            {formatMessage({ id: "settings.connectedApps.appNotifications.reviewActionHint" })}
+          </div>
+          {/* No displayed revision id means we cannot bind the approval to
+              what the reviewer saw — the server would 400 it anyway. */}
+          <Button type="button" size="sm" variant="accent" onClick={onApprove} disabled={reviewing || !pendingRevisionId}>
+            {reviewing ? formatMessage({ id: "settings.connectedApps.appNotifications.approving" }) : formatMessage({ id: "settings.connectedApps.appNotifications.approvePermissionUpdate" })}
+          </Button>
+        </div>
+      ) : null}
     </section>
   );
 }
@@ -644,7 +658,7 @@ export function InstalledAppNotifications({
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
 
-  const load = async () => {
+  const load = useCallback(async () => {
     setLoading(true);
     try {
       const { data } = await api.get(`/integrations/marketplace/${clientId}/install/app-notifications`);
@@ -654,14 +668,15 @@ export function InstalledAppNotifications({
     } finally {
       setLoading(false);
     }
-  };
+  }, [clientId, formatMessage, onError]);
+  // Load once per app; parent re-renders (a new `onError`, a locale switch) must not refetch.
+  const loadForClient = useEffectEvent(load);
 
   useEffect(() => {
-    void load();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    void loadForClient();
   }, [clientId]);
 
-  const save = async () => {
+  const save = useCallback(async () => {
     setSaving(true);
     onError("");
     try {
@@ -672,12 +687,33 @@ export function InstalledAppNotifications({
     } finally {
       setSaving(false);
     }
-  };
+  }, [clientId, formatMessage, load, onError]);
+
+  const formatGroups = useCallback(
+    (groups: readonly AppNotificationGroup[] | undefined) =>
+      (groups ?? []).map((group) => permissionGroupLabel(group, formatMessage)),
+    [formatMessage],
+  );
+  const formatEvents = useCallback(
+    (events: readonly AppNotificationEvent[] | undefined) =>
+      (events ?? []).map((event) => formatMessage({ id: EVENT_LABEL_ID[event] })),
+    [formatMessage],
+  );
+  const approvedGroupLabels = useMemo(() => formatGroups(state?.approved_groups), [formatGroups, state?.approved_groups]);
+  const subscribedEventLabels = useMemo(() => formatEvents(state?.subscribed_events), [formatEvents, state?.subscribed_events]);
+  const effectiveEventLabels = useMemo(() => formatEvents(state?.effective_events), [formatEvents, state?.effective_events]);
+  const newlyRequestedGroupLabels = useMemo(
+    () => (state?.requested_groups ?? [])
+      .filter((group) => !state?.approved_groups.includes(group))
+      .map((group) => formatMessage(
+        { id: "settings.connectedApps.appNotifications.newDataGroupPrefix" },
+        { group: permissionGroupLabel(group, formatMessage) },
+      )),
+    [formatMessage, state?.approved_groups, state?.requested_groups],
+  );
 
   if (loading) return <div className="border-t-2 border-line-strong theme-brutal:border-black pt-3 text-xs font-bold text-foreground-muted theme-brutal:text-black/50">{formatMessage({ id: "settings.connectedApps.appNotifications.loading" })}</div>;
   if (!state) return null;
-
-  const newlyRequestedGroups = state.requested_groups.filter((group) => !state.approved_groups.includes(group));
 
   return (
     <section className="space-y-3 border-t-2 border-line-strong theme-brutal:border-black pt-4" data-testid="installed-app-notifications">
@@ -695,15 +731,15 @@ export function InstalledAppNotifications({
       <div className="grid gap-3 sm:grid-cols-3">
         <div className="min-w-0 space-y-2 border-t-2 border-line-muted theme-brutal:border-black/15 pt-2">
           <div className="text-[10px] font-black uppercase tracking-widest text-foreground-muted theme-brutal:text-black/50">{formatMessage({ id: "settings.connectedApps.appNotifications.approvedData" })}</div>
-          <ScopeChips values={state.approved_groups.map((group) => permissionGroupLabel(group, formatMessage))} empty={formatMessage({ id: "settings.connectedApps.appNotifications.noDataAccessEmpty" })} />
+          <ScopeChips values={approvedGroupLabels} empty={formatMessage({ id: "settings.connectedApps.appNotifications.noDataAccessEmpty" })} />
         </div>
         <div className="min-w-0 space-y-2 border-t-2 border-line-muted theme-brutal:border-black/15 pt-2">
           <div className="text-[10px] font-black uppercase tracking-widest text-foreground-muted theme-brutal:text-black/50">{formatMessage({ id: "settings.connectedApps.appNotifications.developerSubscriptions" })}</div>
-          <ScopeChips values={state.subscribed_events.map((event) => formatMessage({ id: EVENT_LABEL_ID[event] }))} empty={formatMessage({ id: "settings.connectedApps.appNotifications.noSubscriptions" })} />
+          <ScopeChips values={subscribedEventLabels} empty={formatMessage({ id: "settings.connectedApps.appNotifications.noSubscriptions" })} />
         </div>
         <div className="min-w-0 space-y-2 border-t-2 border-line-muted theme-brutal:border-black/15 pt-2">
           <div className="text-[10px] font-black uppercase tracking-widest text-foreground-muted theme-brutal:text-black/50">{formatMessage({ id: "settings.connectedApps.appNotifications.activeEvents" })}</div>
-          <ScopeChips values={state.effective_events.map((event) => formatMessage({ id: EVENT_LABEL_ID[event] }))} empty={formatMessage({ id: "settings.connectedApps.appNotifications.noActiveEvents" })} />
+          <ScopeChips values={effectiveEventLabels} empty={formatMessage({ id: "settings.connectedApps.appNotifications.noActiveEvents" })} />
         </div>
       </div>
       {state.approval_required ? (
@@ -714,12 +750,12 @@ export function InstalledAppNotifications({
           <div className="min-w-0 space-y-2">
             <div className="text-xs font-bold text-foreground-muted theme-brutal:text-black/70">{formatMessage({ id: "settings.connectedApps.appNotifications.newDataAccessNotice" })}</div>
             <ScopeChips
-              values={newlyRequestedGroups.map((group) => formatMessage({ id: "settings.connectedApps.appNotifications.newDataGroupPrefix" }, { group: permissionGroupLabel(group, formatMessage) }))}
+              values={newlyRequestedGroupLabels}
               empty={formatMessage({ id: "settings.connectedApps.appNotifications.noNewDataGroups" })}
             />
           </div>
           {canManage ? (
-            <Button type="button" size="sm" variant="accent" onClick={() => void save()} disabled={saving}>
+            <Button type="button" size="sm" variant="accent" onClick={save} disabled={saving}>
               {saving ? formatMessage({ id: "settings.connectedApps.appNotifications.approving" }) : formatMessage({ id: "settings.connectedApps.appNotifications.approveUpdate" })}
             </Button>
           ) : null}

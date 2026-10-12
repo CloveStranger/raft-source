@@ -1,5 +1,5 @@
 import { Button, Card } from "raft-ui";
-import { useEffect, useRef, useState, useMemo } from "react";
+import { useCallback, useEffect, useRef, useState, useMemo } from "react";
 import { usePreviewApiTarget } from "./hooks/usePreviewApiTarget";
 import { Routes, Route, Navigate, useParams, useNavigate, useLocation } from "react-router-dom";
 import { useAuthStore } from "./store/authStore";
@@ -7,7 +7,7 @@ import { useIntl } from "react-intl";
 import { useLocale } from "./i18n/LocaleProvider";
 import { shouldReconcileAccountLocale } from "./i18n/locale";
 import { useServerStore } from "./store/serverStore";
-import type { CommunityServerSlug } from "./store/serverStore";
+import type { CommunityServerSlug, Server } from "./store/serverStore";
 import { useAgentStore } from "./store/agentStore";
 import { useMachineStore } from "./store/machineStore";
 import { serverPersistence } from "./store/serverPersistenceRegistry";
@@ -137,11 +137,31 @@ function documentTitleChannelLabel(channel: Channel | null | undefined): string 
   return channelName ? `#${channelName}` : null;
 }
 
+// Slockdev debug panel actions that need no component state. Kept apart from
+// `clearLocalState` (below), the one panel action allowed to clear auth tokens.
+function reloadPage() {
+  window.location.reload();
+}
+
+function openServerPicker() {
+  requestServerSelection();
+  serverPersistence.clearLastServerSlug();
+  window.location.assign("/");
+}
+
 function EnvironmentDevOverlay() {
   const previewApiTarget = usePreviewApiTarget(deploymentEnv === "web-preview");
   const [open, setOpen] = useState(false);
   const [hidden, setHidden] = useState(false);
   const { formatMessage } = useIntl();
+  const closePanel = useCallback(() => setOpen(false), []);
+  const togglePanel = useCallback(() => setOpen((value) => !value), []);
+  const hideAllDevTools = useCallback(() => {
+    document.documentElement.dataset.raftDevToolsHidden = "true";
+    window.dispatchEvent(new Event(HIDE_LOCAL_DEV_TOOLS_EVENT));
+    setOpen(false);
+    setHidden(true);
+  }, []);
   if (!environmentLabelMessageId) return null;
   if (isSlockdev && import.meta.env?.VITE_SLOCKDEV_HIDE_PANEL === "1") return null;
   if (hidden) return null;
@@ -159,20 +179,13 @@ function EnvironmentDevOverlay() {
     { id: isSlockdev ? "devTools.overlay.triggerTitle" : "env.badge.dragTitle" },
     { label: badgeLabel },
   );
-  const hideAllDevTools = () => {
-    document.documentElement.dataset.raftDevToolsHidden = "true";
-    window.dispatchEvent(new Event(HIDE_LOCAL_DEV_TOOLS_EVENT));
-    setOpen(false);
-    setHidden(true);
-  };
-
   return (
     <DraggableDevOverlay
       id="environment-dev-tools"
       handleSelector="[data-dev-overlay-handle]"
       panel={isSlockdev && open ? (
         <SlockdevDebugPanel
-          onClose={() => setOpen(false)}
+          onClose={closePanel}
           onHideAll={hideAllDevTools}
         />
       ) : null}
@@ -200,7 +213,7 @@ function EnvironmentDevOverlay() {
         variant="primary"
         size="icon-sm"
         data-dev-overlay-handle
-        onClick={isSlockdev ? () => setOpen((value) => !value) : undefined}
+        onClick={isSlockdev ? togglePanel : undefined}
         aria-label={triggerTitle}
         className={`size-7 touch-none select-none border border-line-strong shadow-raft-sm theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-soft-signal theme-brutal:text-black theme-brutal:shadow-brutal-sm cursor-grab active:cursor-grabbing`}
         data-testid="raftdev-debug-trigger"
@@ -209,6 +222,18 @@ function EnvironmentDevOverlay() {
       </Button>
     </DraggableDevOverlay>
   );
+}
+
+function clearLocalState() {
+  emitAuthTraceAndFlush("slock.auth.session_cleared", {
+    clearSessionCaller: "clearLocalState",
+    logoutTrigger: "dev_clear_local_state",
+  });
+  localStorage.removeItem("slock_access_token");
+  localStorage.removeItem("slock_refresh_token");
+  serverPersistence.clearLastServerSlug();
+  localStorage.removeItem(PENDING_INVITE_STORAGE_KEY);
+  window.location.assign("/");
 }
 
 interface SlockdevDebugPanelProps {
@@ -227,22 +252,14 @@ function SlockdevDebugPanel(props: SlockdevDebugPanelProps) {
   const envName = import.meta.env?.VITE_SLOCKDEV_ENV_NAME || "";
   const previewDescription = import.meta.env?.VITE_SLOCKDEV_PREVIEW_DESCRIPTION?.trim() || "";
   const seedCommand = getSlockdevSeedCommand(envName);
-  if (!isSlockdev) return null;
-  if (import.meta.env?.VITE_SLOCKDEV_HIDE_PANEL === "1") return null;
 
-  const clearLocalState = () => {
-    emitAuthTraceAndFlush("slock.auth.session_cleared", {
-      clearSessionCaller: "clearLocalState",
-      logoutTrigger: "dev_clear_local_state",
-    });
-    localStorage.removeItem("slock_access_token");
-    localStorage.removeItem("slock_refresh_token");
-    serverPersistence.clearLastServerSlug();
-    localStorage.removeItem(PENDING_INVITE_STORAGE_KEY);
-    window.location.assign("/");
-  };
+  const devLogin = useCallback(() => login(SLOCKDEV_EMAIL, SLOCKDEV_PASSWORD).catch((err) => {
+    console.error("Dev login failed", err);
+  }), [login]);
 
-  const copySeedCommand = async () => {
+  const handleLogout = useCallback(() => logout(), [logout]);
+
+  const copySeedCommand = useCallback(async () => {
     try {
       await navigator.clipboard.writeText(seedCommand);
       setCopied(true);
@@ -250,7 +267,10 @@ function SlockdevDebugPanel(props: SlockdevDebugPanelProps) {
     } catch (err) {
       console.warn("Failed to copy raftdev seed command", err);
     }
-  };
+  }, [seedCommand]);
+
+  if (!isSlockdev) return null;
+  if (import.meta.env?.VITE_SLOCKDEV_HIDE_PANEL === "1") return null;
 
   return (
     <div className="w-72 max-w-[calc(100vw-1rem)] overflow-y-auto bg-layer-panel p-3 text-xs text-foreground-strong shadow-raft-sm theme-brutal:bg-white theme-brutal:shadow-brutal">
@@ -296,9 +316,7 @@ function SlockdevDebugPanel(props: SlockdevDebugPanelProps) {
             <Button
               type="button"
               disabled={loading}
-              onClick={() => login(SLOCKDEV_EMAIL, SLOCKDEV_PASSWORD).catch((err) => {
-                console.error("Dev login failed", err);
-              })}
+              onClick={devLogin}
               variant="accent"
               size="sm"
               className="w-full min-w-0"
@@ -307,7 +325,7 @@ function SlockdevDebugPanel(props: SlockdevDebugPanelProps) {
             </Button>
             <Button
               type="button"
-              onClick={() => window.location.reload()}
+              onClick={reloadPage}
               variant="outline"
               size="sm"
               className="w-full min-w-0"
@@ -316,11 +334,7 @@ function SlockdevDebugPanel(props: SlockdevDebugPanelProps) {
             </Button>
             <Button
               type="button"
-              onClick={() => {
-                requestServerSelection();
-                serverPersistence.clearLastServerSlug();
-                window.location.assign("/");
-              }}
+              onClick={openServerPicker}
               variant="outline"
               size="sm"
               className="w-full min-w-0"
@@ -329,7 +343,7 @@ function SlockdevDebugPanel(props: SlockdevDebugPanelProps) {
             </Button>
             <Button
               type="button"
-              onClick={() => logout()}
+              onClick={handleLogout}
               variant="outline"
               size="sm"
               className="w-full min-w-0"
@@ -369,6 +383,16 @@ function SlockdevDebugPanel(props: SlockdevDebugPanelProps) {
   );
 }
 
+/** ServerSelector pick → make it current and open its remembered surface. */
+function useOpenSelectedServer(replace: boolean) {
+  const setCurrent = useServerStore((s) => s.setCurrent);
+  const navigate = useNavigate();
+  return useCallback((server: Server) => {
+    setCurrent(server);
+    navigate(readServerSurfaceMemory(server.slug) ?? `/s/${server.slug}`, { replace });
+  }, [navigate, replace, setCurrent]);
+}
+
 /** Resolves server from URL slug and renders MainLayout */
 export function ServerAccessDeniedPage() {
   const { formatMessage } = useIntl();
@@ -385,12 +409,14 @@ export function ServerAccessDeniedPage() {
     ? (readServerSurfaceMemory(fallbackServer.slug) ?? `/s/${fallbackServer.slug}`)
     : "/";
 
-  useEffect(() => {
-    const timeout = window.setTimeout(() => {
-      navigate(fallbackPath, { replace: true });
-    }, 3000);
-    return () => window.clearTimeout(timeout);
+  const goToFallback = useCallback(() => {
+    navigate(fallbackPath, { replace: true });
   }, [fallbackPath, navigate]);
+
+  useEffect(() => {
+    const timeout = window.setTimeout(goToFallback, 3000);
+    return () => window.clearTimeout(timeout);
+  }, [goToFallback]);
 
   return (
     <div className="flex min-h-0 flex-1 items-center justify-center bg-layer-canvas px-4 font-display safe-top safe-bottom theme-brutal:bg-brutal-cream">
@@ -409,7 +435,7 @@ export function ServerAccessDeniedPage() {
             variant="outline"
             size="md"
             type="button"
-            onClick={() => navigate(fallbackPath, { replace: true })}
+            onClick={goToFallback}
             className="font-bold"
           >
             {fallbackServer
@@ -553,6 +579,7 @@ export function ServerResolver() {
   }, [serverSlug, server, loading, current?.id, setCurrent]);
 
   useBrowserDocumentTitle(routeDocumentTitle);
+  const openSelectedServer = useOpenSelectedServer(true);
 
   useEffect(() => {
     if (!jointInviteId || !server || !current || current.id !== server.id) return;
@@ -602,14 +629,7 @@ export function ServerResolver() {
     // The first-server flow IS the right screen here, so render it directly.
     if (showServerSelector || servers.length === 0) {
       return (
-        <ServerSelector
-          onSelect={(nextServer) => {
-            setCurrent(nextServer);
-            navigate(readServerSurfaceMemory(nextServer.slug) ?? `/s/${nextServer.slug}`, {
-              replace: true,
-            });
-          }}
-        />
+        <ServerSelector onSelect={openSelectedServer} />
       );
     }
     return (
@@ -680,9 +700,8 @@ export function ServerResolver() {
 
 export function ServerSelectionPage() {
   const { formatMessage } = useIntl();
-  const setCurrent = useServerStore((s) => s.setCurrent);
   const loading = useServerStore((s) => s.loading);
-  const navigate = useNavigate();
+  const openSelectedServer = useOpenSelectedServer(false);
 
   if (loading) {
     return (
@@ -693,12 +712,7 @@ export function ServerSelectionPage() {
   }
 
   return (
-    <ServerSelector
-      onSelect={(server) => {
-        setCurrent(server);
-        navigate(readServerSurfaceMemory(server.slug) ?? `/s/${server.slug}`);
-      }}
-    />
+    <ServerSelector onSelect={openSelectedServer} />
   );
 }
 
@@ -711,6 +725,25 @@ export function ServerRedirect() {
   const navigate = useNavigate();
   const [showServerSelector] = useState(() => consumeServerSelectionRequest());
   const location = useLocation();
+  const openSelectedServer = useOpenSelectedServer(true);
+
+  // `/.well-known/change-password` redirects here before auth is known. The
+  // pathname survives the signed-out login screen, so once auth + the server
+  // list are restored this same resolver can choose the browser's remembered
+  // server without inventing an account-global settings surface.
+  const changePasswordIntent = isChangePasswordIntentPath(location.pathname);
+
+  const enterSelectedServer = useCallback((server: Server) => {
+    setCurrent(server);
+    // replace, like every other root → server hop: the picker at "/" only
+    // exists while no last server is remembered, so a history Back onto it
+    // would just re-run ServerRedirect and bounce forward again.
+    navigate(serverEntryPath({
+      serverSlug: server.slug,
+      rememberedSurface: readServerSurfaceMemory(server.slug),
+      changePasswordIntent,
+    }), { replace: true });
+  }, [changePasswordIntent, navigate, setCurrent]);
 
   if (loading) {
     return (
@@ -723,26 +756,13 @@ export function ServerRedirect() {
   // A deliberate Server Picker action must win over normal last-server and
   // deep-location restoration, including on a cold navigation to "/".
   if (showServerSelector) {
-    return (
-      <ServerSelector
-        onSelect={(server) => {
-          setCurrent(server);
-          navigate(readServerSurfaceMemory(server.slug) ?? `/s/${server.slug}`, { replace: true });
-        }}
-      />
-    );
+    return <ServerSelector onSelect={openSelectedServer} />;
   }
 
   const nativeTarget = getDesktopServerBootstrapTarget(location.search, servers);
   if (nativeTarget) {
     return <Navigate to={nativeTarget} replace />;
   }
-
-  // `/.well-known/change-password` redirects here before auth is known. The
-  // pathname survives the signed-out login screen, so once auth + the server
-  // list are restored this same resolver can choose the browser's remembered
-  // server without inventing an account-global settings surface.
-  const changePasswordIntent = isChangePasswordIntentPath(location.pathname);
 
   // Auto-redirect to last used server
   const lastSlug = serverPersistence.readLastServerSlug();
@@ -761,21 +781,7 @@ export function ServerRedirect() {
   }
 
   // No last server — show selector (user picks or creates)
-  return (
-    <ServerSelector
-      onSelect={(server) => {
-        setCurrent(server);
-        // replace, like every other root → server hop: the picker at "/" only
-        // exists while no last server is remembered, so a history Back onto it
-        // would just re-run ServerRedirect and bounce forward again.
-        navigate(serverEntryPath({
-          serverSlug: server.slug,
-          rememberedSurface: readServerSurfaceMemory(server.slug),
-          changePasswordIntent,
-        }), { replace: true });
-      }}
-    />
-  );
+  return <ServerSelector onSelect={enterSelectedServer} />;
 }
 
 // Standalone palette audit page (#proj-uiux:0e6befb8 task #92).
@@ -785,6 +791,9 @@ export function ServerRedirect() {
 // AppShell and are never conditionally skipped — earlier the early-return
 // gated `window.location.pathname === "/palette-audit"` made every hook in
 // AppShell rules-of-hooks-conditional under SPA nav.
+// Already signed in: the login/register entry points are inert.
+function ignoreAuthEntry() {}
+
 /** Auth bootstrap loading / restoring chrome — exported for zh-cn i18n behavior tests. */
 export function AuthBootstrapStatus({ view }: { view: "loading" | "restoring" }) {
   const { formatMessage } = useIntl();
@@ -1049,6 +1058,49 @@ export function AppShell() {
     navigate(pendingInviteRedirect, { replace: true });
   }, [user, profileSetupRequired, urlParamsRef, navigate]);
 
+  const showLogin = useCallback(() => setAuthView("login"), []);
+  const showRegister = useCallback(() => setAuthView("register"), []);
+  const showForgotPassword = useCallback(() => setAuthView("forgot-password"), []);
+  const clearInviteToken = useCallback(() => setInviteToken(null), []);
+  const inviteSwitchToLogin = useCallback(() => {
+    setInviteToken(null);
+    setAuthView("login");
+  }, []);
+  const inviteSwitchToRegister = useCallback(() => {
+    setInviteToken(null);
+    setAuthView("register");
+  }, []);
+  const dismissPublicView = useCallback(() => setPublicViewDismissed(true), []);
+  const publicSignIn = useCallback(() => {
+    setPublicViewDismissed(true);
+    setAuthView("login");
+  }, []);
+  const publicRegister = useCallback(() => {
+    setPublicViewDismissed(true);
+    setAuthView("register");
+  }, []);
+
+  const hasUser = !!user;
+  const leaveResetPassword = useCallback(() => {
+    const url = new URL(window.location.href);
+    url.searchParams.delete("reset");
+    // Keep url.search: drop ONLY reset, preserve any invite/verify/other
+    // params so the post-reset reload can still resume those flows.
+    window.history.replaceState({}, "", url.pathname + url.search + url.hash);
+    // Logged-out → return to sign-in; logged-in → reload keeps the current
+    // session and lands back in the app (never an implicit logout/switch).
+    if (!hasUser) setAuthView("login");
+    window.location.reload();
+  }, [hasUser]);
+
+  const handlePublicServerJoined = useCallback(async () => {
+    await loadServers();
+    const joined = useServerStore.getState().servers.find((server) => server.slug === publicServerSlug);
+    if (!joined) throw new Error("Joined server was not returned by the server list");
+    setCurrentServer(joined);
+    navigate(publicChannelId ? `/s/${joined.slug}/channel/${encodeURIComponent(publicChannelId)}` : `/s/${joined.slug}`, { replace: true });
+  }, [loadServers, navigate, publicChannelId, publicServerSlug, setCurrentServer]);
+
   // Determine page content
   let content: React.ReactNode;
 
@@ -1066,17 +1118,7 @@ export function AppShell() {
     content = (
       <ResetPasswordPage
         token={urlParams.resetToken}
-        onBack={() => {
-          const url = new URL(window.location.href);
-          url.searchParams.delete("reset");
-          // Keep url.search: drop ONLY reset, preserve any invite/verify/other
-          // params so the post-reset reload can still resume those flows.
-          window.history.replaceState({}, "", url.pathname + url.search + url.hash);
-          // Logged-out → return to sign-in; logged-in → reload keeps the current
-          // session and lands back in the app (never an implicit logout/switch).
-          if (!user) setAuthView("login");
-          window.location.reload();
-        }}
+        onBack={leaveResetPassword}
       />
     );
   } else if (!user) {
@@ -1084,15 +1126,9 @@ export function AppShell() {
       content = (
         <InviteAcceptPage
           token={urlParams.inviteToken}
-          onInviteConsumed={() => setInviteToken(null)}
-          onSwitchToLogin={() => {
-            setInviteToken(null);
-            setAuthView("login");
-          }}
-          onSwitchToRegister={() => {
-            setInviteToken(null);
-            setAuthView("register");
-          }}
+          onInviteConsumed={clearInviteToken}
+          onSwitchToLogin={inviteSwitchToLogin}
+          onSwitchToRegister={inviteSwitchToRegister}
         />
       );
     } else if (publicServerSlug && !publicViewDismissed) {
@@ -1100,26 +1136,20 @@ export function AppShell() {
         <PublicServerPage
           slug={publicServerSlug}
           initialChannelId={publicChannelId}
-          onSignIn={() => {
-            setPublicViewDismissed(true);
-            setAuthView("login");
-          }}
-          onRegister={() => {
-            setPublicViewDismissed(true);
-            setAuthView("register");
-          }}
-          onUnavailable={() => setPublicViewDismissed(true)}
+          onSignIn={publicSignIn}
+          onRegister={publicRegister}
+          onUnavailable={dismissPublicView}
         />
       );
     } else if (authView === "register") {
-      content = <RegisterPage onSwitchToLogin={() => setAuthView("login")} />;
+      content = <RegisterPage onSwitchToLogin={showLogin} />;
     } else if (authView === "forgot-password") {
-      content = <ForgotPasswordPage onBack={() => setAuthView("login")} />;
+      content = <ForgotPasswordPage onBack={showLogin} />;
     } else {
       content = (
         <LoginPage
-          onSwitchToRegister={() => setAuthView("register")}
-          onForgotPassword={() => setAuthView("forgot-password")}
+          onSwitchToRegister={showRegister}
+          onForgotPassword={showForgotPassword}
         />
       );
     }
@@ -1127,9 +1157,9 @@ export function AppShell() {
     content = (
       <InviteAcceptPage
         token={urlParams.inviteToken}
-        onInviteConsumed={() => setInviteToken(null)}
-        onSwitchToLogin={() => {}}
-        onSwitchToRegister={() => {}}
+        onInviteConsumed={clearInviteToken}
+        onSwitchToLogin={ignoreAuthEntry}
+        onSwitchToRegister={ignoreAuthEntry}
       />
     );
   } else if (!user.emailVerified) {
@@ -1148,16 +1178,10 @@ export function AppShell() {
         slug={publicServerSlug}
         initialChannelId={publicChannelId}
         authenticated
-        onSignIn={() => {}}
-        onRegister={() => {}}
-        onUnavailable={() => setPublicViewDismissed(true)}
-        onJoined={async () => {
-          await loadServers();
-          const joined = useServerStore.getState().servers.find((server) => server.slug === publicServerSlug);
-          if (!joined) throw new Error("Joined server was not returned by the server list");
-          setCurrentServer(joined);
-          navigate(publicChannelId ? `/s/${joined.slug}/channel/${encodeURIComponent(publicChannelId)}` : `/s/${joined.slug}`, { replace: true });
-        }}
+        onSignIn={ignoreAuthEntry}
+        onRegister={ignoreAuthEntry}
+        onUnavailable={dismissPublicView}
+        onJoined={handlePublicServerJoined}
       />
     );
   } else {

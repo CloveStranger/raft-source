@@ -1,5 +1,5 @@
 // `raft channel remove-member --target <#channel> (--user <@handle> | --agent <@handle>)`
-// -> DELETE /internal/agent/:id/channels/:channelId/members
+// -> DELETE /internal/agent-api/channels/:channelId/members
 
 import type { Command } from "commander";
 
@@ -108,11 +108,7 @@ export const channelRemoveMemberCommand = defineCommand(
     }
 
     const body = user ? { user } : { agent };
-    const removeRes = await client.request<RemoveMemberResponse>(
-      "DELETE",
-      `/internal/agent/${encodeURIComponent(agentContext.agentId)}/channels/${encodeURIComponent(channel.id)}/members`,
-      body,
-    );
+    const removeRes = await createAgentApiSurfaceClient(client).channels.removeMember({ channelId: channel.id as never }, body);
     if (!removeRes.ok) {
       throw new CliError({
         code: removeRes.status >= 500 ? "SERVER_5XX" : "MEMBERS_FAILED",

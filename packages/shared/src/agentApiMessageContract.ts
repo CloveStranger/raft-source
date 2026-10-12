@@ -1,16 +1,17 @@
 import { z } from "zod";
+import { lazySchema } from "./lazySchema";
 
-const optionalStringSchema = z.string().trim().optional();
-const optionalStringArraySchema = z.array(z.string().trim().min(1)).optional();
-const optionalBooleanSchema = z.boolean().optional();
-const optionalNumberSchema = z.number().finite().optional();
-const optionalExactSeqArraySchema = z.array(z.number().int().positive()).max(2_500).optional();
-const optionalIsoTimestampSchema = z.string().datetime().optional();
-const nullableStringSchema = z.string().nullable();
+const optionalStringSchema = lazySchema("optionalStringSchema", () => z.string().trim().optional());
+const optionalStringArraySchema = lazySchema("optionalStringArraySchema", () => z.array(z.string().trim().min(1)).optional());
+const optionalBooleanSchema = lazySchema("optionalBooleanSchema", () => z.boolean().optional());
+const optionalNumberSchema = lazySchema("optionalNumberSchema", () => z.number().finite().optional());
+const optionalExactSeqArraySchema = lazySchema("optionalExactSeqArraySchema", () => z.array(z.number().int().positive()).max(2_500).optional());
+const optionalIsoTimestampSchema = lazySchema("optionalIsoTimestampSchema", () => z.string().datetime().optional());
+const nullableStringSchema = lazySchema("nullableStringSchema", () => z.string().nullable());
 
 const passthroughObject = <T extends z.ZodRawShape>(shape: T) => z.object(shape).passthrough();
 
-export const agentApiFreshnessContextModeSchema = z.enum(["inline", "withheld"]);
+export const agentApiFreshnessContextModeSchema = lazySchema("agentApiFreshnessContextModeSchema", () => z.enum(["inline", "withheld"]));
 
 export interface AgentApiStructuredMention {
   type: "user" | "agent";
@@ -18,13 +19,13 @@ export interface AgentApiStructuredMention {
   name: string;
 }
 
-export const agentApiStructuredMentionSchema = z.object({
+export const agentApiStructuredMentionSchema = lazySchema("agentApiStructuredMentionSchema", () => z.object({
   type: z.enum(["user", "agent"]),
   id: z.string().uuid(),
   name: z.string().trim().min(1).max(128),
-});
+}));
 
-const agentApiSendBodyKnownSchema = z.object({
+const agentApiSendBodyKnownSchema = lazySchema("agentApiSendBodyKnownSchema", () => z.object({
   target: z.string().optional(),
   content: z.string().optional(),
   attachmentIds: optionalStringArraySchema,
@@ -38,25 +39,25 @@ const agentApiSendBodyKnownSchema = z.object({
   seenUpToSeq: optionalNumberSchema,
   seenExactSeqs: optionalExactSeqArraySchema,
   freshnessContextMode: agentApiFreshnessContextModeSchema.optional(),
-});
+}));
 
-export const agentApiSendBodySchema = agentApiSendBodyKnownSchema.passthrough();
+export const agentApiSendBodySchema = lazySchema("agentApiSendBodySchema", () => agentApiSendBodyKnownSchema.passthrough());
 
-export const agentApiSendV2BodySchema = agentApiSendBodyKnownSchema.extend({
+export const agentApiSendV2BodySchema = lazySchema("agentApiSendV2BodySchema", () => agentApiSendBodyKnownSchema.extend({
   mentions: z.array(agentApiStructuredMentionSchema).optional(),
-}).passthrough();
+}).passthrough());
 
-export const legacyAgentSendBodySchema = agentApiSendBodySchema.extend({
+export const legacyAgentSendBodySchema = lazySchema("legacyAgentSendBodySchema", () => agentApiSendBodySchema.extend({
   channel: z.string().optional(),
   dm_to: z.string().optional(),
-});
+}));
 
-export const agentApiAttachmentEnvelopeSchema = passthroughObject({
+export const agentApiAttachmentEnvelopeSchema = lazySchema("agentApiAttachmentEnvelopeSchema", () => passthroughObject({
   id: z.string(),
   filename: z.string(),
-});
+}));
 
-export const agentApiTaskCurrentProjectionSchema = passthroughObject({
+export const agentApiTaskCurrentProjectionSchema = lazySchema("agentApiTaskCurrentProjectionSchema", () => passthroughObject({
   title: z.string(),
   description: z.string().nullable(),
   revision: z.number().int().nonnegative(),
@@ -68,9 +69,9 @@ export const agentApiTaskCurrentProjectionSchema = passthroughObject({
   amendedByName: z.string().nullable().optional(),
   amended_by_name: z.string().nullable().optional(),
   source: z.literal("tasks_current_projection"),
-});
+}));
 
-const agentApiExternalMessageProvenanceSchema = z.object({
+const agentApiExternalMessageProvenanceSchema = lazySchema("agentApiExternalMessageProvenanceSchema", () => z.object({
   schema: z.literal("external-message-provenance.v1"),
   provider: z.string().trim().min(1),
   workspace_id: z.string().trim().min(1),
@@ -79,7 +80,7 @@ const agentApiExternalMessageProvenanceSchema = z.object({
   actor_id: z.string().trim().min(1),
   actor_kind: z.enum(["human", "guest", "remote", "bot", "unknown"]),
   projection_id: z.string().uuid(),
-}).strict();
+}).strict());
 
 export interface AgentApiExternalMessageProvenance {
   schema: "external-message-provenance.v1";
@@ -108,7 +109,7 @@ export function isAgentApiExternalMessageForbiddenAuthorityField(field: string):
     || AGENT_API_EXTERNAL_MESSAGE_TASK_LIFECYCLE_FIELD.test(field);
 }
 
-export const agentApiMessageEnvelopeSchema = passthroughObject({
+export const agentApiMessageEnvelopeSchema = lazySchema("agentApiMessageEnvelopeSchema", () => passthroughObject({
   seq: optionalNumberSchema,
   id: optionalStringSchema,
   message_id: optionalStringSchema,
@@ -120,6 +121,8 @@ export const agentApiMessageEnvelopeSchema = passthroughObject({
   sender_name: optionalStringSchema,
   senderDescription: z.string().nullable().optional(),
   sender_description: z.string().nullable().optional(),
+  senderTimezone: z.string().nullable().optional(),
+  sender_timezone: z.string().nullable().optional(),
   external_message: agentApiExternalMessageProvenanceSchema.optional(),
   channel_type: optionalStringSchema,
   channel_name: optionalStringSchema,
@@ -151,9 +154,9 @@ export const agentApiMessageEnvelopeSchema = passthroughObject({
   for (const field of Object.keys(value)) if (isAgentApiExternalMessageForbiddenAuthorityField(field)) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, message: `external_message cannot carry ${field} authority`, path: [field] });
   }
-});
+}));
 
-export const agentApiHeldFreshnessResponseSchema = passthroughObject({
+export const agentApiHeldFreshnessResponseSchema = lazySchema("agentApiHeldFreshnessResponseSchema", () => passthroughObject({
   ok: z.literal(true).optional(),
   state: z.literal("held"),
   outcome: z.literal("held").optional(),
@@ -175,9 +178,9 @@ export const agentApiHeldFreshnessResponseSchema = passthroughObject({
   withheldMessageCount: optionalNumberSchema,
   seenUpToSeq: optionalNumberSchema,
   seenUpToMessageId: nullableStringSchema.optional(),
-});
+}));
 
-export const agentApiSendSentResponseSchema = passthroughObject({
+export const agentApiSendSentResponseSchema = lazySchema("agentApiSendSentResponseSchema", () => passthroughObject({
   ok: z.literal(true),
   state: z.literal("sent"),
   messageId: z.string(),
@@ -192,29 +195,29 @@ export const agentApiSendSentResponseSchema = passthroughObject({
       stillArrives: optionalStringArraySchema,
     }).optional(),
   }).optional(),
-});
+}));
 
-export const agentApiSendNotFoundResponseSchema = passthroughObject({
+export const agentApiSendNotFoundResponseSchema = lazySchema("agentApiSendNotFoundResponseSchema", () => passthroughObject({
   ok: z.literal(true),
   state: z.literal("not_found"),
   reconciliation: z.literal(true),
-});
+}));
 
-export const agentApiSendCommittedResponseSchema = passthroughObject({
+export const agentApiSendCommittedResponseSchema = lazySchema("agentApiSendCommittedResponseSchema", () => passthroughObject({
   ok: z.literal(true),
   state: z.literal("committed"),
   messageId: z.string(),
   messageSeq: optionalNumberSchema,
   reconciliation: z.literal(true),
   receiptComplete: z.literal(false),
-});
+}));
 
-export const agentApiSendResponseSchema = z.discriminatedUnion("state", [
+export const agentApiSendResponseSchema = lazySchema("agentApiSendResponseSchema", () => z.discriminatedUnion("state", [
   agentApiSendSentResponseSchema,
   agentApiHeldFreshnessResponseSchema,
   agentApiSendNotFoundResponseSchema,
   agentApiSendCommittedResponseSchema,
-]);
+]));
 
 // Keep the exported request projection independent of Zod so downstream SDK
 // declaration bundles do not require consumers to install our validator.
@@ -282,6 +285,8 @@ export interface AgentApiMessageEnvelope {
   sender_name?: string;
   senderDescription?: string | null;
   sender_description?: string | null;
+  senderTimezone?: string | null;
+  sender_timezone?: string | null;
   external_message?: AgentApiExternalMessageProvenance;
   channel_type?: string;
   channel_name?: string;

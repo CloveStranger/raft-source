@@ -4,6 +4,7 @@ import type { Server as SocketServer } from "socket.io";
 import * as channelService from "../services/channelService";
 import { actorHasServerCapabilityInServer } from "../lib/actorPermissions";
 import { addTraceEvent, errorClassOf } from "../tracing/semanticTrace";
+import { agentRefusalBody, agentServerRoleRequiredBody } from "../lib/agentServerRoleRequired";
 
 export interface AgentChannelCreateActor {
   id: string;
@@ -61,7 +62,7 @@ export async function createChannelForAgent(input: {
       reason: "capability_required",
       status_code: 403,
     });
-    return { status: 403, body: { error: "Agent requires createChannels capability to create channels" } };
+    return { status: 403, body: await agentServerRoleRequiredBody({ serverId, agentId: actor.id, capabilities: ["createChannels"], action: "create channels" }) };
   }
 
   const payload = typeof body === "object" && body !== null ? body as Record<string, unknown> : {};
@@ -155,7 +156,14 @@ export async function createChannelForAgent(input: {
         reason: "channel_limit_reached",
         status_code: 403,
       });
-      return { status: 403, body: { error: msg } };
+      return {
+        status: 403,
+        body: agentRefusalBody(
+          msg,
+          "channel_limit_reached",
+          "This server has reached its channel limit. Tell a server owner: they can archive unused channels or change the plan. Do not retry until then.",
+        ),
+      };
     }
     addTraceEvent("agent_channel_create.request.failed", {
       reason: "unexpected_error",

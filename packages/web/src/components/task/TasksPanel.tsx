@@ -130,6 +130,12 @@ function writeStoredTaskViewMode(nextView: ViewMode): void {
   }
 }
 
+const SKELETON_LINE_WIDTHS = ["w-1/2", "w-3/4"];
+
+function getTaskKey(task: Task): string {
+  return task.id;
+}
+
 const STATUS_TO_RUI_STATUS: Record<TaskStatus, TaskStatusId> = {
   todo: "todo",
   in_progress: "in-progress",
@@ -142,7 +148,6 @@ function TaskSection({
   status,
   tasks,
   onOpenTask,
-  onDragTask,
   collapsed = false,
   onToggleCollapsed,
   showChannelName = true,
@@ -154,9 +159,8 @@ function TaskSection({
   status: TaskStatus;
   tasks: Task[];
   onOpenTask: (task: Task) => void;
-  onDragTask?: (event: React.DragEvent<HTMLDivElement>, task: Task) => void;
   collapsed?: boolean;
-  onToggleCollapsed?: () => void;
+  onToggleCollapsed?: (status: TaskStatus) => void;
   showChannelName?: boolean;
   scrollElementRef: React.RefObject<HTMLDivElement | null>;
   /** Server-mode lazy paging: more pages exist for this status lane. */
@@ -166,10 +170,18 @@ function TaskSection({
 }) {
   const { formatMessage } = useIntl();
   const ruiStatus = STATUS_TO_RUI_STATUS[status];
+  const handleOpenChange = useCallback(() => onToggleCollapsed?.(status), [onToggleCollapsed, status]);
+  const renderTask = useCallback((task: Task) => (
+    <TaskCard
+      task={task}
+      onOpen={onOpenTask}
+      showChannelName={showChannelName}
+    />
+  ), [onOpenTask, showChannelName]);
   return (
     <RuiTaskSection
       open={!collapsed}
-      onOpenChange={() => onToggleCollapsed?.()}
+      onOpenChange={handleOpenChange}
       className="space-y-2.5"
     >
       <TaskSectionTrigger
@@ -197,7 +209,7 @@ function TaskSection({
           loadingPage ? (
             <SkeletonRow
               className="gap-2 rounded border border-line-muted bg-layer-card p-3 theme-brutal:border-2 theme-brutal:border-black/30 theme-brutal:bg-white"
-              lineWidths={["w-1/2", "w-3/4"]}
+              lineWidths={SKELETON_LINE_WIDTHS}
             />
           ) : (
             <TaskSectionEmpty className="border-2 border-dashed border-line-muted px-3 py-5 text-sm text-foreground-muted">
@@ -214,15 +226,8 @@ function TaskSection({
               scrollElementRef={scrollElementRef}
               estimateSize={116}
               gap={10}
-              getItemKey={(task) => task.id}
-              renderItem={(task) => (
-                <TaskCard
-                  task={task}
-                  onOpen={onOpenTask}
-                  onDragStart={onDragTask}
-                  showChannelName={showChannelName}
-                />
-              )}
+              getItemKey={getTaskKey}
+              renderItem={renderTask}
             />
           </TaskSectionItems>
         )}
@@ -295,7 +300,6 @@ function DroppableColumn({
   onToggleCollapsed,
   statusTasks,
   openTask,
-  onDragTask,
   isChannelMode,
   scrollElementRef,
   canModifyTasks,
@@ -305,10 +309,9 @@ function DroppableColumn({
 }: {
   status: TaskStatus;
   collapsed: boolean;
-  onToggleCollapsed: () => void;
+  onToggleCollapsed: (status: TaskStatus) => void;
   statusTasks: Task[];
   openTask: (task: Task) => void;
-  onDragTask?: (event: React.DragEvent<HTMLDivElement>, task: Task) => void;
   isChannelMode: boolean;
   scrollElementRef: React.RefObject<HTMLDivElement | null>;
   canModifyTasks: boolean;
@@ -320,11 +323,21 @@ function DroppableColumn({
   const { formatMessage } = useIntl();
   const { setNodeRef, isOver } = useDroppable({ id: status, disabled: !canModifyTasks });
   const ruiStatus = STATUS_TO_RUI_STATUS[status];
+  const handleOpenChange = useCallback(() => onToggleCollapsed(status), [onToggleCollapsed, status]);
+  const renderTask = useCallback((task: Task) => (
+    <DraggableTaskWrapper task={task} disabled={!canModifyTasks}>
+      <TaskCard
+        task={task}
+        onOpen={openTask}
+        showChannelName={!isChannelMode}
+      />
+    </DraggableTaskWrapper>
+  ), [canModifyTasks, isChannelMode, openTask]);
   return (
     <TaskBoardColumn
       ref={setNodeRef}
       open={!collapsed}
-      onOpenChange={() => onToggleCollapsed()}
+      onOpenChange={handleOpenChange}
       className={`flex w-[320px] shrink-0 self-start flex-col border theme-brutal:border-2 ${
         isOver ? "border-line-strong bg-primary-soft shadow-raft-sm theme-brutal:border-black theme-brutal:bg-soft-signal/20 theme-brutal:shadow-brutal-sm" : "border-line-muted bg-fill-muted/30 theme-brutal:border-black/20 theme-brutal:bg-white/30"
       } p-3 transition-colors`}
@@ -350,7 +363,7 @@ function DroppableColumn({
             loadingPage ? (
               <SkeletonRow
                 className="gap-2 rounded border border-line-muted bg-layer-card p-3 theme-brutal:border-2 theme-brutal:border-black/30 theme-brutal:bg-white"
-                lineWidths={["w-1/2", "w-3/4"]}
+                lineWidths={SKELETON_LINE_WIDTHS}
               />
             ) : (
               <TaskBoardColumnEmpty className={`border border-dashed px-3 py-5 text-sm theme-brutal:border-2 ${
@@ -368,17 +381,8 @@ function DroppableColumn({
               scrollElementRef={scrollElementRef}
               estimateSize={116}
               gap={10}
-              getItemKey={(task) => task.id}
-              renderItem={(task) => (
-                <DraggableTaskWrapper task={task} disabled={!canModifyTasks}>
-                  <TaskCard
-                    task={task}
-                    onOpen={openTask}
-                    onDragStart={onDragTask}
-                    showChannelName={!isChannelMode}
-                  />
-                </DraggableTaskWrapper>
-              )}
+              getItemKey={getTaskKey}
+              renderItem={renderTask}
             />
           )}
           {hasMore && (
@@ -518,15 +522,17 @@ function IdentityFilterChip({
     );
   }, [optionsWithSentinel, search]);
 
-  const toggleValue = (value: IdentityFilterValue) => {
+  const toggleValue = useCallback((value: IdentityFilterValue) => {
     onChange(
       selected.includes(value)
         ? selected.filter((v) => v !== value)
         : [...selected, value],
     );
-  };
+  }, [onChange, selected]);
 
-  const popoverOptions = filteredOptions.map((opt) => ({
+  const clearSelection = useCallback(() => onChange([]), [onChange]);
+
+  const popoverOptions = useMemo(() => filteredOptions.map((opt) => ({
     key: opt.key,
     checked: selected.includes(opt.key),
     onClick: () => toggleValue(opt.key),
@@ -548,7 +554,7 @@ function IdentityFilterChip({
         email={opt.type === "user" ? opt.email ?? null : null}
       />
     ),
-  }));
+  })), [filteredOptions, selected, toggleValue]);
 
   return (
     <div ref={containerRef} className="relative">
@@ -575,7 +581,7 @@ function IdentityFilterChip({
           onSearchChange={setSearch}
           options={popoverOptions}
           showClear={selected.length > 0}
-          onClear={() => onChange([])}
+          onClear={clearSelection}
         />
       )}
     </div>
@@ -602,14 +608,9 @@ export interface TasksPanelProps {
   /** When set, render in channel mode (no channel filter, scoped task list,
    *  no top page header, and a New Task button). */
   channelId?: string;
-  /** Optional host override for surfaces like workspace-grid that need task
-   *  activation to open inside their own tab model instead of the global
-   *  right-panel thread store. */
-  onOpenTask?: (task: Task) => void;
-  onDragTask?: (event: React.DragEvent<HTMLDivElement>, task: Task) => void;
 }
 
-export default function TasksPanel({ channelId, onOpenTask, onDragTask }: TasksPanelProps = {}) {
+export default function TasksPanel({ channelId }: TasksPanelProps = {}) {
   const { formatMessage } = useIntl();
   const isChannelMode = !!channelId;
 
@@ -949,6 +950,42 @@ export default function TasksPanel({ channelId, onOpenTask, onDragTask }: TasksP
     setSelectedChannels([]);
   }, [setSelectedChannels]);
 
+  const channelPopoverOptions = useMemo(() => filteredChannelOptions.map((channel) => ({
+    key: channel.id,
+    checked: selectedChannelIds.includes(channel.id),
+    onClick: () => toggleChannelFilter(channel.id),
+    label: `#${channel.name}`,
+  })), [filteredChannelOptions, selectedChannelIds, toggleChannelFilter]);
+
+  const toggleChannelPopover = useCallback(() => {
+    setOpenFilter((prev) => (prev === "channel" ? null : "channel"));
+  }, []);
+  const toggleCreatorPopover = useCallback(() => {
+    setOpenFilter((prev) => (prev === "creator" ? null : "creator"));
+  }, []);
+  const toggleAssigneePopover = useCallback(() => {
+    setOpenFilter((prev) => (prev === "assignee" ? null : "assignee"));
+  }, []);
+
+  const creatorSelfOption = useMemo(
+    () => (myUserKey ? { key: myUserKey, label: formatMessage({ id: "task.filter.createdByMe" }) } : null),
+    [myUserKey, formatMessage],
+  );
+  const assigneeSelfOption = useMemo(
+    () => (myUserKey ? { key: myUserKey, label: formatMessage({ id: "task.filter.assignedToMe" }) } : null),
+    [myUserKey, formatMessage],
+  );
+
+  const openCreateDialog = useCallback(() => setShowCreateDialog(true), []);
+  const closeCreateDialog = useCallback(() => setShowCreateDialog(false), []);
+
+  const renderBoardViewButton = useCallback((props: React.ComponentProps<"button">) => (
+    <Button {...props} size="sm" variant={viewMode === "board" ? "primary" : "outline"} className="box-border h-8 min-h-8 gap-1.5 py-0" />
+  ), [viewMode]);
+  const renderListViewButton = useCallback((props: React.ComponentProps<"button">) => (
+    <Button {...props} size="sm" variant={viewMode === "list" ? "primary" : "outline"} className="box-border h-8 min-h-8 gap-1.5 py-0" />
+  ), [viewMode]);
+
   const toggleStatusCollapsed = useCallback((status: TaskStatus) => {
     // Expanding a never-loaded lane (done/closed start collapsed + unloaded in
     // server mode) lazily pulls its first summary page.
@@ -962,13 +999,6 @@ export default function TasksPanel({ channelId, onOpenTask, onDragTask }: TasksP
   // Stable across renders so the memoized TaskCard rows don't all re-render
   // when an unrelated task updates. Deps are all zustand action refs (stable).
   const openTask = useCallback((task: Task) => {
-    // Stryker disable all: this host override is contract-pinned; the fallback
-    // task-opening behavior below retains its existing behavioral coverage.
-    if (onOpenTask) {
-      onOpenTask(task);
-      return;
-    }
-    // Stryker restore all
     closeProfile();
     if (task.isLegacy) {
       closeThread();
@@ -984,7 +1014,7 @@ export default function TasksPanel({ channelId, onOpenTask, onDragTask }: TasksP
     // never matched the in-channel Tasks tab.
     void openThread({ parentChannelId: task.channelId, parentMessageId: task.messageId, intent: "task" });
     // Stryker restore all
-  }, [closeProfile, closeThread, closeLegacyTask, onOpenTask, openLegacyTask, openThread]);
+  }, [closeProfile, closeThread, closeLegacyTask, openLegacyTask, openThread]);
 
   /**
    * Resolves a dnd-kit drag-end event into a task status update.
@@ -1045,9 +1075,7 @@ export default function TasksPanel({ channelId, onOpenTask, onDragTask }: TasksP
             <div ref={channelFilterRef} className="relative">
               <Button size="sm" variant={selectedChannelIds.length > 0 ? "primary" : "outline"}
                 type="button"
-                onClick={() =>
-                  setOpenFilter((prev) => (prev === "channel" ? null : "channel"))
-                }
+                onClick={toggleChannelPopover}
                 className="box-border h-8 min-h-8 gap-2 py-0"
               >
                 <Hash size={14} />
@@ -1066,12 +1094,7 @@ export default function TasksPanel({ channelId, onOpenTask, onDragTask }: TasksP
                   searchable
                   search={channelSearch}
                   onSearchChange={setChannelSearch}
-                  options={filteredChannelOptions.map((channel) => ({
-                    key: channel.id,
-                    checked: selectedChannelIds.includes(channel.id),
-                    onClick: () => toggleChannelFilter(channel.id),
-                    label: `#${channel.name}`,
-                  }))}
+                  options={channelPopoverOptions}
                   showClear={selectedChannelIds.length > 0}
                   onClear={clearChannelFilters}
                 />
@@ -1088,11 +1111,9 @@ export default function TasksPanel({ channelId, onOpenTask, onDragTask }: TasksP
             options={identityOptions}
             selected={selectedCreators}
             onChange={setSelectedCreators}
-            selfOption={myUserKey ? { key: myUserKey, label: formatMessage({ id: "task.filter.createdByMe" }) } : null}
+            selfOption={creatorSelfOption}
             isOpen={openFilter === "creator"}
-            onToggleOpen={() =>
-              setOpenFilter((prev) => (prev === "creator" ? null : "creator"))
-            }
+            onToggleOpen={toggleCreatorPopover}
           />
           <IdentityFilterChip
             icon={<UserIcon size={14} />}
@@ -1101,11 +1122,9 @@ export default function TasksPanel({ channelId, onOpenTask, onDragTask }: TasksP
             selected={selectedAssignees}
             onChange={setSelectedAssignees}
             includeUnassigned
-            selfOption={myUserKey ? { key: myUserKey, label: formatMessage({ id: "task.filter.assignedToMe" }) } : null}
+            selfOption={assigneeSelfOption}
             isOpen={openFilter === "assignee"}
-            onToggleOpen={() =>
-              setOpenFilter((prev) => (prev === "assignee" ? null : "assignee"))
-            }
+            onToggleOpen={toggleAssigneePopover}
           />
 
           {/* "Created by me" / "Assigned to me" are no longer standalone
@@ -1132,7 +1151,7 @@ export default function TasksPanel({ channelId, onOpenTask, onDragTask }: TasksP
               type="button"
               size="sm"
               variant="outline"
-              onClick={() => setShowCreateDialog(true)}
+              onClick={openCreateDialog}
               className="box-border inline-flex h-8 min-h-8 items-center gap-1 py-0 text-xs font-bold"
             >
               <Plus size={12} />
@@ -1149,9 +1168,7 @@ export default function TasksPanel({ channelId, onOpenTask, onDragTask }: TasksP
             <SegmentedControlItem
               value="board"
               data-testid="channel-task-view-board"
-              render={(props) => (
-                <Button {...props} size="sm" variant={viewMode === "board" ? "primary" : "outline"} className="box-border h-8 min-h-8 gap-1.5 py-0" />
-              )}
+              render={renderBoardViewButton}
             >
               <Columns3 size={12} />
               <SegmentedControlLabel>{formatMessage({ id: "task.view.board" })}</SegmentedControlLabel>
@@ -1159,9 +1176,7 @@ export default function TasksPanel({ channelId, onOpenTask, onDragTask }: TasksP
             <SegmentedControlItem
               value="list"
               data-testid="channel-task-view-list"
-              render={(props) => (
-                <Button {...props} size="sm" variant={viewMode === "list" ? "primary" : "outline"} className="box-border h-8 min-h-8 gap-1.5 py-0" />
-              )}
+              render={renderListViewButton}
             >
               <LayoutList size={12} />
               <SegmentedControlLabel>{formatMessage({ id: "task.view.list" })}</SegmentedControlLabel>
@@ -1183,7 +1198,7 @@ export default function TasksPanel({ channelId, onOpenTask, onDragTask }: TasksP
               <SkeletonRow
                 key={i}
                 className="gap-2 rounded border border-line-muted bg-layer-card p-3 theme-brutal:border-2 theme-brutal:border-black/30 theme-brutal:bg-white"
-                lineWidths={["w-1/2", "w-3/4"]}
+                lineWidths={SKELETON_LINE_WIDTHS}
               />
             ))}
           </div>
@@ -1210,10 +1225,9 @@ export default function TasksPanel({ channelId, onOpenTask, onDragTask }: TasksP
                   key={status}
                   status={status}
                   collapsed={collapsedStatuses[status]}
-                  onToggleCollapsed={() => toggleStatusCollapsed(status)}
+                  onToggleCollapsed={toggleStatusCollapsed}
                   statusTasks={statusTasks}
                   openTask={openTask}
-                  onDragTask={canModifyTasks ? onDragTask : undefined}
                   isChannelMode={isChannelMode}
                   scrollElementRef={scrollContainerRef}
                   canModifyTasks={canModifyTasks}
@@ -1233,9 +1247,8 @@ export default function TasksPanel({ channelId, onOpenTask, onDragTask }: TasksP
                 status={status}
                 tasks={statusTasks}
                 onOpenTask={openTask}
-                onDragTask={canModifyTasks ? onDragTask : undefined}
                 collapsed={collapsedStatuses[status]}
-                onToggleCollapsed={() => toggleStatusCollapsed(status)}
+                onToggleCollapsed={toggleStatusCollapsed}
                 showChannelName={!isChannelMode}
                 scrollElementRef={scrollContainerRef}
                 {...lanePagingProps(status)}
@@ -1248,7 +1261,7 @@ export default function TasksPanel({ channelId, onOpenTask, onDragTask }: TasksP
       {showCreateDialog && channelId && (
         <CreateTaskDialog
           channelId={channelId}
-          onClose={() => setShowCreateDialog(false)}
+          onClose={closeCreateDialog}
         />
       )}
     </TasksPanelRoot>

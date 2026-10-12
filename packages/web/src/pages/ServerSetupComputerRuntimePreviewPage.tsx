@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useCallback, useState } from "react";
 import CreateAgentDialog from "../components/agent/CreateAgentDialog";
 import ServerCreatePreview from "../components/auth/ServerCreatePreview";
 import ServerSetupComputerRuntimeStep from "../components/onboarding/ServerSetupComputerRuntimeStep";
@@ -31,6 +31,8 @@ function seedCreateAgentPreviewMachine() {
   });
 }
 
+function ignorePreviewAction() {}
+
 export default function ServerSetupComputerRuntimePreviewPage() {
   const initialView = readServerSetupPreviewView(window.location.search);
   const [view, setView] = useState(() => {
@@ -41,6 +43,12 @@ export default function ServerSetupComputerRuntimePreviewPage() {
   });
   const fixture = serverSetupPreviewFixture(view);
   const showCreateAgent = view === "create-agent";
+  const showReady = useCallback(() => setView("ready"), []);
+  const showOfflineRecovery = useCallback(() => setView("offline-recovery"), []);
+  const showCreateAgentStep = useCallback(() => {
+    seedCreateAgentPreviewMachine();
+    setView("create-agent");
+  }, []);
 
   return (
     <div className="relative min-h-0 flex-1 overflow-hidden bg-brutal-cream font-display">
@@ -56,8 +64,8 @@ export default function ServerSetupComputerRuntimePreviewPage() {
             previewOnly
             previewRuntimeOptions={fixture.createRuntimeOptions}
             defaultMachineId="preview-computer"
-            onClose={() => setView("ready")}
-            onOnboardingStartOver={() => setView("offline-recovery")}
+            onClose={showReady}
+            onOnboardingStartOver={showOfflineRecovery}
           />
         ) : (
           <ServerSetupComputerRuntimeStep
@@ -70,12 +78,9 @@ export default function ServerSetupComputerRuntimePreviewPage() {
             serverSlug="launch"
             setupCommand="raft-computer setup /cindys-pricing-team"
             computerInstallCommand="curl -fsSL https://cdn.raft.build/computer/install.sh | sh"
-            onCopyInstallCommand={() => undefined}
-            onOpenApiKeySettings={() => undefined}
-            onNext={() => {
-              seedCreateAgentPreviewMachine();
-              setView("create-agent");
-            }}
+            onCopyInstallCommand={ignorePreviewAction}
+            onOpenApiKeySettings={ignorePreviewAction}
+            onNext={showCreateAgentStep}
           />
         )}
       </div>

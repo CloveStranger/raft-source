@@ -91,6 +91,13 @@ export const SUBAGENT_DELEGATION_FEATURE_FLAG_KEY = "subagent_delegation_prompt"
  */
 export const PASSIVE_AX_FEATURE_FLAG_KEY = "passive_ax";
 
+/**
+ * RFC 074 §2 personal assistant v0 (identity borrowing). Server-scoped,
+ * default OFF: a missing flag or any evaluation failure keeps every
+ * assistant-only read refused and the assistant link unsettable.
+ */
+export const IDENTITY_BORROWING_FEATURE_FLAG_KEY = "identity_borrowing";
+
 const FEATURE_FLAG_LOCK_NAMESPACE = 0x46464c47; // "FFLG"
 const FEATURE_FLAG_CONFIG_VERSION_LOCK_NAMESPACE = 0x46464356; // "FFCV"
 const FEATURE_FLAG_CONFIG_VERSION_LOCK_KEY = 0;

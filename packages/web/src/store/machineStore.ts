@@ -12,7 +12,8 @@ import type {
   MachineTransition,
 } from "./events/machineEvents";
 import type { CreatorSummary } from "./agentStore";
-import { normalizeComputerReleaseNotes } from "@botiverse/raft-shared";
+import type { AcceptedComputerUpgrade } from "../utils/computerUpgradeInFlight";
+import { currentTimeMs, normalizeComputerReleaseNotes } from "@botiverse/raft-shared";
 import type { ComputerReleaseNotes, MachineDiskStatus } from "@botiverse/raft-shared";
 
 export interface Machine {
@@ -77,6 +78,8 @@ export interface MachineWorkspaceEntry {
   totalSizeBytes: number;
   lastModified: string;
   fileCount: number;
+  /** Reported by daemons from 1.0.46; older daemons only use `~/.slock/agents/`. */
+  displayPath?: string;
   status: "active" | "stopped" | "deleted" | "orphan";
   agentName: string | null;
   agentStatus: string | null;
@@ -138,6 +141,19 @@ interface MachineState {
   machineWorkspacesLoading: Record<string, boolean>;
   /** Per-machine Computer operation progress (upgrade/restart) */
   computerOperationProgress: Record<string, ComputerOperationProgress | null>;
+  /** Per-machine web Upgrade click in flight: the target version, from the
+   *  click until the POST settles and the refreshed machine row carries the
+   *  server's upgradeRequest. Client-only; never a server fact. */
+  computerUpgradeSubmitting: Record<string, string>;
+  /** Per-machine upgrade request the server accepted for this tab's Upgrade
+   *  click; see computerUpgradeInFlight. Client-only copy of a server fact. */
+  computerUpgradeAccepted: Record<string, AcceptedComputerUpgrade>;
+  /** Per-machine time (client clock, ms) this tab saw a live online→offline
+   *  status event; cleared when it comes back online. The machine row has no
+   *  disconnect timestamp (`lastHeartbeat` in the store is only as fresh as
+   *  the last loadMachines), so a transition seen live is the best anchor for
+   *  "offline since". Client-only; never a server fact. */
+  computerOfflineObservedAt: Record<string, number>;
 
   loadMachines: () => Promise<void>;
   /** Ask a computer to re-detect its installed runtimes. Fresh list arrives via the capabilities push. */
@@ -187,6 +203,8 @@ interface MachineState {
     machineId: string,
     progress: ComputerOperationProgress | null,
   ) => void;
+  setComputerUpgradeSubmitting: (machineId: string, targetVersion: string | null) => void;
+  setComputerUpgradeAccepted: (machineId: string, request: MachineUpgradeRequest) => void;
   completeComputerRestart: (
     machineId: string,
     requestId: string,
@@ -242,6 +260,25 @@ export const useMachineStore = create<MachineState>((set, get) => {
     computerOperationProgress: {},
     setComputerOperation: (machineId, progress) => {
       dispatchMachineEvent({ kind: "operation-set", machineId, progress });
+    },
+    computerUpgradeSubmitting: {},
+    computerUpgradeAccepted: {},
+    computerOfflineObservedAt: {},
+    setComputerUpgradeAccepted: (machineId, request) => {
+      set({
+        computerUpgradeAccepted: {
+          ...get().computerUpgradeAccepted,
+          [machineId]: { request, acceptedAtMs: currentTimeMs() },
+        },
+      });
+    },
+    setComputerUpgradeSubmitting: (machineId, targetVersion) => {
+      const current = get().computerUpgradeSubmitting;
+      if ((current[machineId] ?? null) === targetVersion) return;
+      const next = { ...current };
+      if (targetVersion === null) delete next[machineId];
+      else next[machineId] = targetVersion;
+      set({ computerUpgradeSubmitting: next });
     },
 
     rescanRuntimes: async (machineId: string) => {
@@ -370,13 +407,26 @@ export const useMachineStore = create<MachineState>((set, get) => {
       machineId: string,
       status: "online" | "offline",
       statusVersion?: number,
-    ) =>
-      dispatchMachineEvent({
+    ) => {
+      const wasOnline = get().machines.find((m) => m.id === machineId)?.status === "online";
+      const transition = dispatchMachineEvent({
         kind: "status",
         machineId,
         status,
         statusVersion,
-      }),
+      });
+      if (transition.accepted) {
+        const observed = get().computerOfflineObservedAt;
+        if (status === "offline" && wasOnline) {
+          set({ computerOfflineObservedAt: { ...observed, [machineId]: currentTimeMs() } });
+        } else if (status === "online" && machineId in observed) {
+          const next = { ...observed };
+          delete next[machineId];
+          set({ computerOfflineObservedAt: next });
+        }
+      }
+      return transition;
+    },
 
     requestMachineReconcile: (reason) =>
       dispatchMachineEvent({ kind: "reconcile", reason }),
@@ -527,5 +577,8 @@ registerServerReset(() =>
     machineWorkspaces: {},
     machineWorkspacesLoading: {},
     computerOperationProgress: {},
+    computerUpgradeSubmitting: {},
+    computerUpgradeAccepted: {},
+    computerOfflineObservedAt: {},
   }),
 );

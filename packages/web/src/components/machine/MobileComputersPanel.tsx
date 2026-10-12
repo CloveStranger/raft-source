@@ -1,5 +1,6 @@
 import { Button } from "raft-ui";
 import { Monitor, Plus, RefreshCw } from "lucide-react";
+import { useCallback, useMemo } from "react";
 import { useIntl } from "react-intl";
 import { useLocation } from "react-router-dom";
 import { useMachineStore } from "../../store/machineStore";
@@ -34,6 +35,8 @@ import { machineDiskLowPresentation } from "../../utils/machineDiskPresentation"
  * Desktop still uses the Sidebar's dedicated Computers rail column;
  * only mobile routes /computers here.
  */
+const SKELETON_LINE_WIDTHS = ["w-2/5", "w-3/5"];
+
 export default function MobileComputersPanel() {
   const { formatMessage } = useIntl();
   const machines = useMachineStore((s) => s.machines);
@@ -55,6 +58,13 @@ export default function MobileComputersPanel() {
   // Computers is a level-2 view under Settings on mobile; back pops
   // to the Settings tab home (or app root if serverSlug is missing).
   const onMobileBack = useMobileBack(serverSlug ? `/s/${serverSlug}/settings` : "/");
+  const mobileBackProps = useMemo(
+    () => ({ "data-testid": "computers-mobile-back", title: formatMessage({ id: "common.announcement.back" }) }),
+    [formatMessage],
+  );
+  const retryLoadMachines = useCallback(() => {
+    void loadMachines();
+  }, [loadMachines]);
 
   return (
     <div className="flex min-h-0 flex-1 flex-col" data-testid="mobile-computers-panel">
@@ -67,7 +77,7 @@ export default function MobileComputersPanel() {
       <PanelHeader
         title={formatMessage({ id: "machine.mobile.title" })}
         onMobileBack={onMobileBack}
-        mobileBackProps={{ "data-testid": "computers-mobile-back", title: formatMessage({ id: "common.announcement.back" }) }}
+        mobileBackProps={mobileBackProps}
       />
 
       {/* Body — cream page background with card-style machine rows,
@@ -82,7 +92,7 @@ export default function MobileComputersPanel() {
                   className="min-h-[68px] gap-3 rounded-md border border-line-muted bg-layer-panel p-3 shadow-raft-sm theme-brutal:rounded-none theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white theme-brutal:shadow-brutal-sm"
                   avatar
                   avatarClassName="size-10 rounded-none"
-                  lineWidths={["w-2/5", "w-3/5"]}
+                  lineWidths={SKELETON_LINE_WIDTHS}
                 />
               ))}
             </div>
@@ -93,7 +103,7 @@ export default function MobileComputersPanel() {
               data-testid="computers-refresh-error"
             >
               <span className="font-semibold">{formatMessage({ id: "machine.mobile.refreshErrorSaved" })}</span>
-              <Button onClick={() => void loadMachines()}>
+              <Button onClick={retryLoadMachines}>
                 <RefreshCw size={14} />
                 {formatMessage({ id: "machine.mobile.retry" })}
               </Button>
@@ -106,7 +116,7 @@ export default function MobileComputersPanel() {
               title={formatMessage({ id: "machine.mobile.loadErrorTitle" })}
               description={formatMessage({ id: "machine.mobile.loadErrorDescription" })}
               action={
-                <Button onClick={() => void loadMachines()}>
+                <Button onClick={retryLoadMachines}>
                   <RefreshCw size={14} />
                   {formatMessage({ id: "machine.mobile.retry" })}
                 </Button>

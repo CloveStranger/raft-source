@@ -30,7 +30,7 @@ import {
   type RaftInterrupted,
   type RaftInterruptResume,
 } from "./interrupt";
-import { projectRaftMessages, sortBySeq, toAgentMessageLike, type RaftMessage } from "./message";
+import { projectRaftMessages, projectRaftMessagesInTarget, sortBySeq, toAgentMessageLike, type RaftMessage } from "./message";
 import { failureFromClientResult, failureOutcome, opError, validateOpRequest, type RaftNextStep, type RaftOutcome } from "./outcome";
 import { requestSchema } from "./requestSchema";
 
@@ -50,8 +50,9 @@ export interface ReadHistoryRequest {
   limit?: number;
   /**
    * Read this target's unread: start right after the agent's read position
-   * (where `inbox.list` counts unread from) and move it forward. Cannot be
-   * combined with after/before/around.
+   * (where `inbox.list` counts unread from) and move it forward. The agent's
+   * own messages are never unread: they are left out, and the read position
+   * still moves past them. Cannot be combined with after/before/around.
    */
   unread?: boolean;
   /**
@@ -203,9 +204,11 @@ export async function readHistory(
       nextAction: "List unread conversations with inbox.list, then read one with messages.read and its after seq.",
     }));
   }
+  // History already identifies its conversation; bare row envelopes inherit that target.
+  const target = typeof data.target === "string" && data.target ? data.target : request.target;
   const page: RaftHistoryPage = {
-    target: typeof data.target === "string" && data.target ? data.target : request.target,
-    messages: sortBySeq(projectRaftMessages(data.messages, style)),
+    target,
+    messages: sortBySeq(projectRaftMessagesInTarget(data.messages, target, style)),
     hasOlder: data.has_older === true,
     hasNewer: data.has_newer === true,
     lastReadSeq: typeof data.last_read_seq === "number" ? data.last_read_seq : null,

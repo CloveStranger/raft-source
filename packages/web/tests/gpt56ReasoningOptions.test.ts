@@ -10,8 +10,13 @@ import {
 // rather than hardcoding per-variant level lists. These assertions pin the
 // picker behavior against that shared data.
 
-test("codex default model is GPT-6 Astra", () => {
-  assert.equal(getDefaultModel("codex"), "gpt-6-astra");
+test("codex default model is GPT-6.1 Sol", () => {
+  assert.equal(getDefaultModel("codex"), "gpt-6.1-sol");
+});
+
+test("GPT-6.1 Sol exposes all six reasoning levels including Ultra; GPT-6 Luna stops at Max", () => {
+  assert.deepEqual(reasoningEffortOptionsForModel("codex", "gpt-6.1-sol").map((o) => o.value), ["low", "medium", "high", "xhigh", "max", "ultra"]);
+  assert.deepEqual(reasoningEffortOptionsForModel("codex", "gpt-6-luna").map((o) => o.value), ["low", "medium", "high", "xhigh", "max"]);
 });
 
 test("Astra exposes all six reasoning levels including Ultra", () => {

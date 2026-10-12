@@ -2805,6 +2805,23 @@ test("detectCodexModels extracts visible API-supported models and reads default 
   });
 });
 
+test("detectCodexModels keeps GPT-6.1 Sol only when the cache lists it", () => {
+  withTempHome((home) => {
+    mkdirSync(path.join(home, ".codex"));
+    const write = (visibility: string) => writeFileSync(path.join(home, ".codex", "models_cache.json"), JSON.stringify({
+      models: [
+        { slug: "gpt-6.1-sol", display_name: "GPT-6.1-Sol", visibility },
+        { slug: "gpt-6-astra", display_name: "GPT-6-Astra", visibility: "list" },
+      ],
+    }));
+    write("list");
+    assert.deepEqual(detectCodexModels(home)!.models.map((m) => m.id), ["gpt-6.1-sol", "gpt-6-astra"]);
+    // A hidden entry stays hidden even though the bundled fallback knows the slug.
+    write("hide");
+    assert.deepEqual(detectCodexModels(home)!.models.map((m) => m.id), ["gpt-6-astra"]);
+  });
+});
+
 test("detectCodexModels reads CODEX_HOME root-shaped cache and config", () => {
   withTempHome((home) => {
     writeFileSync(path.join(home, "models_cache.json"), JSON.stringify({
@@ -2920,7 +2937,28 @@ test("probeCodex does not advertise version-only installs without app-server", (
   });
 
   assert.equal(result.available, false);
+  assert.equal(result.unavailableReason, "probe_failed");
   assert.match(result.diagnostic ?? "", /\/tmp\/codex rejected: app-server probe exit status 2/);
+});
+
+test("probeCodex reports not_installed when no Codex candidate exists anywhere", () => {
+  withTempHome((home) => {
+    const result = probeCodex({
+      platform: "linux",
+      homeDir: home,
+      env: { PATH: "/nonexistent-bin", HOME: home },
+      existsSyncFn: () => false,
+      execFileSyncFn: (() => {
+        throw Object.assign(new Error("which: no codex"), { status: 1 });
+      }) as unknown as typeof import("node:child_process").execFileSync,
+      statSyncFn: () => {
+        throw new Error("disable host-file cache for the injected probe");
+      },
+    });
+
+    assert.equal(result.available, false);
+    assert.equal(result.unavailableReason, "not_installed");
+  });
 });
 
 test("resolveCodexCommand ignores Windows sandbox runner fallback", () => {

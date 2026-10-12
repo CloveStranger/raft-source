@@ -140,6 +140,19 @@ export function PwaInstallSettingsCard() {
     });
   }, [cooldownState, isMobile, platform, sessionCount, standalone]);
 
+  const openInstallSheet = useCallback(() => {
+    recordPwaInstallEvent({
+      event: "pwa_install_cta_clicked",
+      platform,
+      surface: "settings",
+      trigger: "settings",
+      displayMode: getPwaInstallDisplayMode(window),
+      sessionCountBucket: getSessionCountBucket(sessionCount),
+      cooldownState,
+    });
+    window.dispatchEvent(new CustomEvent(PWA_INSTALL_OPEN_EVENT, { detail: { source: "settings" } }));
+  }, [cooldownState, platform, sessionCount]);
+
   if (!isMobile || standalone || !hasPwaInstallPath({ platform, hasNativePrompt: false })) return null;
 
   const helpText = formatMessage({ id: "pwa.install.openInSafariSettingsHint" });
@@ -159,18 +172,7 @@ export function PwaInstallSettingsCard() {
             type="button"
             size="sm"
             variant="accent"
-            onClick={() => {
-              recordPwaInstallEvent({
-                event: "pwa_install_cta_clicked",
-                platform,
-                surface: "settings",
-                trigger: "settings",
-                displayMode: getPwaInstallDisplayMode(window),
-                sessionCountBucket: getSessionCountBucket(sessionCount),
-                cooldownState,
-              });
-              window.dispatchEvent(new CustomEvent(PWA_INSTALL_OPEN_EVENT, { detail: { source: "settings" } }));
-            }}
+            onClick={openInstallSheet}
           >
             {formatMessage({ id: "pwa.install.add" })}
           </Button>
@@ -237,20 +239,20 @@ export default function PwaInstallPrompt() {
     return () => window.removeEventListener(PWA_INSTALL_OPEN_EVENT, onOpen);
   }, [platform, track]);
 
-  const closeSheet = () => {
+  const closeSheet = useCallback(() => {
     if (typeof window !== "undefined") {
       window.sessionStorage.setItem(PWA_INSTALL_SESSION_DISMISSED_KEY, "1");
       setCooldownState("dismissed_active");
     }
     track("pwa_install_ios_instruction_dismissed", "ios_instruction_sheet");
     setSheet(null);
-  };
+  }, [track]);
 
-  const copyLink = () => {
+  const copyLink = useCallback(() => {
     if (typeof window === "undefined") return;
     void navigator.clipboard?.writeText(window.location.href);
     track("pwa_install_cta_clicked", "ios_instruction_sheet");
-  };
+  }, [track]);
 
   if (standalone) return null;
 

@@ -47,6 +47,25 @@ export class RuntimeModelNotFoundError extends Error {
 }
 
 /**
+ * task #10 — the session this start would resume failed context compaction
+ * repeatedly (the summary request no longer fits the model). Resuming it
+ * again would fail the same way; a new session (Reset Session & Restart) is
+ * the way out.
+ */
+export class RuntimeSessionNeedsResetError extends Error {
+  readonly code = "session_needs_reset" as const;
+  readonly runtimeId: string;
+  readonly failures: number;
+
+  constructor(input: { runtimeId: string; failures: number }) {
+    super(`The ${input.runtimeId} session failed context compaction ${input.failures} times in a row and cannot be resumed`);
+    this.name = "RuntimeSessionNeedsResetError";
+    this.runtimeId = input.runtimeId;
+    this.failures = input.failures;
+  }
+}
+
+/**
  * The selected model has no entry in the runtime's configuration on this
  * computer (Kimi: config.toml [models."X"]). Distinct from model_not_found so
  * only this runtime-confirmed case stops automatic relaunches (task #1221).

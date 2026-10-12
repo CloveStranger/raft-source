@@ -181,22 +181,6 @@ function collectReactUpdateDepthErrors(page: Page) {
   return errors;
 }
 
-async function enableWorkspaceGrid(page: Page) {
-  await page.route("**/api/feature-flags/evaluate", async (route) => {
-    const body = route.request().postDataJSON() as { keys?: string[] };
-    await route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({
-        evaluations: (body.keys ?? []).map((key) => ({
-          key,
-          enabled: key === "chat_grid_layout_v0",
-        })),
-      }),
-    });
-  });
-}
-
 function requirePointerPointInViewport(
   page: Page,
   point: { x: number; y: number },
@@ -852,7 +836,6 @@ test("creates a personal section and moves a channel into it", async ({ page, re
       }),
     });
   });
-  await enableWorkspaceGrid(page);
   const sectionName = `Launch ${Date.now()}`;
   await page.goto(`/s/${seedState.server.slug}/channel/${seedState.channel.id}`);
   const deferSetup = page.getByRole("button", { name: "I'll set this up myself" });
@@ -1055,7 +1038,7 @@ test("creates a personal section and moves a channel into it", async ({ page, re
   await page.screenshot({ path: "test-results/sidebar-custom-sections-mobile.png", fullPage: false });
 });
 
-test("reorders channels and DMs in classic and Workspace modes with persisted orders", async ({ page, request }) => {
+test("reorders channels and DMs with persisted orders", async ({ page, request }) => {
   test.setTimeout(60_000);
   const seedState = await waitForSeedState();
   const login = await loginViaApi(request, seedState);
@@ -1095,7 +1078,6 @@ test("reorders channels and DMs in classic and Workspace modes with persisted or
     sectionPlacements: expectedSectionPlacements,
     sectionsVersion: initialOrder.sectionsVersion,
   });
-  await enableWorkspaceGrid(page);
 
   await page.goto(`/s/${seedState.server.slug}/channel/${firstChannel.id}`);
 
@@ -1160,81 +1142,4 @@ test("reorders channels and DMs in classic and Workspace modes with persisted or
 
   const persisted = await getSidebarOrder(request, seedState, login.accessToken);
   expect(persisted).toEqual(expectedAfterDmDrag);
-
-  await page.getByRole("button", { name: "Enter Workspace" }).click();
-  await expect(page).toHaveURL(/[?&]wg=/);
-  await expect(firstChannelRow).toHaveAttribute("draggable", "true");
-  await firstChannelRow.dragTo(secondChannelRow);
-  await expect.poll(async () => {
-    const order = await getSidebarOrder(request, seedState, login.accessToken);
-    return order.channelOrder.indexOf(firstChannel.id) < order.channelOrder.indexOf(secondChannel.id);
-  }).toBe(true);
-
-  await withWorkspaceDmDragEvidence(page, test.info(), seedState.server.id, [firstDm.id, secondDm.id], async () => {
-    await expect(firstDmRow).toHaveAttribute("draggable", "true");
-    await firstDmRow.dragTo(secondDmRow);
-    await expect.poll(async () => {
-      const order = await getSidebarOrder(request, seedState, login.accessToken);
-      return order.dmOrder.indexOf(firstDm.id) < order.dmOrder.indexOf(secondDm.id);
-    }).toBe(true);
-  });
-});
-
-test("Workspace does not treat pinned or custom DMs as part of the default-DMs reorder surface", async ({ page, request }) => {
-  const seedState = await waitForSeedState();
-  const login = await loginViaApi(request, seedState);
-  await dismissOwnerOnboarding(request, seedState, login.accessToken);
-  const pinnedDm = await createDm(request, seedState, login.accessToken, { userId: seedState.extraHuman.userId });
-  const defaultDm = await createDm(request, seedState, login.accessToken, { agentId: seedState.agent.id });
-  await patchSidebarOrder(request, seedState, login.accessToken, {
-    dmSortMode: "manual",
-    dmOrder: [pinnedDm.id, defaultDm.id],
-    pinned: [{ kind: "human", id: seedState.extraHuman.userId }],
-  });
-  await enableWorkspaceGrid(page);
-
-  await page.goto(`/s/${seedState.server.slug}/dm/${defaultDm.id}`);
-  await page.getByRole("button", { name: "Enter Workspace" }).click();
-  await expect(page).toHaveURL(/[?&]wg=/);
-
-  const pinnedDmRow = page.locator(`button[data-sidebar-channel-id="${pinnedDm.id}"]`);
-  const defaultDmRow = page.locator(`button[data-sidebar-channel-id="${defaultDm.id}"]`);
-  await expect(pinnedDmRow).toHaveAttribute("draggable", "true");
-  await expect(defaultDmRow).toHaveAttribute("draggable", "true");
-  const before = (await getSidebarOrder(request, seedState, login.accessToken)).dmOrder;
-
-  await pinnedDmRow.dragTo(defaultDmRow);
-  await page.waitForTimeout(250);
-
-  const after = (await getSidebarOrder(request, seedState, login.accessToken)).dmOrder;
-  expect(after).toEqual(before);
-
-  const sectionId = `workspace-dm-${Date.now()}`;
-  const current = await getSidebarOrder(request, seedState, login.accessToken);
-  await patchSidebarOrder(request, seedState, login.accessToken, {
-    pinned: [],
-    customSections: [{ id: sectionId, name: "Workspace DMs", emoji: null, sortMode: "manual" }],
-    sectionOrder: ["system:pinned", sectionId, "system:joint", "system:channels", "system:dms"],
-    sectionPlacements: [{ kind: "channel", id: pinnedDm.id, sectionId, position: 0 }],
-    sectionsVersion: current.sectionsVersion,
-  });
-  await page.reload();
-
-  const customSection = page.locator('[data-testid^="sidebar-custom-section-"]', { hasText: "Workspace DMs" });
-  const customDmRow = customSection.locator(`button[data-sidebar-channel-id="${pinnedDm.id}"]`);
-  await expect(customDmRow).toHaveAttribute("draggable", "true");
-  await expect(customDmRow).toHaveClass(/\bitems-center\b/);
-  await expect(customDmRow).not.toHaveClass(/\bitems-start\b/);
-  const customDmBox = await customDmRow.boundingBox();
-  const defaultDmBox = await defaultDmRow.boundingBox();
-  expect(customDmBox).not.toBeNull();
-  expect(defaultDmBox).not.toBeNull();
-  expect(Math.abs(customDmBox!.height - defaultDmBox!.height)).toBeLessThan(1);
-  const beforeCustomDrag = (await getSidebarOrder(request, seedState, login.accessToken)).dmOrder;
-
-  await customDmRow.dragTo(defaultDmRow);
-  await page.waitForTimeout(250);
-
-  const afterCustomDrag = (await getSidebarOrder(request, seedState, login.accessToken)).dmOrder;
-  expect(afterCustomDrag).toEqual(beforeCustomDrag);
 });

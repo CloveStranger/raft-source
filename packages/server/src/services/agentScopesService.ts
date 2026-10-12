@@ -18,8 +18,8 @@
 //   revision 1. This keeps existing agents (created before this migration)
 //   working without a backfill migration step.
 
-import { eq } from "drizzle-orm";
-import { getDb, type DatabaseExecutor } from "../db/index";
+import { eq, inArray } from "drizzle-orm";
+import { getDb, withDbTraceAttributes, type DatabaseExecutor } from "../db/index";
 import { agentScopes, agents } from "../db/schema";
 import {
   AGENT_GRANTABLE_SCOPES,
@@ -53,18 +53,7 @@ export async function loadAgentScopes(agentId: string): Promise<AgentScopeSet> {
   const row = await db.query.agentScopes.findFirst({
     where: eq(agentScopes.agentId, agentId),
   });
-  if (row) {
-    const mode = row.mode ?? "custom";
-    return {
-      agentId,
-      granted: mode === "default"
-        ? completeDefaultScopes(row.scopes as readonly string[] | null)
-        : sanitizeGrantedScopes(row.scopes as readonly string[] | null),
-      mode,
-      revision: row.revision,
-      updatedAt: row.updatedAt.toISOString(),
-    };
-  }
+  if (row) return scopeSetFromRow(agentId, row);
   // No row yet — synthesize the full grantable set (every scope default-on
   // in v1). Treat it as revision 0 so the first explicit write bumps to
   // revision 1 and triggers the initial cache push.
@@ -212,6 +201,45 @@ export async function resetAgentScopesToDefault(args: {
     revision: 1,
     updatedAt: now.toISOString(),
   };
+}
+
+function scopeSetFromRow(agentId: string, row: typeof agentScopes.$inferSelect): AgentScopeSet {
+  const mode = row.mode ?? "custom";
+  return {
+    agentId,
+    granted: mode === "default"
+      ? completeDefaultScopes(row.scopes as readonly string[] | null)
+      : sanitizeGrantedScopes(row.scopes as readonly string[] | null),
+    mode,
+    revision: row.revision,
+    updatedAt: row.updatedAt.toISOString(),
+  };
+}
+
+/**
+ * agentHasScope for several agents that are known to exist (the caller holds
+ * their rows), in one query. An agent without an `agent_scopes` row has the
+ * default-on set, as in loadAgentScopes.
+ */
+export async function existingAgentsHaveScope(
+  agentIds: readonly string[],
+  scope: AgentScope,
+): Promise<Map<string, boolean>> {
+  if (agentIds.length === 0) return new Map();
+  const rows = await withDbTraceAttributes(
+    { db_callsite: "agent_scopes.existing_agents_have_scope" },
+    () => getDb().select().from(agentScopes).where(inArray(agentScopes.agentId, [...agentIds])),
+  );
+  const defaultSet: AgentScopeSet = {
+    agentId: "",
+    granted: [...AGENT_GRANTABLE_SCOPES],
+    mode: "default",
+    revision: 0,
+    updatedAt: new Date(0).toISOString(),
+  };
+  const allowed = new Map(agentIds.map((id) => [id, hasScopeShared(defaultSet, scope)]));
+  for (const row of rows) allowed.set(row.agentId, hasScopeShared(scopeSetFromRow(row.agentId, row), scope));
+  return allowed;
 }
 
 /** Convenience wrapper around `loadAgentScopes` + `hasScope` for callers

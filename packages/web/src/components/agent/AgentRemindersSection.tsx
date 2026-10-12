@@ -1,6 +1,7 @@
 import { Button } from "raft-ui";
 import { BellRing, Clock3, Link2, RefreshCw, Repeat } from "lucide-react";
 import type { MouseEvent } from "react";
+import { useCallback } from "react";
 import { useIntl } from "react-intl";
 import type { ReminderSummary } from "@botiverse/raft-shared";
 import Banner from "../ui/Banner";
@@ -107,6 +108,9 @@ export default function AgentRemindersSection({
 }) {
   const { formatMessage } = useIntl();
   const isTab = variant === "tab";
+  const handleRetry = useCallback(() => {
+    void onRetry?.();
+  }, [onRetry]);
   return (
     <div
       className={
@@ -137,7 +141,7 @@ export default function AgentRemindersSection({
           {onRetry && (
             <Button variant="outline" size="sm"
               type="button"
-              onClick={() => void onRetry()}
+              onClick={handleRetry}
               className="mt-2 text-[11px]"
             >
               <span className="inline-flex items-center gap-1">

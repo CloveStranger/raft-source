@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { hostname } from "node:os";
 import { and, asc, eq, gt, inArray, isNotNull, lt, lte, or, sql } from "drizzle-orm";
+import type { SQL } from "drizzle-orm";
 import { currentDate, currentTimeMs, noopTracer, setClockInterval, setClockTimeout, type Tracer } from "@botiverse/raft-shared";
 
 import { getDb, type DatabaseExecutor, type DatabaseTransaction } from "../db/index";
@@ -131,6 +132,13 @@ export type ReadMutationAck = {
     readStateVersion: number;
     lastAppliedAuthoritySeq: number;
     changed: boolean;
+    /**
+     * Unread messages left in the scope after this write (others' messages
+     * past maxReadSeq), so clients can update a count they cannot project
+     * locally. 0 for the read-all kinds; set for row_read on a live scope;
+     * absent otherwise and on acks minted before the field existed.
+     */
+    unreadCount?: number;
   }>;
   terminalDigest: string;
 };
@@ -1388,6 +1396,8 @@ async function captureLiveFrontier(tx: DatabaseTransaction, live: LiveReadScope)
 type CapturedChannelBoundary = {
   boundary: ReadMutationBoundary[];
   residueScopeIds: string[];
+  /** row_read on a live scope: where its messages are stored, to count what stays unread. */
+  unreadStorageScopeId?: string;
 };
 
 async function captureChannelBoundary(
@@ -1696,9 +1706,11 @@ async function captureBoundary(
     scopeId: mutation.scopeId!,
   });
   if (!resolved) return null;
+  const live = liveReadScopeOf(resolved);
   return {
     boundary: [{ scopeId: mutation.scopeId!, throughSeq: mutation.requestedThroughSeq! }],
     residueScopeIds: [],
+    ...(mutation.kind === "row_read" && live ? { unreadStorageScopeId: live.storageScopeId } : {}),
   };
 }
 
@@ -1742,6 +1754,9 @@ export async function raiseReadPositionForJoin(
       `);
 }
 
+/** row_read stops counting unread here; at the cap the ack omits the count. */
+export const READ_ACK_UNREAD_COUNT_CAP = 1000;
+
 async function applyScopeBoundary(input: {
   tx: DatabaseTransaction;
   principalKind: ReadMutationPrincipalKind;
@@ -1751,6 +1766,8 @@ async function applyScopeBoundary(input: {
   throughSeq: number | string;
   direction: "forward" | "backward";
   afterCursorLocked?: () => Promise<void>;
+  /** Count the scope's unread in the same statement as the cursor write. */
+  unreadStorageScopeId?: string;
 }): Promise<ReadMutationAck["scopes"][number]> {
   const locked = input.principalKind === "human"
     ? await input.tx.execute(sql`
@@ -1776,6 +1793,22 @@ async function applyScopeBoundary(input: {
       changed: false,
     };
   }
+  const ownSenderType = input.principalKind === "human" ? "user" : "agent";
+  // Bounded: this runs under the cursor row lock on every row_read. A count
+  // that reaches the cap is reported as unknown (omitted) below.
+  const unreadAfter = (lastReadSeq: SQL) => input.unreadStorageScopeId
+    ? sql`(
+        SELECT count(*)::int
+        FROM (
+          SELECT 1
+          FROM messages m
+          WHERE m.channel_id = ${input.unreadStorageScopeId}::uuid
+            AND m.seq > ${lastReadSeq}
+            AND NOT (m.sender_type = ${ownSenderType} AND m.sender_id = ${input.principalId})
+          LIMIT ${READ_ACK_UNREAD_COUNT_CAP}
+        ) capped
+      )`
+    : sql`NULL::int`;
   // The conflict predicate deliberately derives from the row visible at the
   // write itself, not only from the preceding FOR UPDATE read. That closes the
   // absent-row race with legacy compatibility writers that do not share the
@@ -1796,7 +1829,8 @@ async function applyScopeBoundary(input: {
         WHERE EXCLUDED.last_read_seq > user_channel_read_cursors.last_read_seq
         RETURNING last_read_seq AS "lastReadSeq",
                   read_state_version AS "readStateVersion",
-                  last_applied_authority_seq AS "lastAppliedAuthoritySeq"
+                  last_applied_authority_seq AS "lastAppliedAuthoritySeq",
+                  ${unreadAfter(sql`user_channel_read_cursors.last_read_seq`)} AS "unreadCount"
       `
     : input.principalKind === "human"
       ? sql`
@@ -1831,7 +1865,8 @@ async function applyScopeBoundary(input: {
         WHERE EXCLUDED.last_read_seq > agent_channel_read_cursors.last_read_seq
         RETURNING last_read_seq AS "lastReadSeq",
                   read_state_version AS "readStateVersion",
-                  last_applied_authority_seq AS "lastAppliedAuthoritySeq"
+                  last_applied_authority_seq AS "lastAppliedAuthoritySeq",
+                  ${unreadAfter(sql`agent_channel_read_cursors.last_read_seq`)} AS "unreadCount"
       `
     : input.principalKind === "agent"
       ? sql`
@@ -1856,6 +1891,7 @@ async function applyScopeBoundary(input: {
     lastReadSeq: unknown;
     readStateVersion: unknown;
     lastAppliedAuthoritySeq: unknown;
+    unreadCount?: unknown;
   }>;
   const changed = Boolean(finalRow);
   if (!finalRow) {
@@ -1863,14 +1899,16 @@ async function applyScopeBoundary(input: {
       ? await input.tx.execute(sql`
           SELECT last_read_seq AS "lastReadSeq",
                  read_state_version AS "readStateVersion",
-                 last_applied_authority_seq AS "lastAppliedAuthoritySeq"
+                 last_applied_authority_seq AS "lastAppliedAuthoritySeq",
+                 ${unreadAfter(sql`last_read_seq`)} AS "unreadCount"
           FROM user_channel_read_cursors
           WHERE user_id = ${input.principalId}::uuid AND channel_id = ${input.scopeId}::uuid
         `)
       : await input.tx.execute(sql`
           SELECT last_read_seq AS "lastReadSeq",
                  read_state_version AS "readStateVersion",
-                 last_applied_authority_seq AS "lastAppliedAuthoritySeq"
+                 last_applied_authority_seq AS "lastAppliedAuthoritySeq",
+                 ${unreadAfter(sql`last_read_seq`)} AS "unreadCount"
           FROM agent_channel_read_cursors
           WHERE agent_id = ${input.principalId}::uuid AND channel_id = ${input.scopeId}::uuid
         `);
@@ -1878,6 +1916,7 @@ async function applyScopeBoundary(input: {
       lastReadSeq: unknown;
       readStateVersion: unknown;
       lastAppliedAuthoritySeq: unknown;
+      unreadCount?: unknown;
     }>;
   }
   if (!finalRow) throw new Error("read mutation cursor resolution returned no row");
@@ -1890,6 +1929,14 @@ async function applyScopeBoundary(input: {
     readStateVersion,
     lastAppliedAuthoritySeq: asNumber(finalRow.lastAppliedAuthoritySeq),
     changed,
+    ...(
+      input.unreadStorageScopeId
+      && input.direction === "forward"
+      && finalRow.unreadCount != null
+      && asNumber(finalRow.unreadCount) < READ_ACK_UNREAD_COUNT_CAP
+        ? { unreadCount: asNumber(finalRow.unreadCount) }
+        : {}
+    ),
   };
 }
 
@@ -2140,6 +2187,7 @@ export async function executeReadMutationClaim(input: {
 
     let captured: ReadMutationBoundary[] | null;
     let residueScopeIds: ReadonlySet<string> = new Set();
+    let unreadStorageScopeId: string | undefined;
     let applyBroadDoneMarker = false;
     let doneFrontierBeyondLatest = false;
     try {
@@ -2151,6 +2199,7 @@ export async function executeReadMutationClaim(input: {
         const capturedScopes = await captureBoundary(tx, minimum);
         captured = capturedScopes?.boundary ?? null;
         residueScopeIds = new Set(capturedScopes?.residueScopeIds ?? []);
+        unreadStorageScopeId = capturedScopes?.unreadStorageScopeId;
       }
     } catch (error) {
       if (
@@ -2175,7 +2224,8 @@ export async function executeReadMutationClaim(input: {
       // whole boundary instead of a per-scope loop. mid_global fires after the
       // batch apply, before terminalize — the transaction still rolls back
       // wholesale, so existing assertions hold.
-      scopes.push(...await applyGlobalScopeBoundaries({
+      // Read-all leaves nothing unread at the captured frontier: no count query.
+      scopes.push(...(await applyGlobalScopeBoundaries({
         tx,
         principalKind: minimum.principalType,
         principalId: minimum.principalId,
@@ -2184,7 +2234,7 @@ export async function executeReadMutationClaim(input: {
         afterScopeCursorLocked: input.afterScopeCursorLocked
           ? ({ scopeId, index }) => input.afterScopeCursorLocked!({ scopeId, index })
           : undefined,
-      }));
+      })).map((scope) => ({ ...scope, unreadCount: 0 })));
       if (input.failpoint === "mid_global") {
         throw new ReadMutationFailpointError(input.failpoint);
       }
@@ -2219,10 +2269,12 @@ export async function executeReadMutationClaim(input: {
         afterCursorLocked: input.afterScopeCursorLocked
           ? () => input.afterScopeCursorLocked!({ scopeId: capturedScope.scopeId, index })
           : undefined,
+        unreadStorageScopeId,
       });
+      const ackScope = minimum.kind === "channel_read_all" ? { ...appliedScope, unreadCount: 0 } : appliedScope;
       scopes.push(residueScopeIds.has(capturedScope.scopeId)
-        ? residueScopeAck(appliedScope, capturedScope.throughSeq)
-        : appliedScope);
+        ? residueScopeAck(ackScope, capturedScope.throughSeq)
+        : ackScope);
       if (minimum.kind === "done") {
         await applyCompositeDoneSuppression({
           tx,

@@ -1,12 +1,22 @@
 import assert from "node:assert/strict";
 import { RUNTIMES } from "@botiverse/raft-shared";
 import {
-  projectExistingAgentRuntimeOptions,
-  projectNewAgentRuntimeOptions,
+  projectExistingAgentRuntimeOptions as projectExistingAgentRuntimeOptionsFor,
+  projectNewAgentRuntimeOptions as projectNewAgentRuntimeOptionsFor,
   projectSetupRuntimeOptions,
+  runtimeOptionProjectionFromHeaders,
+  type RuntimeAdmissionPolicy,
 } from "./runtimeAdmissionService";
 import { KIMI_SDK_FORM_DEFINITION_REF } from "./runtimeFormDefinitionService";
 import { removeRuntimeFormV2EntryForTests } from "./runtimeFormV2Registry";
+
+// Most tests here describe the web projection, which opts into the v2 marker;
+// the default (no opt-in) projection is pinned separately below.
+const WEB = { includeRuntimeFormV2Marker: true };
+const projectNewAgentRuntimeOptions = (installed: readonly string[], policy: RuntimeAdmissionPolicy) =>
+  projectNewAgentRuntimeOptionsFor(installed, policy, WEB);
+const projectExistingAgentRuntimeOptions = (installed: readonly string[], current: string, policy: RuntimeAdmissionPolicy) =>
+  projectExistingAgentRuntimeOptionsFor(installed, current, policy, WEB);
 
 test("new-agent runtime options keep capability separate from admission", () => {
   const disabled = projectNewAgentRuntimeOptions(["codex", "grok"], {
@@ -120,7 +130,7 @@ test("existing Grok is grandfathered while new transitions remain absent", () =>
 });
 
 test("deprecated current runtimes use the same explicit grandfathered contract", () => {
-  for (const runtime of ["kimi", "antigravity"]) {
+  for (const runtime of ["kimi", "antigravity", "copilot"]) {
     const options = projectExistingAgentRuntimeOptions([runtime], runtime, {
       grokRuntimeEnabled: false,
     });
@@ -155,31 +165,32 @@ test("the runtimeFormV2 marker is on exactly the runtimes with a v2 form, indepe
   const withMarker = (options: ReturnType<typeof projectNewAgentRuntimeOptions>) =>
     options.filter((option) => option.runtimeFormV2 !== undefined).map((option) => option.runtimeId).sort();
   const created = projectNewAgentRuntimeOptions(everyRuntime, { grokRuntimeEnabled: true });
-  // Deprecated runtimes with a v2 form (kimi, gemini, antigravity) are not offered for new agents.
-  assert.deepEqual(withMarker(created), ["builtin", "claude", "codex", "copilot", "cursor", "grok", "kimi-sdk", "opencode", "pi"]);
+  // Deprecated runtimes with a v2 form (kimi, gemini, antigravity, copilot) are not offered for new agents.
+  assert.deepEqual(withMarker(created), ["builtin", "claude", "codex", "cursor", "grok", "kimi-sdk", "opencode", "pi"]);
   // Grok's row, and with it the marker, exists only while the grok runtime flag is on.
   assert.deepEqual(
     withMarker(projectNewAgentRuntimeOptions(everyRuntime, { grokRuntimeEnabled: false })),
-    ["builtin", "claude", "codex", "copilot", "cursor", "kimi-sdk", "opencode", "pi"],
+    ["builtin", "claude", "codex", "cursor", "kimi-sdk", "opencode", "pi"],
   );
   for (const option of created.filter((candidate) => candidate.runtimeFormV2)) {
     assert.deepEqual(option.runtimeFormV2, { protocolVersion: 2 });
   }
-  assert.deepEqual(withMarker(projectSetupRuntimeOptions(everyRuntime, { grokRuntimeEnabled: true })), ["claude", "codex", "copilot", "cursor", "grok", "kimi-sdk", "opencode", "pi"]);
+  // Server setup state never carries the marker (no client opens a v2 form from it).
+  assert.deepEqual(withMarker(projectSetupRuntimeOptions(everyRuntime, { grokRuntimeEnabled: true })), []);
   assert.deepEqual(
     withMarker(projectExistingAgentRuntimeOptions(everyRuntime, "kimi-sdk", { grokRuntimeEnabled: true })),
-    ["builtin", "claude", "codex", "copilot", "cursor", "grok", "kimi-sdk", "opencode", "pi"],
+    ["builtin", "claude", "codex", "cursor", "grok", "kimi-sdk", "opencode", "pi"],
   );
   // ...and appear, with the marker, only as an edited agent's current runtime.
-  for (const deprecated of ["kimi", "gemini", "antigravity"]) {
+  for (const deprecated of ["kimi", "gemini", "antigravity", "copilot"]) {
     const options = projectExistingAgentRuntimeOptions(everyRuntime, deprecated, { grokRuntimeEnabled: true });
-    assert.deepEqual(withMarker(options), ["builtin", "claude", "codex", "copilot", "cursor", deprecated, "grok", "kimi-sdk", "opencode", "pi"].sort(), deprecated);
+    assert.deepEqual(withMarker(options), ["builtin", "claude", "codex", "cursor", deprecated, "grok", "kimi-sdk", "opencode", "pi"].sort(), deprecated);
     const current = options.find((option) => option.runtimeId === deprecated);
     assert.equal(current?.current, true, deprecated);
     assert.equal(current?.admissionReason, "deprecated", deprecated);
     assert.equal(current && "formDefinitionRef" in current, false, `${deprecated} has no v1 form`);
   }
-  for (const runtimeId of ["opencode", "codex", "grok", "claude", "cursor", "copilot", "pi"]) {
+  for (const runtimeId of ["opencode", "codex", "grok", "claude", "cursor", "pi"]) {
     const option = created.find((candidate) => candidate.runtimeId === runtimeId);
     assert.equal(option && "formDefinitionRef" in option, false, `${runtimeId} has no v1 form`);
   }
@@ -204,4 +215,47 @@ test("the runtimeFormV2 marker is on exactly the runtimes with a v2 form, indepe
     projectNewAgentRuntimeOptions(["pi"], { grokRuntimeEnabled: false }).find((option) => option.runtimeId === "pi")?.runtimeFormV2,
     { protocolVersion: 2 },
   );
+});
+
+// Released mobile apps (1.12, 1.13: ComputersApi.kt `runtimeFormApiJson`,
+// ignoreUnknownKeys = false) fail the WHOLE runtime catalog on any key they do
+// not know. Without the opt-in header every row must carry exactly the keys
+// those apps decode.
+const RELEASED_MOBILE_OPTION_KEYS = new Set([
+  "runtimeId",
+  "capabilityStatus",
+  "admissionStatus",
+  "admissionReason",
+  "current",
+  "availableForNew",
+  "manageableForCurrentAgent",
+  "canSelectInThisContext",
+  "formDefinitionRef",
+]);
+
+test("without the opt-in, runtime options carry only the keys released mobile apps decode", () => {
+  const everyRuntime = RUNTIMES.map((runtime) => runtime.id);
+  const policy = { grokRuntimeEnabled: true };
+  const noOptIn = runtimeOptionProjectionFromHeaders({});
+  const catalogs = [
+    projectNewAgentRuntimeOptionsFor(everyRuntime, policy),
+    projectNewAgentRuntimeOptionsFor(everyRuntime, policy, noOptIn),
+    projectSetupRuntimeOptions(everyRuntime, policy),
+    ...everyRuntime.map((current) => projectExistingAgentRuntimeOptionsFor(everyRuntime, current, policy)),
+    ...everyRuntime.map((current) => projectExistingAgentRuntimeOptionsFor(everyRuntime, current, policy, noOptIn)),
+  ];
+  for (const options of catalogs) {
+    assert.ok(options.length > 0);
+    for (const option of options) {
+      const extra = Object.keys(option).filter((key) => !RELEASED_MOBILE_OPTION_KEYS.has(key));
+      assert.deepEqual(extra, [], option.runtimeId);
+    }
+  }
+});
+
+test("the opt-in header is exact: only `1` turns the marker on", () => {
+  assert.equal(runtimeOptionProjectionFromHeaders({ "x-raft-runtime-form-v2": "1" }).includeRuntimeFormV2Marker, true);
+  for (const value of [undefined, "", "0", "true", "2", ["1"]]) {
+    assert.equal(runtimeOptionProjectionFromHeaders({ "x-raft-runtime-form-v2": value }).includeRuntimeFormV2Marker, false, String(value));
+  }
 });

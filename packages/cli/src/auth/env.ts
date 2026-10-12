@@ -34,8 +34,8 @@
 // kept as forward-compat hook for milestone-2 agent-token mode.
 
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
+import { resolveRaftHome } from "../state/raftHome";
 
 export interface AgentContext {
   agentId: string;
@@ -140,12 +140,7 @@ export function resolveProfileDir(slug: string, env: NodeJS.ProcessEnv = process
   if (profileDir) {
     return profileDir;
   }
-  const homeRoot = env.RAFT_HOME ?? env.SLOCK_HOME;
-  if (homeRoot) {
-    return path.join(homeRoot, "profiles", slug);
-  }
-  const home = env.HOME ?? os.homedir();
-  return path.join(home, ".slock", "profiles", slug);
+  return path.join(resolveRaftHome(env), "profiles", slug);
 }
 
 function resolveProfileCredentialPath(slug: string, env: NodeJS.ProcessEnv): string {

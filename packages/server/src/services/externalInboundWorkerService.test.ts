@@ -338,7 +338,8 @@ async function enqueue(
     normalizedPayloadDigest: digest(plaintext),
     encryptedPayload: plaintext,
     envelopeKeyId: "opaque-envelope-key-1",
-    payloadSchemaVersion: body.schema === "external-inbound-normalized-event.v2" ? 2 : 1,
+    payloadSchemaVersion: body.schema === "external-inbound-normalized-event.v2"
+      || body.schema === "external-inbound-normalized-event.v3" ? 2 : 1,
     payloadExpiresAt: new Date(receivedAt.getTime() + 5 * 60_000),
     receivedAt,
   });
@@ -352,6 +353,7 @@ function dependencies(
     runtime?: ExternalInboundRuntimeAuthority | null;
     decrypt?: ExternalInboundWorkerDependencies["decryptNormalizedPayload"];
     resolveProviderMentionProfiles?: ExternalInboundWorkerDependencies["resolveProviderMentionProfiles"];
+    resolveProviderAgentMentionHandles?: ExternalInboundWorkerDependencies["resolveProviderAgentMentionHandles"];
     onMessageCommitted?: ExternalInboundWorkerDependencies["onMessageCommitted"];
     onMessageCommittedError?: ExternalInboundWorkerDependencies["onMessageCommittedError"];
     calls?: { decrypt: number; runtime: number };
@@ -371,6 +373,9 @@ function dependencies(
     },
     ...(input.resolveProviderMentionProfiles
       ? { resolveProviderMentionProfiles: input.resolveProviderMentionProfiles }
+      : {}),
+    ...(input.resolveProviderAgentMentionHandles
+      ? { resolveProviderAgentMentionHandles: input.resolveProviderAgentMentionHandles }
       : {}),
     ...(input.onMessageCommitted ? { onMessageCommitted: input.onMessageCommitted } : {}),
     ...(input.onMessageCommittedError ? { onMessageCommittedError: input.onMessageCommittedError } : {}),
@@ -615,7 +620,7 @@ test("Slack inbound mention labels use current directory projections without min
   };
   await enqueue(fixture, "event-native-mentions", body);
   const resolvedIds: string[][] = [];
-  assert.equal((await process(fixture, dependencies(fixture, {
+  const mentionResult = await process(fixture, dependencies(fixture, {
     async resolveProviderMentionProfiles(input) {
       resolvedIds.push([...input.providerUserIds]);
       return [
@@ -631,7 +636,8 @@ test("Slack inbound mention labels use current directory projections without min
         },
       ];
     },
-  }))).kind, "committed");
+  }));
+  assert.equal(mentionResult.kind, "committed", JSON.stringify(mentionResult));
   assert.deepEqual(resolvedIds, [["U0BTXDF3LGY", "UUNKNOWN", "UTOMBSTONED"]]);
   const [stored] = await fixture.db.select().from(messages)
     .where(eq(messages.senderType, "external_projection"));
@@ -676,6 +682,103 @@ test("Slack directory mention labels reject opaque provider identifiers as handl
   assert.equal(providerCalls, 0, "a current directory projection never triggers provider fallback");
   assert.doesNotMatch(stored?.content ?? "", /UOPAQUE/u);
   assert.equal((await fixture.db.select().from(messageMentions)).length, 0);
+});
+
+test("Slack managed usergroup identity creates one exact Raft Agent mention", async () => {
+  const fixture = await seedFixture("public", "slack");
+  const providerUsergroupId = "SAGENT123";
+  await enqueue(fixture, "event-agent-mention", {
+    ...payload(fixture, "provider-message-agent-mention"),
+    schema: "external-inbound-normalized-event.v3",
+    providerFileIds: [],
+    providerAgentMentions: [{
+      providerUsergroupId,
+      handle: "wrong-display-handle",
+    }],
+    content: `please <!subteam^${providerUsergroupId}|@wrong-display-handle> respond; @alice stays text`,
+  });
+  const result = await process(fixture, dependencies(fixture, {
+    async resolveProviderAgentMentionHandles() {
+      return [{
+        agentId: fixture.agent.id,
+        providerUsergroupId,
+        handle: "managed-agent-handle",
+      }];
+    },
+  }));
+  assert.equal(result.kind, "committed", JSON.stringify(result));
+  const [stored] = await fixture.db.select().from(messages)
+    .where(eq(messages.senderType, "external_projection"));
+  assert.equal(
+    stored?.content,
+    `please @${fixture.agent.name} respond; @alice stays text`,
+    "provider group id, not the display handle, chooses the Agent",
+  );
+  const mentions = await fixture.db.select().from(messageMentions);
+  assert.equal(mentions.length, 1);
+  assert.equal(mentions[0]?.messageId, stored?.id);
+  assert.equal(mentions[0]?.targetType, "agent");
+  assert.equal(mentions[0]?.targetId, fixture.agent.id);
+  assert.equal(mentions[0]?.handleAtSendTime, fixture.agent.name);
+  assert.equal(mentions[0]?.notifiableAtSend, true);
+});
+
+test("Slack managed group for an Agent outside the bound channel stays inert", async () => {
+  const fixture = await seedFixture("public", "slack");
+  const [otherAgent] = await fixture.db.insert(agents).values({
+    serverId: fixture.server.id,
+    name: `outside-agent-${randomUUID().slice(0, 8)}`,
+    runtime: "codex",
+  }).returning();
+  const providerUsergroupId = "SOUTSIDE1";
+  await enqueue(fixture, "event-outside-agent-mention", {
+    ...payload(fixture, "provider-message-outside-agent-mention"),
+    schema: "external-inbound-normalized-event.v3",
+    providerFileIds: [],
+    providerAgentMentions: [{ providerUsergroupId, handle: "outside-agent" }],
+    content: `<!subteam^${providerUsergroupId}|@outside-agent> should stay inert`,
+  });
+  assert.equal((await process(fixture, dependencies(fixture, {
+    async resolveProviderAgentMentionHandles() {
+      return [{ agentId: otherAgent.id, providerUsergroupId, handle: "outside-agent" }];
+    },
+  }))).kind, "committed");
+  const [stored] = await fixture.db.select().from(messages)
+    .where(eq(messages.senderType, "external_projection"));
+  // Inert for mention purposes, but the author's label survives display so
+  // the reader can tell which Slack group was written.
+  assert.equal(stored?.content, "@outside-agent should stay inert");
+  assert.equal((await fixture.db.select().from(messageMentions)).length, 0);
+});
+
+test("Slack Agent mention mapping failure retries instead of committing an inert false negative", async () => {
+  const fixture = await seedFixture("public", "slack");
+  const providerUsergroupId = "SRETRY123";
+  await enqueue(fixture, "event-agent-mention-retry", {
+    ...payload(fixture, "provider-message-agent-mention-retry"),
+    schema: "external-inbound-normalized-event.v3",
+    providerFileIds: [],
+    providerAgentMentions: [{ providerUsergroupId, handle: "retry-agent" }],
+    content: `<!subteam^${providerUsergroupId}|@retry-agent> retry me`,
+  });
+  assert.deepEqual(await process(fixture, dependencies(fixture, {
+    async resolveProviderAgentMentionHandles() { return null; },
+  })), {
+    kind: "blocked",
+    eventId: (await fixture.db.select({ id: externalInboundEvents.id })
+      .from(externalInboundEvents))[0]!.id,
+    reason: "provider_agent_mention_unavailable",
+  });
+  assert.equal((await fixture.db.select().from(messages)
+    .where(eq(messages.senderType, "external_projection"))).length, 0);
+
+  assert.equal((await process(fixture, dependencies(fixture, {
+    now: () => new Date(NOW.getTime() + 31_000),
+    async resolveProviderAgentMentionHandles() {
+      return [{ agentId: fixture.agent.id, providerUsergroupId, handle: "retry-agent" }];
+    },
+  }))).kind, "committed");
+  assert.equal((await fixture.db.select().from(messageMentions)).length, 1);
 });
 
 test("Slack mention rendering is bounded and provider-neutral content remains byte-identical", () => {

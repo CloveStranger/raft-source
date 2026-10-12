@@ -249,6 +249,14 @@ export class GrokEventNormalizer {
         if (!toolCallId || !status || !TERMINAL_TOOL_STATUSES.has(status)) {
           return [internalProgress(updateKind, update)];
         }
+        // A turn end clears tool state, so a completion for a call this
+        // normalizer never saw, arriving with no turn open, belongs to a turn
+        // that already ended. Publishing it as a tool event would mark an idle
+        // agent busy with no turn left to end it. A self-started (successor)
+        // turn announces its tool_call first, so its completions stay events.
+        if (this.activeTurnGeneration === null && !this.toolCalls.has(toolCallId)) {
+          return [internalProgress(updateKind, update)];
+        }
         const existing = this.toolCalls.get(toolCallId) ?? {
           name: toolName(update),
           arguments: "",

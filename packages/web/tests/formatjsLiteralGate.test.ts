@@ -2269,7 +2269,7 @@ test("CLI exits 2 on forbidden formatjs disable directive before baseline compar
 
 test("real corpus: structural, catalog-id, and template-glue filters remove audited keys only", () => {
   // Applies the same predicate used before aggregate. Audited C-sub-batch is
-  // 72 space/punct/count keys; exact safe shapes must filter all 72.
+  // 71 space/punct/count keys; exact safe shapes must filter all 71.
   const baselinePath = resolve(WEB_ROOT, "scripts/i18n-literal-baseline.json");
   const current = collectCurrentFindings({
     root: WEB_ROOT,
@@ -2355,6 +2355,15 @@ test("real corpus: structural, catalog-id, and template-glue filters remove audi
   // rows retired the "· " glue between them: 72 -> 71.
   // Joint channel limits v0.3 (task #25) removed CreateJointChannelDialog's
   // free-host paywall, and with it that file's only `{" "}` spacer: 71 -> 70.
+  // One extracted component per file (task #709) moved two rows out of files
+  // that keep a literal of the same kind: AgentDetailPanel's `=` (2 hits) is
+  // now split with EnvVarEntryRow, and SettingsPanel's `/` (6 hits) with
+  // PlanSectionContent. Keys are per file, so 70 -> 72; no literal was added
+  // and the hit total is unchanged.
+  // AnnouncementDialog replaces the paginated Modal, retiring its JSX
+  // `{pageIndex + 1} / {totalPages}` separator: 72 -> 71.
+  // MachineDetailPanel's workspace path left JSX for a helper (slock#9190),
+  // taking its `/` template glue with it: 71 -> 70.
   assert.equal(filteredKeys, 70, `audited structural key count; got ${filteredKeys}`);
   assert.ok(filteredHits > 100, `hits must exceed prior 100; got ${filteredHits}`);
   // HandoffCreateFlow's `· ${session.model}` suffix is dynamic metadata glue, the
@@ -2394,7 +2403,9 @@ test("real corpus: structural, catalog-id, and template-glue filters remove audi
   );
   // The retired AgentScopesPanel contributed 37 catalog keys.
   // Removing settingsNavigation's "wiki.settings" entry lowers 24 to 23.
-  assert.ok(catalogIdDrops >= 23, `catalog MessageId drops should stay >= 23; got ${catalogIdDrops}`);
+  // Removing the Workspace grid layout deleted workspaceGridUrlState.ts and its
+  // 17 catalog-id keys, lowering 23 to 6.
+  assert.ok(catalogIdDrops >= 6, `catalog MessageId drops should stay >= 6; got ${catalogIdDrops}`);
   // Direction matters. Removing a literal lowers these numbers; that is the only
   // legitimate reason they move. RAISING them silences a failure instead of fixing
   // it — and the diff looks almost identical to a legitimate lowering, just with the
@@ -2435,8 +2446,10 @@ test("real corpus: structural, catalog-id, and template-glue filters remove audi
     formerGapFiltered.length,
     // WikiPanel's removed "→" was one former-gap key; #8831 removed the Sidebar
     // row's "→ v{targetVersion}" arrow literal (2026-10-04): 13 -> 12.
-    12,
-    `expected 12 former-gap keys filtered; got ${JSON.stringify(formerGapFiltered)}`,
+    // Task #709 moved one of AgentDetailPanel's two "=" into EnvVarEntryRow;
+    // keys are per file, so the same two hits are now two keys: 12 -> 13.
+    13,
+    `expected 13 former-gap keys filtered; got ${JSON.stringify(formerGapFiltered)}`,
   );
 
   // B examples + technical tokens remain; catalog MessageIds and safe glue are gone.
@@ -2446,7 +2459,6 @@ test("real corpus: structural, catalog-id, and template-glue filters remove audi
   assert.ok(bySource((s) => s === "#").length >= 1, "B # must remain");
   assert.ok(bySource((s) => s === '"99+"').length >= 1, "B 99+ must remain");
   assert.ok(bySource((s) => s.includes("→ v")).length >= 1, "B → v must remain");
-  assert.ok(bySource((s) => s.includes("⌘W")).length >= 1, "B ⌘W must remain");
   assert.equal(
     bySource((s) => /^"[a-z]+(?:\.[a-zA-Z0-9_]+)+"$/.test(s)).length,
     0,
@@ -2560,14 +2572,19 @@ test("baseline disposition counts match reviewed exception decisions", () => {
     // audited protocol literal left the baseline with it.
     // 2026-10-04: -1 key / -1 hit. #8831 moved MachineDetailPanel's "(v" version marker
     // into the catalogued "Upgrade to v{version}" label; its baseline entry was removed.
-    protocol: { keys: 68, hits: 84 },
+    // 2026-10-10: -26 keys / -32 hits. Removing the Workspace grid layout deleted its
+    // panel-title protocol literals (#channel / @name / task #N) across MainLayout,
+    // Sidebar, member rows, MessageSearchPage and src/components/workspace.
+    protocol: { keys: 42, hits: 52 },
     // 2026-08-24: -7 keys / -9 hits. RuntimeConfigFields' ten legacy inputs moved to
     // raft-ui <Input>; the jsx literal rule only sees intrinsic elements, so those
     // placeholders (sk-..., gateway URLs, claude) left the baseline entirely.
     // 2026-09-08: -1 key / -1 hit. InviteHumanDialog's email box moved to raft-ui
     // <Input> for per-row invite roles; the jsx literal rule only sees intrinsic
     // elements, so `name@company.com` left the baseline the same way.
-    code_example: { keys: 9, hits: 9 },
+    // 2026-10-08: -1 key / -1 hit. MachineDetailPanel's `~/.slock/agents/`
+    // workspace path moved out of JSX into a helper (slock#9190).
+    code_example: { keys: 8, hits: 8 },
     user_data_example: { keys: 4, hits: 4 },
     // 2026-09-24: -4 keys / -4 hits. 11fc52292 removed the dormant PostHog
     // integration, taking src/analytics/flagRegistry.ts ("Chat grid layout",

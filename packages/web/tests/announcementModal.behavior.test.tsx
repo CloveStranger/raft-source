@@ -1,159 +1,70 @@
 import assert from "node:assert/strict";
 import "./helpers/domSetup";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { MemoryRouter, useLocation } from "react-router-dom";
 import api from "../src/api/client";
 import AnnouncementModal from "../src/components/AnnouncementModal";
 import { useAnnouncementStore } from "../src/store/announcementStore";
 import { TestIntlProvider } from "./helpers/intl";
 
-const originalApiPost = api.post;
-
 const announcement = {
-  id: "10000000-0000-4000-8000-000000000001",
-  title: "Product update",
-  pages: [
-    { body: "First page" },
-    { body: "Second page" },
-  ],
-  publishedAt: "2026-07-27T00:00:00.000Z",
-  startsAt: "2026-07-27T00:00:00.000Z",
-  endsAt: null,
-  locale: "en" as const,
+  id: "10000000-0000-4000-8000-000000000001", title: "Product update", pages: [{ body: "**New** content" }],
+  publishedAt: "2026-07-27T00:00:00.000Z", startsAt: "2026-07-27T00:00:00.000Z", endsAt: null, locale: "en" as const,
 };
-
-const keyboardAnnouncement = {
-  ...announcement,
-  id: "10000000-0000-4000-8000-000000000002",
-  pages: [
-    { body: "First page" },
-    { body: "Second page" },
-    { body: "Third page" },
-  ],
-};
-
-function BackgroundComposer({ onEnter }: { onEnter: () => void }) {
-  return (
-    <>
-      <textarea
-        aria-label="Background composer"
-        onKeyDown={(event) => {
-          if (event.key !== "Enter") return;
-          onEnter();
-          event.preventDefault();
-        }}
-      />
-      <AnnouncementModal />
-    </>
-  );
+function RouteReceipt() { const location = useLocation(); return <output data-testid="route">{location.pathname}{location.search}</output>; }
+function mount(locale: "en" | "zh-cn" = "en", suppressed = false) {
+  return render(<MemoryRouter initialEntries={["/server/home"]}><TestIntlProvider locale={locale}><textarea aria-label="Background composer" /><AnnouncementModal suppressed={suppressed} /><RouteReceipt /></TestIntlProvider></MemoryRouter>);
 }
+afterEach(() => { cleanup(); useAnnouncementStore.getState().reset(); vi.restoreAllMocks(); });
 
-afterEach(() => {
-  cleanup();
-  api.post = originalApiPost;
-  useAnnouncementStore.getState().reset();
+test("onboarding suppression retains the pending announcement without opening a dialog", () => {
+  useAnnouncementStore.setState({ pending: [announcement], loaded: true }); mount("en", true);
+  assert.ok(screen.queryByTestId("announcement-modal") === null);
+  assert.equal(useAnnouncementStore.getState().pending[0]?.id, announcement.id);
 });
-
-test("onboarding suppression keeps a pending announcement out of the takeover layer", () => {
-  useAnnouncementStore.setState({ pending: [announcement], loaded: true });
-
-  render(
-    <TestIntlProvider>
-      <AnnouncementModal suppressed />
-    </TestIntlProvider>,
-  );
-
-  assert.equal(screen.queryByTestId("announcement-modal"), null);
-  assert.equal(
-    useAnnouncementStore.getState().pending[0]?.id,
-    announcement.id,
-    "suppression does not discard the server-authoritative pending item",
-  );
-});
-
-test("announcement actions render through the zh-cn catalog", () => {
-  useAnnouncementStore.setState({ pending: [announcement], loaded: true });
-
-  render(
-    <TestIntlProvider locale="zh-cn">
-      <AnnouncementModal />
-    </TestIntlProvider>,
-  );
-
-  assert.ok(screen.getByRole("button", { name: "关闭" }));
-  assert.ok(screen.getByRole("button", { name: /下一步/ }));
+test("single dialog uses localized actions and no pagination", () => {
+  useAnnouncementStore.setState({ pending: [announcement], loaded: true }); mount("zh-cn");
+  assert.ok(screen.getByRole("button", { name: "关闭" })); assert.ok(screen.getByRole("button", { name: "知道了" }));
+  assert.ok(screen.queryByTestId("announcement-page-indicator") === null);
+  assert.ok(screen.queryByTestId("announcement-next") === null);
   assert.doesNotMatch(document.body.textContent ?? "", /common\.announcement\./);
 });
-
-test("multi-page announcement keeps the numeric counter without dot pagination", () => {
-  useAnnouncementStore.setState({ pending: [announcement], loaded: true });
-
-  const { container } = render(
-    <TestIntlProvider>
-      <AnnouncementModal />
-    </TestIntlProvider>,
-  );
-
-  assert.equal(screen.getByTestId("announcement-page-indicator").textContent, "1 / 2");
-  assert.equal(
-    container.querySelectorAll(".rounded-full").length,
-    0,
-    "the announcement footer must not render pagination dots",
-  );
+test("Enter confirms once and does not reach the background composer", async () => {
+  const post = vi.spyOn(api, "post").mockResolvedValue({ data: {} });
+  useAnnouncementStore.setState({ pending: [announcement], loaded: true }); mount();
+  const composer = screen.getByRole("textbox", { hidden: true }); const background = vi.fn(); composer.addEventListener("keydown", background);
+  await act(async () => { fireEvent.keyDown(composer, { key: "Enter" }); fireEvent.keyDown(composer, { key: "Enter" }); });
+  assert.equal(background.mock.calls.length, 0); assert.equal(post.mock.calls.length, 1);
+  assert.ok(screen.queryByTestId("announcement-modal") === null);
 });
-
-test("modal capture owns Enter before a focused background composer can consume it", async () => {
-  useAnnouncementStore.setState({ pending: [keyboardAnnouncement], loaded: true });
-  let backgroundEnterCount = 0;
-
-  render(
-    <TestIntlProvider>
-      <BackgroundComposer onEnter={() => { backgroundEnterCount += 1; }} />
-    </TestIntlProvider>,
-  );
-
-  const composer = screen.getByRole("textbox", { name: "Background composer" });
-  composer.focus();
-  assert.equal(document.activeElement, composer);
-
-  fireEvent.keyDown(composer, { key: "Enter", code: "Enter" });
-
-  await waitFor(() => {
-    assert.equal(screen.getByTestId("announcement-page-indicator").textContent, "2 / 3");
-  });
-  assert.equal(backgroundEnterCount, 0, "the background composer must not observe modal-owned Enter");
+test("IME Enter leaves the dialog undismissed", () => {
+  const post = vi.spyOn(api, "post").mockResolvedValue({ data: {} });
+  useAnnouncementStore.setState({ pending: [announcement], loaded: true }); mount();
+  fireEvent.keyDown(window, { key: "Enter", isComposing: true }); assert.equal(post.mock.calls.length, 0);
+  assert.ok(screen.getByTestId("announcement-modal"));
 });
-
-test("three Enter events in one act synchronously advance two pages and dismiss", async () => {
-  useAnnouncementStore.setState({ pending: [keyboardAnnouncement], loaded: true });
-  const dismissedPaths: string[] = [];
-  api.post = (async (path: string) => {
-    dismissedPaths.push(path);
-    return { data: {} };
-  }) as typeof api.post;
-
-  render(
-    <TestIntlProvider>
-      <AnnouncementModal />
-    </TestIntlProvider>,
-  );
-
-  const dispatchEnter = () => window.dispatchEvent(new KeyboardEvent("keydown", {
-    key: "Enter",
-    code: "Enter",
-    bubbles: true,
-    cancelable: true,
-  }));
-
-  await act(async () => {
-    dispatchEnter();
-    dispatchEnter();
-    dispatchEnter();
-  });
-
-  assert.equal(
-    screen.queryByTestId("announcement-modal") === null,
-    true,
-    "three same-turn Enter events must dismiss the three-page announcement",
-  );
-  assert.deepEqual(dismissedPaths, [`/announcements/${keyboardAnnouncement.id}/dismiss`]);
+test("external CTA opens synchronously and records account dismissal", async () => {
+  const post = vi.spyOn(api, "post").mockResolvedValue({ data: {} }); const open = vi.spyOn(window, "open").mockReturnValue(null);
+  useAnnouncementStore.setState({ pending: [{ ...announcement, label: "Release", cta: { label: "Read more", href: "https://example.com/update" } }], loaded: true }); mount();
+  assert.equal(screen.getByText("Release").textContent, "Release"); assert.ok(screen.getByRole("button", { name: "Got it" }));
+  fireEvent.click(screen.getByRole("button", { name: "Read more" }));
+  assert.deepEqual(open.mock.calls[0], ["https://example.com/update", "_blank", "noopener,noreferrer"]);
+  await waitFor(() => assert.equal(post.mock.calls.length, 1));
+});
+test("internal CTA retains the current path for a feature-owned dialog intent", async () => {
+  vi.spyOn(api, "post").mockResolvedValue({ data: {} });
+  useAnnouncementStore.setState({ pending: [{ ...announcement, cta: { label: "Create channel", href: "?dialog=create-joint-channel" } }], loaded: true }); mount();
+  fireEvent.click(screen.getByRole("button", { name: "Create channel" }));
+  await waitFor(() => assert.equal(screen.getByTestId("route").textContent, "/server/home?dialog=create-joint-channel"));
+  assert.ok(screen.queryByTestId("announcement-modal") === null);
+});
+test("secondary confirmation dismisses without opening the CTA", async () => {
+  const post = vi.spyOn(api, "post").mockResolvedValue({ data: {} }); const open = vi.spyOn(window, "open").mockReturnValue(null);
+  useAnnouncementStore.setState({ pending: [{ ...announcement, cta: { label: "Read more", href: "https://example.com" } }], loaded: true }); mount();
+  fireEvent.click(screen.getByRole("button", { name: "Got it" }));
+  await waitFor(() => assert.equal(post.mock.calls.length, 1)); assert.equal(open.mock.calls.length, 0);
+});
+test("an image is served through the publication-gated image endpoint with localized alt text", () => {
+  useAnnouncementStore.setState({ pending: [{ ...announcement, image: { assetId: announcement.id, alt: "Channel diagram" } }], loaded: true }); mount();
+  const image = screen.getByRole("img", { name: "Channel diagram" }); assert.match(image.getAttribute("src") ?? "", new RegExp(`/announcements/images/${announcement.id}$`));
 });

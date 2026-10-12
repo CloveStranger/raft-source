@@ -43,6 +43,10 @@ export function describeAgentConnectionCallback(search: string, currentUserId: s
   return { kind: status === "denied" ? "denied" : "failed", ...target };
 }
 
+type NoTarget = { provider: null; serverId: null; agentId: null };
+const NO_TARGET: NoTarget = { provider: null, serverId: null, agentId: null };
+const NO_PENDING_TARGET: NoTarget & { pending: null } = { ...NO_TARGET, pending: null };
+
 type ConfirmState =
   | { kind: "confirming" }
   | { kind: "connected"; account: string | null }
@@ -60,15 +64,24 @@ export default function AgentConnectionCallbackPage() {
   const [status, setStatus] = useState<AgentConnectionStatusView | null>(null);
   const confirmedKey = useRef<string | null>(null);
 
-  const pendingKey = view.kind === "pending" ? `${view.serverId}/${view.agentId}/${view.pending}` : null;
+  // The effects below are keyed by the flow's own fields (strings), not by `view`, which is
+  // rebuilt every render.
+  const {
+    serverId: pendingServerId,
+    agentId: pendingAgentId,
+    provider: pendingProvider,
+    pending: pendingId,
+  } = view.kind === "pending" ? view : NO_PENDING_TARGET;
   useEffect(() => {
+    if (!pendingServerId || !pendingAgentId || !pendingProvider || !pendingId) return;
     // The pending id is single-use: confirm exactly once per id.
-    if (view.kind !== "pending" || confirmedKey.current === pendingKey) return;
+    const pendingKey = `${pendingServerId}/${pendingAgentId}/${pendingId}`;
+    if (confirmedKey.current === pendingKey) return;
     confirmedKey.current = pendingKey;
     api.post<AgentConnectionStatusView>(
-      `${agentConnectionPath(view.agentId, view.provider)}/confirm`,
-      { pending: view.pending },
-      { headers: { "X-Server-Id": view.serverId } },
+      `${agentConnectionPath(pendingAgentId, pendingProvider)}/confirm`,
+      { pending: pendingId },
+      { headers: { "X-Server-Id": pendingServerId } },
     )
       .then(({ data }) => setConfirm({ kind: "connected", account: data.supported ? data.account : null }))
       .catch((err: unknown) => {
@@ -76,20 +89,22 @@ export default function AgentConnectionCallbackPage() {
         const reason = providerRefusalReason(err);
         setConfirm(httpStatus === 404 ? { kind: "expired", reason } : { kind: "error", reason });
       });
-    // oxlint-disable-next-line react-hooks/exhaustive-deps -- keyed by pendingKey, which covers every field used
-  }, [pendingKey]);
+  }, [pendingAgentId, pendingId, pendingProvider, pendingServerId]);
 
   // A flow someone else started: re-read status so an unexpected connection can be flagged.
-  const foreignKey = view.kind === "foreign" ? `${view.serverId}/${view.agentId}/${view.provider}` : null;
+  const {
+    serverId: foreignServerId,
+    agentId: foreignAgentId,
+    provider: foreignProvider,
+  } = view.kind === "foreign" ? view : NO_TARGET;
   useEffect(() => {
-    if (view.kind !== "foreign") return;
+    if (!foreignServerId || !foreignAgentId || !foreignProvider) return;
     let canceled = false;
-    api.get<AgentConnectionStatusView>(agentConnectionPath(view.agentId, view.provider), { headers: { "X-Server-Id": view.serverId } })
+    api.get<AgentConnectionStatusView>(agentConnectionPath(foreignAgentId, foreignProvider), { headers: { "X-Server-Id": foreignServerId } })
       .then(({ data }) => { if (!canceled) setStatus(data); })
       .catch(() => undefined);
     return () => { canceled = true; };
-    // oxlint-disable-next-line react-hooks/exhaustive-deps -- keyed by foreignKey, which covers every field used
-  }, [foreignKey]);
+  }, [foreignAgentId, foreignProvider, foreignServerId]);
 
   const agentId = view.kind === "invalid" ? null : view.agentId;
   const agentHref = server && agentId ? `/s/${encodeURIComponent(server.slug)}/agent/${encodeURIComponent(agentId)}` : null;

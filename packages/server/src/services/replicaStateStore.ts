@@ -5,6 +5,12 @@ import {
   refreshMachineReplica,
   hasMachineReplica,
   getMachineReplicaOwner,
+  getMachineReplicaOwners,
+  getMachineReplicaLease,
+  getMachineDuplicateHold,
+  setMachineDuplicateHold,
+  touchMachineDuplicateHold,
+  setMachineReplicaInstance,
   getMachineReplicaTraceContext,
   bumpMachineStatusVersion,
   getMachineStatusVersion,
@@ -12,15 +18,21 @@ import {
   releaseWakeLock,
   setAgentActivity,
   getAgentActivity,
+  getAgentActivities,
   getWakeCrashLoopState,
   compareAndSetWakeCrashLoopState,
   setAgentRuntimeError,
   getAgentRuntimeError,
+  getAgentRuntimeErrors,
   setMachineMeta,
   getMachineMeta,
   clearMachineMeta,
   type MachineMeta,
   type AgentRuntimeErrorMirror,
+  type MachineReplicaRefreshResult,
+  type MachineReplicaLease,
+  type MachineDuplicateHold,
+  type MachineReplicaInstance,
 } from "../replicaRouter";
 import { isRedisAvailable } from "../redis";
 import type {
@@ -72,10 +84,18 @@ export interface ReplicaStateStore {
     machineId: string,
     traceContext?: MachineConnectTraceContext,
     expectedGeneration?: string,
-  ): Promise<void>;
+  ): Promise<MachineReplicaRefreshResult | void>;
   hasMachineReplica(machineId: string): Promise<boolean>;
   getMachineReplicaOwner(machineId: string): Promise<string | null>;
   getMachineReplicaTraceContext?(machineId: string): Promise<Partial<MachineConnectTraceContext> | null>;
+  /** Owner lease holder and last renewal time (task #374). Optional: absent means no duplicate detection. */
+  getMachineReplicaLease?(machineId: string): Promise<MachineReplicaLease | null>;
+  /** Duplicate-connection winner record (task #374). Optional: absent means no enforcement hold. */
+  getMachineDuplicateHold?(machineId: string): Promise<MachineDuplicateHold | null>;
+  setMachineDuplicateHold?(machineId: string, hold: MachineDuplicateHold, ttlSeconds: number): Promise<void>;
+  touchMachineDuplicateHold?(machineId: string, ttlSeconds: number): Promise<void>;
+  /** The lease holder's daemon identity, written after a successful refresh (task #374 observation). */
+  setMachineReplicaInstance?(machineId: string, instance: MachineReplicaInstance, ttlSeconds?: number): Promise<void>;
   bumpMachineStatusVersion(machineId: string): Promise<number>;
   getMachineStatusVersion(machineId: string): Promise<number>;
   acquireWakeLock(agentId: string): Promise<boolean>;
@@ -101,6 +121,13 @@ export interface ReplicaStateStore {
   setMachineMeta(machineId: string, meta: MachineMeta): Promise<void>;
   getMachineMeta(machineId: string): Promise<MachineMeta | null>;
   clearMachineMeta(machineId: string): Promise<void>;
+  /**
+   * Batch reads for list endpoints (one round trip each). Optional: a store
+   * without them is read one key at a time (getActivities falls back).
+   */
+  getAgentActivities?(agentIds: readonly string[]): Promise<Map<string, PersistedAgentActivity | null>>;
+  getAgentRuntimeErrors?(agentIds: readonly string[]): Promise<Map<string, AgentRuntimeErrorMirror | null>>;
+  getMachineReplicaOwners?(machineIds: readonly string[]): Promise<Map<string, string | null>>;
 }
 
 export const redisReplicaStateStore: ReplicaStateStore = {
@@ -111,6 +138,12 @@ export const redisReplicaStateStore: ReplicaStateStore = {
   refreshMachineReplica,
   hasMachineReplica,
   getMachineReplicaOwner,
+  getMachineReplicaOwners,
+  getMachineReplicaLease,
+  getMachineDuplicateHold,
+  setMachineDuplicateHold,
+  touchMachineDuplicateHold,
+  setMachineReplicaInstance,
   getMachineReplicaTraceContext,
   bumpMachineStatusVersion,
   getMachineStatusVersion,
@@ -118,10 +151,12 @@ export const redisReplicaStateStore: ReplicaStateStore = {
   releaseWakeLock,
   setAgentActivity,
   getAgentActivity,
+  getAgentActivities,
   getWakeCrashLoopState,
   compareAndSetWakeCrashLoopState,
   setAgentRuntimeError,
   getAgentRuntimeError,
+  getAgentRuntimeErrors,
   setMachineMeta,
   getMachineMeta,
   clearMachineMeta,

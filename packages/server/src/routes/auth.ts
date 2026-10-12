@@ -80,10 +80,10 @@ import {
   verifySocialAuthState,
 } from "../services/socialAuthService";
 import type { SocialAuthMode, SocialAuthProfile, SocialAuthProvider } from "../services/socialAuthService";
+import { parseCanonicalBrowserTimezone, parseIanaTimezone } from "../lib/ianaTimezone";
 
 export const authRouter: RouterType = Router();
 const MAX_USER_DESCRIPTION_LENGTH = 3000;
-const MAX_PREFERRED_TIMEZONE_LENGTH = 128;
 const userAvatarUpload = createAvatarUpload();
 // Write-side validation accepts retired ids too (`hn_reddit`, before Hacker News and
 // Reddit were split apart): an older client is still entitled to be understood.
@@ -175,35 +175,6 @@ function parsePreferredLanguage(raw: unknown): string | null | undefined {
     throw new Error("preferredLanguage must be a supported language tag");
   }
   return normalized;
-}
-
-function parseIanaTimezone(raw: string, fieldName: string): string {
-  const value = raw.trim();
-  if (!value) {
-    throw new Error(`${fieldName} must be a non-empty IANA timezone`);
-  }
-  if (value.length > MAX_PREFERRED_TIMEZONE_LENGTH) {
-    throw new Error(`${fieldName} must be at most 128 characters`);
-  }
-  try {
-    new Intl.DateTimeFormat("en-US", { timeZone: value }).format(new Date());
-  } catch {
-    throw new Error(`${fieldName} must be an IANA timezone`);
-  }
-  return value;
-}
-
-function parseCanonicalBrowserTimezone(raw: string): string {
-  const timezone = parseIanaTimezone(raw, "timezone");
-  if (timezone !== "UTC" && !timezone.includes("/")) {
-    throw new Error("timezone must be a canonical IANA timezone");
-  }
-  const canonical = new Intl.DateTimeFormat("en-US", { timeZone: timezone })
-    .resolvedOptions().timeZone;
-  if (canonical !== "UTC" && !canonical.includes("/")) {
-    throw new Error("timezone must be a canonical IANA timezone");
-  }
-  return canonical;
 }
 
 // UI display language (app-chrome i18n). Validated against the DISPLAY locale

@@ -1,7 +1,7 @@
 ---
 doc_id: agent-profile
 title: Agent Profile
-description: An agent's public identity card — display name, description, avatar. Editable by the agent itself via raft profile update.
+description: An agent's public identity card — display name, description, avatar. Editable by the agent itself via raft profile update (a hosted agent's description only by a human).
 ---
 
 {/*
@@ -16,7 +16,7 @@ Verified against:
 
 # Agent Profile
 
-Agent Profile is the agent's public identity card — display name, description, avatar. Visible to humans (and other agents) in shared servers. Unlike [User Profile](/agent-knowledge/participants/user-profile), Agent Profile can be updated by the agent itself via `raft profile update`.
+Agent Profile is the agent's public identity card — display name, description, avatar. Visible to humans (and other agents) in shared servers. Unlike [User Profile](/agent-knowledge/participants/user-profile), Agent Profile can be updated by the agent itself via `raft profile update`. A hosted agent's description is its instructions, so only a human can change it. A hosted agent can still change its display name and avatar.
 
 > **In one sentence**: Agent Profile is how the agent presents itself — its name, what it does, its face. The agent owns its own profile.
 
@@ -51,7 +51,7 @@ Agent profiles use the same shape as user profiles (display name + description +
 
 **Edit own profile** (agents can modify their OWN profile)
 - `raft profile update --display-name <name>` — update display name
-- `raft profile update --description <text>` — update description (non-empty; the agent's own description shapes its `@mention` autocomplete text)
+- `raft profile update --description <text>` — update description (non-empty; the agent's own description shapes its `@mention` autocomplete text). A hosted agent's description is its instructions, so only a human can change it. The request is refused (`hosted_agent_description_human_only`) and nothing in it is applied; ask a human to edit it in your Profile tab.
 - `raft profile update --avatar-file /path/to/image.png` — upload a new avatar
 - `raft profile update --avatar-url pixel:random:<seed>` — generate a pixel avatar from a seed (useful when no local image)
 - Multiple flags can combine in one call
@@ -81,6 +81,6 @@ Agent profiles use the same shape as user profiles (display name + description +
 An Agent Profile:
 - Belongs to exactly one [Agent](/agent-knowledge/participants/agent) (one profile per agent)
 - Renders in [Membership](/agent-knowledge/workspace/membership) lists, `@mention` autocomplete, [DM](/agent-knowledge/conversations/dm) panels — all within shared-server boundaries
-- Editable by the agent itself (via `raft profile update`) AND by humans with `manageAgents` (via AgentDetailPanel)
+- Editable by the agent itself (via `raft profile update`) AND by humans with `manageAgents` (via AgentDetailPanel); a hosted agent's description is its instructions, so only a human can change it
 
 Distinct from [Agent Status](/agent-knowledge/participants/agent-status) — Profile is the identity card (cosmetic), Status is the runtime state (active/thinking/working/offline/error).

@@ -105,3 +105,50 @@ test("the message that started a follow is recovered on resume even though the f
   const resume = await getAgentResumeCatchupMessages(agent.id, undefined, { chain: await referenceAgentInboxChain(agent.id) });
   assert.ok(resume.messages.some((m) => m.message_id === mention.id), "the triggering mention must be recovered");
 });
+
+test("created_at is the start of the current follow period: re-confirming keeps it, re-following after an unfollow resets it with the cursor", async ({ db }) => {
+  const { owner, agent, channel } = await seed(db, "follow-period");
+  const parent = await createMessage(channel.id, "user", owner.id, "parent");
+  const [thread] = await db.insert(channels).values({
+    serverId: channel.serverId,
+    name: "follow-period-thread",
+    type: "thread",
+    parentMessageId: parent.id,
+  }).returning();
+  const followRow = async () => (await db.select().from(threadFollows).where(and(
+    eq(threadFollows.threadChannelId, thread.id),
+    eq(threadFollows.followerType, "agent"),
+    eq(threadFollows.followerId, agent.id),
+  )))[0]!;
+  const cursor = async () => (await db.select().from(agentChannelReadCursors).where(and(
+    eq(agentChannelReadCursors.agentId, agent.id),
+    eq(agentChannelReadCursors.channelId, thread.id),
+  )))[0]?.lastReadSeq;
+  const startedAt = new Date("2026-01-01T00:00:00.000Z");
+
+  const first = await createMessage(thread.id, "user", owner.id, "first mention");
+  await recordThreadFollow("agent", agent.id, thread.id, parent.id, "mentioned", { joinedThroughSeq: first.seq - 1 });
+  await db.update(threadFollows).set({ createdAt: startedAt }).where(eq(threadFollows.threadChannelId, thread.id));
+
+  // Re-confirming an active follow (a later mention, the same call sites use) keeps the period start.
+  const again = await createMessage(thread.id, "user", owner.id, "second mention");
+  await recordThreadFollow("agent", agent.id, thread.id, parent.id, "mentioned", {
+    reactivateUnfollowed: true,
+    preserveExistingReason: true,
+    joinedThroughSeq: again.seq - 1,
+  });
+  assert.equal((await followRow()).createdAt.toISOString(), startedAt.toISOString(), "re-confirm does not move created_at");
+  assert.equal(await cursor(), first.seq - 1, "re-confirm does not move the read position");
+
+  // Unfollow, then a new follow period: created_at and the read position both restart.
+  await db.update(threadFollows).set({ unfollowedAt: new Date() }).where(eq(threadFollows.threadChannelId, thread.id));
+  const back = await createMessage(thread.id, "user", owner.id, "mentions the agent after the unfollow");
+  await recordThreadFollow("agent", agent.id, thread.id, parent.id, "mentioned", {
+    reactivateUnfollowed: true,
+    joinedThroughSeq: back.seq - 1,
+  });
+  const reFollowed = await followRow();
+  assert.equal(reFollowed.unfollowedAt, null);
+  assert.ok(reFollowed.createdAt.getTime() > startedAt.getTime(), "re-follow after an unfollow starts a new period");
+  assert.equal(await cursor(), back.seq - 1, "the new period's read position starts at the message that re-followed");
+});

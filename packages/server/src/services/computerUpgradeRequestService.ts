@@ -93,9 +93,17 @@ export async function observeComputerVersionForUpgradeRequests(input: {
   const now = input.now ?? new Date();
   const done = version === open.targetVersion;
   const receipt = input.receipt && input.receipt.targetVersion === open.targetVersion ? input.receipt : null;
+  // A `ready` still on the old version is not, by itself, an outcome: the
+  // Computer stays online while it downloads, so a connection blip during the
+  // download reconnects on the old version. Only the target version or the
+  // Computer's own upgrade receipt for this target settles the request; with
+  // neither, it stays pending until the deadline (expireComputerUpgradeRequests).
+  // Every web-upgradable Computer (COMPUTER_REMOTE_UPGRADE_MIN_VERSION, 1.0.37+)
+  // sends `lastUpgradeReceipt` on ready.
+  if (!done && !receipt) return null;
   const reason = done
     ? null
-    : receipt?.reason ?? (receipt ? `installer_${receipt.outcome}` : "version_unchanged");
+    : receipt?.reason ?? `installer_${receipt!.outcome}`;
   const [row] = await executor
     .update(computerUpgradeRequests)
     .set({
@@ -105,6 +113,50 @@ export async function observeComputerVersionForUpgradeRequests(input: {
       resolvedAt: now,
     })
     .where(and(eq(computerUpgradeRequests.id, open.id), isNull(computerUpgradeRequests.outcome)))
+    .returning();
+  return row ?? null;
+}
+
+/**
+ * The upgrade command never reached the machine (it went offline between the
+ * route's check and the send, or this replica had no route to it). Settle the
+ * request now: nothing is running on the machine, and an open row would hold
+ * every retry (`created: false`, nothing sent) until the deadline.
+ */
+export async function failUndeliveredComputerUpgradeRequest(
+  requestId: string,
+  now: Date = new Date(),
+  executor: DatabaseExecutor = getDb(),
+): Promise<ComputerUpgradeRequestRow | null> {
+  const [row] = await executor
+    .update(computerUpgradeRequests)
+    .set({ outcome: "failed", reason: "command_not_delivered", resolvedAt: now })
+    .where(and(eq(computerUpgradeRequests.id, requestId), isNull(computerUpgradeRequests.outcome)))
+    .returning();
+  return row ?? null;
+}
+
+/**
+ * The Computer refused this request before any installer ran
+ * (`computer:upgrade:done` with `ok: false`). Settled by request id, and only for the machine
+ * that sent it: with the same key online twice (#374) the other daemon cannot
+ * settle a request that is not its own.
+ */
+export async function settleRefusedComputerUpgradeRequest(input: {
+  machineId: string;
+  requestId: string;
+  reason: string;
+  now?: Date;
+}, executor: DatabaseExecutor = getDb()): Promise<ComputerUpgradeRequestRow | null> {
+  const reason = input.reason.replace(/[\u0000-\u001f\u007f]+/gu, " ").trim().slice(0, 512) || "computer_refused";
+  const [row] = await executor
+    .update(computerUpgradeRequests)
+    .set({ outcome: "failed", reason, resolvedAt: input.now ?? new Date() })
+    .where(and(
+      eq(computerUpgradeRequests.id, input.requestId),
+      eq(computerUpgradeRequests.machineId, input.machineId),
+      isNull(computerUpgradeRequests.outcome),
+    ))
     .returning();
   return row ?? null;
 }

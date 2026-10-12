@@ -3,6 +3,7 @@ import { Readable } from "node:stream";
 import { handleRequest, type TraceUploadWorkerEnv } from "./index";
 import { createNodeExecutionContext, installUnhandledRejectionGuard } from "./nodeExecutionContext";
 import { createNodeTraceUploadEnv } from "./nodeEnv";
+import { applyServerTimeouts } from "./serverTimeouts";
 
 const DEFAULT_PORT = 3000;
 
@@ -24,6 +25,7 @@ const server = createServer(async (incoming, outgoing) => {
     outgoing.end(JSON.stringify({ error: "Internal server error" }));
   }
 });
+applyServerTimeouts(server);
 
 server.listen(port, () => {
   console.log(`Trace upload service listening on :${port}`);

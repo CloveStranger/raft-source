@@ -2,6 +2,7 @@ import os from "node:os";
 import path from "node:path";
 
 import type { UserSessionIdentity } from "./lib/userSession";
+import { resolveDefaultRaftHome } from "./paths";
 
 export type AccountUnavailableLocale = "en" | "zh-cn";
 
@@ -93,7 +94,7 @@ function profileLabel(
   locale: AccountUnavailableLocale,
 ): string {
   const resolved = path.resolve(slockHome);
-  const defaultHome = path.resolve(homeDir, ".slock");
+  const defaultHome = resolveDefaultRaftHome(homeDir);
   if (resolved === defaultHome) return "default";
 
   const profilesRoot = path.join(defaultHome, "profiles");
@@ -106,7 +107,7 @@ function profileLabel(
 
 function alternateProfileHome(slockHome: string, homeDir: string): string {
   const resolved = path.resolve(slockHome);
-  const defaultHome = path.resolve(homeDir, ".slock");
+  const defaultHome = resolveDefaultRaftHome(homeDir);
   const profilesRoot = path.join(defaultHome, "profiles");
   const relative = path.relative(profilesRoot, resolved);
   if (relative && !relative.startsWith("..") && !path.isAbsolute(relative) && !relative.includes(path.sep)) {

@@ -1,6 +1,7 @@
 import { currentTimeMs } from "@botiverse/raft-shared";
 import { create } from "zustand";
 import api from "../api/client";
+import { getWithRwOverloadRetry } from "../api/overloadRetry";
 import { observeActivityBootstrap } from "./activityPanel/bootstrap";
 import { invalidateActivityShadowGeneration } from "./activityShadowBridge";
 import { getCurrentPrincipalId } from "./principalRuntime";
@@ -988,7 +989,7 @@ export const useInboxStore = create<InboxState>((set, get) => ({
           .then(({ data }) => typeof data.totalCount === "number" ? data.totalCount : null)
           .catch(() => null)
         : Promise.resolve(null);
-      const { data } = await api.get("/channels/inbox", {
+      const { data } = await getWithRwOverloadRetry("/channels/inbox", {
         params: {
           filter: requestFilter,
           sort: requestSortDirection,

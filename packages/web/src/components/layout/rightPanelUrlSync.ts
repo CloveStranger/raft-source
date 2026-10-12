@@ -1,4 +1,6 @@
 import api from "../../api/client";
+import type { ChannelExternalMember } from "../../hooks/useChannelMembers";
+import type { ExternalMessageAuthorProjection } from "@botiverse/raft-shared";
 import type { Message } from "../../store/messageStore";
 import { useMessageStore } from "../../store/messageStore";
 import { useProfileStore } from "../../store/profileStore";
@@ -12,6 +14,7 @@ import {
   resolveOrderedFirstAgentTab,
   shouldDeleteAgentTabDuringProfileSync,
 } from "../../utils/profilePanelUrl";
+import { recordProfileOpenE2eUrl } from "../../utils/profileOpenE2eTimeline";
 
 // Stryker disable all: this file is an extracted copy of the right-panel URL
 // sync behavior. The focused rightPanelUrlSyncContract DOM tests cover the
@@ -70,6 +73,10 @@ function externalProfileParam(channelId: string, messageId: string): string {
   return `external:${channelId}:${messageId}`;
 }
 
+function externalMentionProfileParam(channelId: string, projectionId: string): string {
+  return `external-mention:${channelId}:${projectionId}`;
+}
+
 function currentExternalProfileParamMatches(expected: string): boolean {
   if (typeof window === "undefined") return false;
   return new URLSearchParams(window.location.search).get("profile") === expected;
@@ -115,6 +122,53 @@ export async function restoreExternalProfileFromUrl(
   useProfileStore.getState().openExternalProfile(messageId, target.externalAuthor, {
     channelId,
     openSource,
+  });
+  return true;
+}
+
+/** Restore a mention-clicked external identity (projection-id keyed, no message).
+ *  Fetches channel members, finds the projection, and opens the profile. */
+export async function restoreExternalMentionProfileFromUrl(
+  channelId: string,
+  projectionId: string,
+  openSource: "channel" | "thread",
+): Promise<boolean> {
+  const expected = externalMentionProfileParam(channelId, projectionId);
+  let member: ChannelExternalMember | null = null;
+  try {
+    const { data } = await api.get(`/channels/${channelId}/members`);
+    const externals = (data.externalMembers ?? []) as ChannelExternalMember[];
+    member = externals.find((e) => e.id === projectionId) ?? null;
+  } catch {
+    member = null;
+  }
+
+  if (!currentExternalProfileParamMatches(expected)) return false;
+  if (!member) {
+    useProfileStore.getState().closeProfile();
+    return false;
+  }
+
+  const profile: ExternalMessageAuthorProjection = {
+    projectionId: member.id,
+    provider: member.provider,
+    appRegistrationId: "", // members endpoint intentionally omits provider-side ids
+    installId: "",
+    workspaceId: "",
+    externalActorId: "",
+    workspaceName: member.workspaceName,
+    externalConversationId: "",
+    externalMessageId: "",
+    displayName: member.displayName,
+    actorKind: member.actorKind,
+    avatarUrl: member.avatarUrl,
+    avatarDigest: null,
+    actorProjectionRevision: 0,
+  };
+  useProfileStore.getState().openExternalProfile(member.id, profile, {
+    channelId,
+    openSource,
+    isMention: true,
   });
   return true;
 }
@@ -256,6 +310,7 @@ export function isCurrentRightPanelSearchSnapshot(search: string): boolean {
 }
 
 export function syncRightPanelStoresFromSearch(search: string): void {
+  recordProfileOpenE2eUrl("profile-url-read", search);
   const params = new URLSearchParams(search);
   // /search col 3 IS the thread surface for thread search hits — driven by
   // ThreadPanel reading threadStore (stdrc msg=41f5c906 2026-05-28: "点开
@@ -408,11 +463,32 @@ export function syncRightPanelStoresFromSearch(search: string): void {
             profile.profileType !== "external"
             || profile.profileId !== messageId
             || profile.externalProfileChannelId !== channelId
+            || profile.externalProfileIsMention
             || !profile.externalProfile
           ) {
             void restoreExternalProfileFromUrl(
               channelId,
               messageId,
+              params.has("thread") ? "thread" : "channel",
+            );
+          }
+        }
+      } else if (type === "external-mention") {
+        const externalParts = id.split(":");
+        const channelId = externalParts[0] ?? "";
+        const projectionId = externalParts[1] ?? "";
+        if (externalParts.length === 2 && channelId && projectionId) {
+          const profile = useProfileStore.getState();
+          if (
+            profile.profileType !== "external"
+            || profile.profileId !== projectionId
+            || profile.externalProfileChannelId !== channelId
+            || !profile.externalProfileIsMention
+            || !profile.externalProfile
+          ) {
+            void restoreExternalMentionProfileFromUrl(
+              channelId,
+              projectionId,
               params.has("thread") ? "thread" : "channel",
             );
           }
@@ -488,7 +564,9 @@ export function syncRightPanelUrlFromStores({
     params.set(
       "profile",
       profileType === "external"
-        ? externalProfileParam(externalProfileChannelId!, profileId!)
+        ? useProfileStore.getState().externalProfileIsMention
+          ? externalMentionProfileParam(externalProfileChannelId!, profileId!)
+          : externalProfileParam(externalProfileChannelId!, profileId!)
         : `${profileType}:${profileId}`,
     );
   }
@@ -531,6 +609,11 @@ export function syncRightPanelUrlFromStores({
     && !removedAny;
 
   const nextSearch = newSearch ? `?${newSearch}` : "";
+  recordProfileOpenE2eUrl(
+    "profile-url-write",
+    nextSearch,
+    shouldPush ? "push" : "replace",
+  );
   navigate(
     { pathname, search: nextSearch },
     { replace: !shouldPush },

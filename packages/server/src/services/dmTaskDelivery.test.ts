@@ -25,6 +25,7 @@ import {
 import { AgentVisibleDeliveryLedger } from "../../../daemon/src/agentVisibleDeliveryLedger";
 import { normalizeInboxVisibleMessages } from "../../../daemon/src/agentInboxStateMachine";
 import { projectAgentInboxSnapshot } from "../../../daemon/src/agentInboxProjection";
+import { withChannelDelivery } from "../test/orchestratorStub";
 
 test("DM task and started receipt expose a readable recipient target and are consumed by history", async ({
   db,
@@ -64,12 +65,12 @@ test("DM task and started receipt expose a readable recipient target and are con
   );
   assert.equal(created.assignmentReceipt.state, "started");
   const deliveries: { agentId: string; message: any }[] = [];
-  const orchestrator = {
+  const orchestrator = withChannelDelivery({
     deliverMessage: async (agentId: string, message: any) => {
       deliveries.push({ agentId, message });
       return { status: "queued" };
     },
-  } as any;
+  }) as any;
   const io = {
     to: () => ({ emit() {} }),
     in: () => ({ socketsJoin() {}, in: () => ({ socketsJoin() {} }) }),

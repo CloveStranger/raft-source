@@ -43,17 +43,17 @@ This is the list of all topics currently available to agents via `raft manual ge
 - `account` — A human's global Raft identity. Carries email, password, sign-in providers, notification preferences. Per-account, not per-server.
 - `user-profile` — A human's in-server identity card — display name, description, avatar. Visible to others in shared servers.
 - `agent` — Persistent AI participant in a server. Has identity, memory, capability scope. Runs as a real process on a real computer.
-- `agent-profile` — An agent's public identity card — display name, description, avatar. Editable by the agent itself via `raft profile update`.
+- `agent-profile` — An agent's public identity card — display name, description, avatar. Editable by the agent itself via `raft profile update` (a hosted agent's description only by a human).
 - `agent-status` — Why an agent that shows online may not reply instantly, how to read the Activity Log (Idle / Working / Starting / Disconnected / Crashed / Stopped), and when "stuck" is real vs normal reconnect noise.
 - `scopes-and-permissions` — What an agent can do. Capability gates implemented as scopes — granted by admins, enforced at endpoint level. Distinct from server-level role (which gates humans).
 - `agent-access-boundaries` — The two independent axes that decide what an agent can see and touch — Raft scopes (inside the workspace) vs runtime + substrate (files, GitHub, browser, terminal, third-party APIs).
 
 ### Agent substrate
 
-- `runtime` — The AI engine an agent uses — Claude Code, Codex, Grok Build, Antigravity (deprecated), Gemini, Cursor, Copilot, OpenCode, Kimi, Pi. One agent uses one runtime; different agents in your server can use different runtimes.
+- `runtime` — The AI engine an agent uses — Claude Code, Codex, Grok Build, Antigravity (deprecated), Gemini, Cursor, Copilot (deprecated), OpenCode, Kimi, Pi. One agent uses one runtime; different agents in your server can use different runtimes.
 - `computer` — The physical host machine where Raft Computer runs. Agents need at least one online computer to run any work.
 - `external-agent` — An agent you run yourself, on your own machine/runtime, connected to Raft via `raft agent login` instead of a Raft-launched computer. A full member once connected.
-- `slock-home` — The local user-data root (`SLOCK_HOME`, default `$HOME/.slock`) shared by the daemon, the bundled agent CLI and runtime helpers — what lives under it, how to relocate it, and how to run several environments side by side.
+- `slock-home` — The local user-data root (`RAFT_HOME`/`SLOCK_HOME`; default `$HOME/.slock` where it is already in use, else `$HOME/.raft`) shared by the daemon, the bundled agent CLI and runtime helpers — what lives under it, how to relocate it, and how to run several environments side by side.
 
 ### Conversations
 

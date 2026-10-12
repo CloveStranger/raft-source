@@ -57,6 +57,7 @@ export const RUNTIME_FORM_V2_RESERVED_CLIENT_CAPABILITIES = [
   "select.custom_value",
   "choice.labels",
   "option_source.status",
+  "provider.saved_connection",
 ] as const;
 
 export type RuntimeFormV2ClientCapability = (typeof RUNTIME_FORM_V2_RESERVED_CLIENT_CAPABILITIES)[number];
@@ -157,6 +158,13 @@ export type RuntimeFormV2Field = {
   derivedFrom?: { key: string; attribute: string; defaultAttribute?: string };
   /** Copy for this field's choices by option value (`choice.labels`); see runtimeFormV2Choices. */
   choices?: Record<string, RuntimeFormV2ChoiceCopy>;
+  /**
+   * `x-connectionOwned` (capability `provider.saved_connection`): a selected
+   * saved connection owns this field's value. While a connection is selected it
+   * renders disabled with a placeholder, is not required, and stays out of
+   * formValues; see runtimeFormV2SelectedConnection.
+   */
+  connectionOwned?: boolean;
   /** Shown only when every rule matches; empty means always shown. */
   visibleWhen: Array<{ key: string; in: string[] }>;
 };
@@ -183,8 +191,20 @@ export type ParsedRuntimeFormV2 = {
    * server sends none). See missingRuntimeFormV2Capabilities.
    */
   requiredClientCapabilities: string[];
+  /**
+   * Definition.revision: opaque token for this exact form build. A client that
+   * fetches option sources passes it back as ?formRevision=; a 409
+   * `form_revision_stale` means the whole form must be refetched.
+   */
+  revision?: string;
   /** Edit only: the agent's current values by field key (writeOnly fields absent). */
   values?: Record<string, unknown>;
+  /**
+   * Edit only (`writeOnlyKeepRequiresUnchanged`), by field key: a blank secret
+   * keeps the stored value only while these fields still equal `values`.
+   * Entries naming no secret field, or bound fields naming no field, are dropped.
+   */
+  writeOnlyKeepRequiresUnchanged?: Record<string, string[]>;
 };
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -267,6 +287,7 @@ export function parseRuntimeFormV2(value: unknown): ParsedRuntimeFormV2 | null {
       if (source.dependsOn) field.dependsOn = source.dependsOn;
     }
     if (derived) field.derivedFrom = derived;
+    if (schema["x-connectionOwned"] === true) field.connectionOwned = true;
     const choices = choiceCopy(copy.choices);
     if (choices) field.choices = choices;
     fields.push(field);
@@ -279,8 +300,27 @@ export function parseRuntimeFormV2(value: unknown): ParsedRuntimeFormV2 | null {
     optionSources,
     blockingFieldKeys: fields.filter((field) => field.kind === "unsupported" && field.required).map((field) => field.key),
     requiredClientCapabilities: requiredClientCapabilities(value.requiredClientCapabilities),
+    ...(typeof value.revision === "string" && value.revision ? { revision: value.revision } : {}),
     ...(isRecord(value.values) ? { values: value.values } : {}),
+    ...keepRequiresUnchanged(value.writeOnlyKeepRequiresUnchanged, fields),
   };
+}
+
+/** `writeOnlyKeepRequiresUnchanged` by field key; anything malformed is ignored (tolerant by contract). */
+function keepRequiresUnchanged(
+  value: unknown,
+  fields: RuntimeFormV2Field[],
+): Pick<ParsedRuntimeFormV2, "writeOnlyKeepRequiresUnchanged"> {
+  if (!isRecord(value)) return {};
+  const kinds = new Map(fields.map((field) => [field.key, field.kind]));
+  const out: Record<string, string[]> = {};
+  for (const [pointer, bound] of Object.entries(value)) {
+    const key = propertyKey(pointer);
+    if (!key || kinds.get(key) !== "secret" || !Array.isArray(bound)) continue;
+    const keys = bound.map(propertyKey).filter((item): item is string => item !== null && kinds.has(item) && item !== key);
+    if (keys.length > 0) out[key] = keys;
+  }
+  return Object.keys(out).length > 0 ? { writeOnlyKeepRequiresUnchanged: out } : {};
 }
 
 /** FieldCopy.choices, keeping only entries with a string label; unknown keys inside an entry are ignored. */

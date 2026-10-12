@@ -1,12 +1,15 @@
 import os from "node:os";
 import path from "node:path";
 import { existsSync } from "node:fs";
+import { defaultRaftHomeDirname } from "@botiverse/raft-shared";
 
 export const SLOCK_HOME_ENV = "SLOCK_HOME";
 export const RAFT_HOME_ENV = "RAFT_HOME";
 
+// ~/.slock when it already holds Raft state, else ~/.raft (rule in @botiverse/raft-shared raftHome.ts).
 export function resolveDefaultRaftHome(homeDir: string = os.homedir()): string {
-  return path.resolve(path.join(homeDir, ".slock"));
+  const dirname = defaultRaftHomeDirname((name) => existsSync(path.join(homeDir, name)));
+  return path.resolve(path.join(homeDir, dirname));
 }
 
 export function resolveRaftHome(

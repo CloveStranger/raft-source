@@ -1,4 +1,4 @@
-import type { MentionDeliveryTerminalDecision } from "@botiverse/raft-shared";
+import type { AnnouncementContent, MentionDeliveryTerminalDecision } from "@botiverse/raft-shared";
 import { pgTable, text, timestamp, integer, bigint, bigserial, uuid, primaryKey, unique, uniqueIndex, index, json, jsonb, boolean, customType, check, date, foreignKey } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
@@ -110,6 +110,10 @@ export const users = pgTable("users", {
   traceUserId: uuid("trace_user_id").notNull().defaultRandom(),
 }, (table) => [
   uniqueIndex("idx_users_name_exact_unique").on(table.name),
+  // Traces carry only trace_user_id; mapping one back to a user is a lookup on
+  // this column. Random, so unique by construction; the index makes duplicates
+  // impossible and the reverse lookup one probe.
+  uniqueIndex("idx_users_trace_user_id_unique").on(table.traceUserId),
   check(
     "users_timezone_observation_consistent",
     sql`(
@@ -960,11 +964,19 @@ export const agents = pgTable("agents", {
   // report. From then on `/activity` hook events no longer drive the live
   // status (they are still logged). Only ever goes NULL -> set.
   statusProtocolAdoptedAt: timestamp("status_protocol_adopted_at", { withTimezone: true }),
+  // RFC 074 §2 personal assistant: set = this agent may read as this user
+  // (minus DMs). Only that user sets or clears it, and only on an agent they
+  // created. Effective only while `identity_borrowing` is on for the server.
+  assistantOwnerUserId: uuid("assistant_owner_user_id").references(() => users.id, { onDelete: "set null" }),
   deletedAt: timestamp("deleted_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 }, (t) => [
   uniqueIndex("idx_agents_server_name").on(t.serverId, t.name).where(sql`deleted_at is null`),
+  // One live assistant per person per server.
+  uniqueIndex("idx_agents_server_assistant_owner")
+    .on(t.serverId, t.assistantOwnerUserId)
+    .where(sql`assistant_owner_user_id is not null and deleted_at is null`),
   index("idx_agents_server").on(t.serverId),
   index("idx_agents_creator").on(t.serverId, t.creatorType, t.creatorId),
   // RFC-067 product-data derivation reads new agents by a created_at watermark.
@@ -1173,6 +1185,9 @@ export const oauthClients = pgTable("oauth_clients", {
   logoStorageKey: text("logo_storage_key"),
   category: text("category").default("Other").notNull(),
   dataAccessSummary: text("data_access_summary"),
+  // NULL is only for pre-migration local clients using the legacy operator policy.
+  // New registrations default off; an explicit false always wins over that policy.
+  agentJwtEnabled: boolean("agent_jwt_enabled").default(false),
   enabled: boolean("enabled").default(true).notNull(),
   humanMarketplaceVisible: boolean("human_marketplace_visible").default(true).notNull(),
   publishStatus: text("publish_status", { enum: ["private", "publish_requested", "in_review", "published", "rejected", "unpublish_requested"] }).default("private").notNull(),
@@ -1278,6 +1293,8 @@ export const oauthClientInstalls = pgTable("oauth_client_installs", {
   installedByUserId: uuid("installed_by_user_id").references(() => users.id, { onDelete: "cascade" }),
   installedByAgentId: uuid("installed_by_agent_id").references(() => agents.id, { onDelete: "cascade" }),
   installedBySystem: boolean("installed_by_system").notNull().default(false),
+  // Target-Server consent, separate from publisher support and data-read groups.
+  agentJwtEnabled: boolean("agent_jwt_enabled").notNull().default(false),
   status: text("status", { enum: ["active", "suspended"] }).notNull().default("active"),
   approvedRequestRevisionId: uuid("approved_request_revision_id").references(() => oauthAppPermissionRevisions.id, { onDelete: "set null" }),
   approvedGroups: jsonb("approved_groups").$type<string[]>().notNull().default([]),
@@ -1556,7 +1573,12 @@ export const thirdPartyAgentEvents = pgTable("third_party_agent_events", {
   id: uuid("id").primaryKey().$defaultFn(() => randomUUID()),
   serverId: uuid("server_id").notNull().references(() => servers.id, { onDelete: "cascade" }),
   agentId: uuid("agent_id").notNull().references(() => agents.id, { onDelete: "cascade" }),
-  clientId: uuid("client_id").notNull().references(() => oauthClients.id, { onDelete: "cascade" }),
+  // Exactly one of clientId / systemApp is set (check constraint). OAuth-client
+  // paths always filter by client_id, so a system row (client_id NULL) is
+  // invisible to every client.
+  clientId: uuid("client_id").references(() => oauthClients.id, { onDelete: "cascade" }),
+  // A Raft system app's event (RFC 074 §2 assistant doorbell: "system.assistant").
+  systemApp: text("system_app", { enum: ["system.assistant"] }),
   accessTokenId: uuid("access_token_id").references(() => oauthAccessTokens.id, { onDelete: "set null" }),
   externalEventId: text("external_event_id"),
   kind: text("kind", { enum: ["event", "notification", "action_request"] }).notNull(),
@@ -1577,7 +1599,20 @@ export const thirdPartyAgentEvents = pgTable("third_party_agent_events", {
   index("idx_third_party_agent_events_agent_created").on(t.agentId, t.createdAt.desc(), t.id.desc()),
   // Retention sweep: events are deleted 30 days after they expire.
   index("idx_third_party_agent_events_expires").on(t.expiresAt),
+  check("third_party_agent_events_one_source", sql`num_nonnulls(${t.clientId}, ${t.systemApp}) = 1`),
 ]);
+
+// RFC 074 §2 assistant doorbell: at most one pending "owner inbox changed" per
+// assistant. Written with INSERT ... ON CONFLICT DO NOTHING inside the
+// transaction that records the owner's inbox fact (no lock on an existing
+// row); a worker turns it into a `system.assistant` event in
+// third_party_agent_events and deletes it, at most once per 30 s per assistant.
+export const assistantDoorbells = pgTable("assistant_doorbells", {
+  agentId: uuid("agent_id").primaryKey().references(() => agents.id, { onDelete: "cascade" }),
+  serverId: uuid("server_id").notNull().references(() => servers.id, { onDelete: "cascade" }),
+  ownerUserId: uuid("owner_user_id").notNull(),
+  firstChangeAt: timestamp("first_change_at", { withTimezone: true }).notNull().defaultNow(),
+});
 
 // Canonical source events shared by notification adapters. App webhooks are a
 // delivery adapter over this substrate, not a parallel webhook event stream.
@@ -1979,6 +2014,11 @@ export const messages = pgTable("messages", {
   senderId: text("sender_id").notNull(), // user UUID, agent UUID, or external actor projection UUID
   agentSendKey: text("agent_send_key"),
   randomId: text("random_id"),
+  // IANA time zone the human sender's browser reported when sending from the
+  // web client (e.g. "Asia/Shanghai"). Exposed to agents only, never to other
+  // humans' clients. Null for agent/system/forwarded/non-web messages and for
+  // rows written before it existed. Not in slock_rw_publication's column list.
+  senderTimezone: text("sender_timezone"),
   messageType: text("message_type", { enum: ["chat", "system"] }).notNull().default("chat"),
   content: text("content").notNull(),
   actionMetadata: json("action_metadata"),
@@ -4606,6 +4646,342 @@ export const webhookEvents = pgTable("webhook_events", {
   processedAt: timestamp("processed_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
+export const billingPaidHistoryCoverage = pgTable("billing_paid_history_coverage", {
+  environment: text("environment").notNull(),
+  livemode: boolean("livemode").notNull(),
+  coverageOriginAt: timestamp("coverage_origin_at", { withTimezone: true }).notNull(),
+  coverageWatermarkAt: timestamp("coverage_watermark_at", { withTimezone: true }).notNull(),
+  completedAt: timestamp("completed_at", { withTimezone: true }),
+  source: text("source").notNull(),
+  auditActor: text("audit_actor"),
+  auditReason: text("audit_reason").notNull(),
+  unresolvedIdentityCount: integer("unresolved_identity_count").notNull().default(0),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [
+  primaryKey({ columns: [t.environment, t.livemode] }),
+  check("billing_paid_history_coverage_unresolved_nonnegative", sql`${t.unresolvedIdentityCount} >= 0`),
+  check("billing_paid_history_coverage_window_valid", sql`${t.coverageWatermarkAt} >= ${t.coverageOriginAt}`),
+  check("billing_paid_history_coverage_completed_covers_window", sql`${t.completedAt} IS NULL OR ${t.completedAt} >= ${t.coverageWatermarkAt}`),
+]);
+
+export const billingPaidIdentityEvents = pgTable("billing_paid_identity_events", {
+  id: uuid("id").primaryKey().$defaultFn(() => randomUUID()),
+  environment: text("environment").notNull(),
+  livemode: boolean("livemode").notNull(),
+  stripeEventId: text("stripe_event_id").notNull(),
+  stripeInvoiceId: text("stripe_invoice_id").notNull(),
+  stripeSubscriptionId: text("stripe_subscription_id"),
+  stripeCustomerId: text("stripe_customer_id"),
+  paidFactKind: text("paid_fact_kind", { enum: ["pro_invoice_paid"] }).notNull(),
+  stripeProductId: text("stripe_product_id").notNull(),
+  stripePriceId: text("stripe_price_id").notNull(),
+  serverId: uuid("server_id"),
+  payerUserId: uuid("payer_user_id"),
+  ownerUserId: uuid("owner_user_id"),
+  identityResolutionState: text("identity_resolution_state", { enum: ["resolved", "parked"] }).notNull(),
+  paidAt: timestamp("paid_at", { withTimezone: true }).notNull(),
+  currency: text("currency").notNull(),
+  invoiceSubtotal: integer("invoice_subtotal").notNull(),
+  invoiceTotal: integer("invoice_total").notNull(),
+  amountPaid: integer("amount_paid").notNull(),
+  observedAt: timestamp("observed_at", { withTimezone: true }).notNull().defaultNow(),
+  source: text("source").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [
+  uniqueIndex("idx_billing_paid_identity_event_env_mode_event").on(t.environment, t.livemode, t.stripeEventId),
+  uniqueIndex("idx_billing_paid_identity_event_env_mode_invoice").on(t.environment, t.livemode, t.stripeInvoiceId),
+  index("idx_billing_paid_identity_events_server").on(t.serverId),
+  index("idx_billing_paid_identity_events_payer").on(t.payerUserId),
+  index("idx_billing_paid_identity_events_owner").on(t.ownerUserId),
+  index("idx_billing_paid_identity_events_customer").on(t.stripeCustomerId),
+  check(
+    "billing_paid_identity_events_identity_state_consistent",
+    sql`(
+      ${t.identityResolutionState} = 'resolved'
+      AND ${t.serverId} IS NOT NULL
+      AND ${t.payerUserId} IS NOT NULL
+      AND ${t.ownerUserId} IS NOT NULL
+    ) OR ${t.identityResolutionState} = 'parked'`,
+  ),
+  check("billing_paid_identity_events_amounts_nonnegative", sql`${t.invoiceSubtotal} >= 0 AND ${t.invoiceTotal} >= 0 AND ${t.amountPaid} >= 0`),
+  check("billing_paid_identity_events_currency_lower", sql`${t.currency} = lower(${t.currency})`),
+  check("billing_paid_identity_events_fact_kind_known", sql`${t.paidFactKind} = 'pro_invoice_paid'`),
+  check("billing_paid_identity_events_identity_state_known", sql`${t.identityResolutionState} IN ('resolved', 'parked')`),
+]);
+
+export const billingPaidIdentityResolutions = pgTable("billing_paid_identity_resolutions", {
+  id: uuid("id").primaryKey().$defaultFn(() => randomUUID()),
+  paidIdentityEventId: uuid("paid_identity_event_id").notNull().references(() => billingPaidIdentityEvents.id, { onDelete: "restrict" }),
+  serverId: uuid("server_id").notNull(),
+  payerUserId: uuid("payer_user_id").notNull(),
+  ownerUserId: uuid("owner_user_id").notNull(),
+  resolvedAt: timestamp("resolved_at", { withTimezone: true }).notNull().defaultNow(),
+  source: text("source").notNull(),
+  auditActor: text("audit_actor"),
+  auditReason: text("audit_reason").notNull(),
+}, (t) => [
+  uniqueIndex("idx_billing_paid_identity_resolutions_event").on(t.paidIdentityEventId),
+  index("idx_billing_paid_identity_resolutions_server").on(t.serverId),
+  index("idx_billing_paid_identity_resolutions_payer").on(t.payerUserId),
+  index("idx_billing_paid_identity_resolutions_owner").on(t.ownerUserId),
+]);
+
+export const referralDiscountCampaigns = pgTable("referral_discount_campaigns", {
+  id: uuid("id").primaryKey().$defaultFn(() => randomUUID()),
+  name: text("name").notNull(),
+  status: text("status", { enum: ["draft", "active", "paused", "archived"] }).notNull().default("draft"),
+  providerState: text("provider_state", { enum: ["pending", "ready", "failed", "disabled"] }).notNull().default("pending"),
+  providerProvisioningStartedAt: timestamp("provider_provisioning_started_at", { withTimezone: true }),
+  stripeCouponId: text("stripe_coupon_id"),
+  providerStrategy: text("provider_strategy").notNull(),
+  providerErrorCode: text("provider_error_code"),
+  providerErrorMessage: text("provider_error_message"),
+  providerSyncedAt: timestamp("provider_synced_at", { withTimezone: true }),
+  percentOff: integer("percent_off").notNull(),
+  durationMonths: integer("duration_months").notNull(),
+  currency: text("currency").notNull().default("usd"),
+  productScope: text("product_scope", { enum: ["pro"] }).notNull().default("pro"),
+  billingIntervalScope: text("billing_interval_scope", { enum: ["monthly", "annual", "both"] }).notNull().default("both"),
+  maxPaidRedemptions: integer("max_paid_redemptions"),
+  liveReservedCount: integer("live_reserved_count").notNull().default(0),
+  qualifiedCount: integer("qualified_count").notNull().default(0),
+  startsAt: timestamp("starts_at", { withTimezone: true }),
+  expiresAt: timestamp("expires_at", { withTimezone: true }),
+  createdByUserId: uuid("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  archivedAt: timestamp("archived_at", { withTimezone: true }),
+  mutationReason: text("mutation_reason").notNull(),
+}, (t) => [
+  check("referral_discount_campaigns_percent_range", sql`${t.percentOff} > 0 AND ${t.percentOff} <= 100`),
+  check("referral_discount_campaigns_duration_positive", sql`${t.durationMonths} > 0`),
+  check("referral_discount_campaigns_currency_lower", sql`${t.currency} = lower(${t.currency})`),
+  check("referral_discount_campaigns_counts_nonnegative", sql`${t.liveReservedCount} >= 0 AND ${t.qualifiedCount} >= 0`),
+  check("referral_discount_campaigns_cap_nonnegative", sql`${t.maxPaidRedemptions} IS NULL OR ${t.maxPaidRedemptions} >= 0`),
+  check("referral_discount_campaigns_counts_within_cap", sql`${t.maxPaidRedemptions} IS NULL OR (${t.liveReservedCount} + ${t.qualifiedCount}) <= ${t.maxPaidRedemptions}`),
+  check("referral_discount_campaigns_status_known", sql`${t.status} IN ('draft', 'active', 'paused', 'archived')`),
+  check("referral_discount_campaigns_provider_state_known", sql`${t.providerState} IN ('pending', 'ready', 'failed', 'disabled')`),
+  check("referral_discount_campaigns_product_scope_known", sql`${t.productScope} = 'pro'`),
+  check("referral_discount_campaigns_billing_interval_scope_known", sql`${t.billingIntervalScope} IN ('monthly', 'annual', 'both')`),
+]);
+
+export const referralDiscountCodes = pgTable("referral_discount_codes", {
+  id: uuid("id").primaryKey().$defaultFn(() => randomUUID()),
+  campaignId: uuid("campaign_id").notNull().references(() => referralDiscountCampaigns.id, { onDelete: "cascade" }),
+  referrerUserId: uuid("referrer_user_id").notNull().references(() => users.id, { onDelete: "restrict" }),
+  displayCode: text("display_code").notNull(),
+  normalizedCode: text("normalized_code").notNull(),
+  status: text("status", { enum: ["active", "paused", "revoked", "expired"] }).notNull().default("active"),
+  providerState: text("provider_state", { enum: ["pending", "ready", "failed", "disabled"] }).notNull().default("pending"),
+  providerProvisioningStartedAt: timestamp("provider_provisioning_started_at", { withTimezone: true }),
+  stripePromotionCodeId: text("stripe_promotion_code_id"),
+  providerErrorCode: text("provider_error_code"),
+  providerErrorMessage: text("provider_error_message"),
+  providerSyncedAt: timestamp("provider_synced_at", { withTimezone: true }),
+  maxPaidRedemptions: integer("max_paid_redemptions"),
+  liveReservedCount: integer("live_reserved_count").notNull().default(0),
+  qualifiedCount: integer("qualified_count").notNull().default(0),
+  expiresAt: timestamp("expires_at", { withTimezone: true }),
+  issuedByUserId: uuid("issued_by_user_id").references(() => users.id, { onDelete: "set null" }),
+  issuedReason: text("issued_reason").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [
+  uniqueIndex("idx_referral_discount_codes_normalized").on(t.normalizedCode),
+  index("idx_referral_discount_codes_campaign").on(t.campaignId),
+  index("idx_referral_discount_codes_referrer").on(t.referrerUserId),
+  check("referral_discount_codes_normalized_lower", sql`${t.normalizedCode} = lower(${t.normalizedCode})`),
+  check("referral_discount_codes_counts_nonnegative", sql`${t.liveReservedCount} >= 0 AND ${t.qualifiedCount} >= 0`),
+  check("referral_discount_codes_cap_nonnegative", sql`${t.maxPaidRedemptions} IS NULL OR ${t.maxPaidRedemptions} >= 0`),
+  check("referral_discount_codes_counts_within_cap", sql`${t.maxPaidRedemptions} IS NULL OR (${t.liveReservedCount} + ${t.qualifiedCount}) <= ${t.maxPaidRedemptions}`),
+  check("referral_discount_codes_status_known", sql`${t.status} IN ('active', 'paused', 'revoked', 'expired')`),
+  check("referral_discount_codes_provider_state_known", sql`${t.providerState} IN ('pending', 'ready', 'failed', 'disabled')`),
+]);
+
+export const referralDiscountRedemptions = pgTable("referral_discount_redemptions", {
+  id: uuid("id").primaryKey().$defaultFn(() => randomUUID()),
+  campaignId: uuid("campaign_id").notNull().references(() => referralDiscountCampaigns.id, { onDelete: "restrict" }),
+  codeId: uuid("code_id").notNull().references(() => referralDiscountCodes.id, { onDelete: "restrict" }),
+  referrerUserId: uuid("referrer_user_id").notNull(),
+  referredServerId: uuid("referred_server_id").notNull().references(() => servers.id, { onDelete: "restrict" }),
+  redeemingUserId: uuid("redeeming_user_id").notNull().references(() => users.id, { onDelete: "restrict" }),
+  stripeCustomerId: text("stripe_customer_id"),
+  stripeCheckoutSessionId: text("stripe_checkout_session_id"),
+  stripeSubscriptionId: text("stripe_subscription_id"),
+  firstPaidInvoiceId: text("first_paid_invoice_id"),
+  targetProductScope: text("target_product_scope", { enum: ["pro"] }).notNull().default("pro"),
+  targetBillingInterval: text("target_billing_interval", { enum: ["monthly", "annual"] }).notNull().default("monthly"),
+  acquisitionState: text("acquisition_state", {
+    enum: ["reserved", "checkout_created", "checkout_completed", "qualified", "checkout_expired", "void"],
+  }).notNull().default("reserved"),
+  qualificationDisposition: text("qualification_disposition", { enum: ["none", "qualified", "reversed"] }).notNull().default("none"),
+  financialRisk: text("financial_risk", { enum: ["clear", "disputed"] }).notNull().default("clear"),
+  capSlotState: text("cap_slot_state", { enum: ["held", "consumed", "released"] }).notNull().default("held"),
+  reservationExpiresAt: timestamp("reservation_expires_at", { withTimezone: true }).notNull(),
+  referralCheckoutIdempotencyKey: text("referral_checkout_idempotency_key"),
+  internalReason: text("internal_reason"),
+  reservedAt: timestamp("reserved_at", { withTimezone: true }).notNull().defaultNow(),
+  checkoutCreatedAt: timestamp("checkout_created_at", { withTimezone: true }),
+  checkoutCompletedAt: timestamp("checkout_completed_at", { withTimezone: true }),
+  qualifiedAt: timestamp("qualified_at", { withTimezone: true }),
+  terminalAt: timestamp("terminal_at", { withTimezone: true }),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [
+  index("idx_referral_discount_redemptions_campaign").on(t.campaignId),
+  index("idx_referral_discount_redemptions_code").on(t.codeId),
+  index("idx_referral_discount_redemptions_server").on(t.referredServerId),
+  index("idx_referral_discount_redemptions_redeeming_user").on(t.redeemingUserId),
+  index("idx_referral_discount_redemptions_customer").on(t.stripeCustomerId),
+  uniqueIndex("idx_referral_discount_redemptions_session").on(t.stripeCheckoutSessionId),
+  uniqueIndex("idx_referral_discount_redemptions_invoice").on(t.firstPaidInvoiceId),
+  uniqueIndex("idx_referral_discount_redemptions_active_server")
+    .on(t.referredServerId)
+    .where(sql`${t.acquisitionState} IN ('reserved', 'checkout_created', 'checkout_completed')`),
+  uniqueIndex("idx_referral_discount_redemptions_active_user")
+    .on(t.redeemingUserId)
+    .where(sql`${t.acquisitionState} IN ('reserved', 'checkout_created', 'checkout_completed')`),
+  uniqueIndex("idx_referral_discount_redemptions_active_customer")
+    .on(t.stripeCustomerId)
+    .where(sql`${t.stripeCustomerId} IS NOT NULL AND ${t.acquisitionState} IN ('reserved', 'checkout_created', 'checkout_completed')`),
+  uniqueIndex("idx_referral_discount_redemptions_success_server")
+    .on(t.referredServerId)
+    .where(sql`${t.acquisitionState} = 'qualified'`),
+  uniqueIndex("idx_referral_discount_redemptions_success_user")
+    .on(t.redeemingUserId)
+    .where(sql`${t.acquisitionState} = 'qualified'`),
+  uniqueIndex("idx_referral_discount_redemptions_success_customer")
+    .on(t.stripeCustomerId)
+    .where(sql`${t.stripeCustomerId} IS NOT NULL AND ${t.acquisitionState} = 'qualified'`),
+  check(
+    "referral_discount_redemptions_qualification_consistent",
+    sql`(
+      ${t.acquisitionState} = 'qualified'
+      AND ${t.qualificationDisposition} IN ('qualified', 'reversed')
+      AND ${t.capSlotState} = 'consumed'
+    ) OR (
+      ${t.acquisitionState} <> 'qualified'
+      AND ${t.qualificationDisposition} = 'none'
+    )`,
+  ),
+  check(
+    "referral_discount_redemptions_cap_slot_consistent",
+    sql`(
+      ${t.acquisitionState} IN ('reserved', 'checkout_created', 'checkout_completed')
+      AND ${t.capSlotState} = 'held'
+    ) OR (
+      ${t.acquisitionState} = 'qualified'
+      AND ${t.capSlotState} = 'consumed'
+    ) OR (
+      ${t.acquisitionState} IN ('checkout_expired', 'void')
+      AND ${t.capSlotState} = 'released'
+    )`,
+  ),
+  check("referral_discount_redemptions_acquisition_state_known", sql`${t.acquisitionState} IN ('reserved', 'checkout_created', 'checkout_completed', 'qualified', 'checkout_expired', 'void')`),
+  check("referral_discount_redemptions_product_scope_known", sql`${t.targetProductScope} = 'pro'`),
+  check("referral_discount_redemptions_billing_interval_known", sql`${t.targetBillingInterval} IN ('monthly', 'annual')`),
+  check("referral_discount_redemptions_disposition_known", sql`${t.qualificationDisposition} IN ('none', 'qualified', 'reversed')`),
+  check("referral_discount_redemptions_financial_risk_known", sql`${t.financialRisk} IN ('clear', 'disputed')`),
+  check("referral_discount_redemptions_cap_slot_known", sql`${t.capSlotState} IN ('held', 'consumed', 'released')`),
+]);
+
+export const referralDiscountProviderOperations = pgTable("referral_discount_provider_operations", {
+  id: uuid("id").primaryKey().$defaultFn(() => randomUUID()),
+  environment: text("environment").notNull(),
+  livemode: boolean("livemode").notNull(),
+  operationType: text("operation_type", {
+    enum: ["campaign_coupon_create", "code_promotion_create", "checkout_session_create"],
+  }).notNull(),
+  localTargetId: uuid("local_target_id").notNull(),
+  state: text("state", { enum: ["intent", "provider_started", "confirmed", "failed", "parked"] }).notNull().default("intent"),
+  idempotencyKey: text("idempotency_key").notNull(),
+  requestFingerprint: text("request_fingerprint").notNull(),
+  requestPayload: jsonb("request_payload").$type<Record<string, unknown>>().notNull().default({}),
+  providerObjectId: text("provider_object_id"),
+  providerRequestId: text("provider_request_id"),
+  attemptCount: integer("attempt_count").notNull().default(0),
+  sanitizedErrorCode: text("sanitized_error_code"),
+  sanitizedErrorMessage: text("sanitized_error_message"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [
+  uniqueIndex("idx_referral_discount_provider_operations_target")
+    .on(t.environment, t.livemode, t.operationType, t.localTargetId),
+  index("idx_referral_discount_provider_operations_state").on(t.state),
+  check("referral_discount_provider_operations_operation_known", sql`${t.operationType} IN ('campaign_coupon_create', 'code_promotion_create', 'checkout_session_create')`),
+  check("referral_discount_provider_operations_state_known", sql`${t.state} IN ('intent', 'provider_started', 'confirmed', 'failed', 'parked')`),
+  check("referral_discount_provider_operations_attempts_nonnegative", sql`${t.attemptCount} >= 0`),
+]);
+
+export const referralDiscountProviderEvents = pgTable("referral_discount_provider_events", {
+  id: uuid("id").primaryKey().$defaultFn(() => randomUUID()),
+  environment: text("environment").notNull(),
+  livemode: boolean("livemode").notNull(),
+  stripeEventId: text("stripe_event_id").notNull(),
+  stripeEventType: text("stripe_event_type").notNull(),
+  providerObjectId: text("provider_object_id"),
+  sourceApiVersion: text("source_api_version"),
+  payloadHash: text("payload_hash").notNull(),
+  normalizedPayload: jsonb("normalized_payload").$type<Record<string, unknown>>().notNull().default({}),
+  processingState: text("processing_state", { enum: ["parked", "applied"] }).notNull().default("parked"),
+  sanitizedErrorCode: text("sanitized_error_code"),
+  sanitizedErrorMessage: text("sanitized_error_message"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [
+  uniqueIndex("idx_referral_discount_provider_events_event").on(t.environment, t.livemode, t.stripeEventId),
+  index("idx_referral_discount_provider_events_object").on(t.providerObjectId),
+  check("referral_discount_provider_events_processing_state_known", sql`${t.processingState} IN ('parked', 'applied')`),
+]);
+
+export const referralDiscountFinancialAdjustments = pgTable("referral_discount_financial_adjustments", {
+  id: uuid("id").primaryKey().$defaultFn(() => randomUUID()),
+  environment: text("environment").notNull(),
+  livemode: boolean("livemode").notNull(),
+  kind: text("kind", { enum: ["refund", "credit_note", "dispute_opened", "dispute_won", "dispute_lost"] }).notNull(),
+  providerFactId: text("provider_fact_id").notNull(),
+  providerFactSequence: integer("provider_fact_sequence").notNull().default(0),
+  stripeEventId: text("stripe_event_id").notNull(),
+  stripeInvoiceId: text("stripe_invoice_id").notNull(),
+  stripeRefundId: text("stripe_refund_id"),
+  stripeCreditNoteId: text("stripe_credit_note_id"),
+  stripeDisputeId: text("stripe_dispute_id"),
+  stripeChargeId: text("stripe_charge_id"),
+  currency: text("currency").notNull(),
+  amount: integer("amount").notNull(),
+  netRevenueDelta: integer("net_revenue_delta").notNull(),
+  fullEconomicReversal: boolean("full_economic_reversal").notNull().default(false),
+  observedAt: timestamp("observed_at", { withTimezone: true }).notNull().defaultNow(),
+  sanitizedReason: text("sanitized_reason"),
+  observedRedemptionId: uuid("observed_redemption_id").references(() => referralDiscountRedemptions.id, { onDelete: "restrict" }),
+  resolvedRedemptionId: uuid("resolved_redemption_id").references(() => referralDiscountRedemptions.id, { onDelete: "restrict" }),
+  processingState: text("processing_state", { enum: ["parked", "applied"] }).notNull().default("parked"),
+  appliedAt: timestamp("applied_at", { withTimezone: true }),
+}, (t) => [
+  uniqueIndex("idx_referral_discount_adjustments_provider_fact").on(t.environment, t.livemode, t.kind, t.providerFactId, t.stripeEventId),
+  index("idx_referral_discount_adjustments_observed_redemption").on(t.observedRedemptionId),
+  index("idx_referral_discount_adjustments_resolved_redemption").on(t.resolvedRedemptionId),
+  index("idx_referral_discount_adjustments_invoice").on(t.stripeInvoiceId),
+  check("referral_discount_adjustments_amount_nonnegative", sql`${t.amount} >= 0`),
+  check("referral_discount_adjustments_currency_lower", sql`${t.currency} = lower(${t.currency})`),
+  check("referral_discount_adjustments_kind_known", sql`${t.kind} IN ('refund', 'credit_note', 'dispute_opened', 'dispute_won', 'dispute_lost')`),
+  check("referral_discount_adjustments_processing_state_known", sql`${t.processingState} IN ('parked', 'applied')`),
+  check("referral_discount_adjustments_applied_has_redemption", sql`${t.processingState} <> 'applied' OR (${t.resolvedRedemptionId} IS NOT NULL AND ${t.appliedAt} IS NOT NULL)`),
+]);
+
+export const referralDiscountFinancialAdjustmentResolutions = pgTable("referral_discount_financial_adjustment_resolutions", {
+  id: uuid("id").primaryKey().$defaultFn(() => randomUUID()),
+  financialAdjustmentId: uuid("financial_adjustment_id").notNull().references(() => referralDiscountFinancialAdjustments.id, { onDelete: "restrict" }),
+  redemptionId: uuid("redemption_id").notNull().references(() => referralDiscountRedemptions.id, { onDelete: "restrict" }),
+  resolvedAt: timestamp("resolved_at", { withTimezone: true }).notNull().defaultNow(),
+  source: text("source").notNull(),
+  auditActor: text("audit_actor"),
+  auditReason: text("audit_reason").notNull(),
+}, (t) => [
+  uniqueIndex("idx_referral_discount_adjustment_resolutions_adjustment").on(t.financialAdjustmentId),
+  index("idx_referral_discount_adjustment_resolutions_redemption").on(t.redemptionId),
+]);
+
 // Attachment objects — immutable stored bytes and their physical metadata.
 //
 // Phase A of RFC 049 only establishes the additive object/projection boundary.
@@ -5516,6 +5892,10 @@ export const threadFollows = pgTable("thread_follows", {
   followerId: uuid("follower_id").notNull(),
   parentMessageId: uuid("parent_message_id").notNull(),
   reason: text("reason", { enum: ["replied", "authored", "mentioned", "manual"] }).notNull(),
+  // Start of the CURRENT follow period, not "row created": reset when a thread
+  // is re-followed after an unfollow, never when an active follow is
+  // re-confirmed (reply, mention). Readers (agent `thread list` followedAt,
+  // follower order, o11y rule 12b) want "since when is this followed now".
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   doneAt: timestamp("done_at", { withTimezone: true }),
   unfollowedAt: timestamp("unfollowed_at", { withTimezone: true }),
@@ -5659,20 +6039,36 @@ export const serverInvites = pgTable("server_invites", {
  * Not server-scoped: announcements follow the user across every server they
  * belong to, so the table holds no serverId.
  */
+export const announcementImageAssets = pgTable("announcement_image_assets", {
+  id: uuid("id").primaryKey(),
+  storageKey: text("storage_key").notNull().unique(),
+  contentType: text("content_type").notNull(),
+  width: integer("width").notNull(),
+  height: integer("height").notNull(),
+  sizeBytes: integer("size_bytes").notNull(),
+  createdByUserId: uuid("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
+  createdByAgentId: uuid("created_by_agent_id").references(() => agents.id, { onDelete: "set null" }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  unreferencedSince: timestamp("unreferenced_since", { withTimezone: true }),
+  deletingAt: timestamp("deleting_at", { withTimezone: true }),
+});
+
 export const announcements = pgTable("announcements", {
   id: uuid("id").primaryKey().$defaultFn(() => randomUUID()),
   title: text("title").notNull(),
   pages: json("pages").$type<Array<{ title?: string; body: string }>>().notNull(),
   defaultLocale: text("default_locale", { enum: ["en", "zh-cn"] }).notNull().default("en"),
   localizedContent: json("localized_content")
-    .$type<Partial<Record<"en" | "zh-cn", { title: string; pages: Array<{ title?: string; body: string }> }>>>()
+    .$type<Partial<Record<"en" | "zh-cn", AnnouncementContent>>>()
     .notNull()
     .default({}),
   status: text("status", { enum: ["draft", "published", "expired"] }).notNull().default("draft"),
   startsAt: timestamp("starts_at", { withTimezone: true }),
   endsAt: timestamp("ends_at", { withTimezone: true }),
   createdByUserId: uuid("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
+  createdByAgentId: uuid("created_by_agent_id").references(() => agents.id, { onDelete: "set null" }),
   updatedByUserId: uuid("updated_by_user_id").references(() => users.id, { onDelete: "set null" }),
+  updatedByAgentId: uuid("updated_by_agent_id").references(() => agents.id, { onDelete: "set null" }),
   publishedByUserId: uuid("published_by_user_id").references(() => users.id, { onDelete: "set null" }),
   // Keep the legacy default during the expand phase so an old server that is
   // still draining can continue to create a published row safely. V2 draft
@@ -5697,6 +6093,7 @@ export const announcementAuditEvents = pgTable("announcement_audit_events", {
   id: uuid("id").primaryKey().$defaultFn(() => randomUUID()),
   announcementId: uuid("announcement_id").notNull().references(() => announcements.id, { onDelete: "cascade" }),
   actorUserId: uuid("actor_user_id").references(() => users.id, { onDelete: "set null" }),
+  actorAgentId: uuid("actor_agent_id").references(() => agents.id, { onDelete: "set null" }),
   action: text("action", {
     enum: [
       "created",
@@ -6617,6 +7014,62 @@ export const computers = pgTable("computers", {
   index("idx_computers_server").on(t.serverId),
   // Partial index `idx_computers_prefix_active` is appended to the
   // canonical migration as raw SQL — see drizzle migration `0074_*`.
+]);
+
+// Durable, receiver-independent attention caused by an authoritative runtime
+// account usage snapshot. The account key is already a one-way SHA-256 value;
+// no provider label, raw response, or error text is retained here.
+export const systemAttentionIncidents = pgTable("system_attention_incidents", {
+  id: uuid("id").primaryKey().$defaultFn(() => randomUUID()),
+  serverId: uuid("server_id").notNull().references(() => servers.id, { onDelete: "cascade" }),
+  machineId: uuid("machine_id").notNull().references(() => machines.id, { onDelete: "cascade" }),
+  kind: text("kind", { enum: ["usage_limit_reached"] }).notNull(),
+  provider: text("provider", { enum: ["claude", "codex", "kimi", "grok"] }).notNull(),
+  accountKeyHash: text("account_key_hash").notNull(),
+  windowKey: text("window_key").notNull(),
+  activationGeneration: integer("activation_generation").notNull(),
+  state: text("state", { enum: ["active", "resolved"] }).notNull().default("active"),
+  affectedAgentIds: jsonb("affected_agent_ids").$type<string[]>().notNull().default([]),
+  activatedAt: timestamp("activated_at", { withTimezone: true }).notNull(),
+  lastObservedAt: timestamp("last_observed_at", { withTimezone: true }).notNull(),
+  resetsAt: timestamp("resets_at", { withTimezone: true }),
+  resolvedAt: timestamp("resolved_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [
+  uniqueIndex("idx_system_attention_incidents_generation")
+    .on(t.serverId, t.machineId, t.kind, t.provider, t.accountKeyHash, t.windowKey, t.activationGeneration),
+  uniqueIndex("idx_system_attention_incidents_active_identity")
+    .on(t.serverId, t.machineId, t.kind, t.provider, t.accountKeyHash, t.windowKey)
+    .where(sql`${t.state} = 'active'`),
+  index("idx_system_attention_incidents_server_state").on(t.serverId, t.state, t.activatedAt),
+  check("system_attention_incidents_generation_positive", sql`${t.activationGeneration} > 0`),
+  check("system_attention_incidents_account_key_hash", sql`${t.accountKeyHash} ~ '^[0-9a-f]{64}$'`),
+  check("system_attention_incidents_window_key", sql`length(btrim(${t.windowKey})) BETWEEN 1 AND 64`),
+  check(
+    "system_attention_incidents_state_shape",
+    sql`(${t.state} = 'active' AND ${t.resolvedAt} IS NULL)
+      OR (${t.state} = 'resolved' AND ${t.resolvedAt} IS NOT NULL)`,
+  ),
+]);
+
+// Seen/dismissed state belongs to each current receiver, so opening or
+// dismissing on one device is immediately reflected on every other device.
+export const systemAttentionReceipts = pgTable("system_attention_receipts", {
+  incidentId: uuid("incident_id").notNull()
+    .references(() => systemAttentionIncidents.id, { onDelete: "cascade" }),
+  userId: uuid("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  seenAt: timestamp("seen_at", { withTimezone: true }),
+  dismissedAt: timestamp("dismissed_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [
+  primaryKey({ columns: [t.incidentId, t.userId] }),
+  index("idx_system_attention_receipts_user").on(t.userId, t.updatedAt),
+  check(
+    "system_attention_receipts_dismiss_implies_seen",
+    sql`${t.dismissedAt} IS NULL OR ${t.seenAt} IS NOT NULL`,
+  ),
 ]);
 
 export const computerOutageOccurrences = pgTable("computer_outage_occurrences", {

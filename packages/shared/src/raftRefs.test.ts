@@ -8,6 +8,7 @@ import {
   formatRaftRefTarget,
   parseRaftRefTarget,
   replaceOutsideMarkdownCode,
+  resolveRaftMentionHandle,
   structuredRaftMentionStillAppears,
   type RaftTargetString,
 } from "./raftRefs";
@@ -192,7 +193,15 @@ test("identity-backed mentions survive left-boundary edits without becoming pref
   assert.equal(structuredRaftMentionStillAppears("先给个草案@Mona", "Mona"), true);
   assert.equal(structuredRaftMentionStillAppears("draft@Mona", "Mona"), true);
   assert.equal(structuredRaftMentionStillAppears("先给个草案 @Mona", "Mona"), true);
-  assert.equal(structuredRaftMentionStillAppears("先给个草案@Mona继续", "Mona"), false);
+  assert.equal(structuredRaftMentionStillAppears("先给个草案@Mona继续", "Mona"), true);
+  assert.equal(structuredRaftMentionStillAppears("@Mona的方案", "Mona"), true);
+  assert.equal(structuredRaftMentionStillAppears("@Monaさん", "Mona"), true);
+  assert.equal(structuredRaftMentionStillAppears("@Mona와", "Mona"), true);
+  assert.equal(structuredRaftMentionStillAppears("@민수가 확인", "민수"), true);
+  assert.equal(structuredRaftMentionStillAppears("@Monica", "Mona"), false);
+  assert.equal(structuredRaftMentionStillAppears("@Mona2", "Mona"), false);
+  assert.equal(structuredRaftMentionStillAppears("@Mona_x", "Mona"), false);
+  assert.equal(structuredRaftMentionStillAppears("@Mona-x", "Mona"), false);
   assert.equal(structuredRaftMentionStillAppears("ask `@Mona`", "Mona"), false);
   assert.equal(
     structuredRaftMentionStillAppears(
@@ -309,4 +318,92 @@ test("prose outside code survives the walk byte for byte", () => {
   ]) {
     assert.equal(replaceOutsideMarkdownCode(source, (chunk) => chunk), source);
   }
+});
+
+test("resolveRaftMentionHandle splits free text only where Latin meets CJK", () => {
+  const known = (...names: string[]) => (name: string) => names.includes(name);
+
+  assert.deepEqual(resolveRaftMentionHandle("ops", known("ops")), { handle: "ops", suffix: "" });
+  assert.deepEqual(resolveRaftMentionHandle("ops와", known("ops")), { handle: "ops", suffix: "와" });
+  assert.deepEqual(resolveRaftMentionHandle("ops的", known("ops")), { handle: "ops", suffix: "的" });
+  assert.deepEqual(resolveRaftMentionHandle("opsさん", known("ops")), { handle: "ops", suffix: "さん" });
+  assert.deepEqual(resolveRaftMentionHandle("opsテスト", known("ops")), { handle: "ops", suffix: "テスト" });
+  assert.deepEqual(resolveRaftMentionHandle("ops-2的", known("ops-2")), { handle: "ops-2", suffix: "的" });
+  // An exact member name always wins over a split.
+  assert.deepEqual(resolveRaftMentionHandle("ops的", known("ops", "ops的")), { handle: "ops的", suffix: "" });
+
+  // Same-script continuations are never guessed.
+  assert.equal(resolveRaftMentionHandle("opsteam", known("ops")), null);
+  assert.equal(resolveRaftMentionHandle("Kaiwen", known("Kai")), null);
+  assert.equal(resolveRaftMentionHandle("ops2", known("ops")), null);
+  assert.equal(resolveRaftMentionHandle("ops_bot", known("ops")), null);
+  assert.equal(resolveRaftMentionHandle("민수가", known("민", "민수")), null);
+  assert.equal(resolveRaftMentionHandle("张三的", known("张三")), null);
+  assert.equal(resolveRaftMentionHandle("ops的", known("other")), null);
+  assert.equal(resolveRaftMentionHandle("opsx的", known("ops")), null);
+  // A member literally named `ops君` is reached exactly; with both names
+  // present a glued suffix is ambiguous and stays unresolved.
+  assert.deepEqual(resolveRaftMentionHandle("ops君", known("ops", "ops君")), { handle: "ops君", suffix: "" });
+  assert.deepEqual(resolveRaftMentionHandle("ops君", known("ops")), { handle: "ops", suffix: "君" });
+  assert.equal(resolveRaftMentionHandle("ops君的", known("ops", "ops君")), null);
+  // Two valid splits (`ops|君a的` and `ops君a|的`) also leave it unresolved.
+  assert.equal(resolveRaftMentionHandle("ops君a的", known("ops", "ops君a")), null);
+  assert.deepEqual(resolveRaftMentionHandle("ops君a的", known("ops君a")), { handle: "ops君a", suffix: "的" });
+});
+
+test("resolveRaftMentionHandle matches its rule for every short token and member set", () => {
+  // One character per class that matters: Latin, digit, `_`, `-`, Han,
+  // hiragana, katakana, hangul. Every token up to five characters is tried
+  // against every choice of which of its prefixes are member names (other
+  // names cannot affect the result).
+  const alphabet = ["a", "1", "_", "-", "的", "さ", "テ", "가"];
+  const handleEnd = /[\p{Script=Latin}\p{N}_-]$/u;
+  const cjkStart = /^[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u;
+
+  const expected = (chars: string[], members: Set<string>) => {
+    const token = chars.join("");
+    if (members.has(token)) return { handle: token, suffix: "" };
+    const prefix = (length: number) => chars.slice(0, length).join("");
+    const valid = [];
+    for (let length = 1; length < chars.length; length += 1) {
+      const rest = chars.slice(length).join("");
+      if (members.has(prefix(length)) && handleEnd.test(prefix(length)) && cjkStart.test(rest)) valid.push(length);
+    }
+    // Exactly one valid split, and no longer member that also fits;
+    // anything else makes the split point a guess, so nobody is mentioned.
+    if (valid.length !== 1) return null;
+    const chosen = valid[0];
+    for (let length = chosen + 1; length < chars.length; length += 1) {
+      if (members.has(prefix(length))) return null;
+    }
+    return { handle: prefix(chosen), suffix: chars.slice(chosen).join("") };
+  };
+
+  let tokens: string[][] = [[]];
+  let checked = 0;
+  for (let size = 1; size <= 5; size += 1) {
+    tokens = tokens.flatMap((chars) => alphabet.map((char) => [...chars, char]));
+    for (const chars of tokens) {
+      const prefixes = chars.map((_, index) => chars.slice(0, index + 1).join(""));
+      for (let mask = 0; mask < 1 << prefixes.length; mask += 1) {
+        const members = new Set(prefixes.filter((_, index) => mask & (1 << index)));
+        const token = chars.join("");
+        const actual = resolveRaftMentionHandle(token, (name) => members.has(name));
+        const label = `@${token} with members [${[...members].join(", ")}]`;
+        assert.deepEqual(actual, expected(chars, members), label);
+        // Direct invariants, independent of the restated rule above.
+        if (actual) {
+          assert.ok(members.has(actual.handle), label);
+          assert.equal(actual.handle + actual.suffix, token, label);
+          if (actual.suffix) assert.ok(handleEnd.test(actual.handle) && cjkStart.test(actual.suffix), label);
+        }
+        // Tokens without a Latin-to-CJK boundary keep the pre-split behaviour.
+        const hasBoundary = chars.some((_, index) =>
+          index > 0 && handleEnd.test(chars[index - 1]) && cjkStart.test(chars[index]));
+        if (!hasBoundary) assert.equal(actual?.handle ?? null, members.has(token) ? token : null);
+        checked += 1;
+      }
+    }
+  }
+  assert.equal(checked, 1118480);
 });

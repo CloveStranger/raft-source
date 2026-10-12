@@ -98,11 +98,19 @@ import {
   AGENT_API_INBOX_DEFAULT_LIMIT,
   AGENT_API_INBOX_MAX_LIMIT,
   type AgentApiInboxListQuery,
+  AGENT_API_ASSISTANT_INBOX_DEFAULT_LIMIT,
+  AGENT_API_ASSISTANT_INBOX_MAX_LIMIT,
+  AGENT_API_ASSISTANT_MESSAGES_DEFAULT_LIMIT,
+  AGENT_API_ASSISTANT_MESSAGES_MAX_LIMIT,
+  type AgentApiAssistantOwnerInboxQuery,
+  type AgentApiAssistantOwnerMessagesQuery,
   THIRD_PARTY_EVENT_DELIVERED_REPORT_MAX_IDS,
   isThirdPartyEventId,
   buildIntegrationInviteUrl,
+  type Tracer,
 } from "@botiverse/raft-shared";
 import * as agentService from "../services/agentService";
+import * as assistantService from "../services/assistantService";
 import { resolveReadableAttachmentAuthorityContext } from "../services/attachmentAuthorityService";
 import * as actionCardsService from "../services/actionCardsService";
 import * as idempotentAgentApiService from "../services/agentApiIdempotencyService";
@@ -146,6 +154,7 @@ import * as taskService from "../services/taskService";
 import {
   getTaskRealtimeSurfaceTargets,
   resolveTaskChannelSurface,
+  resolveTaskChannelSurfaces,
   isHistoricalJointTaskReadOnly,
   type TaskChannelSurface,
   type TaskSurfaceChannel,
@@ -158,7 +167,7 @@ import {
 import { projectRichMessageSocketPayload } from "../services/messageRealtimeEvents";
 import { mutateMessageReaction } from "../services/messageReactionService";
 import { ChannelConversionInProgressError } from "../services/channelConversionFenceService";
-import { isChannelReadOnlyByBillingFeature, isChannelReadOnlyByQuota } from "../services/planService";
+import { getHistoryCutoff, getServerPlan, isChannelReadOnlyByBillingFeature, isChannelReadOnlyByQuota } from "../services/planService";
 import { getAttachmentFileSizeLimitBytes } from "../services/attachmentUploadPolicy";
 import { uploadAttachmentBuffers } from "../services/attachmentUploadWriterService";
 import type { AttachmentUploadSessionService } from "./attachmentUploadSessions";
@@ -231,7 +240,8 @@ import {
   resolveRequestAttachmentFileSizeLimitBytes,
   runSingleAttachmentUpload,
 } from "./attachments";
-import { addTraceEvent, errorClassOf, recordTraceEvent, tracePhase, withTraceChildSpan } from "../tracing/semanticTrace";
+import { addTraceEvent, errorClassOf, getCurrentTraceSpan, recordTraceEvent, tracePhase, withTraceChildSpan, withTraceRoot } from "../tracing/semanticTrace";
+import { agentIdHashAttrs, serverIdHashAttrs } from "../tracing/traceIdentity";
 import { traceSendRouteFailure, traceSendRouteCatch } from "../tracing/sendRouteFailure";
 import { traceQuerySpan } from "../tracing/queryTrace";
 import { handleAgentKnowledgeGet, handleAgentKnowledgeSearch } from "./agentKnowledge";
@@ -268,7 +278,7 @@ import {
   type MentionActionKind,
   type MentionActionResult,
 } from "../services/mentionActionService";
-import { actorHasServerCapabilityInServer, getActorServerRoleInServer } from "../lib/actorPermissions";
+import { actorHasServerCapabilityInServer, getActorServerRoleInServer, getAgentServerRolesInServer } from "../lib/actorPermissions";
 import { getAppUrl } from "../config/appUrl";
 import {
   getAgentServerLabs,
@@ -286,6 +296,7 @@ import { isAgentCredentialActive } from "../services/agentCredentialService";
 import { subscribeAgentCredentialRevocation } from "../services/agentCredentialRevocationBus";
 import { ManagedMcpGatewayError } from "../services/managedMcpGateway";
 import { ManagedMcpOAuthError } from "../services/managedMcpOAuthService";
+import { getHostedRuntimeSummary } from "../services/agentRuntimeProvisionService";
 import {
   FeedbackLocatorIngestError,
   ingestFeedbackLocator,
@@ -853,6 +864,10 @@ function agentApiRequestValidators<K extends AgentApiRouteKey>(routeKey: K): Req
  *   channelMembers                GET    /agent/:id/channel-members         channel:read
  *   serverInfo                    GET    /agent/:id/server                  server:read
  *   serverUpdate                  PATCH  /agent/:id/server                  server:update
+ *   channelCreate                 POST   /agent/:id/channels                channel:create
+ *   channelUpdate                 PATCH  /agent/:id/channels/:c             channel:update
+ *   channelMemberAdd              POST   /agent/:id/channels/:c/members     channel:add_member
+ *   channelMemberRemove           DELETE /agent/:id/channels/:c/members     channel:remove_member
  *   knowledgeGet                  GET    /agent/:id/knowledge               knowledge:read
  *   knowledgeSearch               GET    /agent/:id/knowledge/search        knowledge:read
  *   taskList                      GET    /agent/:id/tasks                   task:read
@@ -866,8 +881,8 @@ function agentApiRequestValidators<K extends AgentApiRouteKey>(routeKey: K): Req
  * twin: it replaces serverInfo + channelMembers and requires channel:read here
  * and server:read inline.
  *
- * Channel create/update/member routes and the server avatar route are not
- * contract operations yet; they carry `requireAgentGrant(...)` inline below.
+ * The server avatar route is not a contract operation (multipart upload); it
+ * carries `requireAgentGrant(...)` inline below.
  * `internalAgentApi.grantCoverage.test.ts` derives the expected pairs from the
  * legacy router and fails when a counterpart here lacks the same grant.
  */
@@ -891,6 +906,10 @@ export const AGENT_API_ROUTE_GRANTS: Partial<Record<AgentApiRouteKey, AgentScope
   // Plus server:read inline: it replaces serverInfo and channelMembers.
   userChannels: "channel:read",
   serverUpdate: "server:update",
+  channelCreate: "channel:create",
+  channelUpdate: "channel:update",
+  channelMemberAdd: "channel:add_member",
+  channelMemberRemove: "channel:remove_member",
   knowledgeGet: "knowledge:read",
   knowledgeSearch: "knowledge:read",
   taskList: "task:read",
@@ -1362,6 +1381,7 @@ async function listRecentFreshnessMessagesAfterSeq(
     {
       forwardedBundleViewerAgentId: agentId,
       forwardedBundleViewerServerId: agentServerId,
+      includeSenderTimezone: true,
     },
   );
   if (recentMessages.length === 0) return [];
@@ -1870,6 +1890,7 @@ registerAgentApiRoute("agentContext", async (req, res) => {
       return;
     }
     const external = isExternalAgentRuntime(agent.runtime);
+    const serverRole = await getActorServerRoleInServer(serverId, "agent", actingAgentId);
     const prompt = external
       ? {
           audience: "self-hosted-runner" as const,
@@ -1878,6 +1899,7 @@ registerAgentApiRoute("agentContext", async (req, res) => {
             displayName: agent.displayName || agent.name,
             description: agent.description,
             serverName: server.name,
+            serverRole,
           }),
         }
       : null;
@@ -1889,6 +1911,8 @@ registerAgentApiRoute("agentContext", async (req, res) => {
         description: agent.description ?? null,
         runtime: agent.runtime,
         external,
+        assistantOf: agent.assistantOwnerUserId ? { userId: agent.assistantOwnerUserId } : null,
+        serverRole,
       },
       server: { id: server.id, slug: server.slug, name: server.name },
       credential: { capabilities: [...(req.agentCredentialScopes ?? [])] },
@@ -2058,9 +2082,11 @@ registerAgentApiRoute("serverUpdate", async (req, res) => {
 // Server Labs uses the same transactional service and role policy as the
 // human Settings API. The credential scope is an additional transport gate;
 // it never substitutes for owner/admin membership authorization.
-internalAgentApiRouter.get("/labs", requireAgentCapability("read"), getAgentServerLabs);
-internalAgentApiRouter.patch("/labs/access", requireAgentCapability("server"), patchAgentServerLabsAccess);
-internalAgentApiRouter.put("/labs/:labKey", requireAgentCapability("server"), putAgentServerLabEnrollment);
+// Labs keep their own body checks (stable codes such as invalid_enabled and
+// invalid_lab_key); the contract supplies the capability and the response shape.
+registerAgentApiRoute("serverLabs", validateAgentApiResponseMiddleware("serverLabs"), getAgentServerLabs);
+registerAgentApiRoute("serverLabsAccess", validateAgentApiResponseMiddleware("serverLabsAccess"), patchAgentServerLabsAccess);
+registerAgentApiRoute("serverLabEnrollment", validateAgentApiResponseMiddleware("serverLabEnrollment"), putAgentServerLabEnrollment);
 
 internalAgentApiRouter.post("/server/avatar", requireAgentCapability("server"), requireAgentGrant("server:update"), async (req, res) => {
   try {
@@ -2349,6 +2375,7 @@ registerAgentApiRoute("historyRead", async (req, res) => {
         {
           forwardedBundleViewerAgentId: actingAgentId,
           forwardedBundleViewerServerId: serverId,
+          includeSenderTimezone: true,
         },
       );
       if (!context || context.channelId !== storageChannelId) {
@@ -2363,6 +2390,7 @@ registerAgentApiRoute("historyRead", async (req, res) => {
       rawMsgs = await messageService.listMessages(storageChannelId, limit + 1, beforeSeq, afterSeq, undefined, {
         forwardedBundleViewerAgentId: actingAgentId,
         forwardedBundleViewerServerId: serverId,
+        includeSenderTimezone: true,
       });
     }
     const msgs = jointThreadProjection || resolvedAccess?.kind === "joint"
@@ -2446,8 +2474,23 @@ registerAgentApiRoute("historyRead", async (req, res) => {
       }
     }
 
+    // The agent's own messages are never unread for it: the inbox count and the
+    // `/events` pull leave them out, and a send can leave the read position
+    // below them (markAgentOwnSendRead). So `--unread` prints only others'
+    // messages, while the read position above moved over the whole window, own
+    // messages included, so the next `--unread` starts after them. A full page
+    // followed only by own messages has no more unread.
+    const ownSender = { senderType: "agent" as const, senderId: actingAgentId };
+    const shownMsgs = unread
+      ? pageMsgs.filter((message) => !(message.senderType === ownSender.senderType && message.senderId === ownSender.senderId))
+      : pageMsgs;
+    if (unread && hasNewer && pageMsgs.length > 0) {
+      const pageLastSeq = Math.max(...pageMsgs.map((message) => Number(message.seq)));
+      hasNewer = (await messageService.listMessages(storageChannelId, 1, undefined, pageLastSeq, undefined, { excludeSender: ownSender })).length > 0;
+    }
+
     const renderedContents = await agentPermalinkRenderService.renderAgentReadablePermalinksInTexts(
-      pageMsgs.map((message) => message.content),
+      shownMsgs.map((message) => message.content),
       serverId,
     );
     // Resolve the evidence key from the same authority that resolved this
@@ -2479,7 +2522,7 @@ registerAgentApiRoute("historyRead", async (req, res) => {
         channel_type: channel.type as "dm" | "thread",
         target: resolvedHistoryTarget ?? channelRef,
       } }),
-      messages: pageMsgs.map((message, index: number) =>
+      messages: shownMsgs.map((message, index: number) =>
         toAgentApiMessageEnvelope(
           message,
           messageService.appendAgentFacingForwardedSnapshot(
@@ -2874,6 +2917,7 @@ async function handleReaction(
   const context = await messageService.getMessageContext(message.id, 0, 0, undefined, {
     forwardedBundleViewerAgentId: actingAgentId,
     forwardedBundleViewerServerId: serverId,
+    includeSenderTimezone: true,
   });
   const enriched = context?.messages[0];
   if (!enriched) {
@@ -2992,6 +3036,10 @@ registerAgentApiRoute("channelJoin", ...agentApiRequestValidators("channelJoin")
     req.app.get("io")?.to(`server:${serverId}`).emit("channel:members-updated", { channelId: channel.id });
     sendAgentApiResponse("channelJoin", res, { ok: true });
   } catch (err: any) {
+    if (err instanceof Error && err.message === channelService.ASSISTANT_CHANNEL_FORBIDDEN_MESSAGE) {
+      res.status(403).json({ error: err.message, code: channelService.ASSISTANT_CHANNEL_FORBIDDEN_CODE });
+      return;
+    }
     sendJsonServerError(req, res, {
       error: "Failed to join channel",
       code: "agent_api_channel_join_failed",
@@ -3058,7 +3106,7 @@ registerAgentApiRoute("channelLeave", ...agentApiRequestValidators("channelLeave
   }
 });
 
-internalAgentApiRouter.post("/channels", requireAgentCapability("channels"), requireAgentGrant("channel:create"), async (req, res) => {
+registerAgentApiRoute("channelCreate", ...agentApiRequestValidators("channelCreate"), validateAgentApiResponseMiddleware("channelCreate"), async (req, res) => {
   try {
     const actingAgentId = req.actingAgentId!;
     const serverId = req.serverId!;
@@ -3084,7 +3132,7 @@ internalAgentApiRouter.post("/channels", requireAgentCapability("channels"), req
   }
 });
 
-internalAgentApiRouter.patch("/channels/:channelId", requireAgentCapability("channels"), requireAgentGrant("channel:update"), async (req, res) => {
+registerAgentApiRoute("channelUpdate", ...agentApiRequestValidators("channelUpdate"), validateAgentApiResponseMiddleware("channelUpdate"), async (req, res) => {
   try {
     const actingAgentId = req.actingAgentId!;
     const serverId = req.serverId!;
@@ -3163,7 +3211,7 @@ registerAgentApiRoute(
   agentChannelLifecycleHandler(false),
 );
 
-internalAgentApiRouter.post("/channels/:channelId/members", requireAgentCapability("channels"), requireAgentGrant("channel:add_member"), async (req, res) => {
+registerAgentApiRoute("channelMemberAdd", ...agentApiRequestValidators("channelMemberAdd"), validateAgentApiResponseMiddleware("channelMemberAdd"), async (req, res) => {
   try {
     const actingAgentId = req.actingAgentId!;
     const serverId = req.serverId!;
@@ -3191,7 +3239,7 @@ internalAgentApiRouter.post("/channels/:channelId/members", requireAgentCapabili
   }
 });
 
-internalAgentApiRouter.delete("/channels/:channelId/members", requireAgentCapability("channels"), requireAgentGrant("channel:remove_member"), async (req, res) => {
+registerAgentApiRoute("channelMemberRemove", ...agentApiRequestValidators("channelMemberRemove"), validateAgentApiResponseMiddleware("channelMemberRemove"), async (req, res) => {
   try {
     const actingAgentId = req.actingAgentId!;
     const serverId = req.serverId!;
@@ -3572,6 +3620,40 @@ internalAgentApiRouter.get("/wake-hints/stream", requireAgentCapability("read"),
     }
 
     const agentOrchestrator = req.app.get("agentOrchestrator") as AgentOrchestrator;
+
+    // The stream lives for hours; its request span covers only the connection.
+    // Each pull (the open one, every heartbeat, every wake) is its own root
+    // trace that names the stream it came from: hanging them all on the
+    // request span folded thousands of pulls into one trace (#proj-o11y task
+    // #6). Wake and revocation callbacks also run in the context of whoever
+    // fired them, so without their own root they would land in the sender's
+    // or revoker's trace.
+    const streamSpan = getCurrentTraceSpan();
+    const streamContext = streamSpan?.context ?? null;
+    const streamTracer = req.app.get("serverTracer") as Tracer | undefined;
+    let tickOrdinal = 0;
+    type StreamTickTrigger = "open" | "heartbeat" | "wake" | "wake_follow_up" | "revocation";
+    const inStreamTickTrace = <T>(trigger: StreamTickTrigger, work: () => Promise<T>): Promise<T> =>
+      withTraceRoot(streamTracer, "server.agent_api.wake_hints_stream.tick", {
+        parent: null,
+        surface: "server",
+        kind: "internal",
+        attrs: {
+          trigger,
+          tick_ordinal: ++tickOrdinal,
+          ...(streamContext ? { stream_trace_id: streamContext.traceId, stream_span_id: streamContext.spanId } : {}),
+          ...agentIdHashAttrs(actingAgentId),
+          ...serverIdHashAttrs(serverId),
+        },
+      }, work);
+    // A failed tick is already recorded on its own span; log it like the
+    // flush does and keep the stream (and the process) running.
+    const runStreamTick = (trigger: StreamTickTrigger, work: () => Promise<unknown>): void => {
+      void inStreamTickTrace(trigger, work).catch((err) => {
+        console.error("internal.agent-api.wake-hints-stream tick error:", serializeErrorForLog(err));
+      });
+    };
+
     // External agents: persisted messages are peeked from the durable inbox;
     // the latest pull is kept for this stream's flushes. No cursor moves here.
     const isExternal = isExternalAgentRuntime(agent.runtime);
@@ -3582,9 +3664,11 @@ internalAgentApiRouter.get("/wake-hints/stream", requireAgentCapability("read"),
       if (pulled) durablePending = pulled.messages;
       durablePending ??= [];
     };
-    await pullDurable("wake_hints_stream_open", false);
-    await rebuildPendingThirdPartyAgentEvents(agentOrchestrator, actingAgentId)
-      .catch((err) => console.error("internal.agent-api third-party event rebuild failed:", serializeErrorForLog(err)));
+    await inStreamTickTrace("open", async () => {
+      await pullDurable("wake_hints_stream_open", false);
+      await rebuildPendingThirdPartyAgentEvents(agentOrchestrator, actingAgentId)
+        .catch((err) => console.error("internal.agent-api third-party event rebuild failed:", serializeErrorForLog(err)));
+    });
 
     res.writeHead(200, {
       "content-type": "text/event-stream",
@@ -3653,12 +3737,12 @@ internalAgentApiRouter.get("/wake-hints/stream", requireAgentCapability("read"),
     };
     const onDelivered = (agentId: string) => {
       if (agentId !== actingAgentId) return;
-      void auditAndFlush(true);
+      runStreamTick("wake", () => auditAndFlush(true));
       if (!isExternal) return;
       clearFollowUps();
       followUpTimers = messageService.externalWakeFollowUpPullDelaysMs().map((delayMs) => {
         const timer = setTimeout(() => {
-          if (!closed) void auditAndFlush(true);
+          if (!closed) runStreamTick("wake_follow_up", () => auditAndFlush(true));
         }, delayMs);
         timer.unref?.();
         return timer;
@@ -3700,7 +3784,8 @@ internalAgentApiRouter.get("/wake-hints/stream", requireAgentCapability("read"),
       });
       if (active || closed) return active && !closed;
       cleanup();
-      addTraceEvent("agent_api.wake_hints_stream.credential_invalidated", { agent_id: actingAgentId, credential_id: credentialId });
+      // Connection-level: it ends the stream, so it stays on the stream's span.
+      streamSpan?.addEvent("agent_api.wake_hints_stream.credential_invalidated", { agent_id: actingAgentId, credential_id: credentialId });
       res.write(`event: credential-revoked\ndata: {"code":"credential_revoked"}\n\n`);
       res.end();
       return false;
@@ -3710,11 +3795,11 @@ internalAgentApiRouter.get("/wake-hints/stream", requireAgentCapability("read"),
     // stays online. Throttled per credential inside the recorder.
     const heartbeat = setInterval(() => {
       if (closed) return;
-      void credentialStillValid().then((valid) => {
-        if (!valid) return;
+      runStreamTick("heartbeat", async () => {
+        if (!(await credentialStillValid())) return;
         res.write(": ka\n\n");
         recordAgentApiSeen(req);
-        void auditAndFlush(false);
+        await auditAndFlush(false);
       });
     }, heartbeatMs);
     heartbeat.unref?.();
@@ -3724,7 +3809,7 @@ internalAgentApiRouter.get("/wake-hints/stream", requireAgentCapability("read"),
     // `broadcastAgentCredentialRevocation`); re-check this stream's
     // credential now instead of waiting for the next tick.
     unsubscribeRevocation = subscribeAgentCredentialRevocation(actingAgentId, () => {
-      void credentialStillValid();
+      runStreamTick("revocation", credentialStillValid);
     });
 
     req.on("close", cleanup);
@@ -5500,11 +5585,12 @@ registerAgentApiRoute("channelMembers", async (req, res) => {
     }
 
     const members = await channelService.getChannelMembers(resolved.channelId);
-    const visibleAgents = await Promise.all(members.agents.map(async (agent) => ({
+    const agentRoles = await getAgentServerRolesInServer(serverId, members.agents.map((agent) => agent.id));
+    const visibleAgents = members.agents.map((agent) => ({
       name: agent.name,
       status: agent.status,
-      role: await getActorServerRoleInServer(serverId, "agent", agent.id),
-    })));
+      role: agentRoles.get(agent.id) ?? null,
+    }));
     const visibleHumans = await filterAgentVisibleHumansForHiddenDirectory(
       serverId,
       agentId,
@@ -5513,7 +5599,10 @@ registerAgentApiRoute("channelMembers", async (req, res) => {
     sendAgentApiResponse("channelMembers", res, {
       channel: { ref: channelRef, type: resolved.type },
       agents: visibleAgents,
-      humans: visibleHumans.map((human) => ({ name: human.name, description: human.description, role: human.role })),
+      humans: visibleHumans.map((human) => {
+        const servers = channelService.agentVisibleMemberServers(human, serverId);
+        return { name: human.name, description: human.description, role: human.role, ...(servers ? { servers } : {}) };
+      }),
     });
   } catch (err) {
     sendJsonServerError(req, res, {
@@ -5657,6 +5746,245 @@ registerAgentApiRoute("inboxList", ...agentApiRequestValidators("inboxList"), as
     });
   }
 });
+/**
+ * RFC 074 §2 personal assistant (v0) reads. The assistant calls with its own
+ * credential and the Server answers AS ITS OWNER, minus DMs. Every request
+ * re-resolves the owner (`resolveAssistantOwner`: flag on, live assistant,
+ * owner still a member), and every way that fails gets the same
+ * `403 assistant_not_enabled` so the reason is not observable. A DM, a thread
+ * under a DM, and a channel the owner cannot see all get the same neutral 404.
+ *
+ * Neither read changes anyone's state: no read cursor, no activity, no
+ * product event. Both reuse the human read paths (`getInboxItems`,
+ * `filterUserAccessibleChannelIds`, `canUserAccessChannel`, `listMessages`).
+ */
+async function requireAssistantOwner(req: Request, res: Response): Promise<string | null> {
+  const ownerUserId = await assistantService.resolveAssistantOwner(req.actingAgentId!, req.serverId!);
+  if (!ownerUserId) {
+    res.status(403).json({
+      error: "Only a personal assistant can use this, and only where personal assistants are enabled.",
+      code: assistantService.ASSISTANT_NOT_ENABLED_CODE,
+    });
+    return null;
+  }
+  return ownerUserId;
+}
+
+const ASSISTANT_CHANNEL_NOT_FOUND_BODY = { ...CHANNEL_NOT_FOUND_BODY, code: "channel_not_found" } as const;
+
+registerAgentApiRoute("assistantOwnerInbox", ...agentApiRequestValidators("assistantOwnerInbox"), async (req, res) => {
+  try {
+    const serverId = req.serverId!;
+    const ownerUserId = await requireAssistantOwner(req, res);
+    if (!ownerUserId) return;
+    const query = req.query as AgentApiAssistantOwnerInboxQuery;
+    const filter = query.filter ?? "unread";
+    const limit = Math.min(Number(query.limit ?? AGENT_API_ASSISTANT_INBOX_DEFAULT_LIMIT), AGENT_API_ASSISTANT_INBOX_MAX_LIMIT);
+    const offset = Number(query.offset ?? 0);
+    const historyCutoff = getHistoryCutoff(await getServerPlan(serverId));
+    const loaded = await channelService.getInboxItems(serverId, ownerUserId, {
+      filter,
+      limit,
+      offset,
+      scope: "no_dms",
+      historyCutoff,
+    });
+    // Re-check every row against the owner's access right now. The inbox
+    // projection can trail a membership change; a borrowed read must not.
+    const accessChannelIds = loaded.items.map((item) => item.kind === "thread" ? item.threadChannelId : item.channelId);
+    const visible = await channelService.filterUserAccessibleChannelIds(accessChannelIds, ownerUserId, serverId);
+    const items = loaded.items
+      .filter((item) => !channelService.isDmScopedInboxItem(item))
+      .filter((item) => visible.has(item.kind === "thread" ? item.threadChannelId : item.channelId))
+      .map((item) => item.kind === "thread"
+        ? {
+            kind: "thread" as const,
+            channelId: item.threadChannelId,
+            channelName: item.parentChannelName,
+            channelType: item.parentChannelType,
+            parentChannelId: item.parentChannelId,
+            parentMessageId: item.parentMessageId,
+            unread: item.unreadCount,
+            hasMention: item.hasMention,
+            latestAt: item.lastActivityAt ?? null,
+            latestSenderName: item.latestActivitySenderName ?? null,
+            latestPreview: item.latestActivityPreview ?? null,
+            firstUnreadMessageId: item.firstUnreadMessageId ?? null,
+          }
+        : {
+            kind: "channel" as const,
+            channelId: item.channelId,
+            channelName: item.channelName,
+            channelType: item.channelType,
+            parentChannelId: null,
+            parentMessageId: null,
+            unread: item.unreadCount,
+            hasMention: item.hasMention,
+            latestAt: item.lastMessageAt ?? null,
+            latestSenderName: item.lastMessageSenderName ?? null,
+            latestPreview: item.lastMessagePreview ?? null,
+            firstUnreadMessageId: item.firstUnreadMessageId ?? null,
+          });
+    recordTraceEvent("server.agent_api.assistant.owner_inbox", {
+      agent_id: req.actingAgentId!,
+      subject_user_id: ownerUserId,
+      filter,
+      row_count: loaded.items.length,
+      returned_count: items.length,
+    });
+    sendAgentApiResponse("assistantOwnerInbox", res, {
+      owner: { userId: ownerUserId },
+      filter,
+      items,
+      hasMore: loaded.hasMore,
+      nextOffset: loaded.hasMore ? offset + loaded.items.length : null,
+    });
+  } catch (err: unknown) {
+    sendJsonServerError(req, res, {
+      error: "Failed to list the owner's inbox",
+      code: "agent_api_assistant_owner_inbox_failed",
+      logPrefix: "[AgentAPI] Failed to list assistant owner inbox",
+      err,
+    });
+  }
+});
+
+registerAgentApiRoute("assistantOwnerMessages", ...agentApiRequestValidators("assistantOwnerMessages"), async (req, res) => {
+  try {
+    const serverId = req.serverId!;
+    const ownerUserId = await requireAssistantOwner(req, res);
+    if (!ownerUserId) return;
+    const query = req.query as AgentApiAssistantOwnerMessagesQuery;
+    const channelId = query.channelId;
+    const anchors = [query.before, query.after, query.around].filter((value) => value !== undefined && value.trim() !== "");
+    if (anchors.length > 1) {
+      res.status(400).json({ error: "Use at most one of before, after, or around.", code: "invalid_message_page_cursor" });
+      return;
+    }
+    const channel = await channelService.getChannel(channelId);
+    if (
+      !channel
+      || channel.serverId !== serverId
+      || await assistantService.isDmScopedChannel(channel)
+      || !await channelService.canUserAccessChannel(channelId, ownerUserId, serverId)
+    ) {
+      res.status(404).json(ASSISTANT_CHANNEL_NOT_FOUND_BODY);
+      return;
+    }
+    const limit = Math.min(Number(query.limit ?? AGENT_API_ASSISTANT_MESSAGES_DEFAULT_LIMIT), AGENT_API_ASSISTANT_MESSAGES_MAX_LIMIT);
+    const historyCutoff = getHistoryCutoff(await getServerPlan(serverId));
+    const jointThreadProjection = channel.type === "thread"
+      ? await channelService.getJointThreadProjectionByLocalThread(channelId, serverId)
+      : null;
+    const resolvedAccess = channel.type === "joint"
+      ? await channelService.resolveChannelAccess({ serverId, channelId })
+      : null;
+    const storageChannelId = jointThreadProjection?.canonicalThreadChannelId
+      ?? (resolvedAccess?.kind === "joint" ? resolvedAccess.canonicalChannelId : channelId);
+    const projectionChannelId = jointThreadProjection?.localThreadChannelId
+      ?? (resolvedAccess?.kind === "joint" ? resolvedAccess.localChannelId : channelId);
+    const viewer = {
+      attachmentCommentViewerUserId: ownerUserId,
+      forwardedBundleViewerUserId: ownerUserId,
+      forwardedBundleViewerServerId: serverId,
+      includeSenderTimezone: true,
+    };
+    const anchorNotFound = () => res.status(404).json({ error: "No such message in this conversation.", code: "message_not_found" });
+    const around = query.around?.trim();
+    const before = query.before?.trim();
+    const after = query.after?.trim();
+    for (const anchor of [around, before, after]) {
+      if (anchor && !isHistoryAnchorShape(anchor)) {
+        res.status(400).json({ error: "An anchor is a message id, an 8-character short id, or a seq.", code: "invalid_message_page_cursor" });
+        return;
+      }
+    }
+    let rawMsgs;
+    let hasOlder = false;
+    let hasNewer = false;
+    if (around) {
+      const resolution = await messageService.resolveMessageSeqAnchor(storageChannelId, around, "around", historyCutoff);
+      if (!resolution.ok) {
+        anchorNotFound();
+        return;
+      }
+      const beforeCount = Math.floor((limit - 1) / 2);
+      const context = await messageService.getMessageContextBySeq(
+        storageChannelId,
+        resolution.seq,
+        beforeCount,
+        limit - beforeCount - 1,
+        historyCutoff,
+        viewer,
+      );
+      if (!context || context.channelId !== storageChannelId) {
+        anchorNotFound();
+        return;
+      }
+      rawMsgs = context.messages;
+      hasOlder = context.hasOlder;
+      hasNewer = context.hasNewer;
+    } else {
+      const anchor = before ?? after;
+      const resolution = anchor
+        ? await messageService.resolveMessageSeqAnchor(storageChannelId, anchor, "pagination", historyCutoff)
+        : undefined;
+      if (resolution && !resolution.ok) {
+        anchorNotFound();
+        return;
+      }
+      const beforeSeq = before && resolution?.ok ? resolution.seq : undefined;
+      const afterSeq = after && resolution?.ok ? resolution.seq : undefined;
+      rawMsgs = await messageService.listMessages(storageChannelId, limit + 1, beforeSeq, afterSeq, historyCutoff, viewer);
+      const probed = paginateHistoryProbe(
+        rawMsgs,
+        limit,
+        afterSeq !== undefined ? "after" : beforeSeq !== undefined ? "before" : "latest",
+      );
+      rawMsgs = probed.messages;
+      hasOlder = probed.hasOlder;
+      hasNewer = probed.hasNewer;
+    }
+    const pageMsgs = jointThreadProjection || resolvedAccess?.kind === "joint"
+      ? await messageService.projectJointMessagesToLocalChannel(rawMsgs, projectionChannelId, serverId)
+      : rawMsgs;
+    const renderedContents = await agentPermalinkRenderService.renderAgentReadablePermalinksInTexts(
+      pageMsgs.map((message) => message.content),
+      serverId,
+    );
+    recordTraceEvent("server.agent_api.assistant.owner_messages", {
+      agent_id: req.actingAgentId!,
+      subject_user_id: ownerUserId,
+      channel_id: channelId,
+      channel_type: channel.type,
+      message_count: pageMsgs.length,
+    });
+    sendAgentApiResponse("assistantOwnerMessages", res, {
+      owner: { userId: ownerUserId },
+      channelId,
+      messages: pageMsgs.map((message, index: number) =>
+        toAgentApiMessageEnvelope(
+          message,
+          messageService.appendAgentFacingForwardedSnapshot(
+            renderAgentCommentScopedContent(renderedContents[index] ?? "", message.commentRef),
+            message.actionMetadata,
+          ),
+        )
+      ),
+      hasMore: hasOlder || hasNewer,
+      hasOlder,
+      hasNewer,
+    });
+  } catch (err: unknown) {
+    sendJsonServerError(req, res, {
+      error: "Failed to read the owner's messages",
+      code: "agent_api_assistant_owner_messages_failed",
+      logPrefix: "[AgentAPI] Failed to read assistant owner messages",
+      err,
+    });
+  }
+});
+
 registerAgentApiRoute("profileShow", async (req, res) => {
   try {
     const agentId = req.actingAgentId!;
@@ -5693,6 +6021,18 @@ registerAgentApiRoute("profileUpdate", ...agentApiRequestValidators("profileUpda
       res.status(400).json({
         error: "Provide at least one of avatarUrl, displayName, or description",
         errorCode: "PROFILE_UPDATE_NO_FIELDS",
+      });
+      return;
+    }
+    // A hosted agent's description IS its instructions on the provider
+    // (providerAgentInstructions), and the next human profile edit pushes the
+    // current description there. Letting the agent write it would let it
+    // rewrite its own instructions, so only a human may change it.
+    if (hasDescription && await getHostedRuntimeSummary(agentId)) {
+      res.status(403).json({
+        error: "A hosted agent's description is its instructions and only a human can change it",
+        code: "hosted_agent_description_human_only",
+        suggestedNextAction: "Your description is your instructions, so only a human can change it: ask one to edit it in your Profile tab in Raft. Nothing was changed; to update your display name or avatar, retry without the description.",
       });
       return;
     }
@@ -6809,25 +7149,33 @@ registerAgentApiRoute("taskList", async (req, res) => {
     }
 
     if (mine === "true") {
-      const channelRefs = await channelService.listAgentFacingTaskChannelRefs(serverId, agentId);
       const taskSurfaces = new Map<string, {
         channelRef: string;
         localChannel: TaskSurfaceChannel;
       }>();
-      await Promise.all([...channelRefs].map(async ([localChannelId, channelRef]) => {
-        const ctx = await resolveAgentApiTaskChannel(agentId, serverId, channelRef);
-        if (ctx) {
+      // The visible channels and their refs, then every task surface in one
+      // batch. These ids are already authorized by the ref resolution, so they
+      // are not turned into refs and looked up by name again (that round trip,
+      // per channel under Promise.all, borrowed 172 pool connections for one
+      // agent on prod).
+      const agent = await agentService.getAgent(agentId);
+      if (agent && agent.serverId === serverId) {
+        const channelRefs = await channelService.listAgentFacingTaskChannelRefs(serverId, agentId);
+        const surfaces = await resolveTaskChannelSurfaces(serverId, [...channelRefs.keys()]);
+        for (const [localChannelId, channelRef] of channelRefs) {
+          const resolved = surfaces.get(localChannelId);
+          if (!resolved) continue;
           const surface = {
             channelRef,
-            localChannel: ctx.localChannel,
+            localChannel: resolved.localChannel,
           };
           // Legacy/raw imports may still carry the authorized local joint id,
           // while Task V2 writes the canonical storage id. Both project to the
           // same caller-local surface; neither id is discovered from task rows.
           taskSurfaces.set(localChannelId, surface);
-          taskSurfaces.set(ctx.storageChannelId, surface);
+          taskSurfaces.set(resolved.storageChannelId, surface);
         }
-      }));
+      }
       const assigned = await taskService.listTasksAssignedToAgent(
         [...taskSurfaces.keys()],
         agentId,

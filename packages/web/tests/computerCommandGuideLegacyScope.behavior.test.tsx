@@ -50,3 +50,24 @@ test("macOS / Linux offers Raft Computer only", () => {
   assert.ok(screen.getByText("raft-computer setup /launch"));
   assert.equal(document.body.innerHTML.includes("raft-daemon"), false);
 });
+
+test("macOS / Linux shows the single install-and-setup command when one is given; Windows keeps two steps", () => {
+  const oneLine = "curl -fsSL https://cdn.raft.build/computer/install.sh | sh -s -- --setup /launch";
+  render(
+    <ComputerCommandGuide
+      computerCommand="raft-computer setup /launch"
+      computerInstallCommand="curl -fsSL https://cdn.raft.build/computer/install.sh | sh"
+      computerInstallAndSetupCommand={oneLine}
+      windowsComputerCommand="raft-computer setup /launch"
+      windowsComputerInstallCommand="irm https://cdn.raft.build/computer/install.ps1 | iex"
+    />,
+  );
+  fireEvent.click(screen.getByRole("radio", { name: "macOS / Linux" }));
+  assert.ok(screen.getByText(oneLine));
+  assert.ok(screen.queryByText("raft-computer setup /launch") === null);
+  assert.ok(screen.queryByText("curl -fsSL https://cdn.raft.build/computer/install.sh | sh") === null);
+
+  fireEvent.click(screen.getByRole("radio", { name: "Windows x64" }));
+  assert.ok(screen.getByText("irm https://cdn.raft.build/computer/install.ps1 | iex"));
+  assert.ok(screen.getByText("raft-computer setup /launch"));
+});

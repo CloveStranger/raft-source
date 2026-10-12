@@ -3,7 +3,7 @@ import path from "node:path";
 import { hydrateRuntimeConfig, runtimeConfigToLaunchFields, type AgentConfig } from "@botiverse/raft-shared";
 import { isClaudeCustomProviderConfig } from "./claudeProviderIsolation";
 import type { RuntimeProbeResult } from "./types";
-import { firstExistingPath, readCommandVersion, resolveCommandOnPath, resolveHomePath, type ProbeDeps } from "./probe";
+import { firstExistingPath, lookupCommandOnPath, readCommandVersion, resolveHomePath, type CommandLookup, type ProbeDeps } from "./probe";
 import { resolveRuntimeLaunch, resolveWindowsDirectLaunch, type DirectLaunch, type WindowsLaunchDeps } from "./windowsLaunch";
 
 export const CLAUDE_DESKTOP_CLI_RELATIVE_PATH = path.join("Applications", "Claude Code URL Handler.app", "Contents", "MacOS", "claude");
@@ -19,14 +19,19 @@ export const CLAUDE_DISALLOWED_TOOLS = [
 ].join(",");
 
 export function resolveClaudeCommand(deps: ProbeDeps = {}): string | null {
-  const pathCommand = resolveCommandOnPath("claude", deps);
-  if (pathCommand) return pathCommand;
+  return lookupClaudeCommand(deps).command;
+}
 
-  if ((deps.platform ?? process.platform) !== "darwin") return null;
-  return firstExistingPath([
+function lookupClaudeCommand(deps: ProbeDeps): CommandLookup {
+  const lookup = lookupCommandOnPath("claude", deps);
+  if (lookup.command) return lookup;
+
+  if ((deps.platform ?? process.platform) !== "darwin") return lookup;
+  const desktop = firstExistingPath([
     resolveHomePath(CLAUDE_DESKTOP_CLI_RELATIVE_PATH, deps),
     CLAUDE_DESKTOP_CLI_SYSTEM_PATH,
   ], deps);
+  return desktop ? { command: desktop } : lookup;
 }
 
 export function resolveClaudeLaunchCommand(config: AgentConfig, deps: ProbeDeps = {}): string | null {
@@ -35,8 +40,8 @@ export function resolveClaudeLaunchCommand(config: AgentConfig, deps: ProbeDeps 
 }
 
 export function probeClaude(deps: ProbeDeps = {}): RuntimeProbeResult {
-  const command = resolveClaudeCommand(deps);
-  if (!command) return { available: false };
+  const { command, missReason } = lookupClaudeCommand(deps);
+  if (!command) return { available: false, unavailableReason: missReason };
   return {
     available: true,
     version: readCommandVersion(command, [], deps) ?? undefined,

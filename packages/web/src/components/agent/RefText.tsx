@@ -1,5 +1,5 @@
 import { MessageReferenceChip } from "raft-ui";
-import { createContext, useContext, useMemo, useState } from "react";
+import { createContext, useCallback, useContext, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import { useRefNavigation } from "../../hooks/useRefNavigation";
 import { resolveRef } from "../../utils/refTarget";
@@ -75,7 +75,7 @@ function RefToken({ resolved }: { resolved: ResolvedRef }) {
   // the row's black/50 text by construction.
 
 
-  const onClick = (e: React.MouseEvent) => {
+  const onClick = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
     if (busy) return;
     const r = resolved.navigate();
@@ -83,7 +83,7 @@ function RefToken({ resolved }: { resolved: ResolvedRef }) {
       setBusy(true);
       void (r as Promise<void>).finally(() => setBusy(false));
     }
-  };
+  }, [busy, resolved]);
 
   return (
     <MessageReferenceChip

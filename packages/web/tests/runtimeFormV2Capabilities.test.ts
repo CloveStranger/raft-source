@@ -15,7 +15,7 @@ test("web implements every reserved runtime form v2 capability, so Codex, Grok, 
   assert.deepEqual([...WEB_RUNTIME_FORM_V2_CAPABILITIES].sort(), [...RUNTIME_FORM_V2_RESERVED_CLIENT_CAPABILITIES].sort());
   for (const name of [
     "codex.form.json", "codex.edit.json", "grok.form.json", "choices.form.json", "capabilities.form.json",
-    "claude.form.json", "claude.edit.json", "cursor.form.json", "cursor.edit.json", "copilot.form.json",
+    "claude.form.json", "claude.edit.json", "cursor.form.json", "cursor.edit.json", "copilot.edit.json",
     "pi.form.json", "pi.edit.json", "pi.edit.configured.json",
   ]) {
     const form = parseRuntimeFormV2(fixture(name));
@@ -25,4 +25,10 @@ test("web implements every reserved runtime form v2 capability, so Codex, Grok, 
   // A capability web does not know still sends the form back to legacy.
   const future = parseRuntimeFormV2({ ...(fixture("codex.form.json") as object), requiredClientCapabilities: ["choice.labels", "future.capability"] });
   assert.deepEqual(missingRuntimeFormV2Capabilities(future!, WEB_RUNTIME_FORM_V2_CAPABILITIES), ["future.capability"]);
+});
+
+test("v2 form requests ask for the app's display language, not the browser's", async () => {
+  const { runtimeFormV2RequestHeaders } = await import("../src/hooks/useRuntimeFormV2");
+  assert.deepEqual(runtimeFormV2RequestHeaders("zh-cn"), { "Accept-Language": "zh-CN" });
+  assert.deepEqual(runtimeFormV2RequestHeaders("en"), { "Accept-Language": "en" });
 });

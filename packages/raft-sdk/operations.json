@@ -1,6 +1,6 @@
 {
   "schema": "raft-sdk-operations.v1",
-  "version": "00cd4eda6058a4f4",
+  "version": "e2c1ac20eee73b19",
   "operations": [
     {
       "name": "identity.whoami",
@@ -1924,6 +1924,259 @@
       }
     },
     {
+      "name": "channels.create",
+      "toolName": "channels_create",
+      "description": "Create a public or private channel; you join it. Works when your server role allows it: the Server checks on each call, and a refusal says what is missing.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "The new channel's name, with or without a leading `#`."
+          },
+          "description": {
+            "type": "string",
+            "description": "What the channel is for (at most 500 characters).",
+            "maxLength": 500
+          },
+          "visibility": {
+            "type": "string",
+            "description": "`public` (default) or `private`.",
+            "enum": [
+              "public",
+              "private"
+            ]
+          }
+        },
+        "required": [
+          "name"
+        ]
+      },
+      "sideEffect": "write",
+      "idempotency": {
+        "kind": "none"
+      },
+      "capability": [
+        "channels"
+      ],
+      "modelOnly": false,
+      "mayInterrupt": false,
+      "consumes": {
+        "model": [],
+        "code": []
+      },
+      "output": {
+        "mayBeLarge": false,
+        "boundBy": []
+      }
+    },
+    {
+      "name": "channels.update",
+      "toolName": "channels_update",
+      "description": "Rename a channel or change its description (your server role or your channel-admin role in it must allow it), or make it public or private (server role only; you must be in the channel).",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "target": {
+            "type": "string",
+            "description": "The channel, `#channel-name`."
+          },
+          "name": {
+            "type": "string",
+            "description": "New name, with or without a leading `#`."
+          },
+          "description": {
+            "type": "string",
+            "description": "New description (at most 500 characters).",
+            "maxLength": 500
+          },
+          "visibility": {
+            "type": "string",
+            "description": "`public` or `private`. Needs your server role (a channel-admin role is not enough), and you must be in the channel.",
+            "enum": [
+              "public",
+              "private"
+            ]
+          }
+        },
+        "required": [
+          "target"
+        ]
+      },
+      "sideEffect": "write",
+      "idempotency": {
+        "kind": "natural"
+      },
+      "capability": [
+        "channels",
+        "read"
+      ],
+      "modelOnly": false,
+      "mayInterrupt": false,
+      "consumes": {
+        "model": [],
+        "code": []
+      },
+      "output": {
+        "mayBeLarge": false,
+        "boundBy": []
+      }
+    },
+    {
+      "name": "channels.archive",
+      "toolName": "channels_archive",
+      "description": "Archive a channel: it becomes read-only until unarchived. Works when your server role, or your channel-admin role in that channel, allows it.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "target": {
+            "type": "string",
+            "description": "A regular channel, `#channel-name`. DMs and threads are not accepted."
+          }
+        },
+        "required": [
+          "target"
+        ]
+      },
+      "sideEffect": "write",
+      "idempotency": {
+        "kind": "natural"
+      },
+      "capability": [
+        "channels"
+      ],
+      "modelOnly": false,
+      "mayInterrupt": false,
+      "consumes": {
+        "model": [],
+        "code": []
+      },
+      "output": {
+        "mayBeLarge": false,
+        "boundBy": []
+      }
+    },
+    {
+      "name": "channels.unarchive",
+      "toolName": "channels_unarchive",
+      "description": "Unarchive a channel so messages and other writes work again. Works when your server role, or your channel-admin role in that channel, allows it.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "target": {
+            "type": "string",
+            "description": "A regular channel, `#channel-name`. DMs and threads are not accepted."
+          }
+        },
+        "required": [
+          "target"
+        ]
+      },
+      "sideEffect": "write",
+      "idempotency": {
+        "kind": "natural"
+      },
+      "capability": [
+        "channels"
+      ],
+      "modelOnly": false,
+      "mayInterrupt": false,
+      "consumes": {
+        "model": [],
+        "code": []
+      },
+      "output": {
+        "mayBeLarge": false,
+        "boundBy": []
+      }
+    },
+    {
+      "name": "channels.addMember",
+      "toolName": "channels_add_member",
+      "description": "Add a human (`user`) or an agent (`agent`) from this server to a channel. Works when your server role allows it.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "target": {
+            "type": "string",
+            "description": "The channel, `#channel-name`."
+          },
+          "user": {
+            "type": "string",
+            "description": "A human, `@handle`. Pass exactly one of user and agent."
+          },
+          "agent": {
+            "type": "string",
+            "description": "An agent, `@handle`. Pass exactly one of user and agent."
+          }
+        },
+        "required": [
+          "target"
+        ]
+      },
+      "sideEffect": "write",
+      "idempotency": {
+        "kind": "natural"
+      },
+      "capability": [
+        "channels",
+        "read"
+      ],
+      "modelOnly": false,
+      "mayInterrupt": false,
+      "consumes": {
+        "model": [],
+        "code": []
+      },
+      "output": {
+        "mayBeLarge": false,
+        "boundBy": []
+      }
+    },
+    {
+      "name": "channels.removeMember",
+      "toolName": "channels_remove_member",
+      "description": "Remove a human (`user`) or an agent (`agent`) from a channel. Works when your server role, or your channel-admin role in that channel, allows it.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "target": {
+            "type": "string",
+            "description": "The channel, `#channel-name`."
+          },
+          "user": {
+            "type": "string",
+            "description": "A human, `@handle`. Pass exactly one of user and agent."
+          },
+          "agent": {
+            "type": "string",
+            "description": "An agent, `@handle`. Pass exactly one of user and agent."
+          }
+        },
+        "required": [
+          "target"
+        ]
+      },
+      "sideEffect": "write",
+      "idempotency": {
+        "kind": "natural"
+      },
+      "capability": [
+        "channels",
+        "read"
+      ],
+      "modelOnly": false,
+      "mayInterrupt": false,
+      "consumes": {
+        "model": [],
+        "code": []
+      },
+      "output": {
+        "mayBeLarge": false,
+        "boundBy": []
+      }
+    },
+    {
       "name": "threads.list",
       "toolName": "threads_list",
       "description": "The threads you follow.",
@@ -2046,6 +2299,152 @@
       }
     },
     {
+      "name": "server.update",
+      "toolName": "server_update",
+      "description": "Change the server's name, or whether ordinary members see its humans. Works when your server role allows it.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "The server's new name (at most 100 characters)."
+          },
+          "hideHumansFromMembers": {
+            "type": "boolean",
+            "description": "`true` hides the server's humans from ordinary members' member lists; `false` shows them."
+          }
+        }
+      },
+      "sideEffect": "write",
+      "idempotency": {
+        "kind": "natural"
+      },
+      "capability": [
+        "server"
+      ],
+      "modelOnly": false,
+      "mayInterrupt": false,
+      "consumes": {
+        "model": [],
+        "code": []
+      },
+      "output": {
+        "mayBeLarge": false,
+        "boundBy": []
+      }
+    },
+    {
+      "name": "labs.list",
+      "toolName": "labs_list",
+      "description": "The server's Labs: whether Labs access is on, each lab's state and whether the server is enrolled, and what you may change.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {}
+      },
+      "sideEffect": "read",
+      "idempotency": {
+        "kind": "natural"
+      },
+      "capability": [
+        "read"
+      ],
+      "modelOnly": false,
+      "mayInterrupt": false,
+      "consumes": {
+        "model": [],
+        "code": []
+      },
+      "output": {
+        "mayBeLarge": false,
+        "boundBy": []
+      }
+    },
+    {
+      "name": "labs.setAccess",
+      "toolName": "labs_set_access",
+      "description": "Turn the server's Labs access on or off. Only the server owner can; the Server checks on each call. If you are acting on a list you read earlier, pass its version.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "description": "true turns Labs access on for the server; false turns it off."
+          },
+          "expectedVersion": {
+            "type": "integer",
+            "description": "The Labs version from the list you are acting on; pass it whenever you read the list earlier, so a change made since then is refused. Omitted, the current version is used and the last write wins.",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "enabled"
+        ]
+      },
+      "sideEffect": "write",
+      "idempotency": {
+        "kind": "natural"
+      },
+      "capability": [
+        "read",
+        "server"
+      ],
+      "modelOnly": false,
+      "mayInterrupt": false,
+      "consumes": {
+        "model": [],
+        "code": []
+      },
+      "output": {
+        "mayBeLarge": false,
+        "boundBy": []
+      }
+    },
+    {
+      "name": "labs.setEnrollment",
+      "toolName": "labs_set_enrollment",
+      "description": "Enroll the server in an open lab, or leave one. Needs Labs access on and the lab open; the Labs list shows both, and whether you can change enrollments. If you are acting on a list you read earlier, pass its version.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "lab": {
+            "type": "string",
+            "description": "The lab's key, from the Labs list."
+          },
+          "enabled": {
+            "type": "boolean",
+            "description": "true enrolls the server in the lab; false leaves it."
+          },
+          "expectedVersion": {
+            "type": "integer",
+            "description": "The Labs version from the list you are acting on; pass it whenever you read the list earlier, so a change made since then is refused. Omitted, the current version is used and the last write wins.",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "lab",
+          "enabled"
+        ]
+      },
+      "sideEffect": "write",
+      "idempotency": {
+        "kind": "natural"
+      },
+      "capability": [
+        "read",
+        "server"
+      ],
+      "modelOnly": false,
+      "mayInterrupt": false,
+      "consumes": {
+        "model": [],
+        "code": []
+      },
+      "output": {
+        "mayBeLarge": false,
+        "boundBy": []
+      }
+    },
+    {
       "name": "users.info",
       "toolName": "users_info",
       "description": "A human's or agent's visible facts (kind, status, role, description) and which visible channels they are in. Memberships are checked over one page of visible channels; page with offset and limit.",
@@ -2128,7 +2527,7 @@
     {
       "name": "profile.update",
       "toolName": "profile_update",
-      "description": "Update your display name, description, or avatar URL.",
+      "description": "Update your display name, description, or avatar URL. A hosted agent's description is its instructions, so only a human can change it.",
       "inputSchema": {
         "type": "object",
         "properties": {

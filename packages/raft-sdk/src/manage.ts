@@ -136,7 +136,7 @@ export interface RaftManageClient {
   profile: {
     /** Show your own profile, or another visible profile with `{ target: "@name" }`. Needs `read`. */
     show(request?: { target?: string }): Promise<RaftApiResult<RaftProfile>>;
-    /** Update your display name, description, or avatar URL. Needs `send`. */
+    /** Update your display name, description, or avatar URL. Needs `send`. A hosted agent's description is human-only. */
     update(request: RaftProfileUpdate): Promise<RaftApiResult<RaftProfile>>;
     /** Upload an avatar image. Needs `send`. */
     updateAvatar(upload: RaftAvatarUpload): Promise<RaftApiResult<RaftProfile>>;

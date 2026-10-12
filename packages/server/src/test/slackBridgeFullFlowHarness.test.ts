@@ -61,7 +61,6 @@ import {
   type SlackBridgeFullFlowPreflightInput,
 } from "./slackBridgeFullFlowPreflight";
 
-import { readSlackRuntimeBuild } from "./slackBridgeRuntimeBuildManifest";
 
 // Built at runtime so secret scanners don't flag this test sample.
 const SLACK_XOXB = "xo" + "xb-";
@@ -214,8 +213,6 @@ function validPreflightInput(): SlackBridgeFullFlowPreflightInput {
       canonicalJointRows: 0,
       localJointRows: 0,
       externalBindingRows: 1,
-      runtimeBuildFingerprint: "a".repeat(64),
-      expectedRuntimeBuildFingerprint: "a".repeat(64),
     },
     registration: {
       id: "55555555-5555-4555-8555-555555555555",
@@ -339,7 +336,7 @@ test("full-flow preflight has a tooth for every declared input and authority gat
     { gate: "user_ready", mutate: (input) => { input.identity.profileSetupCompleted = false; } },
     { gate: "audience", mutate: (input) => { input.audience.channelHumanIds.pop(); } },
     { gate: "topology", mutate: (input) => { input.topology.localJointRows = 1; } },
-    { gate: "topology", mutate: (input) => { input.topology.runtimeBuildFingerprint = "0".repeat(64); } },
+    { gate: "topology", mutate: (input) => { input.topology.externalBindingRows = 0; } },
     { gate: "registration", mutate: (input) => { input.registration.provider = "not-slack"; } },
     { gate: "grant_install", mutate: (input) => { input.install.serverGrantId = randomUUID(); } },
     { gate: "credential", mutate: (input) => { input.credential.leaseOwner = "stale-worker"; } },
@@ -900,8 +897,6 @@ test("provider-disabled harness closes public register to HTTP message to worker
         eq(externalChannelBindings.channelId, seeded.channel.id),
         eq(externalChannelBindings.state, "active"),
       ));
-    const { manifest: runtimeBuildManifest, actualFingerprint: runtimeBuildFingerprint } =
-      await readSlackRuntimeBuild();
     const serverBootstrapSource = await readFile(new URL("../server.ts", import.meta.url), "utf8");
     assert.match(serverBootstrapSource, /onInboundMessageCommitted:\s*async/u);
     assert.match(serverBootstrapSource, /emitExternalProjectionMessageToFrontend\(slackBridgeSocket, messageId\)/u);
@@ -928,8 +923,6 @@ test("provider-disabled harness closes public register to HTTP message to worker
         canonicalJointRows: canonicalJointRows?.count ?? -1,
         localJointRows: localJointRows?.count ?? -1,
         externalBindingRows: externalBindingRows?.count ?? -1,
-        runtimeBuildFingerprint,
-        expectedRuntimeBuildFingerprint: runtimeBuildManifest.fingerprint,
       },
       registration: {
         id: seeded.registration.id,

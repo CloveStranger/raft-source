@@ -56,7 +56,6 @@ const HEX_EXEMPTIONS = new Set([
   "src/components/search/MessageSearchPage.tsx bg-[#fff4bf]",
   "src/components/search/MessageSearchPage.tsx bg-[#ffeefb]",
   "src/components/settings/MemberGraphSection.tsx bg-[#f8f8f0]",
-  "src/components/workspace/WorkspaceGridDemo.tsx bg-[#1f2328]",
 ]);
 
 const rawYellowViolations = [];

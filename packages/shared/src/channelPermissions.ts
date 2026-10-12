@@ -38,10 +38,30 @@ export const CHANNEL_MANAGEMENT_CAPABILITIES = [
   "changeChannelMemberRoles",
 ] as const satisfies readonly ServerCapability[];
 
+/**
+ * A joint channel's admin role is stored per server (on that server's
+ * projection) but some of its effects reach every connected server. A joint
+ * channel admin therefore gets only the capabilities whose effect is either
+ * the shared name/description (decided by artin, #proj-joint-channel:2541153f)
+ * or this server's own memberships. Archive, guest access and anything that
+ * connects servers stay with server admins.
+ */
+export const JOINT_CHANNEL_ADMIN_CAPABILITIES = [
+  "editChannelMetadata",
+  "changeChannelMemberRoles",
+] as const satisfies readonly (typeof CHANNEL_ADMIN_CAPABILITIES)[number][];
+
 export type ChannelAdminCapability = typeof CHANNEL_ADMIN_CAPABILITIES[number];
 export type ChannelAdminBasis = "server_role" | "channel_role" | "both" | null;
 
 const CHANNEL_ADMIN_CAPABILITY_SET = new Set<ServerCapability>(CHANNEL_ADMIN_CAPABILITIES);
+const JOINT_CHANNEL_ADMIN_CAPABILITY_SET = new Set<ServerCapability>(JOINT_CHANNEL_ADMIN_CAPABILITIES);
+
+/** Public, private and joint channels carry channel roles; DMs, threads and #all do not. */
+export function channelSupportsRoles(channelType: string, channelName: string | null | undefined): boolean {
+  return (channelType === "channel" || channelType === "private" || channelType === "joint")
+    && channelName !== "all";
+}
 
 export function isChannelRole(value: unknown): value is ChannelRole {
   return typeof value === "string" && (CHANNEL_ROLES as readonly string[]).includes(value);
@@ -104,8 +124,11 @@ export function isValidGuestChannelPolicy(input: { guestVisible: boolean; guestJ
 
 export function isChannelAdminCapability(
   capability: ServerCapability,
+  channelType: string,
 ): capability is ChannelAdminCapability {
-  return CHANNEL_ADMIN_CAPABILITY_SET.has(capability);
+  return channelType === "joint"
+    ? JOINT_CHANNEL_ADMIN_CAPABILITY_SET.has(capability)
+    : CHANNEL_ADMIN_CAPABILITY_SET.has(capability);
 }
 
 /**
@@ -152,6 +175,11 @@ export function hasEffectiveChannelCapability(input: {
   isChannelMember: boolean;
   supportsChannelRoles: boolean;
   capability: ServerCapability;
+  /**
+   * Required so no caller can forget it: a stored admin role on a joint
+   * channel grants only JOINT_CHANNEL_ADMIN_CAPABILITIES.
+   */
+  channelType: string;
 }): boolean {
   if (hasServerCapability(input.serverRole, input.capability)) {
     return true;
@@ -162,7 +190,7 @@ export function hasEffectiveChannelCapability(input: {
     && input.channelRole === "admin"
     // A stale or concurrently observed stored grant must never elevate a Guest.
     && (input.serverRole === "owner" || input.serverRole === "admin" || input.serverRole === "member")
-    && isChannelAdminCapability(input.capability);
+    && isChannelAdminCapability(input.capability, input.channelType);
 }
 
 export function getChannelAdminBasis(input: {

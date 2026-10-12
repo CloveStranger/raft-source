@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import {
+  createThreadLiveReadBatcher,
   ingestThreadLiveReply,
   mergeThreadBucketWithinWindow,
   mergeThreadMessageUpdates,
@@ -623,4 +624,61 @@ test("subscribeThreadLiveReplies ignores a thread:updated frame for a different 
   });
   assert.equal(wired.getMessages().length, 0, "a frame for another thread must not touch this panel");
   assert.equal(wired.getCount(), 0);
+});
+
+// ── Open thread: replies that land in view persist a read (task #9) ──
+
+test("only first-seen replies landing at the bottom report as read in view", () => {
+  const state = { messages: [threadMsg({ id: "reply-1", seq: 1 })], seenReplyIds: new Set<string>() };
+  const atBottom = { hasNewer: false, isNearBottom: true };
+  const landed = ingestThreadLiveReply(state, threadMsg({ id: "reply-2", seq: 2 }), atBottom);
+  assert.equal(landed.landedInView, true);
+  state.messages = landed.messages;
+  assert.equal(ingestThreadLiveReply(state, threadMsg({ id: "reply-2", seq: 2 }), atBottom).landedInView, false);
+  assert.equal(
+    ingestThreadLiveReply(state, threadMsg({ id: "reply-3", seq: 3 }), { hasNewer: false, isNearBottom: false }).landedInView,
+    false,
+    "a reader scrolled up has not seen it",
+  );
+});
+
+test("a burst of in-view replies persists one read at the highest seq, flushed on close", async () => {
+  const persisted: number[] = [];
+  const batcher = createThreadLiveReadBatcher((seq) => persisted.push(seq), 20);
+  batcher.add(5);
+  batcher.add(7);
+  batcher.add(6);
+  assert.deepEqual(persisted, []);
+  await new Promise((resolve) => setTimeout(resolve, 40));
+  assert.deepEqual(persisted, [7]);
+
+  batcher.add(8);
+  batcher.flush();
+  assert.deepEqual(persisted, [7, 8], "closing the panel writes what the reader already saw");
+  await new Promise((resolve) => setTimeout(resolve, 40));
+  assert.deepEqual(persisted, [7, 8]);
+});
+
+// Reconnect catch-up regression (2026-10): a reply that only arrived through
+// `GET /messages/sync` carried a STRING seq and `mergeThreadBucketWithinWindow`
+// dropped it (`typeof seq !== "number"`), so the open panel never showed it
+// until reload even though it sat in `channelMessages[thread]`.
+test("an open latest thread window shows a catch-up reply whose wire seq was a string", async () => {
+  const { createMessageWindowHarness } = await import("./messageWindowHarness");
+  const { useMessageStore } = await import("../src/store/messageStore");
+  const harness = createMessageWindowHarness();
+  const threadId = "thread-channel-1";
+  try {
+    const reply = (seq: number) => threadMsg({ id: `reply-${seq}`, seq, createdAt: new Date(Date.UTC(2026, 9, 9, 0, 0, seq)).toISOString() });
+    useMessageStore.setState({ channelMessages: { [threadId]: [reply(10761049)] }, lastSeq: 10761049 });
+    harness.enqueueSyncPages([{ ...reply(10761050), seq: "10761050" } as unknown as Message]);
+
+    await useMessageStore.getState().syncGap(threadId, { sinceSeq: 10761049 });
+
+    const panelWindow = [reply(10761049)];
+    const merged = mergeThreadBucketWithinWindow(panelWindow, useMessageStore.getState().channelMessages[threadId]!, false);
+    assert.deepEqual(merged.map((row) => row.id), ["reply-10761049", "reply-10761050"]);
+  } finally {
+    harness.restore();
+  }
 });

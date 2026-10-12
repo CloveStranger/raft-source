@@ -23,7 +23,10 @@
  * `RUNTIME_OUTCOME_ACK_ENABLED` is true, and it is false.
  */
 import {
+  AGENT_START_NOT_SPAWNED_REASONS,
+  type AgentStartNotSpawnedReason,
   SERVER_CAPABILITY_RUNTIME_OUTCOME_ACK_V1,
+  SERVER_CAPABILITY_START_SPAWN_ERROR_V1,
   type MachineToServerMessage,
   type ServerToMachineMessage,
 } from "@botiverse/raft-shared";
@@ -36,9 +39,22 @@ import type { TerminalOutboxFrame, TerminalOutboxFrameInput } from "./terminalFa
  */
 export const RUNTIME_OUTCOME_ACK_ENABLED = false;
 
-/** Capabilities the server puts on `machine:context`. Empty while the switch is off. */
+/**
+ * Capabilities the server puts on `machine:context`. Empty while the switch is off.
+ *
+ * task #365: `agent:start-spawn-error-v1` only ever WITH the ack capability.
+ * It tells the daemon to stop reporting a proven never-created spawn as a
+ * crash and to send it as an outbox `not_spawned: spawn_error` instead; the
+ * outbox flows only to a server that acks. Advertised alone, the daemon would
+ * drop the crash report (the live #1119 protection) into a paused outbox and
+ * no backoff would apply anywhere.
+ */
 export function serverMachineContextCapabilities(enabled: boolean = RUNTIME_OUTCOME_ACK_ENABLED): string[] {
-  return enabled ? [SERVER_CAPABILITY_RUNTIME_OUTCOME_ACK_V1] : [];
+  return enabled ? [SERVER_CAPABILITY_RUNTIME_OUTCOME_ACK_V1, SERVER_CAPABILITY_START_SPAWN_ERROR_V1] : [];
+}
+
+function notSpawnedReason(value: unknown): AgentStartNotSpawnedReason | null {
+  return (AGENT_START_NOT_SPAWNED_REASONS as readonly unknown[]).includes(value) ? value as AgentStartNotSpawnedReason : null;
 }
 
 /**
@@ -211,7 +227,8 @@ export function planRuntimeOutcomeOutboxMessage(msg: RuntimeOutcomeOutboxMessage
         return { kind: "apply", ack, frame: { kind: "start_rebound", ...base, launchId: msg.launchId, processInstanceId: msg.result.processInstanceId } };
       }
       if (msg.result.kind === "not_spawned") {
-        return { kind: "apply", ack, frame: { kind: "start_not_spawned", ...base, launchId: msg.launchId } };
+        // task #365: the reason decides whether it counts (only `spawn_error`); one this server does not know counts nothing.
+        return { kind: "apply", ack, frame: { kind: "start_not_spawned", ...base, launchId: msg.launchId, reason: notSpawnedReason(msg.result.reason) } };
       }
       return lost("malformed_start_outcome");
     }

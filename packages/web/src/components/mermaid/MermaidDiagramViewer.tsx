@@ -4,8 +4,8 @@ import type {
   ImageZoomController,
   ImageZoomLayoutSettleRequest,
 } from "../ImageZoom";
-import SandboxedPreviewFrame from "../ui/SandboxedPreviewFrame";
 import type { MermaidRenderResult } from "./mermaidRenderer";
+import { MermaidFrameLayer } from "./MermaidFrameLayer";
 
 type MermaidFrameTransition = {
   id: number;
@@ -176,54 +176,13 @@ function BufferedMermaidFrame({
       : [{ id: activeFrameId, kind: "active" as const, ratio: 1 }];
 
   return layers.map((layer) => (
-    <SandboxedPreviewFrame
+    <MermaidFrameLayer
       key={layer.id}
+      layer={layer}
       srcDoc={result.srcDoc}
-      sandbox=""
-      referrerPolicy="no-referrer"
       title={title}
-      ariaHidden={layer.kind === "active" ? undefined : true}
-      tabIndex={layer.kind === "active" ? undefined : -1}
-      frameRef={(frame) => {
-        if (frame) frameRefs.current.set(layer.id, frame);
-        else frameRefs.current.delete(layer.id);
-      }}
-      onLoad={layer.kind === "prepared" ? () => finishPreparedFrame(layer.id) : undefined}
-      className="r-mermaid-frame"
-      style={layer.kind === "active"
-        ? {
-            left: 0,
-            top: 0,
-            width: "100%",
-            height: "100%",
-            opacity: 1,
-            zIndex: 1,
-          }
-        : layer.kind === "prepared"
-          ? {
-              left: "50%",
-              top: "50%",
-              width: `${layer.ratio * 100}%`,
-              height: `${layer.ratio * 100}%`,
-              transform: `translate(-50%, -50%) scale(${1 / layer.ratio})`,
-              transformOrigin: "center center",
-              // Keep the prepared document paintable. `opacity: 0` lets the
-              // browser defer its iframe raster until reveal, recreating the
-              // exact stale-frame flash this buffer exists to prevent. The old
-              // frame is above it and covers the same visual pixels.
-              opacity: 1,
-              zIndex: 0,
-            }
-          : {
-              left: "50%",
-              top: "50%",
-              width: `${100 / layer.ratio}%`,
-              height: `${100 / layer.ratio}%`,
-              transform: `translate(-50%, -50%) scale(${layer.ratio})`,
-              transformOrigin: "center center",
-              opacity: 1,
-              zIndex: 2,
-            }}
+      frameRefs={frameRefs}
+      onPreparedLoad={finishPreparedFrame}
     />
   ));
 }

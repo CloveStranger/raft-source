@@ -2269,6 +2269,90 @@
       "when": 1791214741936,
       "tag": "0323_users_trace_user_id_not_null",
       "breakpoints": true
+    },
+    {
+      "idx": 324,
+      "version": "7",
+      "when": 1791279523694,
+      "tag": "0324_users_trace_user_id_unique",
+      "breakpoints": true
+    },
+    {
+      "idx": 325,
+      "version": "7",
+      "when": 1791349524399,
+      "tag": "0325_amazing_greymalkin",
+      "breakpoints": true
+    },
+    {
+      "idx": 326,
+      "version": "7",
+      "when": 1791440696060,
+      "tag": "0326_announcement_assets_and_agent_drafts",
+      "breakpoints": true
+    },
+    {
+      "idx": 327,
+      "version": "7",
+      "when": 1791446200501,
+      "tag": "0327_agent_config_migrations",
+      "breakpoints": true
+    },
+    {
+      "idx": 328,
+      "version": "7",
+      "when": 1791453804148,
+      "tag": "0328_drop_agent_config_migrations",
+      "breakpoints": true
+    },
+    {
+      "idx": 329,
+      "version": "7",
+      "when": 1791480915455,
+      "tag": "0329_messages_sender_timezone",
+      "breakpoints": true
+    },
+    {
+      "idx": 330,
+      "version": "7",
+      "when": 1791517677356,
+      "tag": "0330_agents_assistant_owner",
+      "breakpoints": true
+    },
+    {
+      "idx": 331,
+      "version": "7",
+      "when": 1791520243777,
+      "tag": "0331_assistant_doorbells",
+      "breakpoints": true
+    },
+    {
+      "idx": 332,
+      "version": "7",
+      "when": 1791565676510,
+      "tag": "0332_dashing_martin_li",
+      "breakpoints": true
+    },
+    {
+      "idx": 333,
+      "version": "7",
+      "when": 1791706857923,
+      "tag": "0333_feature_flag_admin_announcement_image_privileges",
+      "breakpoints": true
+    },
+    {
+      "idx": 334,
+      "version": "7",
+      "when": 1791710184458,
+      "tag": "0334_colorful_ikaris",
+      "breakpoints": true
+    },
+    {
+      "idx": 335,
+      "version": "7",
+      "when": 1791772113400,
+      "tag": "0335_nervous_lady_vermin",
+      "breakpoints": true
     }
   ]
 }

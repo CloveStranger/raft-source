@@ -5,7 +5,8 @@ export type HostAccessTokenSurface =
   | "computers"
   | "billing"
   | "marketplace"
-  | "administration";
+  | "administration"
+  | "agent";
 
 export interface HostAccessTokenEventDetail {
   accountId: string;
@@ -121,6 +122,8 @@ export function hostAccessTokenSurfaceForPathname(
 ): HostAccessTokenSurface | null {
   const normalized = pathname.replace(/\/+$/, "") || "/";
   if (/^(?:\/s\/[^/]+)?\/computers$/.test(normalized)) return "computers";
+  // The agent page (/agent/:agentId) hosts the native Apps entry.
+  if (/^(?:\/s\/[^/]+)?\/agent\/[^/]+$/.test(normalized)) return "agent";
   const match = /^(?:\/s\/[^/]+)?\/settings\/(billing|applications|integrations|administration)$/.exec(normalized);
   if (!match) return null;
   if (match[1] === "billing") return "billing";

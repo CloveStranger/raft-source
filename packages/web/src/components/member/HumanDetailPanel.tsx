@@ -1,7 +1,6 @@
-import { Badge, ProfilePanelBody, Button, DirectMessageIcon } from "raft-ui";
+import { Badge, ProfilePanelBody, Button, DirectMessageIcon, PanelTitle } from "raft-ui";
 import CloseButton from "../ui/CloseButton";
-import { useEffect, useMemo, useRef, useState } from "react";
-import { formatRuntimeLabelWithStatus } from "../../utils/runtimeAvailabilityLabel";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useIntl } from "react-intl";
 import {
   HelpCircle,
@@ -27,7 +26,7 @@ import InlineBadgeEditor from "../InlineBadgeEditor";
 import AvatarSlot from "../ui/AvatarSlot";
 import { useImageLightboxStore } from "../../store/imageLightboxStore";
 import { isRaftUploadedHumanAvatarUrl } from "../../utils/humanAvatar";
-import PanelHeader from "../ui/PanelHeader";
+import PanelHeader, { PROFILE_HEADER_SURFACE_CLASS, PROFILE_HANDLE_SIZE_CLASS } from "../ui/PanelHeader";
 import SectionEyebrow from "../ui/SectionEyebrow";
 import SectionHeader from "../ui/SectionHeader";
 import KeyValueRow from "../ui/KeyValueRow";
@@ -39,8 +38,6 @@ import {
 import type {
   AgentCreatedSummary,
 } from "../../store/agentStore";
-import AvatarListRow from "../ui/AvatarListRow";
-import StatusDot from "../ui/StatusDot";
 import Tooltip from "../ui/Tooltip";
 import RolePermissionHelpDialog from "./RolePermissionHelpDialog";
 import { getHumanDepartureLabel } from "./humanMembershipStatus";
@@ -54,6 +51,9 @@ import { formatAgentDisplayStateText } from "../../utils/activity";
 import type { MessageId } from "../../i18n/messages";
 import { useServerFeatureFlag } from "../../store/serverFeatureFlags";
 import { getEditableHumanServerRoles } from "./humanRoleTransitions";
+import { CreatedAgentRow } from "./CreatedAgentRow";
+import { memberServerBadgeLabels } from "../../utils/channelLocalMembership";
+import type { ChannelMemberServer } from "../../utils/channelLocalMembership";
 
 const ROLE_CONFIG: Record<ServerRole, { labelId: MessageId; color: string }> = {
   owner: { labelId: "member.detail.roleOwner", color: "bg-warning-soft text-warning-strong theme-brutal:bg-brutal-orange theme-brutal:text-black" },
@@ -68,12 +68,18 @@ const EDITABLE_ROLE_OPTIONS: { id: ServerRole; labelId: MessageId }[] = [
   { id: "guest", labelId: "member.detail.roleGuest" },
 ];
 const MAX_HUMAN_DESCRIPTION_LENGTH = 3000;
+// Profile-surface header chrome (tint + divider, elegant) — see the class doc
+// in ui/PanelHeader.tsx. cindyz/gzj 2026-10-10, #737.
+const HUMAN_HEADER_CONTAINER_PROPS = { className: PROFILE_HEADER_SURFACE_CLASS };
 
 export interface HumanProfile {
   userId: string;
   serverId?: string;
   serverName?: string | null;
   serverSlug?: string | null;
+  /** Joint channel context only (RFC 075 phase 1): every server the person
+   *  participates through in that channel, viewed server first. */
+  servers?: ChannelMemberServer[];
   email: string | null;
   gravatarHash: string;
   name: string;
@@ -120,9 +126,9 @@ export default function HumanDetailPanel({
     currentServerId && human.serverId && human.serverId !== currentServerId,
   );
   const isChannelSummaryHuman = human.profileProjection === "channel_summary";
-  const sourceServerLabel = isRemoteJointHuman
-    ? human.serverName || human.serverSlug || null
-    : null;
+  // Every server the person participates through when any of them is not
+  // this one (a person on both sides of a joint channel lists both).
+  const sourceServerLabel = memberServerBadgeLabels(human, currentServerId).join(", ") || null;
   // Two render modes for HumanDetailPanel — see AgentDetailPanel for the
   // same pattern. Overlay mode (`onClose` provided) routes back through
   // the closer rather than skipping past the underlying channel/DM to
@@ -277,8 +283,120 @@ export default function HumanDetailPanel({
     }
   };
 
+  const mobileBackProps = useMemo(
+    () => ({
+      "data-testid": "human-mobile-back",
+      title: formatMessage({ id: "common.announcement.back" }),
+    }),
+    [formatMessage],
+  );
+
+  const handleMessage = useCallback(async () => {
+    useProfileStore.getState().closeProfile();
+    useThreadStore.getState().closeThread();
+    if (dmChannel) {
+      nav.toDm(dmChannel.id);
+    } else {
+      const ch = await openUserDM(human.userId);
+      if (ch) nav.toDm(ch.id);
+    }
+  }, [dmChannel, nav, openUserDM, human.userId]);
+
+  const handleSaveDescription = useCallback(async () => {
+    const nextDescription = descriptionValue.trim();
+    if (
+      nextDescription.length > MAX_HUMAN_DESCRIPTION_LENGTH
+    ) {
+      setDescriptionError(
+        formatMessage(
+          { id: "member.detail.descriptionMaxLength" },
+          { count: MAX_HUMAN_DESCRIPTION_LENGTH },
+        ),
+      );
+      return;
+    }
+    setDescriptionSaving(true);
+    setDescriptionError("");
+    try {
+      await updateProfile({
+        description: nextDescription || null,
+      });
+      await loadMembers();
+      setEditingDescription(false);
+    } catch (err: any) {
+      setDescriptionError(
+        err.response?.data?.error ||
+          formatMessage({
+            id: "member.detail.updateDescriptionFailed",
+          }),
+      );
+    } finally {
+      setDescriptionSaving(false);
+    }
+  }, [descriptionValue, formatMessage, updateProfile, loadMembers]);
+
+  const handleCancelDescription = useCallback(() => {
+    setDescriptionValue(human.description || "");
+    setDescriptionError("");
+    setEditingDescription(false);
+  }, [human.description]);
+
+  const handleSelectRole = useCallback((nextRole: string) => {
+    setRoleValue(nextRole as ServerRole);
+    setRolePickerOpen(false);
+  }, []);
+
+  const handleToggleRolePicker = useCallback(() => {
+    setRolePickerOpen((value) => !value);
+  }, []);
+
+  const handleSaveRole = useCallback(async () => {
+    try {
+      setRoleSaving(true);
+      setRoleError("");
+      await updateMemberRole(human.userId, roleValue);
+      setEditingRole(false);
+    } catch (err: unknown) {
+      const axiosErr = err as {
+        response?: { data?: { error?: string } };
+      };
+      setRoleError(
+        axiosErr.response?.data?.error ||
+          formatMessage({
+            id: "member.detail.updateRoleFailed",
+          }),
+      );
+    } finally {
+      setRoleSaving(false);
+    }
+  }, [updateMemberRole, human.userId, roleValue, formatMessage]);
+
+  const handleCancelRole = useCallback(() => {
+    setRoleValue(human.role ?? "member");
+    setRolePickerOpen(false);
+    setRoleError("");
+    setEditingRole(false);
+  }, [human.role]);
+
+  const openRemoveConfirm = useCallback(() => setShowRemoveConfirm(true), []);
+
+  const handleConfirmRemove = useCallback(async () => {
+    setRemoving(true);
+    try {
+      await removeMember(human.userId);
+    } finally {
+      setRemoving(false);
+    }
+  }, [removeMember, human.userId]);
+
+  const handleCloseRemoveConfirm = useCallback(() => {
+    if (!removing) setShowRemoveConfirm(false);
+  }, [removing]);
+
+  const closeRoleHelp = useCallback(() => setShowRoleHelp(false), []);
+
   return (
-    <ProfilePanelBody className="flex min-h-0 flex-1 flex-col bg-layer-panel theme-brutal:bg-white">
+    <ProfilePanelBody className="flex min-h-0 flex-1 flex-col bg-layer-panel font-sans theme-brutal:bg-white">
       {isSelf && human.membershipStatus === "active" && (
         <input
           ref={avatarInputRef}
@@ -295,6 +413,7 @@ export default function HumanDetailPanel({
       <PanelHeader
         title={human.displayName || human.name}
         subtitle={`@${human.name}`}
+        subtitleClassName={PROFILE_HANDLE_SIZE_CLASS}
         iconSlot={
           <AvatarSlot
             context="panel-header"
@@ -304,27 +423,17 @@ export default function HumanDetailPanel({
           />
         }
         iconAlwaysVisible
+        iconKind="avatar"
         onMobileBack={headerBack}
         backButtonVisibility={onBack ? "always" : "responsive"}
-        mobileBackProps={{
-          "data-testid": "human-mobile-back",
-          title: formatMessage({ id: "common.announcement.back" }),
-        }}
+        mobileBackProps={mobileBackProps}
+        containerProps={HUMAN_HEADER_CONTAINER_PROPS}
         actions={
           <>
             {canMessageHuman && (
               <Tooltip content={formatMessage({ id: "member.detail.message" })}>
               <Button size="sm" variant="outline"
-                onClick={async () => {
-                  useProfileStore.getState().closeProfile();
-                  useThreadStore.getState().closeThread();
-                  if (dmChannel) {
-                    nav.toDm(dmChannel.id);
-                  } else {
-                    const ch = await openUserDM(human.userId);
-                    if (ch) nav.toDm(ch.id);
-                  }
-                }}
+                onClick={handleMessage}
                 className="flex size-7 items-center justify-center"
                 aria-label={formatMessage({ id: "member.detail.message" })}
                 data-slot="button"
@@ -417,14 +526,13 @@ export default function HumanDetailPanel({
             />
           )}
           <div className="min-w-0 flex-1">
-            <div
-              className="min-w-0 truncate text-lg font-bold leading-tight text-foreground-strong theme-brutal:text-black"
-            >
-              {human.displayName || human.name}
-            </div>
+            {/* PanelTitle source (cindyz 2026-10-10): the detail-block name follows
+                the panel-title spec so the same name reads identically in the
+                header and the body. */}
+            <PanelTitle className="min-w-0 text-foreground-muted theme-brutal:text-black theme-brutal:text-lg">{human.displayName || human.name}</PanelTitle>
             <div className="flex min-w-0 items-center gap-2">
               <span
-                className="min-w-0 truncate text-sm font-mono text-foreground-muted theme-brutal:text-black/50"
+                className={`min-w-0 truncate text-sm ${PROFILE_HANDLE_SIZE_CLASS} font-mono text-foreground-placeholder theme-brutal:text-black/50`}
               >
                 @{human.name}
               </span>
@@ -434,7 +542,7 @@ export default function HumanDetailPanel({
                 </span>
               )}
               {isSelf && (
-                <span className="shrink-0 text-sm text-foreground-muted theme-brutal:text-black/60 font-mono">
+                <span className={`shrink-0 text-sm ${PROFILE_HANDLE_SIZE_CLASS} text-foreground-placeholder theme-brutal:text-black/60 font-mono`}>
                   {formatMessage({ id: "member.detail.you" })}
                 </span>
               )}
@@ -496,38 +604,7 @@ export default function HumanDetailPanel({
                 <div className="flex items-center gap-1.5">
                   <Button size="sm" variant="accent"
                     type="button"
-                    onClick={async () => {
-                      const nextDescription = descriptionValue.trim();
-                      if (
-                        nextDescription.length > MAX_HUMAN_DESCRIPTION_LENGTH
-                      ) {
-                        setDescriptionError(
-                          formatMessage(
-                            { id: "member.detail.descriptionMaxLength" },
-                            { count: MAX_HUMAN_DESCRIPTION_LENGTH },
-                          ),
-                        );
-                        return;
-                      }
-                      setDescriptionSaving(true);
-                      setDescriptionError("");
-                      try {
-                        await updateProfile({
-                          description: nextDescription || null,
-                        });
-                        await loadMembers();
-                        setEditingDescription(false);
-                      } catch (err: any) {
-                        setDescriptionError(
-                          err.response?.data?.error ||
-                            formatMessage({
-                              id: "member.detail.updateDescriptionFailed",
-                            }),
-                        );
-                      } finally {
-                        setDescriptionSaving(false);
-                      }
-                    }}
+                    onClick={handleSaveDescription}
                     className="px-2 py-1 text-xs disabled:opacity-50 disabled:cursor-not-allowed"
                     disabled={descriptionSaving}
                   >
@@ -537,11 +614,7 @@ export default function HumanDetailPanel({
                   </Button>
                   <Button size="sm" variant="outline"
                     type="button"
-                    onClick={() => {
-                      setDescriptionValue(human.description || "");
-                      setDescriptionError("");
-                      setEditingDescription(false);
-                    }}
+                    onClick={handleCancelDescription}
                     className="px-2 py-1 text-xs disabled:opacity-50 disabled:cursor-not-allowed"
                     disabled={descriptionSaving}
                   >
@@ -563,18 +636,18 @@ export default function HumanDetailPanel({
                 </div>
               </div>
             ) : (
-              <p className="text-sm text-foreground-strong theme-brutal:text-black">
+              <p className="text-sm text-foreground-muted theme-brutal:text-black">
                 {human.description || (
-                  <span className="italic text-foreground-muted theme-brutal:text-black/40">
+                  <span className="italic text-foreground-placeholder theme-brutal:text-black/40">
                     {formatMessage({ id: "member.detail.noDescription" })}
                   </span>
                 )}
               </p>
             )
           ) : (
-            <div className="text-sm text-foreground-strong theme-brutal:text-black">
+            <div className="text-sm text-foreground-muted theme-brutal:text-black">
               {human.description || (
-                <span className="italic text-foreground-muted theme-brutal:text-black/40">
+                <span className="italic text-foreground-placeholder theme-brutal:text-black/40">
                   {formatMessage({ id: "member.detail.noDescription" })}
                 </span>
               )}
@@ -592,7 +665,7 @@ export default function HumanDetailPanel({
               {/* Role */}
               <div>
                 <div className="mb-1 flex items-center gap-2">
-                  <div className="text-xs text-foreground-muted theme-brutal:text-black/50">
+                  <div className="text-[13px] text-foreground-hint theme-brutal:text-black/50">
                     {departureLabel
                       ? formatMessage({ id: "member.detail.status" })
                       : formatMessage({ id: "member.detail.role" })}
@@ -649,14 +722,9 @@ export default function HumanDetailPanel({
                             })}
                             selectedId={roleValue}
                             options={localizedEditableRoleOptions}
-                            onSelect={(nextRole) => {
-                              setRoleValue(nextRole as ServerRole);
-                              setRolePickerOpen(false);
-                            }}
+                            onSelect={handleSelectRole}
                             open={rolePickerOpen}
-                            onToggle={() =>
-                              setRolePickerOpen((value) => !value)
-                            }
+                            onToggle={handleToggleRolePicker}
                             badgeClassName={
                               (ROLE_CONFIG[roleValue] || ROLE_CONFIG.member)
                                 .color
@@ -669,26 +737,7 @@ export default function HumanDetailPanel({
                         <div className="flex items-center gap-1.5">
                           <Button size="sm" variant="accent"
                             type="button"
-                            onClick={async () => {
-                              try {
-                                setRoleSaving(true);
-                                setRoleError("");
-                                await updateMemberRole(human.userId, roleValue);
-                                setEditingRole(false);
-                              } catch (err: unknown) {
-                                const axiosErr = err as {
-                                  response?: { data?: { error?: string } };
-                                };
-                                setRoleError(
-                                  axiosErr.response?.data?.error ||
-                                    formatMessage({
-                                      id: "member.detail.updateRoleFailed",
-                                    }),
-                                );
-                              } finally {
-                                setRoleSaving(false);
-                              }
-                            }}
+                            onClick={handleSaveRole}
                             disabled={roleSaving || roleValue === human.role}
                             className="px-2 py-1 text-xs disabled:cursor-not-allowed disabled:opacity-50"
                           >
@@ -696,12 +745,7 @@ export default function HumanDetailPanel({
                           </Button>
                           <Button size="sm" variant="outline"
                             type="button"
-                            onClick={() => {
-                              setRoleValue(human.role ?? "member");
-                              setRolePickerOpen(false);
-                              setRoleError("");
-                              setEditingRole(false);
-                            }}
+                            onClick={handleCancelRole}
                             disabled={roleSaving}
                             className="px-2 py-1 text-xs disabled:cursor-not-allowed disabled:opacity-50"
                           >
@@ -731,8 +775,8 @@ export default function HumanDetailPanel({
                 <KeyValueRow
                   label={formatMessage({ id: "member.detail.email" })}
                   value={human.email}
-                  mono
                   breakAll
+                  valueClassName="theme-brutal:font-mono"
                 />
               )}
               {/* Joined */}
@@ -740,7 +784,7 @@ export default function HumanDetailPanel({
                 <KeyValueRow
                   label={formatMessage({ id: "member.detail.joined" })}
                   value={joinedDate}
-                  mono
+                  valueClassName="tabular-nums theme-brutal:font-mono"
                 />
               )}
             </div>
@@ -764,36 +808,18 @@ export default function HumanDetailPanel({
                   );
                   const activityText = formatAgentDisplayStateText(intl, displayState);
                   return (
-                    <AvatarListRow
+                    <CreatedAgentRow
                       key={createdAgent.id}
-                      avatar={
-                        <AvatarSlot
-                          context="surface-list"
-                          type="agent"
-                          agentAvatarUrl={createdAgent.avatarUrl}
-                        />
-                      }
-                      name={createdAgent.displayName || createdAgent.name}
-                      subtitle={formatRuntimeLabelWithStatus(createdAgent.runtime, formatMessage)}
-                      rightContent={
-                        <StatusDot
-                          activity={displayState.activity}
-                          title={activityText}
-                        />
-                      }
-                      onClick={() => {
-                        if (onOpenProfile) {
-                          onOpenProfile("agent", createdAgent.id);
-                          return;
-                        }
-                        useProfileStore.getState().openProfile("agent", createdAgent.id);
-                      }}
+                      createdAgent={createdAgent}
+                      displayState={displayState}
+                      activityText={activityText}
+                      onOpenProfile={onOpenProfile}
                     />
                   );
                 })}
               </div>
             ) : (
-              <span className="text-sm italic text-foreground-muted theme-brutal:text-black/40">
+              <span className="text-sm italic text-foreground-placeholder theme-brutal:text-black/40">
                 {formatMessage({ id: "member.detail.noCreatedAgents" })}
               </span>
             )}
@@ -805,7 +831,7 @@ export default function HumanDetailPanel({
               {formatMessage({ id: "member.detail.actions" })}
             </SectionEyebrow>
             <Button size="sm" variant="danger"
-              onClick={() => setShowRemoveConfirm(true)}
+              onClick={openRemoveConfirm}
               className="flex w-full items-center justify-center gap-2 px-4 py-2 text-sm font-bold"
             >
               <Trash2 size={14} />
@@ -824,23 +850,14 @@ export default function HumanDetailPanel({
           confirmLabel={formatMessage({ id: "member.detail.removeAction" })}
           loadingLabel={formatMessage({ id: "member.detail.removing" })}
           chromeLocale="active"
-          onConfirm={async () => {
-            setRemoving(true);
-            try {
-              await removeMember(human.userId);
-            } finally {
-              setRemoving(false);
-            }
-          }}
-          onClose={() => {
-            if (!removing) setShowRemoveConfirm(false);
-          }}
+          onConfirm={handleConfirmRemove}
+          onClose={handleCloseRemoveConfirm}
         />
       )}
       {showRoleHelp && (
         <RolePermissionHelpDialog
           subject="human"
-          onClose={() => setShowRoleHelp(false)}
+          onClose={closeRoleHelp}
         />
       )}
     </ProfilePanelBody>

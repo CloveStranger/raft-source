@@ -6,6 +6,24 @@
 
 import { createAgentApiClient, type AgentApiClient } from "@botiverse/raft-shared/src/agentApiClient";
 import {
+  listLabs,
+  setLabEnrollment,
+  setLabsAccess,
+  type SetLabEnrollmentRequest,
+  type SetLabsAccessRequest,
+  addChannelMember,
+  archiveChannel,
+  createChannel,
+  removeChannelMember,
+  unarchiveChannel,
+  updateChannel,
+  updateServer,
+  type ChannelMemberRequest,
+  type CreateChannelRequest,
+  type RaftChannelArchiveState,
+  type RaftChannelSummary,
+  type UpdateChannelRequest,
+  type UpdateServerRequest,
   amendTask,
   assignTask,
   unassignTask,
@@ -121,6 +139,11 @@ import {
 import type {
   AgentApiAttachmentCommentsResponse,
   AgentApiChannelMembersResponse,
+  AgentApiChannelMemberAddResponse,
+  AgentApiChannelMemberRemoveResponse,
+  AgentApiServerUpdateResponse,
+  AgentApiServerLabsResponse,
+  AgentApiServerLabsMutationResponse,
   AgentApiKnowledgeGetResponse,
   AgentApiKnowledgeSearchResponse,
   AgentApiSenderMentionDeliveriesResponse,
@@ -340,6 +363,18 @@ export interface Raft {
     members(request: { target: string }): Promise<RaftOutcome<AgentApiChannelMembersResponse, "members">>;
     /** A regular channel's facts: visibility, whether you joined, description, member counts (`raft channel info`). */
     info(request: { target: string }): Promise<RaftOutcome<RaftChannelInfo, "info">>;
+    /**
+     * Channel administration. The Server checks the agent's current server role
+     * on every call; a refusal carries `serverCode` and a `nextAction` naming
+     * the role needed.
+     */
+    create(request: CreateChannelRequest): Promise<RaftOutcome<RaftChannelSummary, "created">>;
+    update(request: UpdateChannelRequest): Promise<RaftOutcome<RaftChannelSummary, "updated">>;
+    archive(request: { target: string }): Promise<RaftOutcome<RaftChannelArchiveState, "archived" | "unarchived">>;
+    unarchive(request: { target: string }): Promise<RaftOutcome<RaftChannelArchiveState, "archived" | "unarchived">>;
+    /** Exactly one of `user` (a human) and `agent`. */
+    addMember(request: ChannelMemberRequest): Promise<RaftOutcome<AgentApiChannelMemberAddResponse, "added" | "already_member">>;
+    removeMember(request: ChannelMemberRequest): Promise<RaftOutcome<AgentApiChannelMemberRemoveResponse, "removed" | "not_member">>;
   };
   threads: {
     list(): Promise<RaftOutcome<AgentApiThreadListItem[], "threads" | "empty">>;
@@ -348,6 +383,16 @@ export interface Raft {
   server: {
     /** Summary by default; `view: "channels" | "agents" | "humans"` pages a section; `view: "full"` is the whole overview. */
     info(request?: ServerInfoRequest): Promise<RaftOutcome<RaftServerInfo, "info">>;
+    /** The server's name or member visibility of humans; server-role gated, needs the `server` capability. */
+    update(request: UpdateServerRequest): Promise<RaftOutcome<AgentApiServerUpdateResponse, "updated">>;
+  };
+  labs: {
+    /** The server's Labs, each lab's state and enrollment, and what you may change. */
+    list(): Promise<RaftOutcome<AgentApiServerLabsResponse, "labs">>;
+    /** Labs access on or off (server owner). Omit `expectedVersion` to use the current one. */
+    setAccess(request: SetLabsAccessRequest): Promise<RaftOutcome<AgentApiServerLabsMutationResponse, "updated" | "unchanged">>;
+    /** Enroll in or leave an open lab (server settings authority). */
+    setEnrollment(request: SetLabEnrollmentRequest): Promise<RaftOutcome<AgentApiServerLabsMutationResponse, "updated" | "unchanged">>;
   };
   users: {
     /** A human's or agent's visible facts and their memberships among one page of visible channels (`raft user info`). */
@@ -545,6 +590,12 @@ export function createRaft(options: CreateRaftOptions): Raft {
       unmute: (request) => unmuteChannel(api, request, style).then(styled),
       members: (request) => channelMembers(api, request).then(styled),
       info: (request) => channelInfo(api, request, style).then(styled),
+      create: (request) => createChannel(api, request, style).then(styled),
+      update: (request) => updateChannel(api, request, style).then(styled),
+      archive: (request) => archiveChannel(api, request).then(styled),
+      unarchive: (request) => unarchiveChannel(api, request).then(styled),
+      addMember: (request) => addChannelMember(api, request, style).then(styled),
+      removeMember: (request) => removeChannelMember(api, request, style).then(styled),
     },
     threads: {
       list: () => listThreads(api).then(styled),
@@ -552,6 +603,12 @@ export function createRaft(options: CreateRaftOptions): Raft {
     },
     server: {
       info: (request) => serverInfo(api, request, style).then(styled),
+      update: (request) => updateServer(api, request).then(styled),
+    },
+    labs: {
+      list: () => listLabs(api, style).then(styled),
+      setAccess: (request) => setLabsAccess(api, request, style).then(styled),
+      setEnrollment: (request) => setLabEnrollment(api, request, style).then(styled),
     },
     users: {
       info: (request) => userInfo(api, request, style).then(styled),
@@ -640,9 +697,19 @@ export function createRaft(options: CreateRaftOptions): Raft {
     "channels.unmute": (args: { target: string }) => raft.channels.unmute(args),
     "channels.members": (args: { target: string }) => raft.channels.members(args),
     "channels.info": (args: { target: string }) => raft.channels.info(args),
+    "channels.create": (args: CreateChannelRequest) => raft.channels.create(args),
+    "channels.update": (args: UpdateChannelRequest) => raft.channels.update(args),
+    "channels.archive": (args: { target: string }) => raft.channels.archive(args),
+    "channels.unarchive": (args: { target: string }) => raft.channels.unarchive(args),
+    "channels.addMember": (args: ChannelMemberRequest) => raft.channels.addMember(args),
+    "channels.removeMember": (args: ChannelMemberRequest) => raft.channels.removeMember(args),
     "threads.list": () => raft.threads.list(),
     "threads.unfollow": (args: { target: string; reason?: string }) => raft.threads.unfollow(args),
     "server.info": (args: ServerInfoRequest) => raft.server.info(args),
+    "server.update": (args: UpdateServerRequest) => raft.server.update(args),
+    "labs.list": () => raft.labs.list(),
+    "labs.setAccess": (args: SetLabsAccessRequest) => raft.labs.setAccess(args),
+    "labs.setEnrollment": (args: SetLabEnrollmentRequest) => raft.labs.setEnrollment(args),
     "users.info": (args: UserInfoRequest) => raft.users.info(args),
     "profile.show": (args: { target?: string }) => raft.profile.show(args),
     "profile.update": (args: AgentApiProfileUpdateBody) => raft.profile.update(args),

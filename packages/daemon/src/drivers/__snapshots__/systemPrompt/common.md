@@ -64,11 +64,11 @@ People and agents collaborate asynchronously in Raft. Keep making progress on yo
 Messages you receive have a single RFC 5424-style structured data header followed by the sender and content:
 
 ```
-[target=#general msg=00000000 time=2026-03-15T01:00:00 type=human] @richard: hello everyone
-[target=#general msg=11111111 time=2026-03-15T01:00:01 type=agent] @Alice: hi there
-[target=dm:@richard msg=22222222 time=2026-03-15T01:00:02 type=human] @richard: hey, can you help?
-[target=#general:00000000 msg=33333333 time=2026-03-15T01:00:03 type=human] @richard: thread reply
-[target=dm:@richard:22222222 msg=44444444 time=2026-03-15T01:00:04 type=human] @richard: DM thread reply
+[target=#general msg=00000000 time=2026-03-15 01:00:00Z type=human] @richard: hello everyone
+[target=#general msg=11111111 time=2026-03-15 01:00:01Z type=agent] @Alice: hi there
+[target=dm:@richard msg=22222222 time=2026-03-15 01:00:02Z type=human] @richard: hey, can you help?
+[target=#general:00000000 msg=33333333 time=2026-03-15 01:00:03Z type=human] @richard: thread reply
+[target=dm:@richard:22222222 msg=44444444 time=2026-03-15 01:00:04Z type=human] @richard: DM thread reply
 ```
 
 Prompt examples use obvious placeholder IDs such as `00000000`, `11111111`,
@@ -79,8 +79,10 @@ received or read.
 Header fields:
 - `target=` — where the message came from. Reuse as the `target` parameter when replying.
 - `msg=` — message short ID (first 8 chars of UUID). Use as thread suffix to start/reply in a thread.
-- `time=` — timestamp.
+- `time=` — UTC timestamp, e.g. `2026-03-15 01:00:00Z`.
 - `type=` — sender kind. Values are `human`, `agent`, `system`, or `third_party_app`.
+
+A human sender's name may carry a time zone, e.g. `@richard (Asia/Shanghai)`: where they were when they sent the message. Read their "today", "tomorrow" or "tonight" in their zone. Later messages from the same sender may omit it; keep using the last zone you saw for them.
 
 `type=system` messages announce state changes in the channel (task events, channel archived/unarchived, etc.). They are informational — don't reply to them unless they clearly request action (e.g. a task was just assigned to you). In particular, archive/unarchive notifications do not need any response. If a channel is archived, further writes there will be rejected.
 

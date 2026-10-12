@@ -11,12 +11,16 @@ import {
 } from "./productFeedbackRouteSubject";
 
 const COMMITMENT_LABEL = "hands-feedback-route-subject:v1";
+// The per-source apps share their own root (productFeedbackApps), committed
+// under a separate label so it never collides with the legacy root.
+const MULTI_COMMITMENT_LABEL = "hands-feedback-route-subject:multi:v1";
 const CACHE_MAX = 10_000;
 const CACHE_TTL_MS = 5 * 60_000;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
 export class ProductFeedbackRouteBindingError extends Error {
-  constructor() {
+  /** Fixed operator-log code (a status number at most); never a value. */
+  constructor(readonly reason: string = "unknown") {
     super("feedback integration unavailable");
     this.name = "ProductFeedbackRouteBindingError";
   }
@@ -30,6 +34,7 @@ export type ProductFeedbackRouteConfig = {
   reporterIntegrationId: string;
   keyId: "v1";
   root: string;
+  commitmentLabel: string;
   reporterIdSecret: string;
 };
 
@@ -48,21 +53,24 @@ export function readProductFeedbackRouteConfig(env: NodeJS.ProcessEnv = process.
   const keyId = env.HANDS_FEEDBACK_ROUTE_SUBJECT_KEY_ID?.trim();
   const root = env.HANDS_FEEDBACK_ROUTE_SUBJECT_ROOT?.trim();
   const reporterIdSecret = env.HANDS_FEEDBACK_REPORTER_ID_SECRET?.trim();
+  const commitmentLabel = env.HANDS_FEEDBACK_ROUTE_SUBJECT_COMMITMENT_SCOPE === "multi"
+    ? MULTI_COMMITMENT_LABEL
+    : COMMITMENT_LABEL;
   if (
     !baseUrl || !appId || !appToken || !credentialRevision || !reporterIntegrationId
     || keyId !== "v1" || !root || !reporterIdSecret
     || !UUID_RE.test(appId)
     || (!UUID_RE.test(reporterIntegrationId) && reporterIntegrationId !== `legacy-feedback:${appId}`)
-  ) throw new ProductFeedbackRouteBindingError();
+  ) throw new ProductFeedbackRouteBindingError("config_invalid");
   try {
     const decoded = Buffer.from(root, "base64url");
     if (!/^[A-Za-z0-9_-]{43}$/.test(root) || decoded.length !== 32 || decoded.toString("base64url") !== root) throw new Error();
   } catch {
-    throw new ProductFeedbackRouteBindingError();
+    throw new ProductFeedbackRouteBindingError("root_invalid");
   }
   return {
     baseUrl: baseUrl.replace(/\/+$/, ""), appId, appToken, credentialRevision,
-    reporterIntegrationId, keyId, root, reporterIdSecret,
+    reporterIntegrationId, keyId, root, commitmentLabel, reporterIdSecret,
   };
 }
 
@@ -75,24 +83,24 @@ export function isProductFeedbackRouteConfigured(env: NodeJS.ProcessEnv = proces
   }
 }
 
-export function productFeedbackRouteRootCommitment(root: string): Buffer {
-  return createHash("sha256").update(feedbackRouteTuple(COMMITMENT_LABEL, Buffer.from(root, "base64url"))).digest();
+export function productFeedbackRouteRootCommitment(root: string, label: string = COMMITMENT_LABEL): Buffer {
+  return createHash("sha256").update(feedbackRouteTuple(label, Buffer.from(root, "base64url"))).digest();
 }
 
 export async function assertProductFeedbackRouteRootCommitment(
   config: ProductFeedbackRouteConfig,
   executor: DatabaseExecutor = getDb(),
 ): Promise<Buffer> {
-  const commitment = productFeedbackRouteRootCommitment(config.root);
+  const commitment = productFeedbackRouteRootCommitment(config.root, config.commitmentLabel);
   await executor.insert(integrationSecretCommitments).values({
-    label: COMMITMENT_LABEL,
+    label: config.commitmentLabel,
     commitment,
   }).onConflictDoNothing();
   const [row] = await executor.select({ commitment: integrationSecretCommitments.commitment })
     .from(integrationSecretCommitments)
-    .where(eq(integrationSecretCommitments.label, COMMITMENT_LABEL));
+    .where(eq(integrationSecretCommitments.label, config.commitmentLabel));
   if (!row || row.commitment.length !== commitment.length || !timingSafeEqual(row.commitment, commitment)) {
-    throw new ProductFeedbackRouteBindingError();
+    throw new ProductFeedbackRouteBindingError("root_commitment_mismatch");
   }
   return commitment;
 }
@@ -143,16 +151,18 @@ export async function ensureProductFeedbackRouteBinding(input: {
         body: JSON.stringify({ route_subject: subject }),
       },
     );
-    if (response.status !== 200 && response.status !== 201) throw new Error();
+    if (response.status !== 200 && response.status !== 201) {
+      throw new ProductFeedbackRouteBindingError(`hands_status_${response.status}`);
+    }
     const body = await response.json().catch(() => null) as Record<string, unknown> | null;
     if (!body || Object.keys(body).sort().join("\0") !== "changed\0subject_version"
       || typeof body.changed !== "boolean" || body.subject_version !== "v1"
-      || (response.status === 201) !== body.changed) throw new Error();
+      || (response.status === 201) !== body.changed) throw new ProductFeedbackRouteBindingError("hands_unexpected_body");
     remember(cacheKey, now + CACHE_TTL_MS);
     return { reporterId };
   } catch (error) {
     if (error instanceof ProductFeedbackRouteBindingError) throw error;
-    if (error instanceof ProductFeedbackRouteSubjectError) throw new ProductFeedbackRouteBindingError();
-    throw new ProductFeedbackRouteBindingError();
+    if (error instanceof ProductFeedbackRouteSubjectError) throw new ProductFeedbackRouteBindingError("route_subject_invalid");
+    throw new ProductFeedbackRouteBindingError("request_failed");
   }
 }

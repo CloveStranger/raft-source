@@ -99,6 +99,14 @@
       "types": "./src/attachmentUploadContract.ts",
       "default": "./src/attachmentUploadContract.ts"
     },
+    "./src/tracing/index": {
+      "types": "./src/tracing/index.ts",
+      "default": "./src/tracing/index.ts"
+    },
+    "./src/tracing/eventRows": {
+      "types": "./src/tracing/eventRows.ts",
+      "default": "./src/tracing/eventRows.ts"
+    },
     "./unread-activity-diagnostic": {
       "types": "./src/unreadActivityDiagnostic.ts",
       "default": "./src/unreadActivityDiagnostic.ts"
@@ -117,7 +125,11 @@
     },
     "./src/testVectors/messageRepliesDiscussionGraph.vectors.json": "./src/testVectors/messageRepliesDiscussionGraph.vectors.json",
     "./src/testVectors/threadRepliesReadModel.vectors.json": "./src/testVectors/threadRepliesReadModel.vectors.json",
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./announcement-presentation": {
+      "types": "./announcement-presentation.ts",
+      "default": "./announcement-presentation.ts"
+    }
   },
   "scripts": {
     "generate:openapi": "node --import @oxc-node/core/register scripts/generate-openapi.ts",
@@ -142,12 +154,12 @@
     "zod": "^4.3.6"
   },
   "devDependencies": {
-    "@oxc-node/core": "^0.1.3",
+    "@oxc-node/core": "^0.1.6",
     "@redocly/cli": "2.40.0",
     "@types/node": "^25.5.0",
     "openapi-typescript": "7.13.0",
     "typescript": "^6.0.3",
-    "vitest": "^5.0.2",
+    "vitest": "^5.0.3",
     "zod-openapi": "6.0.0"
   }
 }

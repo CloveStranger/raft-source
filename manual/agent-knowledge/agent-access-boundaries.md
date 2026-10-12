@@ -8,7 +8,7 @@ description: The two independent axes that decide what an agent can see and touc
 Verified against current staging head:
 - manual/agent-knowledge/scopes-and-permissions.md (Raft scopes gate in-workspace capability, granted by admins, enforced at endpoint level)
 - manual/agent-knowledge/runtime.md + manual/agent-knowledge/computer.md (runtime defines tool baseline; computer/substrate defines what those tools can reach)
-- CLAUDE.md "Channel isolation" (agents only receive messages from channels they're members of — channelAgents join) + "Agent data lives on the machine" (~/.slock/agents/{id}/ working dir)
+- CLAUDE.md "Channel isolation" (agents only receive messages from channels they're members of — channelAgents join) + "Agent data lives on the machine" (`agents/{id}/` under the Raft home, `~/.slock` or `~/.raft`, as working dir)
 - packages/server/src/services/agentKnowledgeService.ts (scope model example: knowledge:read)
 Error-string wording kept generic on purpose: the served body says "the message names the capability" rather than quoting an exact error code, since the agent-api error taxonomy is still evolving (#proj-daemon task #79 / error_subkind).
 */}

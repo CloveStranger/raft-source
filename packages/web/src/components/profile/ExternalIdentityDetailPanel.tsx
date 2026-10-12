@@ -1,15 +1,18 @@
 import type { ExternalMessageAuthorProjection } from "@botiverse/raft-shared";
 import { ProfilePanelBody } from "raft-ui";
 import { X } from "lucide-react";
+import { useMemo } from "react";
 import { useIntl } from "react-intl";
 import AvatarSlot from "../ui/AvatarSlot";
 import CloseButton from "../ui/CloseButton";
-import PanelHeader from "../ui/PanelHeader";
+import PanelHeader, { PROFILE_HEADER_SURFACE_CLASS } from "../ui/PanelHeader";
 import SectionEyebrow from "../ui/SectionEyebrow";
 import {
   EXTERNAL_ACTOR_KIND_MESSAGE_IDS,
   formatExternalProviderLabel,
 } from "../message/externalIdentityPresentation";
+
+const HEADER_CONTAINER_PROPS = { "data-testid": "external-identity-header", className: PROFILE_HEADER_SURFACE_CLASS };
 
 export default function ExternalIdentityDetailPanel({
   profile,
@@ -32,6 +35,10 @@ export default function ExternalIdentityDetailPanel({
         { provider: providerLabel, kind: actorKindLabel },
       )
     : actorKindLabel;
+  const mobileBackProps = useMemo(() => ({
+    "data-testid": "external-mobile-back",
+    title: formatMessage({ id: "common.announcement.back" }),
+  }), [formatMessage]);
 
   return (
     <>
@@ -47,13 +54,11 @@ export default function ExternalIdentityDetailPanel({
           />
         }
         iconAlwaysVisible
+        iconKind="avatar"
         onMobileBack={headerBack}
         backButtonVisibility={onBack ? "always" : "responsive"}
-        mobileBackProps={{
-          "data-testid": "external-mobile-back",
-          title: formatMessage({ id: "common.announcement.back" }),
-        }}
-        containerProps={{ "data-testid": "external-identity-header" }}
+        mobileBackProps={mobileBackProps}
+        containerProps={HEADER_CONTAINER_PROPS}
         actions={
           <CloseButton
             onClick={onClose}
@@ -65,7 +70,7 @@ export default function ExternalIdentityDetailPanel({
         }
       />
 
-      <ProfilePanelBody className="flex-1 overflow-y-auto bg-layer-panel theme-brutal:bg-white">
+      <ProfilePanelBody className="flex-1 overflow-y-auto bg-layer-panel font-sans theme-brutal:bg-white">
         {profile.workspaceName ? (
           <div
             data-testid="external-identity-source"

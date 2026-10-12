@@ -89,11 +89,15 @@ dbTest("message history consumes resolved ids as an indexable predicate", async 
   });
 
   assert.deepEqual(page.messages.map((row) => row.id), [message.id]);
-  assert.equal(coverageSql.length, 2);
-  for (const rendered of coverageSql) {
-    assert.match(rendered, /where "messages"\."channel_id" = \$\d+/);
-    assert.doesNotMatch(rendered, /channel_id" IN \( SELECT/);
-  }
+  // The page and its coverage bounds are one statement; the page and each
+  // bound read the channel through the equality predicate.
+  assert.equal(coverageSql.length, 1);
+  assert.equal(coverageSql[0]!.match(/where "messages"\."channel_id" = \$\d+/g)?.length, 3);
+  // Each bound is a plain max() subquery (one backward index probe); a max()
+  // with a FILTER clause would read the channel's whole index.
+  assert.equal(coverageSql[0]!.match(/\(select max\("seq"\) from "messages" where/g)?.length, 2);
+  assert.doesNotMatch(coverageSql[0]!, /filter \(where/i);
+  assert.doesNotMatch(coverageSql[0]!, /channel_id" IN \( SELECT/);
 });
 
 test("resolved single-channel history scope compiles to an equality index condition", () => {

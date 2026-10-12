@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawnRuntimeChild } from "./runtimeChild";
 import { hydrateRuntimeConfig, runtimeConfigToLaunchFields, type AgentConfig , type AxSurfaceText } from "@botiverse/raft-shared";
 import type { RuntimeDriver, SpawnContext, SpawnResult, ParsedEvent } from "./types";
 import { buildCliTransportSystemPrompt, prepareCliTransport } from "./cliTransport";
@@ -59,6 +59,10 @@ export function buildCopilotArgs(ctx: SpawnContext, managedMcpConfigPath?: strin
 /**
  * GitHub Copilot CLI driver.
  *
+ * @deprecated Retained only to run and resume existing Copilot agents.
+ * Shared runtime availability and server admission reject new agents and
+ * transitions from other runtimes; keep this driver for existing-agent compatibility.
+ *
  * Uses `--output-format json` which emits JSONL events with a different
  * schema from Claude/Cursor:
  *   { type: "assistant.message", data: { content, toolRequests, ... }, id, timestamp, ... }
@@ -115,7 +119,9 @@ export class CopilotDriver implements RuntimeDriver {
     const spawnEnv = await buildCopilotSpawnEnv(ctx);
 
     const launch = resolveRuntimeLaunch("copilot", "copilot", args, { env: spawnEnv });
-    const proc = spawn(launch.command, launch.args, {
+    // task #365: after the last await, right before the child exists.
+    ctx.assertLaunchCurrent?.();
+    const proc = spawnRuntimeChild(launch.command, launch.args, {
       cwd: ctx.workingDirectory,
       stdio: ["pipe", "pipe", "pipe"],
       env: launch.env ?? spawnEnv,

@@ -8,7 +8,7 @@ import {
   type RuntimeCompactionInterruption,
   type RuntimeErrorActivityDiagnostic,
 } from "@botiverse/raft-shared";
-import { formatRuntimeInputTooLargeMessage } from "./runtimeErrorDiagnostics";
+import { formatRuntimeInputTooLargeMessage, formatRuntimeResetSessionGuidance, runtimeNeedsResetSessionGuidance } from "./runtimeErrorDiagnostics";
 
 export type RuntimeCompactionReason = "manual" | "threshold" | "overflow" | "unknown";
 export type RuntimeCompactionOutcome = "compaction_failed_or_exhausted" | "aborted" | "unknown";
@@ -136,7 +136,9 @@ export function projectStructuredRuntimeTerminalFailure(
         detail: event.compaction?.failureReason === "input_too_large" || event.compaction?.failureReason === "recovery_exhausted"
           || (event.compaction === undefined && event.message === "InputTooLargeError")
           ? formatRuntimeInputTooLargeMessage(runtimeId)
-          : `${getRuntimeDisplayName(runtimeId)} context compaction failed. No successful summary was reported; inspect the runtime diagnostics before retrying.`,
+          : runtimeNeedsResetSessionGuidance(runtimeId)
+            ? `${getRuntimeDisplayName(runtimeId)} context compaction failed. No successful summary was reported. If it keeps failing, start a new session. ${formatRuntimeResetSessionGuidance()}`
+            : `${getRuntimeDisplayName(runtimeId)} context compaction failed. No successful summary was reported; inspect the runtime diagnostics before retrying.`,
         actionRequired: false,
       }
     : null;

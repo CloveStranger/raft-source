@@ -34,7 +34,7 @@ export const unfollowThreadRequestSchema = requestSchema<{ target: string; reaso
 
 const INVALID_CHANNEL_TARGET = "Target must be a regular channel in the form '#channel-name'. DMs and thread targets are not supported.";
 
-async function resolveRegularChannel(
+export async function resolveRegularChannel(
   client: Pick<AgentApiClient, "server">,
   target: string,
   options: RaftHintOptions,

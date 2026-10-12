@@ -28,10 +28,23 @@
  * pure transition functions are exported so the rules stay testable without a
  * store. Observation carrier: ids, classes, counts and times only.
  */
-import type { WakeCrashLoopActivityDiagnostic } from "@botiverse/raft-shared";
+import {
+  NON_RETRYABLE_SPAWN_FAILURE_REASONS,
+  RETRY_ONCE_SPAWN_FAILURE_REASONS,
+  SPAWN_FAILURE_RETRY_ONCE_DELAY_MS,
+  type SpawnFailureReason,
+  type WakeCrashLoopActivityDiagnostic,
+} from "@botiverse/raft-shared";
 
 export const WAKE_CRASH_LOOP_WINDOW_MS = 60_000;
 export const WAKE_CRASH_LOOP_THRESHOLD = 3;
+/**
+ * Failed starts in a row (typed start failures of any reason, each belonging
+ * to the start it ends) after which automatic wakes stop, with the last
+ * failure as the reason. Reasons retrying cannot fix stop sooner (see
+ * `applyWakeCrashLoopStartFailure`).
+ */
+export const START_FAILURE_THRESHOLD = 5;
 
 export type WakeCrashLoopExitKind = WakeCrashLoopActivityDiagnostic["lastExitKind"];
 
@@ -96,6 +109,35 @@ export interface WakeCrashLoopEpisodeState {
   catchupOwed?: boolean;
   /** task #1221: the start (launchId) that carried the owed catch-up, pending its active report. */
   catchupCarriedLaunchId?: string | null;
+  /**
+   * Failed starts in a row, any reason; a start that reports its runtime
+   * active, a new episode or a config change resets it. Absent on older
+   * records (= 0).
+   */
+  startFailureCount?: number;
+  /** Reason of the last counted start failure (absent = null). */
+  lastStartFailureReason?: string | null;
+  /** The start whose failure was counted last: one count per start. */
+  lastStartFailureLaunchId?: string | null;
+  /**
+   * A retry-once failure (`RETRY_ONCE_SPAWN_FAILURE_REASONS`) holds automatic
+   * wakes until this time; the server then retries once. Absent = null.
+   */
+  retryAfterMs?: number | null;
+  /**
+   * task #365: the start (launchId) whose failure the RFC 071 terminal
+   * breaker owns: its outbox proved no process was created
+   * (`not_spawned: spawn_error`) and counts it in its own bounded backoff, so
+   * this streak does not count it again. Written only in the same
+   * compare-and-set that commits that outcome. Absent = null (= no owner).
+   */
+  startFailureOwnedLaunchId?: string | null;
+  /**
+   * task #365: the start whose counted failure set `blocked` (written by the
+   * start-failure path only; an early-exit block leaves it null). Only that
+   * start's ownership can lift the block. Absent = null (= never lifted).
+   */
+  blockedByLaunchId?: string | null;
 }
 
 /** Token returned by `recordStart`; lets a failed dispatch roll the record back. */
@@ -141,12 +183,30 @@ export function freshWakeCrashLoopEpisode(episode: number): WakeCrashLoopEpisode
 export interface WakeCrashLoopRules {
   windowMs: number;
   threshold: number;
+  /** Default START_FAILURE_THRESHOLD. */
+  startFailureThreshold?: number;
+  /** Default SPAWN_FAILURE_RETRY_ONCE_DELAY_MS. */
+  retryOnceDelayMs?: number;
 }
 
 export const DEFAULT_WAKE_CRASH_LOOP_RULES: WakeCrashLoopRules = {
   windowMs: WAKE_CRASH_LOOP_WINDOW_MS,
   threshold: WAKE_CRASH_LOOP_THRESHOLD,
+  startFailureThreshold: START_FAILURE_THRESHOLD,
+  retryOnceDelayMs: SPAWN_FAILURE_RETRY_ONCE_DELAY_MS,
 };
+
+function hasStartFailureStreak(state: WakeCrashLoopEpisodeState): boolean {
+  return (state.startFailureCount ?? 0) > 0 || (state.retryAfterMs ?? null) !== null;
+}
+
+/** The start-failure fields of a state with no failed start counted. */
+const NO_START_FAILURE_STREAK = {
+  startFailureCount: 0,
+  lastStartFailureReason: null,
+  lastStartFailureLaunchId: null,
+  retryAfterMs: null,
+} as const satisfies Partial<WakeCrashLoopEpisodeState>;
 
 /**
  * A start was dispatched. `human` starts (manual start / resume) always lift a
@@ -159,7 +219,7 @@ export function applyWakeCrashLoopStart(
   rules: WakeCrashLoopRules = DEFAULT_WAKE_CRASH_LOOP_RULES,
 ): WakeCrashLoopEpisodeState {
   let state: WakeCrashLoopEpisodeState = { ...current };
-  if (input.human && (state.blocked || state.earlyExitCount > 0)) {
+  if (input.human && (state.blocked || state.earlyExitCount > 0 || hasStartFailureStreak(state))) {
     // A new episode, but an owed catch-up survives until it is delivered.
     state = { ...freshWakeCrashLoopEpisode(state.episode + 1), catchupOwed: current.catchupOwed === true };
   } else if (
@@ -226,29 +286,133 @@ export function applyWakeCrashLoopExit(
   return { state, counted: true, rejected: null, blockedNow };
 }
 
+export type WakeCrashLoopStartFailureOutcome =
+  /** Not this start's failure, already counted, or already blocked: no change. */
+  | "ignored"
+  /** Counted; automatic wakes continue. */
+  | "counted"
+  /** Counted; automatic wakes wait `retryOnceDelayMs`, then the server retries once. */
+  | "retry_scheduled"
+  /** Counted and automatic wakes are now blocked (needs the owner). */
+  | "blocked"
+  /** task #365: the RFC 071 breaker owns this start's failure: not counted here. */
+  | "owned_by_terminal_breaker";
+
 /**
- * task #1221: a start failed for a reason retrying cannot fix. Block automatic
- * wakes at once (no threshold), but only when the failure belongs to the
- * current start: a late failure from an older launch must not re-block a start
- * a person or a config change has since made. Already blocked: no change.
+ * A start failed with a typed reason. Counted only when the failure belongs to
+ * the current start, once per start: a late failure from an older launch must
+ * not count against (or block) a start a person or a config change has since
+ * made. Then, in order:
+ *  - task #1221: a reason retrying cannot fix blocks at once;
+ *  - a retry-once reason blocks when the previous counted failure had the same
+ *    reason (the retry failed too), else holds automatic wakes for
+ *    `retryOnceDelayMs` so the server retries once after it;
+ *  - any reason blocks once `startFailureThreshold` starts failed in a row.
+ * A block keeps the last reason (`needsActionReason`) and owes the unread
+ * catch-up to the start that follows it; so does a held retry.
  */
-export function applyWakeCrashLoopNonRetryableStartFailure(
+export function applyWakeCrashLoopStartFailure(
   current: WakeCrashLoopEpisodeState,
   input: { launchId: string | null; reason: string; nowMs: number },
-): { state: WakeCrashLoopEpisodeState; blockedNow: boolean } {
-  if (current.blocked) return { state: current, blockedNow: false };
-  if (input.launchId === null || input.launchId !== current.lastStartLaunchId) return { state: current, blockedNow: false };
-  return {
-    state: {
-      ...current,
-      blocked: true,
-      blockedAtMs: input.nowMs,
-      lastLaunchId: input.launchId,
-      needsActionReason: input.reason,
-      catchupOwed: true,
-    },
-    blockedNow: true,
+  rules: WakeCrashLoopRules = DEFAULT_WAKE_CRASH_LOOP_RULES,
+): { state: WakeCrashLoopEpisodeState; outcome: WakeCrashLoopStartFailureOutcome } {
+  if (current.blocked) return { state: current, outcome: "ignored" };
+  if (input.launchId === null || input.launchId !== current.lastStartLaunchId) return { state: current, outcome: "ignored" };
+  if ((current.startFailureOwnedLaunchId ?? null) === input.launchId) return { state: current, outcome: "owned_by_terminal_breaker" };
+  if (current.lastStartFailureLaunchId === input.launchId) return { state: current, outcome: "ignored" };
+  const previousCount = current.startFailureCount ?? 0;
+  const count = previousCount + 1;
+  const counted: WakeCrashLoopEpisodeState = {
+    ...current,
+    startFailureCount: count,
+    lastStartFailureReason: input.reason,
+    lastStartFailureLaunchId: input.launchId,
+    retryAfterMs: null,
   };
+  const reason = input.reason as SpawnFailureReason;
+  const retryOnce = RETRY_ONCE_SPAWN_FAILURE_REASONS.includes(reason);
+  const block = NON_RETRYABLE_SPAWN_FAILURE_REASONS.includes(reason)
+    || (retryOnce && previousCount > 0 && current.lastStartFailureReason === input.reason)
+    || count >= (rules.startFailureThreshold ?? START_FAILURE_THRESHOLD);
+  if (block) {
+    return {
+      state: {
+        ...counted,
+        blocked: true,
+        blockedAtMs: input.nowMs,
+        lastLaunchId: input.launchId,
+        needsActionReason: input.reason,
+        blockedByLaunchId: input.launchId,
+        catchupOwed: true,
+      },
+      outcome: "blocked",
+    };
+  }
+  if (retryOnce) {
+    return {
+      state: { ...counted, retryAfterMs: input.nowMs + (rules.retryOnceDelayMs ?? SPAWN_FAILURE_RETRY_ONCE_DELAY_MS), catchupOwed: true },
+      outcome: "retry_scheduled",
+    };
+  }
+  return { state: counted, outcome: "counted" };
+}
+
+/**
+ * task #365: the RFC 071 terminal breaker just committed `not_spawned:
+ * spawn_error` for `launchId` (its current launch): it owns that start's
+ * failure. Applied only inside that commit's compare-and-set, never on its
+ * own, so a replayed, stale or mismatched outcome changes nothing here.
+ *  - Ownership is recorded only when `launchId` is also this record's
+ *    current start; a late activity for it is then not counted.
+ *  - If this streak already counted that start (it is the last counted
+ *    start), exactly that contribution is withdrawn: one count, the
+ *    retry-once it scheduled, and the block only when that start set it
+ *    (`blockedByLaunchId`). An early-exit block, another start's failure, a
+ *    manual stop (which already cleared the streak) are left alone. A record
+ *    without `blockedByLaunchId` (written by an older replica) keeps its
+ *    block: withdrawing it then needs a person.
+ */
+export function applyWakeCrashLoopStartFailureOwned(
+  current: WakeCrashLoopEpisodeState,
+  launchId: string,
+): { state: WakeCrashLoopEpisodeState; changed: boolean; withdrawn: boolean; unblocked: boolean } {
+  if (current.lastStartLaunchId !== launchId) return { state: current, changed: false, withdrawn: false, unblocked: false };
+  const state: WakeCrashLoopEpisodeState = { ...current, startFailureOwnedLaunchId: launchId };
+  if ((current.lastStartFailureLaunchId ?? null) !== launchId) return { state, changed: true, withdrawn: false, unblocked: false };
+  const count = Math.max(0, (current.startFailureCount ?? 0) - 1);
+  state.startFailureCount = count;
+  state.lastStartFailureLaunchId = null;
+  if (count === 0) state.lastStartFailureReason = null;
+  state.retryAfterMs = null;
+  const unblocked = current.blocked && (current.blockedByLaunchId ?? null) === launchId;
+  if (unblocked) {
+    state.blocked = false;
+    state.blockedAtMs = null;
+    state.needsActionReason = null;
+    state.blockedByLaunchId = null;
+  }
+  return { state, changed: true, withdrawn: true, unblocked };
+}
+
+/** A start reported its runtime active: the failed-start streak is over. */
+export function applyWakeCrashLoopStartSucceeded(
+  current: WakeCrashLoopEpisodeState,
+  launchId: string,
+): { state: WakeCrashLoopEpisodeState; changed: boolean } {
+  if (current.lastStartLaunchId !== launchId || !hasStartFailureStreak(current)) return { state: current, changed: false };
+  return { state: { ...current, ...NO_START_FAILURE_STREAK }, changed: true };
+}
+
+export type WakeCrashLoopAutomaticWakeHold =
+  | { kind: "blocked"; reason: string | null }
+  | { kind: "retry_pending"; retryAfterMs: number };
+
+/** Why an automatic wake may not start now, or null when it may. Human starts ignore this. */
+export function wakeCrashLoopAutomaticWakeHold(state: WakeCrashLoopEpisodeState, nowMs: number): WakeCrashLoopAutomaticWakeHold | null {
+  if (state.blocked) return { kind: "blocked", reason: state.needsActionReason ?? null };
+  const retryAfterMs = state.retryAfterMs ?? null;
+  if (retryAfterMs !== null && nowMs < retryAfterMs) return { kind: "retry_pending", retryAfterMs };
+  return null;
 }
 
 const WAKE_CRASH_LOOP_EXIT_KINDS: ReadonlySet<string> = new Set(["machine_disconnected", "agent_process_exited"]);
@@ -352,6 +516,8 @@ export class WakeCrashLoopBreaker {
     this.rules = {
       windowMs: options.windowMs ?? WAKE_CRASH_LOOP_WINDOW_MS,
       threshold: options.threshold ?? WAKE_CRASH_LOOP_THRESHOLD,
+      startFailureThreshold: options.startFailureThreshold ?? START_FAILURE_THRESHOLD,
+      retryOnceDelayMs: options.retryOnceDelayMs ?? SPAWN_FAILURE_RETRY_ONCE_DELAY_MS,
     };
   }
 
@@ -382,6 +548,11 @@ export class WakeCrashLoopBreaker {
 
   async isBlocked(agentId: string): Promise<boolean> {
     return (await this.read(agentId)).state.blocked;
+  }
+
+  /** See `wakeCrashLoopAutomaticWakeHold`. */
+  async automaticWakeHold(agentId: string, nowMs: number): Promise<WakeCrashLoopAutomaticWakeHold | null> {
+    return wakeCrashLoopAutomaticWakeHold((await this.read(agentId)).state, nowMs);
   }
 
   /** task #1221: does the next start owe the unread catch-up (see `catchupOwed`)? */
@@ -460,14 +631,35 @@ export class WakeCrashLoopBreaker {
     });
   }
 
-  /** task #1221: see `applyWakeCrashLoopNonRetryableStartFailure`. */
-  async recordNonRetryableStartFailure(
+  /**
+   * See `applyWakeCrashLoopStartFailure`. Also returns the resulting state's
+   * block, count and retry time, so a failure that changed nothing (already
+   * blocked) can still be shown as paused.
+   */
+  async recordStartFailure(
     agentId: string,
     input: { launchId: string | null; reason: string; nowMs: number },
-  ): Promise<boolean> {
+  ): Promise<{ outcome: WakeCrashLoopStartFailureOutcome; blocked: boolean; startFailureCount: number; retryAfterMs: number | null }> {
     return this.mutate(agentId, (state) => {
-      const applied = applyWakeCrashLoopNonRetryableStartFailure(state, input);
-      return { state: applied.state, result: applied.blockedNow, write: applied.blockedNow };
+      const applied = applyWakeCrashLoopStartFailure(state, input, this.rules);
+      return {
+        state: applied.state,
+        write: applied.outcome !== "ignored",
+        result: {
+          outcome: applied.outcome,
+          blocked: applied.state.blocked,
+          startFailureCount: applied.state.startFailureCount ?? 0,
+          retryAfterMs: applied.state.retryAfterMs ?? null,
+        },
+      };
+    });
+  }
+
+  /** See `applyWakeCrashLoopStartSucceeded`. */
+  async recordStartSucceeded(agentId: string, launchId: string): Promise<boolean> {
+    return this.mutate(agentId, (state) => {
+      const applied = applyWakeCrashLoopStartSucceeded(state, launchId);
+      return { state: applied.state, result: applied.changed, write: applied.changed };
     });
   }
 
@@ -480,10 +672,10 @@ export class WakeCrashLoopBreaker {
    */
   async liftForConfigChange(agentId: string): Promise<boolean> {
     return this.mutate(agentId, (state) => {
-      if (state.blocked) {
+      if (state.blocked || hasStartFailureStreak(state)) {
         return {
           state: { ...freshWakeCrashLoopEpisode(state.episode + 1), catchupOwed: state.catchupOwed === true },
-          result: true,
+          result: state.blocked,
           write: true,
         };
       }

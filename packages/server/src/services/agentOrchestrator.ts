@@ -81,9 +81,11 @@ import {
   type DeliveryConsumptionActivityDiagnostic,
   type WakeCrashLoopActivityDiagnostic,
   type SpawnFailureActivityDiagnostic,
-  NON_RETRYABLE_SPAWN_FAILURE_REASONS,
   AGENT_MIGRATION_CAPABILITY,
   MODEL_SEEN_MAX_ITEMS_PER_REPORT,
+  MACHINE_DUPLICATE_CONNECTION_CLOSE_CODE,
+  MACHINE_DUPLICATE_CONNECTION_CLOSE_REASON,
+  MACHINE_DUPLICATE_CONNECTION_HELD_CLOSE_REASON,
 } from "@botiverse/raft-shared";
 import {
   FeedbackTranscriptLateResults,
@@ -107,11 +109,17 @@ import {
   ingestRuntimeOutcomeOutboxMessage,
   type RuntimeOutcomeOutboxMessage,
 } from "../runtimeOutcomeOutboxIngest";
+import { newMachineConnectionEpochId } from "./machineContext";
 import { TerminalFailureBreaker, type CombinedClaimResult } from "../terminalFailureBreakerStore";
 import {
+  buildCatchupBatch,
   isTerminalBreakerProtecting,
+  isSpawnErrorRetryDue,
+  spawnErrorRetryJitterMs,
   terminalBlockView,
+  type CatchupObligation,
   type TerminalBlockView,
+  type TerminalFailureBreakerState,
   type TerminalStartControl,
   type TerminalWakeRefusal,
 } from "../terminalFailureBreaker";
@@ -120,6 +128,7 @@ import { listBuiltInAppConfigSnapshotsForAgent } from "./appConfigTransportCompo
 import { isProbeCarrierFactLive, parseProbeCarrierMeta } from "./probeCarrierFact";
 import type { AppSnapshotComposition } from "./appSnapshotComposition";
 import { boundedErrorClass } from "../tracing/queryTrace";
+import { pgSqlState } from "../db/migrationPreflight";
 import {
   addTraceEvent,
   errorClassOf,
@@ -147,6 +156,7 @@ import {
 import { legacyRuntimeStateFromActivity } from "./legacyActivityStateInference";
 import { CONSTRUCTED_WAKE_CONTEXT_FEATURE_FLAG_KEY, evaluateFeatureFlag, PASSIVE_AX_FEATURE_FLAG_KEY, SUBAGENT_DELEGATION_FEATURE_FLAG_KEY } from "./featureFlagService";
 import { runtimeAccountUsageCacheService } from "./runtimeAccountUsageCacheService";
+import { usageLimitAttentionService } from "./usageLimitAttentionService";
 import { machineRuntimeModelCatalogService } from "./machineRuntimeModelCatalogService";
 import { getComputerLinkedMachineAttachers } from "./computerCredentialService";
 import {
@@ -158,7 +168,7 @@ import {
 } from "./computerBroadcastPolicyService";
 import type { PersistedAgentActivityHint } from "./agentActivityLogService";
 import * as reminderService from "../apps/reminder/service";
-import { agentHasScope } from "./agentScopesService";
+import { agentHasScope, existingAgentsHaveScope } from "./agentScopesService";
 import {
   adaptDaemonActivityLifecycleEvent,
   adaptDaemonSessionLifecycleEvent,
@@ -242,6 +252,7 @@ export {
 import { getServerPlan, getHistoryCutoff } from "./planService";
 import {
   REPLICA_ID,
+  type MachineDuplicateHold,
   routeStartIntent,
   START_INTENT_OWNER_MOVED,
   StartIntentOwnerMovedError,
@@ -265,6 +276,7 @@ import {
 } from "../replicaRouter";
 import {
   redisReplicaStateStore,
+  type AgentRuntimeErrorMirror,
   type MachineMeta,
   type PersistedActivityTypedCarriers,
   type PersistedAgentActivity,
@@ -279,8 +291,19 @@ import {
 import {
   agentDeliveryAckSeconds,
   agentDeliveryOutcomesTotal,
+  provideAgentDeliveryPending,
+  daemonVersionLabel,
+  releaseAgentDeliveryPending,
   agentDeliveryTrackedTotal,
   machineConnectionsRefusedTotal,
+  machineCloseCodeLabel,
+  machineConnectionLifetimeLabel,
+  machineDisconnectsTotal,
+  agentWakePauseTransitionsTotal,
+  machineCommandRouteTotal,
+  machineOwnerRefreshTotal,
+  machineDuplicateConnectionsTotal,
+  machineDuplicateConnectionActionsTotal,
 } from "../metrics";
 import type { ComputerSourceFact } from "./computerBroadcastPolicyService";
 import {
@@ -307,7 +330,28 @@ interface MachineConnection {
   runtimeAccountUsageTimer: unknown | null;
   lastPong: number;
   lastIngressAt: number;
+  // When this connection was accepted; SLI 4 failure outcomes are bucketed by
+  // connection age (task #432). Optional so hand-built test connections compile.
+  connectedAt?: number;
   daemonVersion: string | null;
+  // Task #374: closed because another replica holds a live, renewing
+  // connection for this machine. Its disconnect is local cleanup only.
+  closedAsDuplicate?: boolean;
+  // Task #374: short hash of the hostname the daemon reported in `ready`
+  // (never the name itself). A clue for duplicate reports, not host identity.
+  reportedHostnameHash?: string | null;
+  // Task #374: when this connection, as lease holder, last published its
+  // daemon identity next to the lease (observation for duplicate detection).
+  lastReplicaInstancePublishedAt?: number;
+  // Task #374: evidence that another replica holds this machine's owner lease
+  // and keeps renewing it while this socket is alive. Cleared by a refresh
+  // that succeeds; reported once per connection.
+  duplicateLeaseEvidence?: {
+    firstRejectedAt: number;
+    lastForeignUpdatedAtMs: number;
+    foreignAdvances: number;
+    reported: boolean;
+  };
   capabilities: Set<string>;
   // Runtimes reported in the daemon `ready` message, held in-memory so
   // server-authoritative readiness (ServerSetupProjectionGate) derives runtime
@@ -619,6 +663,8 @@ function requireReplicaGeneration(generation: unknown): string {
 }
 const COMPUTER_LIFECYCLE_DISCONNECT_OBSERVATION_TIMEOUT_MS = 1000;
 const MACHINE_DISCONNECT_PROJECTION_GRACE_MS = 2000;
+/** Fire the retry-once retry just after its hold ends, so the gate never sees it a tick early. */
+const START_FAILURE_RETRY_SLACK_MS = 250;
 export function normalizeRuntimeProfileReportSource(source: unknown): string {
   return typeof source === "string" && RUNTIME_PROFILE_REPORT_SOURCES.has(source) ? source : "unknown";
 }
@@ -694,6 +740,24 @@ const MACHINE_UNLINKED_CLOSE_CODE = 4001;
 const MACHINE_UNLINKED_CLOSE_REASON = "computer_machine_unlinked";
 const LEGACY_PRINCIPAL_FENCED_CLOSE_CODE = 4002;
 const LEGACY_PRINCIPAL_FENCED_CLOSE_REASON = "legacy_machine_key_migrated";
+// Task #374: 4003, shared with the daemon, which picks its backoff from the reason.
+const DUPLICATE_MACHINE_CONNECTION_CLOSE_CODE = MACHINE_DUPLICATE_CONNECTION_CLOSE_CODE;
+
+/**
+ * Task #374: the first 12 hex characters of sha256 over the reported hostname.
+ * Only used to compare what two daemons reported; it is not anonymisation
+ * (hostnames are guessable) and equal names do not prove the same host.
+ */
+export function reportedHostnameHash(hostname: unknown): string | null {
+  if (typeof hostname !== "string" || !hostname.trim()) return null;
+  return crypto.createHash("sha256").update(hostname.trim().toLowerCase(), "utf8").digest("hex").slice(0, 12);
+}
+
+/** Task #374 enforcement is off unless SLOCK_MACHINE_DUPLICATE_CONNECTION_ENFORCEMENT is 1/true. */
+export function duplicateMachineConnectionEnforcementEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  const value = env.SLOCK_MACHINE_DUPLICATE_CONNECTION_ENFORCEMENT?.trim().toLowerCase();
+  return value === "1" || value === "true";
+}
 
 interface PendingMachineDisconnectProjection {
   serverId: string;
@@ -720,10 +784,24 @@ interface PendingAgentDeliveryAck {
   attempts: number;
   parked: boolean;
   parkedReason?: "machine_offline";
+  /** When the current parked period began; bounds how long a record may stay parked. */
+  parkedAt?: number;
+  /**
+   * A tracked mention the daemon reported `daemon_pending` for: it reached the
+   * daemon and waits for the agent to be told (possibly the end of the current
+   * turn). SLI 4 counts arrival here; re-sends stop (task #432).
+   */
+  arrivedAt?: number;
   firstAttemptAt: number;
   lastAttemptAt: number;
   /** SLO v1 SLI 4: the machine socket was open on this replica when the record was created. */
   onlineAtFirstAttempt: boolean;
+  /**
+   * The machine's daemon version when the record was created, as a metric
+   * label value; fixed for the record so its tracked, latency and outcome
+   * samples share one label set.
+   */
+  daemonVersion: string;
 }
 
 type AgentDeliveryOutcome =
@@ -734,7 +812,9 @@ type AgentDeliveryOutcome =
   | "terminal"
   | "agent_stopped"
   | "converted_to_wake"
-  | "replica_shutdown";
+  | "replica_shutdown"
+  | "parked_expired"
+  | "held_expired";
 
 type AgentStartMessage = Extract<
   ServerToMachineMessage,
@@ -742,6 +822,8 @@ type AgentStartMessage = Extract<
 >;
 
 type AgentStartDispatchTerminalReason =
+  /** task #365: the daemon refused the start as claimed against an earlier connection. */
+  | "stale_dispatch"
   | "acked"
   | "stopped"
   | "superseded"
@@ -769,8 +851,20 @@ interface AgentInbox {
 }
 
 interface StartAgentOptions {
-  /** Daemon-requested wake for a due app-inbox item (task #1103). */
-  startCause?: "app_inbox_wake";
+  /**
+   * Daemon-requested wake for a due app-inbox item (task #1103), the one
+   * automatic retry after a retry-once start failure (see
+   * `RETRY_ONCE_SPAWN_FAILURE_REASONS`), or `internal`: the spawn-error retry
+   * sweep (task #365). All are automatic starts, never a human start.
+   */
+  startCause?: "app_inbox_wake" | "start_failure_retry" | "internal";
+  /**
+   * task #365, set only by `startAgent` for an `internal` start: the epoch of
+   * this replica's socket for the agent's machine when it decided to run the
+   * start here. The start is stamped with it, so the daemon refuses it on
+   * any other connection.
+   */
+  localConnectionEpochId?: string;
   resumePrompt?: string;
   wakeMessage?: AgentMessage;
   wakeMessageTransient?: boolean;
@@ -791,6 +885,16 @@ interface TerminalStartContext {
   /** The daemon advertises `agent:runtime-outcome-v1` (it has the outcome outbox), reliable or not. */
   daemonReportsOutcomes: boolean;
   daemonInstanceId: string | null;
+}
+
+/**
+ * The lifecycle cause of a start. The retry after a retry-once start failure
+ * stands in for the message wakes its hold refused, so it is a message cause:
+ * automatic, never human.
+ */
+function lifecycleStartCause(options: StartAgentOptions): "message" | "manual" | "resume" | "app_inbox_wake" | "internal" {
+  if (options.startCause === "start_failure_retry") return "message";
+  return options.startCause ?? (options.wakeMessage ? "message" : options.resumePrompt ? "resume" : "manual");
 }
 
 /** RFC 071 §5: the only start control the terminal-failure breaker treats as human. */
@@ -981,6 +1085,32 @@ type WeakOfflineSource = "owner_missing" | "replica_state_unavailable" | "self_o
 
 type WeakOfflineCompetingFact = "redis_busy_activity" | "persisted_busy_activity";
 
+/**
+ * Reads an agent-list request fetched for every listed agent up front (one
+ * round trip each), served to the per-agent activity resolution in place of
+ * its one-key-at-a-time reads. Absent key = not prefetched: read as before.
+ */
+type ActivityReadPrefetch = {
+  agentActivity: Map<string, PersistedAgentActivity | null>;
+  runtimeError: Map<string, AgentRuntimeErrorMirror | null>;
+  replicaOwner: Map<string, string | null>;
+  latestHint: Map<string, PersistedAgentActivityHint | null>;
+};
+
+/**
+ * One channel's delivery gates read for all of its recipients at once: each
+ * agent's row (null = unavailable), whether the agent can access the channel,
+ * whether it holds the passive-delivery scope and whether an active migration
+ * gates it. An agent missing from `access`, `passiveScope` or
+ * `migrationGated` is checked on its own.
+ */
+export type DeliveryGates = {
+  agents: Map<string, PersistedAgentRow | null>;
+  access: Map<string, boolean>;
+  passiveScope: Map<string, boolean>;
+  migrationGated: Map<string, boolean>;
+};
+
 type ActivityTraceOptions = {
   parent?: TraceContext | null;
   /**
@@ -990,6 +1120,8 @@ type ActivityTraceOptions = {
    * row resolves as "no agent" (getAgent excludes deleted rows) without a query.
    */
   persistedAgent?: PersistedAgentRow;
+  /** Reads getActivities made for the whole list; a key present here is not read again. */
+  prefetched?: ActivityReadPrefetch;
 };
 
 type RuntimeContextMachine = {
@@ -1237,6 +1369,7 @@ export function planMachineReachability(input: MachineReachabilityPlanInput): Ma
 
 interface MachineReachabilityInputContext {
   agent: CachedAgentState | null;
+  prefetched?: ActivityReadPrefetch;
 }
 
 export interface StaleTransientNormalizationPlanInput {
@@ -1303,6 +1436,7 @@ interface ActivityHintResolutionInputContext {
   agent: CachedAgentState | null;
   snapshot: ActivitySnapshot;
   source: ActivityHintSource;
+  prefetched?: ActivityReadPrefetch;
 }
 
 interface StaleTransientNormalizationApplyContext {
@@ -1549,6 +1683,22 @@ interface WakeApplyContext {
   mentionDeliveryOccurrenceId?: string;
 }
 
+const DELIVERY_CHANNEL_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const DELIVERY_CHANNEL_LABEL_RE = /^[a-z][a-z0-9-]{0,39}$/;
+
+/**
+ * Bounded telemetry label for an AgentMessage channel_id: `uuid` for a real
+ * channel id, the label itself for synthetic targets such as
+ * `onboarding-context` (prefix before `:` only, so ids embedded after it never
+ * leak), `other` for anything else.
+ */
+export function deliveryChannelKind(channelId: string | null | undefined): string {
+  if (!channelId) return "none";
+  if (DELIVERY_CHANNEL_UUID_RE.test(channelId)) return "uuid";
+  const label = channelId.split(":", 1)[0] ?? "";
+  return DELIVERY_CHANNEL_LABEL_RE.test(label) ? label : "other";
+}
+
 interface DirectDeliveryContext {
   agentId: string;
   machineId: string | null;
@@ -1571,6 +1721,13 @@ interface DirectDeliveryContext {
    */
   transient?: boolean;
   mentionDeliveryOccurrenceId?: string;
+  /**
+   * `DeliverMessageOptions.intrinsic` of the original server-side call. The
+   * sending replica already skipped the target visibility check for it, so the
+   * plain cross-replica inbox route forwards it in the replica envelope and the
+   * owning replica skips the same check (see `handleRoutedInboxDelivery`).
+   */
+  intrinsic?: boolean;
 }
 
 /**
@@ -2316,6 +2473,19 @@ export function isDurableAgentInboxMessage(message: AgentMessage): boolean {
 /**
  * AgentOrchestrator routes agent commands to the appropriate machine via WebSocket.
  */
+/** SLO v1 SLI 4 labels shared by the tracked, ack-latency and outcome metrics. */
+function agentDeliverySloLabels(pending: PendingAgentDeliveryAck): {
+  online_at_first_attempt: string;
+  delivery_kind: "mention" | "plain";
+  daemon_version: string;
+} {
+  return {
+    online_at_first_attempt: String(pending.onlineAtFirstAttempt),
+    delivery_kind: pending.msg.mentionDelivery ? "mention" : "plain",
+    daemon_version: pending.daemonVersion,
+  };
+}
+
 export class AgentOrchestrator extends EventEmitter {
   private io: SocketServer | null = null;
   private machineConnections = new Map<string, MachineConnection>();
@@ -2352,6 +2522,9 @@ export class AgentOrchestrator extends EventEmitter {
   private pendingAgentSkillsListRequests = new Map<string, PendingAgentSkillsListRequest>();
   private pendingAgentDeliveryAcks = new Map<string, PendingAgentDeliveryAck>();
   private pendingAgentStartAcks = new Map<string, PendingAgentStartAck>();
+  // replica-local: agents a start is being prepared for on this replica, until
+  // its dispatch is recorded in pendingAgentStartAcks (see startAgentHere).
+  private readonly startsInProgress = new Set<string>();
   private terminalAgentStartDispatches = new Map<string, AgentStartDispatchTerminalReason>();
   private agentInboxes = new Map<string, AgentInbox>();
   private agentActivity = new Map<string, ActivitySnapshot>();
@@ -2397,6 +2570,10 @@ export class AgentOrchestrator extends EventEmitter {
   private lastReadyOnlineBroadcastAt = new Map<string, number>();
   private lifecycleEventsByAgent = new Map<string, AgentLifecycleRingBuffer>();
   private staleActivityTimer: unknown | null = null;
+  /** task #365: per-replica retry sweep for wakes refused by the spawn-error backoff (only while RFC 071 is enabled). */
+  private spawnErrorRetryTimer: unknown | null = null;
+  private spawnErrorRetrySweepRunning = false;
+  static readonly SPAWN_ERROR_RETRY_SWEEP_MS = 60_000;
   /**
    * In-flight activity probes keyed by probeId. Each entry holds the
    * fallback timer that fires synth-online if the daemon never replies
@@ -2472,6 +2649,13 @@ export class AgentOrchestrator extends EventEmitter {
   private static MACHINE_HEARTBEAT_TIMEOUT_MS = 60_000;
   private static AGENT_DELIVERY_ACK_TIMEOUT_MS = 5_000;
   private static AGENT_DELIVERY_ACK_MAX_ATTEMPTS = 24;
+  // A parked delivery record (machine offline) checks the machine's status this
+  // often, and ends as parked_expired after the max age (task #432).
+  private static AGENT_DELIVERY_PARKED_PROBE_MS = 30_000;
+  private static AGENT_DELIVERY_PARKED_MAX_MS = 30 * 60_000;
+  // A mention that reached the daemon (daemon_pending) stays an in-flight cycle
+  // until its final ack or terminal error, at most this long (task #432).
+  private static AGENT_DELIVERY_HELD_MAX_MS = 30 * 60_000;
   private static AGENT_START_ACK_TIMEOUT_MS = 5_000;
   private static AGENT_START_ACK_MAX_ATTEMPTS = 24;
   private static AGENT_START_TERMINAL_CACHE_SIZE = 1_024;
@@ -2483,6 +2667,29 @@ export class AgentOrchestrator extends EventEmitter {
   private static DAEMON_INGRESS_RATE_LIMIT_DEFAULT_MAX_EVENTS = 2_000;
   private static DAEMON_INGRESS_RATE_LIMIT_DEFAULT_MAX_EVENTS_PER_MACHINE = 3_000;
   private static INGRESS_REPLICA_REFRESH_MIN_INTERVAL_MS = 15_000;
+  /**
+   * Task #374 duplicate-connection evidence: the other replica's lease must
+   * have been renewed at least this many times, over at least this long,
+   * while this socket kept being refused. A normal cross-replica reconnect
+   * hand-off ends with this socket closing (no more pongs, no more refreshes)
+   * well before both hold.
+   */
+  private static DUPLICATE_LEASE_MIN_FOREIGN_ADVANCES = 2;
+  private static DUPLICATE_LEASE_MIN_DURATION_MS = 60_000;
+  /**
+   * Task #374 hold: after the older socket is closed, a new connection for the
+   * machine is refused while the winner is alive, i.e. while the lease is still
+   * the winner's and was renewed within DUPLICATE_HOLD_WINNER_ALIVE_MS (1.5
+   * pong intervals). A winner that only lost its own socket stops renewing, so
+   * its reconnect is accepted at most one window later. The record itself
+   * lives DUPLICATE_HOLD_TTL_SECONDS and is extended by each refusal, so a
+   * loser that keeps reconnecting stays out while the winner lives.
+   */
+  private static DUPLICATE_HOLD_WINNER_ALIVE_MS = 45_000;
+  private static DUPLICATE_HOLD_TTL_SECONDS = 600;
+  /** Half the 300 s lease TTL: the instance record never outlives a live holder's lease by much. */
+  private static REPLICA_INSTANCE_PUBLISH_INTERVAL_MS = 150_000;
+  protected duplicateConnectionEnforcement = duplicateMachineConnectionEnforcementEnabled();
   private static ACTIVITY_DAEMON_GENERATIONS_PER_AGENT = 4;
   /** Retain a small recent lifecycle buffer for debugging/tests without introducing persistence yet. */
   private static MAX_LIFECYCLE_EVENTS = 500;
@@ -2515,7 +2722,19 @@ export class AgentOrchestrator extends EventEmitter {
       compareAndSetWakeCrashLoopState: (agentId, expectedVersion, state) =>
         this.replicaStateStore.compareAndSetWakeCrashLoopState(agentId, expectedVersion, state),
     });
+    provideAgentDeliveryPending(this.agentDeliveryPendingProvider);
   }
+
+  private readonly agentDeliveryPendingProvider = (): Array<{ parked: boolean; daemonVersion: string; count: number }> => {
+    const counts = new Map<string, { parked: boolean; daemonVersion: string; count: number }>();
+    for (const pending of this.pendingAgentDeliveryAcks.values()) {
+      const key = `${pending.parked}|${pending.daemonVersion}`;
+      const entry = counts.get(key);
+      if (entry) entry.count += 1;
+      else counts.set(key, { parked: pending.parked, daemonVersion: pending.daemonVersion, count: 1 });
+    }
+    return [...counts.values()];
+  };
 
   getCurrentTimeMs(): number {
     return this.clock.now();
@@ -2945,6 +3164,11 @@ export class AgentOrchestrator extends EventEmitter {
         void this.sweepComputerLifecycleOperations().catch(() => {});
         void this.dispatchPendingComputerLifecycleOperations().catch(() => {});
       }, 30_000);
+    }
+    if (this.runtimeOutcomeAckEnabled && !this.spawnErrorRetryTimer) {
+      this.spawnErrorRetryTimer = this.clock.scheduleRepeated(() => {
+        void this.sweepSpawnErrorRetries().catch(() => {});
+      }, AgentOrchestrator.SPAWN_ERROR_RETRY_SWEEP_MS);
     }
   }
 
@@ -3800,29 +4024,71 @@ export class AgentOrchestrator extends EventEmitter {
     };
   }
 
-  private async blockWakesForNonRetryableStartFailure(agentId: string, launchId: string | null, reason: string): Promise<void> {
+  /**
+   * Feed a daemon-reported start failure into the wake breaker (see
+   * `applyWakeCrashLoopStartFailure`) and return the carrier to show: marked
+   * `autoRestartPaused` while automatic wakes are blocked, so the owner sees
+   * that only a model/key change or a restart brings the agent back. A
+   * retry-once failure schedules the one retry here.
+   */
+  private async observeStartFailure(
+    agentId: string,
+    launchId: string | null,
+    carrier: SpawnFailureActivityDiagnostic,
+  ): Promise<SpawnFailureActivityDiagnostic> {
     try {
-      const blockedNow = await this.wakeCrashLoopBreaker.recordNonRetryableStartFailure(agentId, {
-        launchId,
-        reason,
-        nowMs: this.clock.now(),
+      const nowMs = this.clock.now();
+      const result = await this.wakeCrashLoopBreaker.recordStartFailure(agentId, { launchId, reason: carrier.reason, nowMs });
+      this.recordEvent("wake.start_failure", {
+        outcome: result.outcome,
+        reason: carrier.reason,
+        start_failure_count: result.startFailureCount,
+        blocked: result.blocked,
+        launch_id_present: launchId !== null,
       });
-      this.recordEvent("wake.start_failure_block", { blocked_now: blockedNow, reason, launch_id_present: launchId !== null });
-      if (!blockedNow) return;
-      const cached = this.agentStateCache.get(agentId);
-      this.recordLifecycleEvent({
-        agentId,
-        machineId: cached?.machineId ?? null,
-        action: "wake",
-        outcome: "suppressed",
-        cause: "message",
-        previousStatus: cached?.status ?? null,
-        detail: "start_failure_needs_action",
-      });
-      console.warn(`[Agent ${agentId}] Automatic wakes paused: start failed (${reason}); a manual start or a runtime config change lifts it`);
+      if (result.outcome === "blocked") {
+        const cached = this.agentStateCache.get(agentId);
+        this.recordLifecycleEvent({
+          agentId,
+          machineId: cached?.machineId ?? null,
+          action: "wake",
+          outcome: "suppressed",
+          cause: "message",
+          previousStatus: cached?.status ?? null,
+          detail: "start_failure_needs_action",
+        });
+        console.warn(
+          `[Agent ${agentId}] Automatic wakes paused: start failed (${carrier.reason}, ${result.startFailureCount} in a row); `
+          + "a manual start or a runtime config change lifts it",
+        );
+      }
+      if (result.outcome === "retry_scheduled" && result.retryAfterMs !== null) {
+        this.scheduleStartFailureRetry(agentId, result.retryAfterMs - nowMs);
+      }
+      return result.blocked ? { ...carrier, autoRestartPaused: true } : carrier;
     } catch (error) {
-      console.error(`[Agent ${agentId}] Failed to record a non-retryable start failure:`, error);
+      console.error(`[Agent ${agentId}] Failed to record a start failure:`, error);
+      return carrier;
     }
+  }
+
+  /**
+   * The one automatic retry after a retry-once start failure. Process-local
+   * and best effort: if this replica goes away first, the next message wakes
+   * the agent instead (the hold has expired by then). The retry start carries
+   * the unread catch-up the hold owed.
+   */
+  private scheduleStartFailureRetry(agentId: string, delayMs: number): void {
+    const timer = this.scheduleOnClock(() => {
+      void this.startAgent(agentId, { startCause: "start_failure_retry" }).then(
+        (result) => this.recordEvent("wake.start_failure_retry", {
+          outcome: result.outcome,
+          ...(result.outcome === "skipped" ? { reason: result.reason } : {}),
+        }),
+        (error: unknown) => console.warn(`[Agent ${agentId}] Retry after a failed start did not dispatch: ${error instanceof Error ? error.message : String(error)}`),
+      );
+    }, Math.max(0, delayMs) + START_FAILURE_RETRY_SLACK_MS);
+    (timer as { unref?: () => void } | null)?.unref?.();
   }
 
   /**
@@ -3879,6 +4145,102 @@ export class AgentOrchestrator extends EventEmitter {
     this.recordEvent("terminal_breaker.block_shown", { agent_id: agentId, kind: view.kind, ...(view.kind === "needs_manual" ? { reason: view.reason } : { blocked_until_ms: view.blockedUntilMs }) });
   }
 
+  /**
+   * task #365: a wake refused while the spawn-error backoff held is retried by
+   * nobody else (the daemon's refused outcome is final, and RFC 071 itself
+   * only retries on the next wake). Each replica sweeps the agents of the
+   * machines whose sockets it holds and starts those whose backoff, plus
+   * their fixed per-agent jitter, has passed and that still have an unserved
+   * wake demand (`isSpawnErrorRetryDue`). A person's Stop wins: a `stopped`
+   * agent is skipped (and Stop cancels the demand). The start goes through
+   * the normal gate and the combined claim, so two replicas that both see
+   * the agent due produce one probe; the loser is refused
+   * `terminal_failure_probe_in_flight`.
+   */
+  async sweepSpawnErrorRetries(): Promise<void> {
+    if (!this.runtimeOutcomeAckEnabled || this.spawnErrorRetrySweepRunning) return;
+    this.spawnErrorRetrySweepRunning = true;
+    try {
+      for (const machineId of [...this.machineConnections.keys()]) {
+        const agents = await agentService.getAgentsForMachine(machineId);
+        for (const agent of agents) {
+          if (agent.status === "stopped") continue;
+          const nowMs = this.clock.now();
+          let due: boolean;
+          try {
+            due = isSpawnErrorRetryDue(await this.terminalFailureBreaker.read(agent.id, nowMs), { nowMs, jitterMs: spawnErrorRetryJitterMs(agent.id) });
+          } catch (error) {
+            console.warn(`[Agent ${agent.id}] spawn-error retry check failed: ${error instanceof Error ? error.message : String(error)}`);
+            continue;
+          }
+          if (!due) continue;
+          try {
+            const result = await this.startAgentForRetry(agent.id);
+            agentWakePauseTransitionsTotal.inc({ kind: result.outcome === "dispatched" ? "retry_dispatched" : "retry_refused" });
+            this.recordEvent("terminal_breaker.spawn_error_retry", {
+              agent_id: agent.id,
+              outcome: result.outcome,
+              ...(result.outcome === "skipped" ? { reason: result.reason } : {}),
+            });
+          } catch (error) {
+            agentWakePauseTransitionsTotal.inc({ kind: "retry_error" });
+            this.recordEvent("terminal_breaker.spawn_error_retry", { agent_id: agent.id, outcome: "error" });
+            console.warn(`[Agent ${agent.id}] spawn-error retry start failed: ${error instanceof Error ? error.message : String(error)}`);
+          }
+        }
+      }
+    } finally {
+      this.spawnErrorRetrySweepRunning = false;
+    }
+  }
+
+  /**
+   * task #365: the daemon refused `launchId` because it was claimed against an
+   * earlier connection (a frame resent after a reconnect, or one that arrived
+   * late). The refusal is the receipt: the dispatch stops retrying here (it
+   * would only be refused again), and the agent's status is left alone (a
+   * current start may own it). The breaker already removed the launch's
+   * pending entry and unclaimed its wake demand; if demand is left, it is
+   * re-served once, now, as a fresh start: the normal gate and claim on this
+   * replica's current connection, stamped with its epoch. A start whose
+   * outcome is unknown is never repeated on a timeout: only this refusal
+   * (proof that no process was created for that frame) leads here.
+   */
+  /**
+   * The refused frame's pending dispatch lives on the replica that holds the
+   * machine socket (a routed start is tracked by the receiving owner), which
+   * is also where the daemon's refusal arrives.
+   */
+  private stopStaleDispatchRetries(agentId: string, launchId: string): void {
+    for (const [startDispatchId, pending] of [...this.pendingAgentStartAcks.entries()]) {
+      if (pending.msg.agentId === agentId && pending.msg.launchId === launchId) {
+        this.terminalizePendingAgentStart(startDispatchId, "stale_dispatch");
+      }
+    }
+  }
+
+  private async reserveStaleDispatch(agentId: string, launchId: string): Promise<void> {
+    let state: TerminalFailureBreakerState;
+    try {
+      state = await this.terminalFailureBreaker.read(agentId, this.clock.now());
+    } catch (error) {
+      console.warn(`[Agent ${agentId}] stale start re-serve skipped: ${error instanceof Error ? error.message : String(error)}`);
+      return;
+    }
+    if (state.wakeDemand === null || state.wakeDemand.claimedLaunchId !== null) return;
+    try {
+      const result = await this.startAgentForRetry(agentId);
+      this.recordEvent("terminal_breaker.stale_dispatch_reserved", {
+        agent_id: agentId,
+        launch_id: launchId,
+        outcome: result.outcome,
+        ...(result.outcome === "skipped" ? { reason: result.reason } : {}),
+      });
+    } catch (error) {
+      console.warn(`[Agent ${agentId}] stale start re-serve failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
   /** RFC 071 §4.3 rule 4: a `ready` from a daemon instance. Best effort per agent (logged). */
   private async observeTerminalDaemonReady(agentId: string, daemonInstanceId: string): Promise<void> {
     if (!this.runtimeOutcomeAckEnabled) return;
@@ -3888,6 +4250,18 @@ export class AgentOrchestrator extends EventEmitter {
     } catch (error) {
       console.warn(`[Agent ${agentId}] terminal-failure breaker ready not recorded: ${error instanceof Error ? error.message : String(error)}`);
     }
+  }
+
+  /**
+   * task #365: `{ connectionEpochId }` of the machine's socket on this
+   * replica, while this server advertises `agent:start-spawn-error-v1` (which
+   * rides on the ack switch); otherwise nothing, and `agent:start` is
+   * unchanged.
+   */
+  private claimTimeConnectionEpoch(machineId: string | null): { connectionEpochId?: string } {
+    if (!this.runtimeOutcomeAckEnabled || !machineId) return {};
+    const epoch = this.machineConnections.get(machineId)?.connectionEpochId;
+    return epoch ? { connectionEpochId: epoch } : {};
   }
 
   /**
@@ -3937,6 +4311,7 @@ export class AgentOrchestrator extends EventEmitter {
     agentId: string,
     context: { capability: boolean | "unknown" },
     wakeMessage: AgentMessage | undefined,
+    wakeDemand = false,
   ): Promise<TerminalWakeRefusal | null> {
     // Dormant: no gate and no store read, so a store failure cannot refuse a start.
     if (!this.runtimeOutcomeAckEnabled) return null;
@@ -3948,8 +4323,79 @@ export class AgentOrchestrator extends EventEmitter {
     const owed = wakeMessage && typeof wakeMessage.seq === "number" && wakeMessage.channel_id
       ? { conversationId: wakeMessage.channel_id, seq: wakeMessage.seq }
       : null;
-    const decision = await this.terminalFailureBreaker.gate(agentId, { nowMs, capability: context.capability, wakeMessage: owed });
+    const decision = await this.terminalFailureBreaker.gate(agentId, { nowMs, capability: context.capability, wakeMessage: owed, wakeDemand });
     return decision === "pass" ? null : decision;
+  }
+
+  /**
+   * RFC 071 §6: the open catch-up obligation a claimed start must carry, or
+   * null. A read failure carries no batch: nothing is fulfilled, so the
+   * obligation stays and the next start carries it (never fail open on it).
+   */
+  private async readTerminalCatchupObligation(agentId: string): Promise<CatchupObligation | null> {
+    if (!this.runtimeOutcomeAckEnabled) return null;
+    try {
+      return (await this.terminalFailureBreaker.read(agentId, this.clock.now())).catchupObligation;
+    } catch (error) {
+      console.warn(`[Agent ${agentId}] terminal-failure breaker obligation not read; this start carries no batch: ${error instanceof Error ? error.message : String(error)}`);
+      return null;
+    }
+  }
+
+  /**
+   * RFC 071 §6: record what this start's catch-up build learned, in one CAS:
+   * owed conversations whose read cursor passed their ceiling are settled
+   * (recorded on the batch as settled-by-cursor, not coverage; the obligation
+   * may become null without an echo); then, if anything is still owed and the
+   * start renders rows (`rendered` non-null), the batch (contiguous-prefix
+   * coverage; a folded wake row is out of prefix) becomes the pending batch of
+   * the claimed launch and its id is returned for `agent:start`. Null when no
+   * batch was attached (nothing left owed, no rows, another launch claimed,
+   * store error): the start then carries no id.
+   */
+  private async recordTerminalCatchupBuild(
+    agentId: string,
+    launchId: string,
+    obligation: CatchupObligation,
+    input: NonNullable<messageService.AgentResumeCatchupResult["obligationBatch"]>,
+    rendered: AgentMessage[] | null,
+    foldedWakeAppended: boolean,
+  ): Promise<string | null> {
+    const { owedReadCursors, ...buildInput } = input;
+    const batch = rendered === null ? null : buildCatchupBatch(obligation, {
+      ...buildInput,
+      batchId: crypto.randomUUID(),
+      launchId,
+      builtAtMs: this.clock.now(),
+      // Every row the daemon renders, in order: its echo reports this count.
+      rendered: rendered.map((message, index) => ({
+        // Diagnostics only; a live wake row always has an id.
+        id: message.message_id ?? "",
+        conversationId: message.channel_id,
+        // A folded wake without a seq can never extend coverage (out of prefix).
+        seq: typeof message.seq === "number" ? message.seq : 0,
+        appendedOutOfOrder: foldedWakeAppended && index === rendered.length - 1,
+      })),
+    });
+    let recorded: Awaited<ReturnType<TerminalFailureBreaker["recordCatchupBuild"]>> = { attached: false, settled: [], obligationCleared: false };
+    try {
+      recorded = await this.terminalFailureBreaker.recordCatchupBuild(agentId, this.clock.now(), { readCursors: owedReadCursors, batch });
+    } catch (error) {
+      console.warn(`[Agent ${agentId}] terminal-failure breaker batch not recorded; this start carries no batch: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    this.recordEvent("terminal_breaker.catchup_batch", {
+      agent_id: agentId,
+      batch_id: batch?.batchId ?? null,
+      launch_id: launchId,
+      attached: recorded.attached,
+      settled_by_cursor: recorded.settled.length,
+      obligation_fulfilled: recorded.obligationCleared,
+      message_count: batch?.messages.length ?? 0,
+      covered_conversations: batch?.coverage.length ?? 0,
+      truncated_conversations: batch?.coverage.filter((entry) => entry.truncated).length ?? 0,
+      candidate_cap_hit: batch?.candidateCapHit ?? false,
+    });
+    return recorded.attached && batch ? batch.batchId : null;
   }
 
   /** RFC 071 §4.3 step 3: the one claim over both breaker keys. */
@@ -3961,6 +4407,7 @@ export class AgentOrchestrator extends EventEmitter {
       context: TerminalStartContext;
       control: TerminalStartControl;
       human: boolean;
+      wakeDemand: boolean;
     },
   ): Promise<CombinedClaimResult> {
     return this.terminalFailureBreaker.claimStart(agentId, {
@@ -3974,6 +4421,7 @@ export class AgentOrchestrator extends EventEmitter {
       capability: input.context.capability === true,
       control: input.control,
       human: input.human,
+      wakeDemand: input.wakeDemand,
     });
   }
 
@@ -4310,6 +4758,7 @@ export class AgentOrchestrator extends EventEmitter {
     agentId: string,
     agent: CachedAgentState | null,
     loadAuthoritativeAgent: () => Promise<CachedAgentState | null> = () => this.getAuthoritativeAgentForDelivery(agentId),
+    prefetched?: ActivityReadPrefetch,
   ): Promise<{
     agent: CachedAgentState | null;
     activity: VisibleActivity | null;
@@ -4321,7 +4770,7 @@ export class AgentOrchestrator extends EventEmitter {
 
     if (this.replicaStateStore.isAvailable()) {
       try {
-        const mirror = await this.replicaStateStore.getAgentRuntimeError(agentId);
+        const mirror = await this.readAgentRuntimeErrorForActivity(agentId, prefetched);
         if (mirror) {
           const localError = agent?.lastRuntimeError ?? null;
           const localMatches = fingerprintAgentRuntimeError(localError) === mirror.fingerprint
@@ -4465,8 +4914,8 @@ export class AgentOrchestrator extends EventEmitter {
     return this.formatActivity("online");
   }
 
-  private async getMachineReachability(agent: CachedAgentState | null): Promise<MachineReachability> {
-    return planMachineReachability(await this.loadMachineReachabilityPlanInput({ agent }));
+  private async getMachineReachability(agent: CachedAgentState | null, prefetched?: ActivityReadPrefetch): Promise<MachineReachability> {
+    return planMachineReachability(await this.loadMachineReachabilityPlanInput({ agent, prefetched }));
   }
 
   protected async loadMachineReachabilityPlanInput(
@@ -4476,7 +4925,7 @@ export class AgentOrchestrator extends EventEmitter {
     const replicaStateAvailable = this.replicaStateStore.isAvailable();
     const hasLocalMachine = Boolean(machineId && this.hasMachineLocally(machineId));
     const ownerReplica = machineId && replicaStateAvailable && !hasLocalMachine
-      ? await this.replicaStateStore.getMachineReplicaOwner(machineId)
+      ? await this.readMachineReplicaOwnerForActivity(machineId, context.prefetched)
       : null;
 
     return {
@@ -4505,6 +4954,7 @@ export class AgentOrchestrator extends EventEmitter {
     snapshot: ActivitySnapshot,
     source: ActivityHintSource,
     span: ActiveSpan,
+    prefetched?: ActivityReadPrefetch,
   ): Promise<VisibleActivity | null> {
     span.addEvent("activity.hint.seen", {
       source,
@@ -4515,6 +4965,7 @@ export class AgentOrchestrator extends EventEmitter {
       agent,
       snapshot,
       source,
+      prefetched,
     });
     span.addEvent("activity.reachability.resolved", {
       source,
@@ -4605,7 +5056,7 @@ export class AgentOrchestrator extends EventEmitter {
   protected async loadActivityHintResolutionPlanInput(
     context: ActivityHintResolutionInputContext,
   ): Promise<ActivityHintResolutionPlanInput> {
-    const reachabilityInput = await this.loadMachineReachabilityPlanInput({ agent: context.agent });
+    const reachabilityInput = await this.loadMachineReachabilityPlanInput({ agent: context.agent, prefetched: context.prefetched });
     const reachability = planMachineReachability(reachabilityInput);
     const hasStoppedOfflineHint = context.snapshot.activity === "offline" && context.snapshot.detailKind === "stopped";
     const weakOfflineSource = hasStoppedOfflineHint ? null : this.getSuppressibleWeakOfflineSource(
@@ -4652,8 +5103,8 @@ export class AgentOrchestrator extends EventEmitter {
     return this.formatActivityFromSnapshot(context.snapshot);
   }
 
-  private async resolveDerivedActivity(agent: CachedAgentState | null): Promise<VisibleActivity> {
-    const reachability = await this.getMachineReachability(agent);
+  private async resolveDerivedActivity(agent: CachedAgentState | null, prefetched?: ActivityReadPrefetch): Promise<VisibleActivity> {
+    const reachability = await this.getMachineReachability(agent, prefetched);
 
     if (reachability === "external-reported") {
       return this.formatActivity("offline");
@@ -4673,14 +5124,15 @@ export class AgentOrchestrator extends EventEmitter {
     agentId: string,
     agent: CachedAgentState | null,
     span: ActiveSpan,
+    prefetched?: ActivityReadPrefetch,
   ): Promise<VisibleActivity | null> {
-    const reachabilityInput = await this.loadMachineReachabilityPlanInput({ agent });
+    const reachabilityInput = await this.loadMachineReachabilityPlanInput({ agent, prefetched });
     const reachability = planMachineReachability(reachabilityInput);
     const isExternal = reachability === "external-reported";
     // These rule the persisted hint out below whatever it holds; skip its query
     // (every listed deleted / inactive agent paid it on every agent-list read).
     if (!agent || (!isExternal && agent.status !== "active")) return null;
-    const persisted = await this.loadLatestPersistedActivityHint(agentId);
+    const persisted = await this.readLatestPersistedActivityHintForActivity(agentId, prefetched);
     const weakOfflineSource = this.getSuppressibleWeakOfflineSource(agent, reachabilityInput, reachability);
     const weakOfflineCompetingFact = weakOfflineSource && persisted
       ? this.getWeakOfflineCompetingFact(persisted, "persisted")
@@ -4767,6 +5219,55 @@ export class AgentOrchestrator extends EventEmitter {
     });
   }
 
+  /** loadAgentForDelivery for several agents in one query; absent ids map to null. */
+  protected async loadAgentsForDelivery(agentIds: readonly string[]): Promise<Map<string, PersistedAgentRow | null>> {
+    const rows = await agentService.getAgentsByIds(agentIds);
+    const byId = new Map<string, PersistedAgentRow | null>(agentIds.map((id) => [id, null]));
+    for (const row of rows) byId.set(row.id, row);
+    return byId;
+  }
+
+  /**
+   * canAgentAccessDeliveryTarget's answer for these agents on one channel (not
+   * a third-party event): the channel is in the agent's server and the agent
+   * can access it. A fixed number of queries for any number of agents.
+   */
+  protected async loadDeliveryTargetAccess(
+    channelId: string,
+    agents: ReadonlyArray<{ id: string; serverId: string }>,
+  ): Promise<Map<string, boolean>> {
+    const channel = await channelService.getChannel(channelId);
+    const accessible = channel
+      ? await channelService.filterAgentsWithChannelAccess(channelId, agents.map((agent) => agent.id))
+      : new Set<string>();
+    return new Map(agents.map((agent) => [
+      agent.id,
+      Boolean(channel) && channel!.serverId === agent.serverId && accessible.has(agent.id),
+    ]));
+  }
+
+  /**
+   * The delivery gates (agent rows, channel access) for these agents on one
+   * channel, in a fixed number of queries, to pass to deliverMessage. Whatever
+   * fails to load is left to the per-agent checks (null = all of it).
+   */
+  async loadDeliveryGates(channelId: string, agentIds: readonly string[]): Promise<DeliveryGates | null> {
+    let agents: Map<string, PersistedAgentRow | null>;
+    try {
+      agents = await this.loadAgentsForDelivery(agentIds);
+    } catch {
+      return null;
+    }
+    const live = [...agents.values()].filter((row): row is PersistedAgentRow => Boolean(row));
+    // Whatever fails below is checked per agent, with its own error handling.
+    const [access, passiveScope, migrationGated] = await Promise.all([
+      live.length > 0 ? this.loadDeliveryTargetAccess(channelId, live).catch(() => new Map<string, boolean>()) : new Map<string, boolean>(),
+      live.length > 0 ? this.loadPassiveDeliveryScopes(live.map((row) => row.id)).catch(() => new Map<string, boolean>()) : new Map<string, boolean>(),
+      live.length > 0 ? this.loadMigrationGates(live.map((row) => row.id)).catch(() => new Map<string, boolean>()) : new Map<string, boolean>(),
+    ]);
+    return { agents, access, passiveScope, migrationGated };
+  }
+
   /**
    * Passive-delivery scope check. Default impl reads `agent_scopes` via
    * `agentHasScope`; deterministic tests override to bypass DB. See
@@ -4776,8 +5277,108 @@ export class AgentOrchestrator extends EventEmitter {
     return agentHasScope(agentId, "inbox:receive");
   }
 
+  /** hasPassiveDeliveryScope for several existing agents in one query. */
+  protected async loadPassiveDeliveryScopes(agentIds: readonly string[]): Promise<Map<string, boolean>> {
+    return existingAgentsHaveScope(agentIds, "inbox:receive");
+  }
+
+  /** Whether an active migration gates each agent's delivery (loadWakePlanInput's first read), in one query. */
+  protected async loadMigrationGates(agentIds: readonly string[]): Promise<Map<string, boolean>> {
+    return agentMigrationService.getAgentMigrationGateActive(agentIds);
+  }
+
   // `protected` for the same reason: arms ②③ must get past identity resolution to reach the
   // branch under test, and stubbing it is the only way to do that without seeding a full agent row.
+  private async readAgentActivityForActivity(agentId: string, prefetch?: ActivityReadPrefetch): Promise<PersistedAgentActivity | null> {
+    if (prefetch?.agentActivity.has(agentId)) return prefetch.agentActivity.get(agentId) ?? null;
+    return this.replicaStateStore.getAgentActivity(agentId);
+  }
+
+  private async readAgentRuntimeErrorForActivity(agentId: string, prefetch?: ActivityReadPrefetch): Promise<AgentRuntimeErrorMirror | null> {
+    if (prefetch?.runtimeError.has(agentId)) return prefetch.runtimeError.get(agentId) ?? null;
+    return this.replicaStateStore.getAgentRuntimeError(agentId);
+  }
+
+  private async readMachineReplicaOwnerForActivity(machineId: string, prefetch?: ActivityReadPrefetch): Promise<string | null> {
+    if (prefetch?.replicaOwner.has(machineId)) return prefetch.replicaOwner.get(machineId) ?? null;
+    return this.replicaStateStore.getMachineReplicaOwner(machineId);
+  }
+
+  private async readLatestPersistedActivityHintForActivity(agentId: string, prefetch?: ActivityReadPrefetch): Promise<PersistedAgentActivityHint | null> {
+    if (prefetch?.latestHint.has(agentId)) return prefetch.latestHint.get(agentId) ?? null;
+    return this.loadLatestPersistedActivityHint(agentId);
+  }
+
+  protected async loadLatestPersistedActivityHints(agentIds: readonly string[]) {
+    return agentActivityLogService.getLatestAgentActivityHints(agentIds);
+  }
+
+  /**
+   * getActivity for a listed page of agents (GET /api/agents): the same
+   * per-agent resolution, with its reads fetched for the whole list up front --
+   * the Redis activity snapshots, runtime-error mirrors and machine owners in
+   * one round trip each, and the latest persisted activity in one indexed
+   * query -- instead of one key at a time per agent (a 362-agent server took
+   * p95 ~0.9s). A deleted agent is offline without any read: it has no live
+   * state, and the web never shows live state for one. A failed batch read
+   * fails the call, as a failed read for any one agent did when each agent
+   * read on its own; there is no per-agent retry, so resolving the list does
+   * no I/O per agent.
+   */
+  async getActivities(rows: readonly PersistedAgentRow[], options: ActivityTraceOptions = {}): Promise<VisibleActivity[]> {
+    const live = rows.filter((row) => !row.deletedAt);
+    const prefetch: ActivityReadPrefetch = {
+      agentActivity: new Map(),
+      runtimeError: new Map(),
+      replicaOwner: new Map(),
+      latestHint: new Map(),
+    };
+    const liveIds = live.map((row) => row.id);
+    const machineIds = [...new Set(live.map((row) => row.machineId).filter((id): id is string => Boolean(id)))];
+    const store = this.replicaStateStore;
+    const loadInto = async <K, V>(load: () => Promise<Map<K, V>>, into: Map<K, V>) => {
+      for (const [key, value] of await load()) into.set(key, value);
+    };
+    await Promise.all([
+      store.isAvailable() && liveIds.length > 0
+        ? loadInto(
+          () => store.getAgentActivities
+            ? store.getAgentActivities(liveIds)
+            : this.mapEach(liveIds, (id) => store.getAgentActivity(id)),
+          prefetch.agentActivity,
+        )
+        : null,
+      store.isAvailable() && liveIds.length > 0
+        ? loadInto(
+          () => store.getAgentRuntimeErrors
+            ? store.getAgentRuntimeErrors(liveIds)
+            : this.mapEach(liveIds, (id) => store.getAgentRuntimeError(id)),
+          prefetch.runtimeError,
+        )
+        : null,
+      store.isAvailable() && machineIds.length > 0
+        ? loadInto(
+          () => store.getMachineReplicaOwners
+            ? store.getMachineReplicaOwners(machineIds)
+            : this.mapEach(machineIds, (id) => store.getMachineReplicaOwner(id)),
+          prefetch.replicaOwner,
+        )
+        : null,
+      liveIds.length > 0 ? loadInto(() => this.loadLatestPersistedActivityHints(liveIds), prefetch.latestHint) : null,
+    ]);
+
+    return (
+      // fanout-ok: every read is prefetched above (rows, Redis, latest hints); per agent this is in-memory work.
+      Promise.all(rows.map((row) => row.deletedAt
+        ? Promise.resolve(this.formatActivity("offline"))
+        : this.getActivity(row.id, { ...options, persistedAgent: row, prefetched: prefetch }))));
+  }
+
+  private async mapEach<V>(keys: readonly string[], read: (key: string) => Promise<V>): Promise<Map<string, V>> {
+    const values = await Promise.all(keys.map(read));
+    return new Map(keys.map((key, index) => [key, values[index]!]));
+  }
+
   /**
    * getAuthoritativeAgentForDelivery for activity reads. A deleted row loaded by
    * the caller in this request answers it without a query, with the same effect
@@ -4791,11 +5392,20 @@ export class AgentOrchestrator extends EventEmitter {
       this.agentStateCache.delete(agentId);
       return null;
     }
+    if (knownRow) {
+      // Loaded by the caller in this request: as fresh as a re-read now.
+      const state = this.cachedStateFromPersistedAgent(knownRow, this.agentStateCache.get(agentId));
+      this.agentStateCache.set(agentId, state);
+      return state;
+    }
     return this.getAuthoritativeAgentForDelivery(agentId);
   }
 
   protected async getAuthoritativeAgentForDelivery(agentId: string): Promise<CachedAgentState | null> {
-    const persisted = await this.loadAgentForDelivery(agentId);
+    return this.applyPersistedAgentForDelivery(agentId, await this.loadAgentForDelivery(agentId));
+  }
+
+  private applyPersistedAgentForDelivery(agentId: string, persisted: PersistedAgentRow | null): CachedAgentState | null {
     if (!persisted) {
       this.agentStateCache.delete(agentId);
       return null;
@@ -4988,7 +5598,18 @@ export class AgentOrchestrator extends EventEmitter {
   }
 
   protected async writeRuntimeAccountUsageSnapshot(machineId: string, snapshot: unknown): Promise<void> {
-    await runtimeAccountUsageCacheService.write(machineId, snapshot);
+    const parsed = await runtimeAccountUsageCacheService.write(machineId, snapshot);
+    if (!parsed) return;
+    try {
+      await usageLimitAttentionService.ingest(machineId, parsed);
+    } catch (error) {
+      // Attention is a gated side projection. It must never break the existing
+      // usage cache write or a correlated manual-refresh response.
+      console.warn("[UsageLimitAttention] projection failed", {
+        machineId,
+        errorClass: errorClassOf(error),
+      });
+    }
   }
 
   protected async collectScheduledRuntimeAccountUsage(machineId: string, conn: MachineConnection): Promise<void> {
@@ -5628,13 +6249,12 @@ export class AgentOrchestrator extends EventEmitter {
    * with 1001 `server_draining` and never registered, so it is neither owned
    * by this replica nor left for the ALB to cut. Counted and logged per
    * refusal; prod acceptance for task #268 reads how often this fires. */
-  private refuseMachineConnectionWhileDraining(
+  private async refuseMachineConnectionWhileDraining(
     machineId: string,
     ws: WebSocket,
     traceContext: MachineConnectTraceContext,
-  ): void {
+  ): Promise<void> {
     this.drainRefusedMachineConnections += 1;
-    machineConnectionsRefusedTotal.inc({ reason: "draining" });
     try {
       if (ws.readyState === 1) ws.close(MACHINE_DRAIN_CLOSE_CODE, MACHINE_DRAIN_CLOSE_REASON);
     } catch {
@@ -5651,6 +6271,11 @@ export class AgentOrchestrator extends EventEmitter {
         ...projectMachineConnectTraceAttrs(traceContext),
       },
     });
+    // Counted after the socket is closed: refused before register/ready, so
+    // the version is the one the machine last reported (its record). At most
+    // one read per refusal, only during a drain.
+    const version = await this.loadMachineDaemonVersion(machineId).catch(() => null);
+    machineConnectionsRefusedTotal.inc({ reason: "draining", daemon_version: daemonVersionLabel(version) });
   }
 
   private closeUnregisteredLegacySocket(ws: WebSocket): void {
@@ -5691,9 +6316,11 @@ export class AgentOrchestrator extends EventEmitter {
     ws: WebSocket,
     traceContext: MachineConnectTraceContext = buildRuntimeTraceContext(),
     principalKind: MachineConnectionPrincipalKind = "unknown",
+    /** The epoch `machine:context` already carried (task #365); minted here when absent. */
+    connectionEpochId: string = newMachineConnectionEpochId(machineId),
   ) {
     if (this.drainingMachineConnections) {
-      this.refuseMachineConnectionWhileDraining(machineId, ws, traceContext);
+      await this.refuseMachineConnectionWhileDraining(machineId, ws, traceContext);
       return;
     }
     const replacedExistingConnection = this.machineConnections.has(machineId);
@@ -5729,6 +6356,22 @@ export class AgentOrchestrator extends EventEmitter {
           return;
         }
 
+        // Task #374: the winner of a duplicate decision is still alive; this
+        // connection would take its lease and restart the kicking. Refused
+        // before anything is registered or replaced.
+        const hold = await this.heldDuplicateMachineConnection(machineId);
+        if (hold) {
+          machineDuplicateConnectionActionsTotal.inc({
+            action: "refused_held",
+            daemon_version: daemonVersionLabel(hold.closedDaemonVersion),
+          });
+          await this.replicaStateStore.touchMachineDuplicateHold?.(machineId, AgentOrchestrator.DUPLICATE_HOLD_TTL_SECONDS)
+            .catch(() => {});
+          if (ws.readyState === 1) ws.close(DUPLICATE_MACHINE_CONNECTION_CLOSE_CODE, MACHINE_DUPLICATE_CONNECTION_HELD_CLOSE_REASON);
+          span.end("ok", { attrs: { outcome: "duplicate_machine_connection_held" } });
+          return;
+        }
+
         await this.clearMachineConnection(machineId, false);
 
         const conn: MachineConnection = {
@@ -5736,12 +6379,13 @@ export class AgentOrchestrator extends EventEmitter {
           machineId,
           serverId,
           principalKind,
-          connectionEpochId: `machine:${machineId}:connection:${crypto.randomUUID()}`,
+          connectionEpochId,
           replicaGeneration: null,
           heartbeatTimer: null,
           runtimeAccountUsageTimer: null,
           lastPong: this.clock.now(),
           lastIngressAt: this.clock.now(),
+          connectedAt: this.clock.now(),
           daemonVersion: null,
           capabilities: new Set(),
           runtimes: null,
@@ -6669,6 +7313,10 @@ export class AgentOrchestrator extends EventEmitter {
 
   /** Close all machine connections and timers (for graceful shutdown). */
   async shutdown(): Promise<void> {
+    if (this.spawnErrorRetryTimer) {
+      this.clock.cancelRepeated(this.spawnErrorRetryTimer);
+      this.spawnErrorRetryTimer = null;
+    }
     if (this.staleActivityTimer) {
       this.clock.cancelRepeated(this.staleActivityTimer);
       this.staleActivityTimer = null;
@@ -6681,11 +7329,21 @@ export class AgentOrchestrator extends EventEmitter {
       this.clock.clearTimeout(pending.timer);
     }
     this.pendingMachineDisconnects.clear();
+    let shutdownPending = 0;
+    let shutdownPendingParked = 0;
     for (const pending of this.pendingAgentDeliveryAcks.values()) {
       if (pending.timer) this.clock.clearTimeout(pending.timer);
       this.recordAgentDeliveryOutcome(pending, "replica_shutdown");
+      shutdownPending += 1;
+      if (pending.parked) shutdownPendingParked += 1;
     }
     this.pendingAgentDeliveryAcks.clear();
+    releaseAgentDeliveryPending(this.agentDeliveryPendingProvider);
+    // The replica_shutdown counter is incremented as the process exits, after
+    // the last metrics scrape, so it never reaches AMP. This line is the only
+    // count of delivery records still awaiting an ack when a replica stops.
+    // Logged even at 0, so a missing line means shutdown did not run.
+    console.log(`[Orchestrator] shutdown: ${shutdownPending} agent deliveries still awaiting ack (${shutdownPendingParked} parked)`);
     for (const pending of this.pendingAgentStartAcks.values()) {
       if (pending.timer) this.clock.clearTimeout(pending.timer);
     }
@@ -6722,6 +7380,7 @@ export class AgentOrchestrator extends EventEmitter {
         machine_id_present: Boolean(machineId),
         cause: context.cause || "socket_close",
         close_code_present: context.closeCode !== undefined,
+        close_code: context.closeCode,
         close_reason_present: Boolean(context.closeReason),
         error_present: Boolean(context.errorMessage),
         shutdown_intent_present: Boolean(context.shutdownIntent),
@@ -6748,6 +7407,15 @@ export class AgentOrchestrator extends EventEmitter {
       const disconnectContext: MachineDisconnectContext = shutdownIntent
         ? { ...context, shutdownIntent }
         : context;
+      machineDisconnectsTotal.inc({
+        cause: context.cause || "socket_close",
+        close_code: machineCloseCodeLabel(context.closeCode),
+        shutdown_reason: shutdownIntent?.reason ?? "none",
+        daemon_version: daemonVersionLabel(conn.daemonVersion),
+        conn_age: machineConnectionLifetimeLabel(
+          conn.connectedAt === undefined ? undefined : this.clock.now() - conn.connectedAt,
+        ),
+      });
       this.emit(`machine:disconnect:${machineId}`, disconnectContext);
       await this.clearMachineConnection(machineId, false);
       this.dispatchComputerLifecycleDisconnectObservation({
@@ -6756,6 +7424,15 @@ export class AgentOrchestrator extends EventEmitter {
         connectionEpoch: connectionEpochId,
       });
       this.recordEvent("operation.disconnect_observation.dispatched", { outcome: "dispatched" });
+
+      // Task #374: this socket was closed because another replica holds a
+      // live, renewing connection for the machine. The machine is not
+      // offline: no outage record, no agent disconnect projection, no
+      // replica unregister or meta clear (both belong to the winner).
+      if (conn.closedAsDuplicate) {
+        span.end("ok", { attrs: { outcome: "duplicate_closed_local_only", server_id: serverId } });
+        return;
+      }
 
       this.cancelPendingMachineDisconnect(machineId);
       const pending: PendingMachineDisconnectProjection = {
@@ -7297,11 +7974,7 @@ export class AgentOrchestrator extends EventEmitter {
               heartbeatError = err;
             }
             // Refresh machine→replica TTL in Redis so cross-replica routing stays valid
-            this.replicaStateStore.refreshMachineReplica(
-              machineId,
-              conn?.traceContext ?? buildRuntimeTraceContext(),
-              conn?.replicaGeneration ?? undefined,
-            ).catch(() => {});
+            this.refreshMachineOwnerLease(machineId, conn, "pong");
             // Upsert the cross-replica meta mirror with the connection's current
             // live fields. Beyond just bumping TTL, this self-heals two narrow
             // failure modes: (1) the original `ready` write missed Redis (e.g.
@@ -7421,6 +8094,34 @@ export class AgentOrchestrator extends EventEmitter {
         break;
       }
 
+      case "computer:upgrade:done": {
+        // Remote upgrade v2: the request never reached the installer, so no
+        // reconnect will carry a receipt for it. A refusal settles the request
+        // by id now (scoped to this machine) instead of at the deadline.
+        // `ok: true` means the installer started; the reconnect settles it.
+        if (msg.ok) break;
+        try {
+          const settled = await computerUpgradeRequestService.settleRefusedComputerUpgradeRequest({
+            machineId,
+            requestId: msg.requestId,
+            reason: msg.reason ?? msg.code ?? "computer_refused",
+            now: new Date(this.clock.now()),
+          });
+          this.recordEvent("server.computer.upgrade_request.refused", {
+            request_id: msg.requestId,
+            machine_id: machineId,
+            code: msg.code ?? "",
+            outcome: settled ? "settled" : "no_open_request",
+          });
+          if (settled && conn) {
+            this.io?.to(`server:${conn.serverId}`).emit("machine:upgrade-request", { machineId, upgradeRequest: computerUpgradeRequestService.projectComputerUpgradeRequest(settled) });
+          }
+        } catch (error) {
+          console.warn(`[Orchestrator] upgrade refusal settle failed for ${machineId}: ${error instanceof Error ? error.message : String(error)}`);
+        }
+        break;
+      }
+
       case "computer:restart:done":
       {
         // Relay managed Computer operation frames to web clients.
@@ -7491,6 +8192,7 @@ export class AgentOrchestrator extends EventEmitter {
         // path, activity to legacy state inference) while ready reconciles.
         if (conn) {
           conn.daemonInstanceId = typeof msg.daemonInstanceId === "string" && msg.daemonInstanceId.trim() ? msg.daemonInstanceId : null;
+          conn.reportedHostnameHash = reportedHostnameHash(msg.hostname);
           conn.capabilities = new Set((msg.capabilities ?? []).filter((capability) => typeof capability === "string" && capability.trim()));
         }
         const readyCapturedAtMs = ingressAtMs;
@@ -7526,6 +8228,7 @@ export class AgentOrchestrator extends EventEmitter {
         let invalid_status_count = 0;
         let requestStartCount = 0;
         let foreignRunningCount = 0;
+        let foreignRunningStoppedCount = 0;
         await this.runInActiveSpan(span, async () => {
           try {
             if (conn) {
@@ -7684,10 +8387,10 @@ export class AgentOrchestrator extends EventEmitter {
                   requestStartCount += 1;
                 }
               }
-              foreignRunningCount = await this.observeForeignRunningAgents(
+              ({ foreign: foreignRunningCount, stopped: foreignRunningStoppedCount } = await this.reconcileForeignRunningAgents(
                 machineId,
                 msg.runningAgents.filter((agentId) => !machineAgents.some((agent) => agent.id === agentId)),
-              );
+              ));
             } catch (err) {
               console.error(`[Machine ${machineId}] Failed to reconcile agents:`, err);
               this.recordEvent("machine.ready.reconcile_failed", {
@@ -7757,6 +8460,7 @@ export class AgentOrchestrator extends EventEmitter {
                 stay_offline_count: actionCounts["stay-offline"] ?? 0,
                 start_in_flight_count: actionCounts["start-in-flight"] ?? 0,
                 foreign_running_count: foreignRunningCount,
+                foreign_running_stopped_count: foreignRunningStoppedCount,
                 request_start_count: requestStartCount,
               },
             });
@@ -7926,6 +8630,7 @@ export class AgentOrchestrator extends EventEmitter {
             // counts.
             if (normalizedStatus === "active" && typeof msg.launchId === "string") {
               await this.wakeCrashLoopBreaker.confirmCatchupDelivered(msg.agentId, msg.launchId);
+              await this.wakeCrashLoopBreaker.recordStartSucceeded(msg.agentId, msg.launchId);
             }
             if (normalizedStatus === "inactive") {
               const exit = (msg as { exit?: { code: number | null; signal: string | null } }).exit;
@@ -8318,18 +9023,18 @@ export class AgentOrchestrator extends EventEmitter {
               const normalizedSpawnFailure = normalizeSpawnFailureActivityDiagnostic(
                 (msg as { spawnFailure?: SpawnFailureActivityDiagnostic | Record<string, unknown> | null }).spawnFailure ?? null,
               );
-              this.pendingSpawnFailure.set(msg.agentId, normalizedSpawnFailure);
               this.recordEvent("spawn_failure.carrier", { present: normalizedSpawnFailure !== null, reason: normalizedSpawnFailure?.reason });
-              // task #1221: a start that failed for a reason retrying cannot fix
-              // stops automatic wakes until a person restarts the agent or its
-              // runtime configuration changes. Messages stay in the inbox.
-              if (normalizedSpawnFailure && NON_RETRYABLE_SPAWN_FAILURE_REASONS.includes(normalizedSpawnFailure.reason)) {
-                void this.blockWakesForNonRetryableStartFailure(
-                  msg.agentId,
-                  typeof msg.launchId === "string" ? msg.launchId : null,
-                  normalizedSpawnFailure.reason,
-                );
-              }
+              // task #1221: count the failed start; a reason retrying cannot
+              // fix, a retry-once reason failing twice, or too many failures in
+              // a row stops automatic wakes until a person restarts the agent or
+              // its runtime configuration changes. Messages stay in the inbox.
+              // Awaited so this frame already shows the pause.
+              this.pendingSpawnFailure.set(
+                msg.agentId,
+                normalizedSpawnFailure
+                  ? await this.observeStartFailure(msg.agentId, typeof msg.launchId === "string" ? msg.launchId : null, normalizedSpawnFailure)
+                  : null,
+              );
             }
             const shouldPreserveVisibleRuntimeError = currentRuntimeError
               && runtimeErrorAction === "preserve"
@@ -8859,6 +9564,9 @@ export class AgentOrchestrator extends EventEmitter {
           });
           break;
         }
+        if (msg.stage === "daemon_pending") {
+          this.recordAgentDeliveryArrival(msg.agentId, msg.mentionDelivery.occurrenceId);
+        }
         await mentionDeliveryOccurrenceService.recordMentionDeliveryDaemonTransition({
           occurrenceId: msg.mentionDelivery.occurrenceId,
           agentId: msg.agentId,
@@ -9358,15 +10066,32 @@ export class AgentOrchestrator extends EventEmitter {
     if (!agent) return;
     const result = await ingestRuntimeOutcomeOutboxMessage(
       {
-        applyOutboxFrame: (agentId, frame, input) => this.terminalFailureBreaker.applyOutboxFrame(agentId, frame, input),
+        applyOutboxFrame: async (agentId, frame, input) => {
+          const applied = await this.terminalFailureBreaker.applyOutboxFrame(agentId, frame, input);
+          if (applied.startFailureWithdrawn) {
+            // task #365: the #1119 start-failure streak had already counted
+            // this start before its outbox arrived; that one contribution was
+            // withdrawn in the same commit. A retry-once timer it scheduled
+            // may still fire; its start is refused by the RFC 071 pause.
+            this.recordEvent("wake.start_failure_owned_by_terminal_breaker", {
+              agent_id: agentId,
+              launch_id: frame.kind === "start_not_spawned" ? frame.launchId : undefined,
+              unblocked: applied.startFailureUnblocked === true,
+            });
+          }
+          return applied;
+        },
         applyOutcomeMarker: (agentId, marker, input) => this.terminalFailureBreaker.applyOutcomeMarker(agentId, marker, input),
         send: (message) => this.sendToMachine(machineId, message),
       },
       msg,
       {
         nowMs: this.clock.now(),
-        // Unknown here: an E1 that opens the breaker owes every unread row (the conservative side).
-        unreadCeilings: null,
+        // RFC 071 §6: an E1 that opens the breaker owes each unread
+        // conversation up to its latest unread seq. Read only for an E1.
+        unreadCeilings: msg.type === "agent:runtime:outcome" && msg.outcome?.kind === "terminal_failure"
+          ? await this.terminalUnreadCeilings(msg.agentId)
+          : null,
         persistedSessionId: agent.sessionId,
       },
     );
@@ -9377,7 +10102,42 @@ export class AgentOrchestrator extends EventEmitter {
     // RFC 071 §9: a frame that opened the breaker shows the pause once. A
     // needs-manual block is shown when it refuses a wake (the agent may still
     // be running when the evidence of an earlier process is found lost).
+    if (result.kind === "acked" && !result.duplicate && result.outcome === "spawn_error_counted") {
+      agentWakePauseTransitionsTotal.inc({ kind: "spawn_error_counted" });
+    }
+    if (
+      result.kind === "acked" && !result.duplicate
+      && msg.type === "agent:start:outcome" && msg.result?.kind === "not_spawned" && msg.result.reason === "stale_dispatch"
+    ) {
+      // Whether or not the launch is still current: the daemon will refuse
+      // every resend of that frame, so stop resending it (review of #9140).
+      this.stopStaleDispatchRetries(msg.agentId, msg.launchId);
+      if (result.outcome === "stale_dispatch_released") await this.reserveStaleDispatch(msg.agentId, msg.launchId);
+    }
     if (result.kind === "acked" && !result.duplicate) await this.projectTerminalBlock(msg.agentId, { includeNeedsManual: false });
+  }
+
+  /**
+   * RFC 071 §6 "what is owed": conversation -> latest unread seq from the
+   * agent's inbox chain. Null when the chain cannot be read, which owes every
+   * unread row (`owedOverflow`, the conservative side).
+   */
+  private async terminalUnreadCeilings(agentId: string): Promise<Record<string, number> | null> {
+    try {
+      const inbox = await this.selectResumeInbox(agentId);
+      if (inbox.source === "unavailable") return null;
+      const ceilings: Record<string, number> = {};
+      for (const row of inbox.rows) {
+        const latest = row.latestSeq ?? row.maxMentionSeq;
+        if (row.offeredUnread > 0 && latest !== null && latest > row.lastReadSeq) {
+          ceilings[row.targetId] = Math.max(ceilings[row.targetId] ?? latest, latest);
+        }
+      }
+      return ceilings;
+    } catch (error) {
+      console.warn(`[Agent ${agentId}] unread snapshot for the terminal-failure breaker failed; every unread row is owed: ${error instanceof Error ? error.message : String(error)}`);
+      return null;
+    }
   }
 
   private refreshReplicaLivenessFromDaemonIngress(
@@ -9395,13 +10155,187 @@ export class AgentOrchestrator extends EventEmitter {
     }
     this.lastIngressReplicaRefreshAt.set(machineId, now);
 
+    this.refreshMachineOwnerLease(machineId, conn, "ingress");
+  }
+
+  /**
+   * Best-effort lease refresh, but never silent (task #440): a refresh that
+   * keeps not writing leaves a live socket unroutable from every other replica.
+   */
+  private refreshMachineOwnerLease(
+    machineId: string,
+    conn: MachineConnection | undefined,
+    trigger: "pong" | "ingress",
+  ): void {
+    const record = (result: string, errorClass?: string) => {
+      machineOwnerRefreshTotal.inc({ trigger, result });
+      if (result === "refreshed") return;
+      this.recordEvent("machine.replica.refresh", {
+        outcome: result === "error" ? "error" : "not_refreshed",
+        result,
+        trigger,
+        machine_id: machineId,
+        ...(errorClass ? { error_class: errorClass } : {}),
+      });
+    };
+    const traceParent = getCurrentTraceContext();
     this.replicaStateStore
       .refreshMachineReplica(
         machineId,
-        conn.traceContext ?? buildRuntimeTraceContext(),
-        conn.replicaGeneration ?? undefined,
+        conn?.traceContext ?? buildRuntimeTraceContext(),
+        conn?.replicaGeneration ?? undefined,
       )
-      .catch(() => {});
+      .then(
+        (result) => {
+          record(result ?? "unknown");
+          if (!conn) return;
+          if (result === "refreshed") {
+            conn.duplicateLeaseEvidence = undefined;
+            this.publishReplicaInstance(machineId, conn);
+          }
+          if (result === "rejected_other_lease") void this.observeForeignOwnerLease(machineId, conn, traceParent);
+        },
+        (err) => record("error", errorClassOf(err)),
+      );
+  }
+
+  /**
+   * Task #374 observation: the lease holder records which daemon is behind the
+   * lease, so the side that keeps being refused can name both daemons when it
+   * reports a duplicate. Written at most every half TTL per connection, and
+   * only once the daemon has identified itself in `ready`. Old daemons send no
+   * instance id in `ready`; their version and hostname hash are still published.
+   */
+  private publishReplicaInstance(machineId: string, conn: MachineConnection): void {
+    // `ready` sets the hostname hash (to a hash or null); undefined means not yet identified.
+    if (!conn.replicaGeneration || conn.reportedHostnameHash === undefined) return;
+    const now = this.clock.now();
+    if (
+      conn.lastReplicaInstancePublishedAt !== undefined
+      && now - conn.lastReplicaInstancePublishedAt < AgentOrchestrator.REPLICA_INSTANCE_PUBLISH_INTERVAL_MS
+    ) return;
+    conn.lastReplicaInstancePublishedAt = now;
+    void this.replicaStateStore.setMachineReplicaInstance?.(machineId, {
+      generation: conn.replicaGeneration,
+      daemonInstanceId: conn.daemonInstanceId,
+      daemonVersion: conn.daemonVersion,
+      reportedHostnameHash: conn.reportedHostnameHash ?? null,
+    })?.catch(() => {
+      conn.lastReplicaInstancePublishedAt = undefined;
+    });
+  }
+
+  /**
+   * Task #374, observation only. This socket's refresh was refused because the
+   * lease is held elsewhere. That alone also happens briefly during a normal
+   * reconnect hand-off, so it counts as a second live connection only when the
+   * holder is another replica whose lease keeps being renewed (its
+   * `replica_updated_at` advances) while this socket stays alive and refused.
+   */
+  private async observeForeignOwnerLease(
+    machineId: string,
+    conn: MachineConnection,
+    traceParent: ReturnType<typeof getCurrentTraceContext>,
+  ): Promise<void> {
+    let lease: Awaited<ReturnType<NonNullable<ReplicaStateStore["getMachineReplicaLease"]>>>;
+    try {
+      lease = await this.replicaStateStore.getMachineReplicaLease?.(machineId) ?? null;
+    } catch {
+      return;
+    }
+    if (this.machineConnections.get(machineId) !== conn) return;
+    if (!lease?.replicaId || lease.replicaId === REPLICA_ID || lease.updatedAtMs === null) return;
+    const now = this.clock.now();
+    const evidence = conn.duplicateLeaseEvidence ??= {
+      firstRejectedAt: now,
+      lastForeignUpdatedAtMs: lease.updatedAtMs,
+      foreignAdvances: 0,
+      reported: false,
+    };
+    if (lease.updatedAtMs > evidence.lastForeignUpdatedAtMs) {
+      evidence.foreignAdvances += 1;
+      evidence.lastForeignUpdatedAtMs = lease.updatedAtMs;
+    }
+    if (
+      evidence.reported
+      || evidence.foreignAdvances < AgentOrchestrator.DUPLICATE_LEASE_MIN_FOREIGN_ADVANCES
+      || now - evidence.firstRejectedAt < AgentOrchestrator.DUPLICATE_LEASE_MIN_DURATION_MS
+    ) return;
+    evidence.reported = true;
+    machineDuplicateConnectionsTotal.inc({ daemon_version: daemonVersionLabel(conn.daemonVersion) });
+    // Newest wins: this socket is the one being refused, so it is the older
+    // one (a registration always takes the lease). Closing needs the winner's
+    // generation for the hold; without it the decision is left to a later pass.
+    const winnerGeneration = typeof lease.generation === "string" && lease.generation ? lease.generation : null;
+    const enforce = this.duplicateConnectionEnforcement && winnerGeneration !== null;
+    const span = this.tracer.startSpan("server.machine.duplicate_connection", {
+      parent: traceParent ?? null,
+      surface: "server",
+      kind: "internal",
+      attrs: { machine_id: machineId },
+    });
+    span.addEvent("machine.connection.duplicate_detected", {
+      machine_id: machineId,
+      daemon_version: daemonVersionLabel(conn.daemonVersion),
+      foreign_lease_advances: evidence.foreignAdvances,
+      refused_for_ms: now - evidence.firstRejectedAt,
+      // Clues about both daemons, not attribution. Instance ids are per
+      // process, so they only separate "one process, two sockets" from "two
+      // processes". The reported hostnames being the same or different is a
+      // hint (names repeat across hosts and change on one host); telling two
+      // installs on one host from two hosts needs separate evidence.
+      refused_daemon_instance_id: conn.daemonInstanceId ?? "unknown",
+      holder_daemon_instance_id: lease.instance?.daemonInstanceId ?? "unknown",
+      holder_daemon_version: daemonVersionLabel(lease.instance?.daemonVersion ?? null),
+      // Compared only when both sides sent an instance id; old daemons send none.
+      same_daemon_instance: !conn.daemonInstanceId || !lease.instance?.daemonInstanceId
+        ? "unknown"
+        : conn.daemonInstanceId === lease.instance.daemonInstanceId ? "same" : "different",
+      refused_hostname_hash: conn.reportedHostnameHash ?? "unknown",
+      holder_hostname_hash: lease.instance?.reportedHostnameHash ?? "unknown",
+      reported_hostname_match: !conn.reportedHostnameHash || !lease.instance?.reportedHostnameHash
+        ? "unknown"
+        : conn.reportedHostnameHash === lease.instance.reportedHostnameHash ? "same" : "different",
+      enforcement: enforce ? "closed_older" : "observe_only",
+    });
+    if (enforce) {
+      try {
+        await this.replicaStateStore.setMachineDuplicateHold?.(
+          machineId,
+          { replicaId: lease.replicaId, generation: winnerGeneration!, closedDaemonVersion: conn.daemonVersion },
+          AgentOrchestrator.DUPLICATE_HOLD_TTL_SECONDS,
+        );
+      } catch (error) {
+        span.addEvent("machine.connection.duplicate_hold_write_failed", { error_class: errorClassOf(error) });
+      }
+      machineDuplicateConnectionActionsTotal.inc({ action: "closed_older", daemon_version: daemonVersionLabel(conn.daemonVersion) });
+      conn.closedAsDuplicate = true;
+      if (conn.ws.readyState === 1) {
+        conn.ws.close(DUPLICATE_MACHINE_CONNECTION_CLOSE_CODE, MACHINE_DUPLICATE_CONNECTION_CLOSE_REASON);
+      }
+    }
+    span.end("ok");
+  }
+
+  /**
+   * Task #374: whether a new connection for `machineId` must be refused because
+   * the winner of an earlier duplicate decision is still alive. Fails open: any
+   * read error, a missing record or a winner that stopped renewing lets the
+   * connection through as before.
+   */
+  private async heldDuplicateMachineConnection(machineId: string): Promise<MachineDuplicateHold | null> {
+    if (!this.duplicateConnectionEnforcement) return null;
+    try {
+      const hold = await this.replicaStateStore.getMachineDuplicateHold?.(machineId);
+      if (!hold) return null;
+      const lease = await this.replicaStateStore.getMachineReplicaLease?.(machineId);
+      if (!lease || lease.replicaId !== hold.replicaId || lease.generation !== hold.generation) return null;
+      if (lease.updatedAtMs === null) return null;
+      if (this.clock.now() - lease.updatedAtMs > AgentOrchestrator.DUPLICATE_HOLD_WINNER_ALIVE_MS) return null;
+      return hold;
+    } catch {
+      return null;
+    }
   }
 
   /**
@@ -9782,8 +10716,9 @@ export class AgentOrchestrator extends EventEmitter {
     machineId: string,
     message: AgentMessage,
     localMachineIds: Set<string>,
+    deliveryOptions: RoutedInboxDeliveryOptions = {},
   ): Promise<boolean> {
-    return routeInboxDelivery(agentId, machineId, message, localMachineIds);
+    return routeInboxDelivery(agentId, machineId, message, localMachineIds, deliveryOptions);
   }
 
   protected async routeInboxDeliveryWithReceiptCrossReplica(
@@ -9877,6 +10812,11 @@ export class AgentOrchestrator extends EventEmitter {
       },
       async () => {
         const routeResult = normalizeMachineCommandRouteResult(await context.reroute());
+        machineCommandRouteTotal.inc({
+          outcome: routeResult.routed ? "routed" : "not_routed",
+          reason: routeResult.reason,
+          message_type: msg.type,
+        });
         this.recordEvent("machine.command.route", {
           event_kind: "machine_command_route",
           outcome: routeResult.routed ? "routed" : "not_routed",
@@ -10020,28 +10960,41 @@ export class AgentOrchestrator extends EventEmitter {
   /**
    * Agents the daemon reports running that the database does not place on
    * this machine: deleted, or moved to another machine (e.g. a migration that
-   * flipped while this daemon was away). Left running, a moved agent runs on
-   * two machines at once. Observe-only for now: each one is recorded with its
-   * reason, and nothing is stopped until production shows no false positives
-   * (e.g. an agent mid-migration). Reads the primary, not a cache.
+   * flipped while this daemon was away). Reads the primary, not a cache.
+   *
+   * A deleted agent is stopped: nothing can own it any more, and left running
+   * it is reported again on every reconnect. Production (v1.21.1, 34 h) showed
+   * only deleted agents, all long gone and idle (#infra:4df7de2a). A moved
+   * agent stays observe-only until production shows what those look like (an
+   * agent mid-migration must not be stopped by the wrong side).
    */
-  private async observeForeignRunningAgents(machineId: string, agentIds: string[]): Promise<number> {
-    if (agentIds.length === 0) return 0;
+  private async reconcileForeignRunningAgents(
+    machineId: string,
+    agentIds: string[],
+  ): Promise<{ foreign: number; stopped: number }> {
+    if (agentIds.length === 0) return { foreign: 0, stopped: 0 };
     const placements = new Map((await this.loadAgentPlacements(agentIds)).map((row) => [row.id, row]));
-    let count = 0;
+    let foreign = 0;
+    let stopped = 0;
     for (const agentId of agentIds) {
       const placement = placements.get(agentId);
       if (placement && !placement.deletedAt && placement.machineId === machineId) continue;
-      count += 1;
+      foreign += 1;
+      const reason = !placement || placement.deletedAt ? "deleted" : "moved";
+      let enforcement: "stopped" | "stop_not_sent" | "observe_only" = "observe_only";
+      if (reason === "deleted") {
+        enforcement = await this.sendToMachine(machineId, { type: "agent:stop", agentId }) ? "stopped" : "stop_not_sent";
+        if (enforcement === "stopped") stopped += 1;
+      }
       this.recordEvent("machine.ready.reconcile.foreign_running", {
         agent_id: agentId,
         machine_id: machineId,
-        reason: !placement || placement.deletedAt ? "deleted" : "moved",
+        reason,
         current_machine_id_present: Boolean(placement?.machineId),
-        enforcement: "observe_only",
+        enforcement,
       });
     }
-    return count;
+    return { foreign, stopped };
   }
 
   protected async loadAgentPlacements(agentIds: string[]) {
@@ -10051,6 +11004,14 @@ export class AgentOrchestrator extends EventEmitter {
   /** Move the agent's read position over messages its daemon reported the model was shown. */
   protected applyAgentModelSeen(input: Parameters<typeof applyAgentModelSeenToReadPosition>[0]) {
     return applyAgentModelSeenToReadPosition(input);
+  }
+
+  /** Whether this replica sent `agentId` a start, on any machine, that is not acknowledged yet. */
+  private hasPendingAgentStartForAgent(agentId: string): boolean {
+    for (const pending of this.pendingAgentStartAcks.values()) {
+      if (pending.msg.agentId === agentId) return true;
+    }
+    return false;
   }
 
   /** Whether this replica sent `agentId` a start on `machineId` that is not acknowledged yet. */
@@ -10359,7 +11320,10 @@ export class AgentOrchestrator extends EventEmitter {
       existing.machineId = machineId;
       existing.msg = msg;
       existing.lastAttemptAt = this.clock.now();
-      if (scheduleTimeout) {
+      // A parked record stays parked on a re-send (task #285: a parked cycle is
+      // not in flight, so mention recovery keeps spending its budget). Keep its
+      // status probe rather than an ack timeout it would ignore (task #432).
+      if (scheduleTimeout && !existing.parked && existing.arrivedAt === undefined) {
         this.scheduleAgentDeliveryAckTimeout(key, existing);
       }
       return;
@@ -10375,9 +11339,10 @@ export class AgentOrchestrator extends EventEmitter {
       firstAttemptAt: now,
       lastAttemptAt: now,
       onlineAtFirstAttempt: this.hasMachineLocally(machineId),
+      daemonVersion: daemonVersionLabel(this.machineConnections.get(machineId)?.daemonVersion),
     };
     this.pendingAgentDeliveryAcks.set(key, pending);
-    agentDeliveryTrackedTotal.inc({ online_at_first_attempt: String(pending.onlineAtFirstAttempt) });
+    agentDeliveryTrackedTotal.inc(agentDeliverySloLabels(pending));
     if (scheduleTimeout) {
       this.scheduleAgentDeliveryAckTimeout(key, pending);
     }
@@ -10403,9 +11368,10 @@ export class AgentOrchestrator extends EventEmitter {
     const pending = this.pendingAgentDeliveryAcks.get(key);
     if (pending?.timer) this.clock.clearTimeout(pending.timer);
     if (pending) {
-      if (outcome === "acked") {
+      // A mention that already arrived (daemon_pending) was observed then.
+      if (outcome === "acked" && pending.arrivedAt === undefined) {
         agentDeliveryAckSeconds.observe(
-          { online_at_first_attempt: String(pending.onlineAtFirstAttempt) },
+          agentDeliverySloLabels(pending),
           (this.clock.now() - pending.firstAttemptAt) / 1000,
         );
       }
@@ -10415,7 +11381,26 @@ export class AgentOrchestrator extends EventEmitter {
   }
 
   private recordAgentDeliveryOutcome(pending: PendingAgentDeliveryAck, outcome: AgentDeliveryOutcome): void {
-    agentDeliveryOutcomesTotal.inc({ outcome, online_at_first_attempt: String(pending.onlineAtFirstAttempt) });
+    agentDeliveryOutcomesTotal.inc({
+      outcome,
+      ...agentDeliverySloLabels(pending),
+      conn_age: outcome === "gave_up" || outcome === "dropped" ? this.machineConnectionAgeBucket(pending.machineId) : "n/a",
+    });
+  }
+
+  /**
+   * Coarse age of this replica's connection to the machine, for failure
+   * outcomes only: it separates state that builds up on a long-lived
+   * connection from state that builds up on the replica (task #432).
+   */
+  private machineConnectionAgeBucket(machineId: string): "none" | "unknown" | "<1h" | "1-6h" | ">6h" {
+    const conn = this.machineConnections.get(machineId);
+    if (!conn) return "none";
+    if (conn.connectedAt === undefined) return "unknown";
+    const ageMs = this.clock.now() - conn.connectedAt;
+    if (ageMs < 3_600_000) return "<1h";
+    if (ageMs < 6 * 3_600_000) return "1-6h";
+    return ">6h";
   }
 
   private clearPendingAgentDeliveryAcksForAgent(agentId: string): number {
@@ -10527,7 +11512,70 @@ export class AgentOrchestrator extends EventEmitter {
     }
   }
 
+  private async logAgentDeliveryGaveUp(pending: PendingAgentDeliveryAck): Promise<void> {
+    const conn = this.machineConnections.get(pending.machineId);
+    let daemonVersion = conn?.daemonVersion ?? null;
+    let daemonVersionSource: "connection" | "machine_record" | "none" = daemonVersion ? "connection" : "none";
+    if (!daemonVersion) {
+      // The machine is not connected here (or has not sent ready): fall back
+      // to the version it last reported, so a non-local give-up still names it.
+      daemonVersion = await this.loadMachineDaemonVersion(pending.machineId).catch(() => null);
+      if (daemonVersion) daemonVersionSource = "machine_record";
+    }
+    console.log(JSON.stringify({
+      event: "agent_delivery.gave_up",
+      machine_id: pending.machineId,
+      agent_id: pending.msg.agentId,
+      delivery_correlation_id: pending.msg.deliveryId ?? null,
+      seq: pending.msg.seq,
+      local_socket_present: this.hasMachineLocally(pending.machineId),
+      daemon_version: daemonVersion,
+      daemon_version_source: daemonVersionSource,
+      delivery_kind: pending.msg.mentionDelivery ? "mention" : "plain",
+      conn_age: this.machineConnectionAgeBucket(pending.machineId),
+      attempts: pending.attempts,
+      first_attempt_age_ms: this.clock.now() - pending.firstAttemptAt,
+    }));
+  }
+
+  protected async loadMachineDaemonVersion(machineId: string): Promise<string | null> {
+    const machine = await machineService.getMachine(asMachineId(machineId));
+    return machine?.daemonVersion ?? null;
+  }
+
+  /**
+   * SLO v1 SLI 4 (task #432): a tracked mention is acked only once the agent
+   * has been told, which can wait for the end of the current turn, so a long
+   * turn turned an arrived mention into gave_up (78% of give-ups in a trace
+   * sample). `daemon_pending` is the daemon saying it has the message: count
+   * arrival here, measured from the first attempt, and stop re-sending. The
+   * record stays as an in-flight cycle (task #285: re-sends inside a live cycle
+   * do not spend recovery budget) until the final ack or terminal error, at
+   * most AGENT_DELIVERY_HELD_MAX_MS, then ends as held_expired.
+   */
+  private recordAgentDeliveryArrival(agentId: string, deliveryId: string): void {
+    const key = `delivery:${deliveryId}`;
+    const pending = this.pendingAgentDeliveryAcks.get(key);
+    if (!pending || pending.msg.agentId !== agentId || pending.arrivedAt !== undefined) return;
+    const now = this.clock.now();
+    pending.arrivedAt = now;
+    agentDeliveryAckSeconds.observe(agentDeliverySloLabels(pending), (now - pending.firstAttemptAt) / 1000);
+    if (pending.timer) this.clock.clearTimeout(pending.timer);
+    pending.parked = false;
+    pending.parkedReason = undefined;
+    pending.parkedAt = undefined;
+    pending.timer = this.scheduleOnClock(() => {
+      const current = this.pendingAgentDeliveryAcks.get(key);
+      if (current !== pending) return;
+      this.recordAgentDeliveryOutcome(pending, "held_expired");
+      this.pendingAgentDeliveryAcks.delete(key);
+    }, AgentOrchestrator.AGENT_DELIVERY_HELD_MAX_MS);
+    const timerWithUnref = pending.timer as { unref?: () => void } | null;
+    timerWithUnref?.unref?.();
+  }
+
   private parkPendingAgentDeliveryAck(
+    key: string,
     pending: PendingAgentDeliveryAck,
     reason: "machine_offline",
   ): void {
@@ -10535,8 +11583,66 @@ export class AgentOrchestrator extends EventEmitter {
       this.clock.clearTimeout(pending.timer);
       pending.timer = null;
     }
+    if (!pending.parked) pending.parkedAt = this.clock.now();
     pending.parked = true;
     pending.parkedReason = reason;
+    this.scheduleParkedAgentDeliveryProbe(key, pending);
+  }
+
+  private scheduleParkedAgentDeliveryProbe(key: string, pending: PendingAgentDeliveryAck): void {
+    pending.timer = this.scheduleOnClock(() => {
+      void this.probeParkedAgentDelivery(key).catch((err) => {
+        console.warn(`[Machine ${pending.machineId}] parked agent delivery probe failed for ${pending.msg.agentId}:`, err);
+      });
+    }, AgentOrchestrator.AGENT_DELIVERY_PARKED_PROBE_MS);
+    const timerWithUnref = pending.timer as { unref?: () => void } | null;
+    timerWithUnref?.unref?.();
+  }
+
+  /**
+   * A parked record used to be woken only by its machine re-registering on
+   * this same replica. A machine that reconnected to another replica, or never
+   * came back, left it with no timer and no outcome until the process exited
+   * (task #432: ~100/h fleet-wide). Like a parked start, keep probing the
+   * machine's status without spending a delivery attempt:
+   * - machine still offline: probe again, until the max age ends the record
+   *   as parked_expired (a miss);
+   * - machine online, plain delivery: unpark and retry, which re-sends here or
+   *   routes it to the owning replica;
+   * - machine online, tracked mention: ready-time durable mention recovery on
+   *   the owning replica re-sends and re-tracks it, so this copy ends as routed.
+   */
+  private async probeParkedAgentDelivery(key: string): Promise<void> {
+    const pending = this.pendingAgentDeliveryAcks.get(key);
+    if (!pending?.parked) return;
+    pending.timer = null;
+    if (this.clock.now() - (pending.parkedAt ?? this.clock.now()) >= AgentOrchestrator.AGENT_DELIVERY_PARKED_MAX_MS) {
+      this.recordAgentDeliveryOutcome(pending, "parked_expired");
+      this.pendingAgentDeliveryAcks.delete(key);
+      return;
+    }
+    let machineStatus: "online" | "offline";
+    try {
+      machineStatus = await this.getMachineStatus(pending.machineId);
+    } catch {
+      if (this.pendingAgentDeliveryAcks.get(key) === pending && pending.parked) this.scheduleParkedAgentDeliveryProbe(key, pending);
+      return;
+    }
+    // The record may have been acked, re-sent or cleared during the read.
+    if (this.pendingAgentDeliveryAcks.get(key) !== pending || !pending.parked) return;
+    if (machineStatus === "offline") {
+      this.scheduleParkedAgentDeliveryProbe(key, pending);
+      return;
+    }
+    if (pending.msg.mentionDelivery) {
+      this.recordAgentDeliveryOutcome(pending, "routed");
+      this.pendingAgentDeliveryAcks.delete(key);
+      return;
+    }
+    pending.parked = false;
+    pending.parkedReason = undefined;
+    pending.parkedAt = undefined;
+    await this.retryPendingAgentDelivery(key, "ack_timeout");
   }
 
   private async loadPendingAgentDeliveryRetryGate(pending: PendingAgentDeliveryAck): Promise<{
@@ -10599,11 +11705,21 @@ export class AgentOrchestrator extends EventEmitter {
   private async retryPendingAgentDelivery(key: string, reason: "ack_timeout" | "ready_reconcile" | "register"): Promise<void> {
     const pending = this.pendingAgentDeliveryAcks.get(key);
     if (!pending) return;
+    // Still the live record for this key after an await. Two triggers for one
+    // record (an ack timeout and a register, say) run concurrently, and an ack,
+    // terminal error, stop or daemon_pending can settle it during an await;
+    // without this check a retry recorded a second outcome, e.g. gave_up
+    // twice (task #432).
+    const stillCurrent = () => this.pendingAgentDeliveryAcks.get(key) === pending && pending.arrivedAt === undefined;
     if (pending.parked && reason === "ack_timeout") {
       return;
     }
+    // Already at the daemon (daemon_pending): a re-send would only meet the
+    // daemon's duplicate_pending and be answered with silence (task #432).
+    if (pending.arrivedAt !== undefined) return;
     const localAtRetry = this.hasMachineLocally(pending.machineId);
     const ownerTraceAttrs = await this.getMachineOwnerTraceAttrs(pending.machineId);
+    if (!stillCurrent()) return;
     const span = this.tracer.startSpan("server.agent.delivery.retry", {
       parent: parseTraceparent(pending.msg.traceparent),
       surface: "server",
@@ -10628,6 +11744,12 @@ export class AgentOrchestrator extends EventEmitter {
       if (pending.timer) this.clock.clearTimeout(pending.timer);
       this.recordAgentDeliveryOutcome(pending, "gave_up");
       this.pendingAgentDeliveryAcks.delete(key);
+      // Task #432: gave_up concentrates on a few replicas (10-18% of their
+      // deliveries vs 1-8% elsewhere), i.e. on a few machines, and the metrics
+      // carry no machine. One JSON line per give-up (a few hundred per hour)
+      // names them in CloudWatch; field names follow the
+      // server.agent.delivery.retry span so queries join the trace.
+      await this.logAgentDeliveryGaveUp(pending);
       span.end("ok", {
         attrs: {
           first_attempt_age_ms: this.clock.now() - pending.firstAttemptAt,
@@ -10640,6 +11762,10 @@ export class AgentOrchestrator extends EventEmitter {
     await this.runInActiveSpan(span, async () => {
       try {
         const gate = await this.loadPendingAgentDeliveryRetryGate(pending);
+        if (!stillCurrent()) {
+          span.end("ok", { attrs: { outcome: "superseded", reason: "settled_during_retry" } });
+          return;
+        }
         this.recordEvent("server.delivery.retry.gate", {
           outcome: gate.allowed ? "allowed" : "dropped",
           reason: gate.reason,
@@ -10664,12 +11790,16 @@ export class AgentOrchestrator extends EventEmitter {
         }
 
         const machineStatus = await this.getMachineStatus(pending.machineId);
+        if (!stillCurrent()) {
+          span.end("ok", { attrs: { outcome: "superseded", reason: "settled_during_retry" } });
+          return;
+        }
         this.recordEvent("server.delivery.retry.machine_status", {
           machine_status: machineStatus,
           retry_reason: reason,
         });
         if (machineStatus === "offline") {
-          this.parkPendingAgentDeliveryAck(pending, "machine_offline");
+          this.parkPendingAgentDeliveryAck(key, pending, "machine_offline");
           span.end("ok", {
             attrs: {
               outcome: "parked",
@@ -10692,6 +11822,10 @@ export class AgentOrchestrator extends EventEmitter {
           },
         });
         const deliveryTraceAttrs = { ...ownerTraceAttrs, ...routeTraceAttrs };
+        if (!stillCurrent()) {
+          span.end("ok", { attrs: { outcome: "superseded", reason: "settled_during_retry", ...deliveryTraceAttrs } });
+          return;
+        }
         this.recordEvent("server.delivery.retry.sent", {
           outcome: sent ? "sent" : "not_sent",
           reason: sent ? (localAtRetry ? "local_socket_present" : "routed_to_owner") : "machine_unreachable",
@@ -10709,7 +11843,7 @@ export class AgentOrchestrator extends EventEmitter {
         this.scheduleAgentDeliveryAckTimeout(key, pending);
         span.end("ok", { attrs: { outcome: sent ? "resent" : "scheduled", reason: sent ? "local_retry_sent" : "machine_unreachable", ...deliveryTraceAttrs } });
       } catch (err) {
-        this.scheduleAgentDeliveryAckTimeout(key, pending);
+        if (stillCurrent()) this.scheduleAgentDeliveryAckTimeout(key, pending);
         span.end("error", { attrs: { outcome: "scheduled", reason: "retry_error", error_class: errorClassOf(err) } });
         console.warn(`[Machine ${pending.machineId}] agent delivery retry failed for ${pending.msg.agentId}:`, err);
       }
@@ -10797,6 +11931,25 @@ export class AgentOrchestrator extends EventEmitter {
   }
 
   private async handleLocalRoutedMachineCommand(machineId: string, msg: ServerToMachineMessage): Promise<boolean> {
+    if (
+      (msg.type === "agent:start" || msg.type === "agent:start:wiki")
+      && msg.startDispatchId
+      && this.terminalAgentStartDispatches.has(msg.startDispatchId)
+    ) {
+      // Task #368: a peer's resend of a start this replica already settled
+      // (superseded, acked, stale…). Re-tracking it would supersede the
+      // agent's current pending start, and re-arming the guard would point it
+      // back at the old launch, so the current launch's frames would be
+      // dropped as stale. Report it handled so the peer stops retrying.
+      this.recordEvent("server.agent.start_dispatch.routed_resend_ignored", {
+        agent_id: msg.agentId,
+        machine_id: machineId,
+        launch_id: msg.launchId,
+        start_dispatch_id: msg.startDispatchId,
+        terminal_reason: this.terminalAgentStartDispatches.get(msg.startDispatchId),
+      });
+      return true;
+    }
     if (msg.type === "agent:start") {
       // A peer that could not route the start as an intent (owner without
       // intent support) prepared it and armed only its own guard. This
@@ -10859,12 +12012,27 @@ export class AgentOrchestrator extends EventEmitter {
     return true;
   }
 
-  async handleRoutedInboxDelivery(agentId: string, machineId: string | null, message: AgentMessage): Promise<boolean> {
+  /**
+   * Owner side of the plain cross-replica inbox route. Only reachable from the
+   * replica router's `inbox:deliver` envelope on Redis pub/sub, which only
+   * server replicas publish. `deliveryOptions.intrinsic` comes from that
+   * envelope (set by the sending replica from its own `DeliverMessageOptions`),
+   * never from the `AgentMessage` payload, so a payload carrying an
+   * `intrinsic` field is still visibility-checked.
+   */
+  async handleRoutedInboxDelivery(
+    agentId: string,
+    machineId: string | null,
+    message: AgentMessage,
+    deliveryOptions: RoutedInboxDeliveryOptions = {},
+  ): Promise<boolean> {
     const agent = await this.getCachedAgent(agentId);
     if (!agent || agent.status !== "active" || !agent.machineId) {
       return true;
     }
-    if (!await this.canAgentAccessDeliveryTarget(agentId, agent, message)) {
+    // Intrinsic deliveries (e.g. onboarding owner facts) carry a label, not a
+    // channel id, as channel_id; the sender skipped this check for them.
+    if (deliveryOptions.intrinsic !== true && !await this.canAgentAccessDeliveryTarget(agentId, agent, message)) {
       return true;
     }
 
@@ -10876,7 +12044,7 @@ export class AgentOrchestrator extends EventEmitter {
       targetMachineId,
       localMachineIds,
       () => this.deliverToLocalInboxIfStillActive(agentId, targetMachineId, message),
-      () => this.routeInboxDeliveryCrossReplica(agentId, targetMachineId, message, localMachineIds),
+      () => this.routeInboxDeliveryCrossReplica(agentId, targetMachineId, message, localMachineIds, deliveryOptions),
       () => this.deliverToLocalInboxIfStillActive(agentId, targetMachineId, message),
     );
   }
@@ -10900,7 +12068,13 @@ export class AgentOrchestrator extends EventEmitter {
     });
   }
 
-  protected async canAgentAccessDeliveryTarget(agentId: string, agent: CachedAgentState, message: AgentMessage): Promise<boolean> {
+  protected async canAgentAccessDeliveryTarget(
+    agentId: string,
+    agent: CachedAgentState,
+    message: AgentMessage,
+    // The batch-read answer for this agent's row (deliverMessagesOnChannel), if any.
+    knownAccess?: boolean,
+  ): Promise<boolean> {
     if (message.third_party_event) return true;
     let checkError: unknown = null;
     return this.runInTraceSpan(
@@ -10913,6 +12087,7 @@ export class AgentOrchestrator extends EventEmitter {
       },
       async () => {
         try {
+          if (knownAccess !== undefined) return knownAccess;
           const channel = await channelService.getChannel(message.channel_id);
           if (!channel || channel.serverId !== agent.serverId) {
             return false;
@@ -10924,16 +12099,27 @@ export class AgentOrchestrator extends EventEmitter {
           this.recordEvent("server.agent_delivery.visibility_check_failed", {
             agent_id: agentId,
             channel_id: message.channel_id,
+            channel_kind: deliveryChannelKind(message.channel_id),
             outcome: "error",
             reason: "visibility_check_threw",
             error_class: errorClassOf(error),
+            error_code: pgSqlState(error) ?? "none",
           });
           return false;
         }
       },
       (allowed) => checkError == null
         ? { attrs: { outcome: allowed ? "allowed" : "denied" } }
-        : { status: "error", attrs: { outcome: "error", reason: "visibility_check_threw", error_class: errorClassOf(checkError) } },
+        : {
+          status: "error",
+          attrs: {
+            outcome: "error",
+            reason: "visibility_check_threw",
+            error_class: errorClassOf(checkError),
+            error_code: pgSqlState(checkError) ?? "none",
+            channel_kind: deliveryChannelKind(message.channel_id),
+          },
+        },
     );
   }
 
@@ -11278,14 +12464,17 @@ export class AgentOrchestrator extends EventEmitter {
   private async loadWakePlanInput(
     agentId: string,
     status: AgentStatus,
+    // The batch-read migration gate for this agent (deliverMessagesOnChannel), if any.
+    knownMigrationGated?: boolean,
   ): Promise<WakePlanInput> {
     // TODO(lifecycle-v2/state-snapshot): delivery wake planning currently
     // builds a minimal in-memory state from DB status, reset state, and
     // runtime-profile gate. If machine reachability becomes authoritative for
     // delivery wake decisions, extend this builder to read the machine owner/
     // connection state instead of leaving reachability as "unknown".
-    const migrationGateStatus = await agentMigrationService.getAgentMigrationGateStatus(agentId);
-    const controlGate = migrationGateStatus.migration
+    const migrationGated = knownMigrationGated
+      ?? Boolean((await agentMigrationService.getAgentMigrationGateStatus(agentId)).migration);
+    const controlGate = migrationGated
       ? "zen_migrating"
       : await agentRuntimeProfileService.isRuntimeProfileMigrationGated(agentId)
         ? "runtime_profile_migration"
@@ -11338,9 +12527,30 @@ export class AgentOrchestrator extends EventEmitter {
    * as stale_launch_guard.
    */
   async startAgent(agentId: string, options: StartAgentOptions = {}): Promise<AgentStartDispatchResult> {
+    // task #365: an `internal` start is never forwarded; see startAgentForRetry.
+    if (options.startCause === "internal") throw new Error("internal starts go through startAgentForRetry");
     const routed = this.mayRunOnOwner(agentId) ? await this.runOnOwner(agentId, { kind: "start", options }) : null;
     if (!routed) return this.startAgentHere(agentId, options);
     return routed as AgentStartDispatchResult;
+  }
+
+  /**
+   * task #365: the spawn-error retry sweep's start runs only on the replica
+   * that holds the machine's socket; it is never handed to an owner (an
+   * older owner would not know `internal` and has no stopped guard for it).
+   * The check is made here, where a start would otherwise be forwarded, and
+   * the start is stamped with that socket's epoch: if the machine reconnects
+   * after this point, the daemon refuses the start (`stale_dispatch`). A
+   * skipped start keeps its demand; the next sweep decides again.
+   */
+  async startAgentForRetry(agentId: string): Promise<AgentStartDispatchResult | { outcome: "skipped"; reason: "not_local_machine" }> {
+    const agent = await this.loadAgentForStart(agentId);
+    const epoch = agent?.machineId ? this.machineConnections.get(agent.machineId)?.connectionEpochId : undefined;
+    if (!epoch) {
+      this.recordEvent("terminal_breaker.spawn_error_retry_not_local", { agent_id: agentId });
+      return { outcome: "skipped", reason: "not_local_machine" };
+    }
+    return this.startAgentHere(agentId, { startCause: "internal", localConnectionEpochId: epoch });
   }
 
   /**
@@ -11490,12 +12700,51 @@ export class AgentOrchestrator extends EventEmitter {
     }
   }
 
+  /**
+   * The one entry every start on this replica goes through (direct starts and
+   * owner intents alike): at most one start per agent is in flight here, from
+   * the moment a start begins until its ack settles it. Two starts for the
+   * same agent a few ms apart (e.g. two rejected deliveries both converted to
+   * a wake, or a ready reconcile wake racing them) each create a launch; the
+   * daemon runs whichever arrives first while the server keeps the one acked
+   * last, and every frame of the running launch is then dropped as stale for
+   * hours. The later start is skipped like a held wake lock: its caller
+   * re-tracks the delivery, and the start already in flight carries it. The
+   * Redis wake lock stays the cross-replica guard; this check also holds when
+   * that lock is released early (an exit status of the previous process
+   * releases it) or Redis is unavailable.
+   */
   protected async startAgentHere(agentId: string, options: StartAgentOptions = {}): Promise<AgentStartDispatchResult> {
+    if (this.startsInProgress.has(agentId) || this.hasPendingAgentStartForAgent(agentId)) {
+      this.recordLifecycleEvent({
+        agentId,
+        machineId: null,
+        action: "start",
+        outcome: "skipped",
+        cause: lifecycleStartCause(options),
+        detail: "start_in_flight",
+      });
+      console.log(`[Agent ${agentId}] Start skipped: a start for this agent is already in flight on this replica`);
+      if (options.requireQueueReceipt) {
+        throw new CrossReplicaQueueReceiptUnavailableError();
+      }
+      // Same contract as a held wake lock: another start is bringing the agent up.
+      return { outcome: "skipped", reason: "wake_lock_held" };
+    }
+    this.startsInProgress.add(agentId);
+    try {
+      return await this.startAgentHereUnguarded(agentId, options);
+    } finally {
+      this.startsInProgress.delete(agentId);
+    }
+  }
+
+  private async startAgentHereUnguarded(agentId: string, options: StartAgentOptions = {}): Promise<AgentStartDispatchResult> {
     const { resumePrompt, wakeMessageTransient } = options;
     let { wakeMessage } = options;
     // Load from DB (and populate cache) for start — need full state
     const agent = await this.loadAgentForStart(agentId);
-    const startCause = options.startCause ?? (wakeMessage ? "message" : resumePrompt ? "resume" : "manual");
+    const startCause = lifecycleStartCause(options);
     if (!agent) {
       this.recordLifecycleEvent({
         agentId,
@@ -11513,9 +12762,10 @@ export class AgentOrchestrator extends EventEmitter {
         `[Agent ${agentId}] Invalid persisted agent status ${JSON.stringify(agent.status)} before start; failing closed`,
       );
     }
-    // A manual stop is the one truly offline state: neither a message wake nor
-    // a daemon app-inbox wake (task #1103) may undo it; only a manual start does.
-    if ((wakeMessage || options.startCause === "app_inbox_wake") && previousStatus === "stopped") {
+    // A manual stop is the one truly offline state: neither a message wake, a
+    // daemon app-inbox wake (task #1103), the start-failure retry nor the
+    // spawn-error retry sweep (task #365) may undo it; only a manual start does.
+    if ((wakeMessage || options.startCause === "app_inbox_wake" || options.startCause === "start_failure_retry" || options.startCause === "internal") && previousStatus === "stopped") {
       this.updateCache(agentId, { status: "stopped" });
       this.recordLifecycleEvent({
         agentId,
@@ -11528,10 +12778,13 @@ export class AgentOrchestrator extends EventEmitter {
       return { outcome: "skipped", reason: "manual_stop" };
     }
     // task #1119: after consecutive early exits, automatic wakes (message,
-    // app-inbox, rejected-delivery conversion) are paused for the episode.
-    // A human start/resume always passes and opens a new episode below.
+    // app-inbox, rejected-delivery conversion) are paused for the episode;
+    // so are they after a start failure retrying cannot fix or too many failed
+    // starts in a row, and for the wait before a retry-once retry. A human
+    // start/resume always passes and opens a new episode below.
     const humanStart = startCause === "manual" || startCause === "resume";
-    if (!humanStart && await this.wakeCrashLoopBreaker.isBlocked(agentId)) {
+    const wakeHold = humanStart ? null : await this.wakeCrashLoopBreaker.automaticWakeHold(agentId, this.clock.now());
+    if (wakeHold) {
       this.recordLifecycleEvent({
         agentId,
         machineId: agent.machineId,
@@ -11539,7 +12792,7 @@ export class AgentOrchestrator extends EventEmitter {
         outcome: "suppressed",
         cause: startCause,
         previousStatus,
-        detail: "wake_crash_loop_blocked",
+        detail: wakeHold.kind === "retry_pending" ? "start_failure_retry_pending" : "wake_crash_loop_blocked",
       });
       return { outcome: "skipped", reason: "wake_crash_loop_blocked" };
     }
@@ -11551,7 +12804,10 @@ export class AgentOrchestrator extends EventEmitter {
     const terminalControl: TerminalStartControl = options.control === "human_start" ? "human_start" : "automatic";
     const terminalContext = this.terminalStartContext(agentId, agent.machineId);
     if (terminalControl === "automatic") {
-      const refusal = await this.terminalStartGate(agentId, terminalContext, wakeMessage).catch((error: unknown) => {
+      // task #365: a refused message or app-inbox wake is not retried by
+      // anyone else; the refusal records it as demand for the retry sweep.
+      const wakeDemand = startCause === "message" || startCause === "app_inbox_wake";
+      const refusal = await this.terminalStartGate(agentId, terminalContext, wakeMessage, wakeDemand).catch((error: unknown) => {
         this.recordLifecycleEvent({
           agentId,
           machineId: agent.machineId,
@@ -11762,10 +13018,25 @@ export class AgentOrchestrator extends EventEmitter {
       });
     }
 
+    // RFC 071 §4.3: whether this start goes through the terminal claim. Always
+    // false while RUNTIME_OUTCOME_ACK_ENABLED is false (no store read).
+    const claimTerminal = await this.usesTerminalClaim(agentId, terminalContext, terminalControl).catch((error: unknown) => {
+      this.updateCache(agentId, { status: rollbackStatus });
+      if (wakeLockHeld) this.releaseWakeLock(agentId);
+      throw new TerminalBreakerStorageUnavailableError(error);
+    });
+    // RFC 071 §6: a claimed start carries the next batch of the terminal
+    // breaker's catch-up obligation. Null on every unclaimed start, so the
+    // catch-up below is exactly today's.
+    const terminalObligation = claimTerminal ? await this.readTerminalCatchupObligation(agentId) : null;
+
     // Query unread rows so resume can deterministically re-drive durable
     // messages that arrived while a manual-stopped/sessioned agent was offline.
     let unreadSummary: Record<string, number> | undefined;
     let resumeMessages: AgentMessage[] | undefined;
+    // RFC 071 §6: the obligation batch's inputs (only with `terminalObligation`).
+    let obligationBatch: messageService.AgentResumeCatchupResult["obligationBatch"];
+    let foldedWakeAppended = false;
     // task #358: set when the catch-up ran but could not read the inbox.
     let catchupUnverified = false;
     // task #1221: messages refused as wakes during a start-failure block are
@@ -11773,8 +13044,10 @@ export class AgentOrchestrator extends EventEmitter {
     // (a fresh session has no history to resume, so without this they would
     // only surface if the agent read its inbox itself).
     const catchupOwed = await this.wakeCrashLoopBreaker.isCatchupOwed(agentId);
-    const catchupReplacesWake = catchupOwed && wakeMessage !== undefined && !wakeMessageTransient;
-    if (agent.sessionId || catchupOwed) {
+    // RFC 071 §6: every start while a terminal obligation exists builds the
+    // catch-up from the durable chain, even with no session, and folds a wake.
+    const catchupReplacesWake = (catchupOwed || terminalObligation !== null) && wakeMessage !== undefined && !wakeMessageTransient;
+    if (agent.sessionId || catchupOwed || terminalObligation !== null) {
       const span = this.tracer.startSpan("server.agent.resume_catchup.prepare", {
         surface: "server",
         kind: "internal",
@@ -11816,7 +13089,12 @@ export class AgentOrchestrator extends EventEmitter {
           const counts = await channelService.getAgentUnreadCounts(agentId, chain);
           if (Object.keys(counts).length > 0) unreadSummary = channelService.capAgentUnreadSummary(counts);
           if ((!wakeMessage || catchupReplacesWake) && !resumePrompt) {
-            const catchup = await messageService.getAgentResumeCatchupMessages(agentId, historyCutoff, { chain });
+            const catchup = await messageService.getAgentResumeCatchupMessages(
+              agentId,
+              historyCutoff,
+              terminalObligation ? { chain, obligation: terminalObligation } : { chain },
+            );
+            obligationBatch = catchup.obligationBatch;
             if (catchup.messages.length > 0) {
               resumeMessages = catchup.messages;
               // The daemon ignores resumeMessages when a wake message is present,
@@ -11826,6 +13104,7 @@ export class AgentOrchestrator extends EventEmitter {
                 const wake = wakeMessage;
                 if (!catchup.messages.some((m) => m.message_id === wake.message_id)) {
                   resumeMessages = [...catchup.messages, wake];
+                  foldedWakeAppended = true;
                 }
                 wakeMessage = undefined;
               }
@@ -11880,11 +13159,6 @@ export class AgentOrchestrator extends EventEmitter {
     // touched nothing shared.
     const launchId = await this.planStartLaunchId(agent.machineId);
     let terminalClaim: Extract<CombinedClaimResult, { ok: true }> | null = null;
-    const claimTerminal = await this.usesTerminalClaim(agentId, terminalContext, terminalControl).catch((error: unknown) => {
-      this.updateCache(agentId, { status: rollbackStatus });
-      if (wakeLockHeld) this.releaseWakeLock(agentId);
-      throw new TerminalBreakerStorageUnavailableError(error);
-    });
     if (claimTerminal) {
       const claimed = await this.claimTerminalStart(agentId, {
         launchId,
@@ -11892,6 +13166,8 @@ export class AgentOrchestrator extends EventEmitter {
         context: terminalContext,
         control: terminalControl,
         human: humanStart,
+        // task #365: an admitted wake is demand as well as a refused one.
+        wakeDemand: startCause === "message" || startCause === "app_inbox_wake",
       }).catch((error: unknown) => {
         // RFC 071 storage: a start whose pending entry cannot be recorded is
         // not dispatched (RFC 4.3 rule 1), human or automatic. Same cleanup as
@@ -11913,6 +13189,14 @@ export class AgentOrchestrator extends EventEmitter {
         // A concurrent claimer won (or #1119 blocked in between): nothing was written.
         this.updateCache(agentId, { status: rollbackStatus });
         if (wakeLockHeld) this.releaseWakeLock(agentId);
+        if (claimed.reason !== "wake_crash_loop_blocked" && (startCause === "message" || startCause === "app_inbox_wake")) {
+          // task #365: the wake passed the gate but lost the claim (another
+          // replica's probe won). Run the gate again so the refusal records
+          // it as demand; if that probe never spawns, the sweep re-serves it.
+          await this.terminalStartGate(agentId, terminalContext, wakeMessage, true).catch((error: unknown) => {
+            console.warn(`[Agent ${agentId}] wake demand after a lost claim not recorded: ${error instanceof Error ? error.message : String(error)}`);
+          });
+        }
         if (claimed.reason === "wake_crash_loop_blocked") {
           this.recordLifecycleEvent({
             agentId,
@@ -11938,6 +13222,15 @@ export class AgentOrchestrator extends EventEmitter {
     // be read, say so instead of letting the daemon report an empty resume.
     const startResumePrompt = resumePrompt
       ?? (catchupUnverified && agent.sessionId && !wakeMessage ? RESUME_CATCHUP_UNAVAILABLE_PROMPT : undefined);
+    // RFC 071 §6/§7: the batch this start carries, recorded on the claimed
+    // launch BEFORE dispatch so its echo can be matched. Only a start whose
+    // input is the resume catch-up (no wake message, no resume prompt).
+    // Every such build also settles the owed conversations the read cursor
+    // has passed (RFC 6 "read cursor"), even when no row is left to render.
+    const rendersCatchup = Boolean(resumeMessages && resumeMessages.length > 0 && !wakeMessage && !startResumePrompt);
+    const catchupBatchId = terminalClaim && terminalObligation && obligationBatch && launchId
+      ? await this.recordTerminalCatchupBuild(agentId, launchId, terminalObligation, obligationBatch, rendersCatchup ? resumeMessages! : null, foldedWakeAppended)
+      : null;
     const startDispatchSpan = this.tracer.startSpan("server.agent.start_dispatch", {
       parent: getCurrentTraceContext(),
       surface: "server",
@@ -11968,9 +13261,16 @@ export class AgentOrchestrator extends EventEmitter {
         ? {
           breakerGeneration: terminalClaim.token.generation,
           takeoverEpoch: terminalClaim.token.takeoverEpoch,
+          ...(catchupBatchId ? { catchupBatchId } : {}),
           ...(terminalControl === "human_start" ? { humanStart: true } : {}),
         }
         : {}),
+      // task #365: an automatic start carries the epoch of the connection it
+      // was claimed against (only a socket this replica holds); the daemon
+      // refuses it on any other connection (`not_spawned: stale_dispatch`).
+      ...(options.localConnectionEpochId
+        ? { connectionEpochId: options.localConnectionEpochId }
+        : terminalClaim && terminalControl === "automatic" ? this.claimTimeConnectionEpoch(agent.machineId) : {}),
     };
     const startMessage: ServerToMachineMessage = { type: "agent:start", ...startFields };
     // task #1119: record the start BEFORE the dispatch leaves this replica, so
@@ -13412,12 +14712,46 @@ export class AgentOrchestrator extends EventEmitter {
     return results;
   }
 
+  /**
+   * Deliver one message to one agent. `gates` carries this agent's row and
+   * channel access when the caller already read them for a whole channel
+   * (deliverMessagesOnChannel); without it the gates are read for this agent.
+   */
   async deliverMessage(
     agentId: string,
     message: AgentMessage,
     options: DeliverMessageOptions = {},
+    gates?: DeliveryGates | null,
   ): Promise<AgentMessageDeliveryResult> {
-    const agent = await this.getAuthoritativeAgentForDelivery(agentId);
+    return this.deliverMessageWithGates(agentId, message, options, gates ?? null);
+  }
+
+  /**
+   * deliverMessage for several agents on one channel (each with its own
+   * payload and options): the agent rows and channel access are read for all
+   * of them in a fixed number of queries, then each agent goes through
+   * deliverMessage with those answers. One result promise per delivery, in
+   * order. A single delivery reads its gates on its own.
+   */
+  deliverMessagesOnChannel(
+    channelId: string,
+    deliveries: ReadonlyArray<{ agentId: string; message: AgentMessage; options?: DeliverMessageOptions }>,
+  ): Array<Promise<AgentMessageDeliveryResult>> {
+    const agentIds = [...new Set(deliveries.map((delivery) => delivery.agentId))];
+    const gates = agentIds.length > 1 ? this.loadDeliveryGates(channelId, agentIds) : Promise.resolve(null);
+    return deliveries.map(({ agentId, message, options }) => gates.then((loaded) =>
+      this.deliverMessage(agentId, message, options ?? {}, loaded && message.channel_id === channelId ? loaded : null)));
+  }
+
+  private async deliverMessageWithGates(
+    agentId: string,
+    message: AgentMessage,
+    options: DeliverMessageOptions,
+    gates: DeliveryGates | null,
+  ): Promise<AgentMessageDeliveryResult> {
+    const agent = gates?.agents.has(agentId)
+      ? this.applyPersistedAgentForDelivery(agentId, gates.agents.get(agentId) ?? null)
+      : await this.getAuthoritativeAgentForDelivery(agentId);
     if (!agent) return { status: "dropped", reason: "agent_unavailable" };
     const requireQueueReceipt = options.requireQueueReceipt === true
       || options.reconcileNonMemberMention === true;
@@ -13427,10 +14761,11 @@ export class AgentOrchestrator extends EventEmitter {
     // server-side audit trail lives on the scope toggle itself
     // (revision + updatedAt + updatedByUserId on `agent_scopes`).
     if (!options.intrinsic && !options.adminAuthority) {
-      const allowed = await this.hasPassiveDeliveryScope(agentId).catch(() => false);
+      const allowed = gates?.passiveScope.get(agentId)
+        ?? await this.hasPassiveDeliveryScope(agentId).catch(() => false);
       if (!allowed) return { status: "dropped", reason: "passive_scope_revoked" };
     }
-    if (!options.intrinsic && !await this.canAgentAccessDeliveryTarget(agentId, agent, message)) {
+    if (!options.intrinsic && !await this.canAgentAccessDeliveryTarget(agentId, agent, message, gates?.access.get(agentId))) {
       return { status: "dropped", reason: "target_access_changed" };
     }
     // A tracked mention carries the launch/session identity the daemon checks
@@ -13489,7 +14824,7 @@ export class AgentOrchestrator extends EventEmitter {
       }
       return { status: "dropped", reason: "transient_delivery_unsupported" };
     }
-    const wakeInput = await this.loadWakePlanInput(agentId, agent.status);
+    const wakeInput = await this.loadWakePlanInput(agentId, agent.status, gates?.migrationGated.get(agentId));
     const action = planWakeAction(wakeInput);
     if (action === "suppress-control-gate") {
       // Migration-gated path normally enqueues into the local inbox so the wake
@@ -13567,6 +14902,7 @@ export class AgentOrchestrator extends EventEmitter {
       transient: options.transient ?? false,
       requireQueueReceipt,
       mentionDeliveryOccurrenceId,
+      intrinsic: options.intrinsic === true,
     }, message);
   }
 
@@ -13721,6 +15057,7 @@ export class AgentOrchestrator extends EventEmitter {
           context.machineId,
           message,
           this.getRoutableLocalMachineIds(),
+          context.intrinsic ? { intrinsic: true } : {},
         );
         if (routed) {
           inboxPath = "routed";
@@ -14346,6 +15683,7 @@ export class AgentOrchestrator extends EventEmitter {
     });
     try {
       const knownRow = options.persistedAgent?.id === agentId ? options.persistedAgent : undefined;
+      const prefetched = options.prefetched;
       const authoritativeAgent = () => this.getAuthoritativeAgentForActivity(agentId, knownRow);
       let agent = await this.getCachedAgent(agentId, knownRow);
       let localMachineId = agent?.machineId ?? null;
@@ -14353,7 +15691,7 @@ export class AgentOrchestrator extends EventEmitter {
       let redisActivity: ActivitySnapshot | null | undefined;
       if (agent?.status === "stopped") {
         if (!hostedLocally && this.replicaStateStore.isAvailable()) {
-          redisActivity = activitySnapshotFromPersisted(await this.replicaStateStore.getAgentActivity(agentId));
+          redisActivity = activitySnapshotFromPersisted(await this.readAgentActivityForActivity(agentId, prefetched));
           if (redisActivity && redisActivity.activity !== "offline") {
             const freshAgent = await authoritativeAgent();
             if (freshAgent) agent = freshAgent;
@@ -14366,7 +15704,7 @@ export class AgentOrchestrator extends EventEmitter {
         return stopped;
       }
 
-      const runtimeErrorResolution = await this.resolveLastRuntimeErrorActivity(agentId, agent, authoritativeAgent);
+      const runtimeErrorResolution = await this.resolveLastRuntimeErrorActivity(agentId, agent, authoritativeAgent, prefetched);
       agent = runtimeErrorResolution.agent;
       localMachineId = agent?.machineId ?? null;
       hostedLocally = localMachineId !== null && this.hasMachineLocally(localMachineId);
@@ -14398,7 +15736,7 @@ export class AgentOrchestrator extends EventEmitter {
       const blockedSnapshot = isServerBlock(activityCached?.detailKind)
         ? activityCached
         : !activityCached && this.replicaStateStore.isAvailable()
-          ? (redisActivity ??= activitySnapshotFromPersisted(await this.replicaStateStore.getAgentActivity(agentId)))
+          ? (redisActivity ??= activitySnapshotFromPersisted(await this.readAgentActivityForActivity(agentId, prefetched)))
           : null;
       if (blockedSnapshot && isServerBlock(blockedSnapshot.detailKind)) {
         const blocked = this.formatActivityFromSnapshot(blockedSnapshot);
@@ -14409,7 +15747,7 @@ export class AgentOrchestrator extends EventEmitter {
       // When the agent's machine is connected to THIS replica, the in-memory
       // cache is authoritative and fresh (it is written on every broadcast).
       if (activityCached && hostedLocally) {
-        const resolved = await this.resolveActivityHint(agentId, agent, activityCached, "local-cache", span);
+        const resolved = await this.resolveActivityHint(agentId, agent, activityCached, "local-cache", span, prefetched);
         if (resolved) {
           span.end("ok", { attrs: { outcome: resolved.activity, source: "local-cache" } });
           return resolved;
@@ -14426,7 +15764,7 @@ export class AgentOrchestrator extends EventEmitter {
       // derived state below rather than fall back to the local shadow, so
       // INV-CC-FRESH holds even under Redis degradation.
       if (this.replicaStateStore.isAvailable()) {
-        redisActivity ??= activitySnapshotFromPersisted(await this.replicaStateStore.getAgentActivity(agentId));
+        redisActivity ??= activitySnapshotFromPersisted(await this.readAgentActivityForActivity(agentId, prefetched));
         if (redisActivity) {
           if (redisActivity.activity === "offline" && agent && !hostedLocally) {
             const freshAgent = await authoritativeAgent();
@@ -14439,7 +15777,7 @@ export class AgentOrchestrator extends EventEmitter {
               return stopped;
             }
           }
-          const resolved = await this.resolveActivityHint(agentId, agent, redisActivity, "redis", span);
+          const resolved = await this.resolveActivityHint(agentId, agent, redisActivity, "redis", span, prefetched);
           if (resolved) {
             span.end("ok", { attrs: { outcome: resolved.activity, source: "redis" } });
             return resolved;
@@ -14447,12 +15785,12 @@ export class AgentOrchestrator extends EventEmitter {
         }
       }
 
-      const persisted = await this.resolveRecentPersistedActivity(agentId, agent, span);
+      const persisted = await this.resolveRecentPersistedActivity(agentId, agent, span, prefetched);
       if (persisted) {
         span.end("ok", { attrs: { outcome: persisted.activity, source: "persisted" } });
         return persisted;
       }
-      const derived = await this.resolveDerivedActivity(agent);
+      const derived = await this.resolveDerivedActivity(agent, prefetched);
       span.end("ok", { attrs: { outcome: derived.activity, source: "derived" } });
       return derived;
     } catch (err) {
@@ -14476,7 +15814,7 @@ export class AgentOrchestrator extends EventEmitter {
   async getLiveActivityObservedAtMs(agentId: string): Promise<number | null> {
     const local = this.agentActivity.get(agentId) ?? null;
     const mirrored = this.replicaStateStore.isAvailable()
-      ? activitySnapshotFromPersisted(await this.replicaStateStore.getAgentActivity(agentId))
+      ? activitySnapshotFromPersisted(await this.readAgentActivityForActivity(agentId))
       : null;
     const snapshot = local && (!mirrored || local.updatedAt >= mirrored.updatedAt) ? local : mirrored;
     return snapshot ? this.getActivityObservedAtMs(snapshot) : null;

@@ -1,4 +1,5 @@
 import { Check, CircleAlert, GitBranch, X } from "lucide-react";
+import { useCallback } from "react";
 import { useIntl } from "react-intl";
 import type { IntlShape } from "react-intl";
 import {
@@ -316,8 +317,12 @@ export function JointConversionConfirmDialog({
   onClose: () => void;
 }) {
   const { formatMessage } = useIntl();
+  const handleOpenChange = useCallback((nextOpen: boolean) => {
+    if (!nextOpen && !busy) onClose();
+  }, [busy, onClose]);
+  const handleConfirm = useCallback(() => void onConfirm().catch(() => undefined), [onConfirm]);
   return (
-    <Dialog open={open} onOpenChange={(nextOpen) => { if (!nextOpen && !busy) onClose(); }}>
+    <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogContent aria-labelledby="channel-settings-joint-conversion-dialog-title" className="max-w-md">
         <DialogHeader>
           <DialogTitle id="channel-settings-joint-conversion-dialog-title">
@@ -347,7 +352,7 @@ export function JointConversionConfirmDialog({
           </DialogClose>
           <Button type="button" variant="accent" size="sm" loading={busy}
             loadingLabel={formatMessage({ id: "channel.edit.converting" })}
-            onClick={() => void onConfirm().catch(() => undefined)} data-testid="channel-settings-joint-conversion-confirm">
+            onClick={handleConfirm} data-testid="channel-settings-joint-conversion-confirm">
             {formatMessage({ id: "channel.edit.convertAction" })}
           </Button>
         </DialogFooter>

@@ -534,7 +534,7 @@ test("verifyInboxNotice accepts a correctly signed notice and rejects the rest, 
   const secret = "0123456789abcdef".repeat(4);
   const notice = {
     schema: "raft-agent-inbox-notice.v1", noticeId: "ntc_1", recipientAgentId: "agent-1", occurredAt: "2020-01-01T00:00:00.000Z",
-    text: "Inbox update: 1 unread message total; 1 changed target",
+    text: "Inbox update: 1 message pending your read across all conversations; 1 changed target",
     targets: [{ target: "#proj-sdk:2ad6c504", channelId: "c-1", channelType: "thread", pendingCount: 1, firstPendingMsgId: "m-1", latestMsgId: "m-1", latestSenderName: "Tenny", latestSenderType: "agent", flags: ["mention", "thread"] }],
   };
   const body = new TextEncoder().encode(JSON.stringify(notice));
@@ -561,4 +561,23 @@ test("verifyInboxNotice accepts a correctly signed notice and rejects the rest, 
   const wrongSchema = new TextEncoder().encode(JSON.stringify({ ...notice, schema: "raft-agent-inbox-notice.v2" }));
   const unsupported = await verifyInboxNotice({ headers: new Headers({ "x-raft-signature-256": `sha256=${createHmac("sha256", secret).update(wrongSchema).digest("hex")}` }), body: wrongSchema, secret });
   assert.deepEqual(unsupported.ok ? null : unsupported.reason, "unsupported_schema");
+});
+
+test("readHistory retains bare camelCase messages using the returned conversation target", async () => {
+  for (const target of ["#onboarding-eval", "#onboarding-eval:00000000", "dm:@richard", "dm:@richard:55555555"]) {
+    const api = client(() => Response.json({ target, messages: [{
+      id: UUID_A, seq: 270, content: "owner asks for feedback help", senderType: "human",
+      senderName: "richard", createdAt: T, channelId: UUID_B,
+    }], has_more: false, has_older: false, has_newer: false, last_read_seq: 269, model_seen_up_to_seq: 270 }));
+    const outcome = await readHistory(api, { target: "#requested-alias", limit: 10 }, new SeenFrontier());
+    assert.equal(outcome.ok, true, JSON.stringify(outcome));
+    if (!outcome.ok) throw new Error("history read failed");
+    assert.equal(outcome.data.messages.length, 1, "a successful nonempty server page must remain nonempty");
+    const message = outcome.data.messages[0]!;
+    assert.equal(message.target, target);
+    assert.equal(message.id, UUID_A);
+    assert.equal(message.seq, 270);
+    assert.equal(message.sender.name, "richard");
+    assert.equal(message.content, "owner asks for feedback help");
+  }
 });

@@ -49,7 +49,12 @@ try {
     const { existsSync, mkdirSync, statSync, writeFileSync } = await import("node:fs");
     const { join } = await import("node:path");
     const { homedir } = await import("node:os");
-    const stateDir = join(homedir(), ".slock");
+    // Raft home rule (@botiverse/raft-shared raftHome.ts), inlined: this file
+    // ships on its own and must not create ~/.slock on a new machine.
+    const home = homedir();
+    const configuredHome = process.env.RAFT_HOME?.trim() || process.env.SLOCK_HOME?.trim();
+    const legacyInUse = ["agents", "computer", "machines", "profiles", "agent-state"].some((entry) => existsSync(join(home, ".slock", entry)));
+    const stateDir = configuredHome || join(home, legacyInUse ? ".slock" : ".raft");
     const stateFile = join(stateDir, ".cli-rename-notice");
     const DAY_MS = 24 * 60 * 60 * 1000;
     const due = !existsSync(stateFile) || Date.now() - statSync(stateFile).mtimeMs > DAY_MS;

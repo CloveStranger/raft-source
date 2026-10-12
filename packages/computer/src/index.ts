@@ -176,6 +176,10 @@ export async function bootstrapThenRun(
   writeDiagnostic: (message: string) => void = (message) =>
     process.stderr.write(message),
   stripCarrierName: (argv: string[]) => boolean = stripForwardedCarrierName,
+  runBundledCli: (argv: string[]) => Promise<void> = async (cliArgv) => {
+    const { runBundledRaftCli } = await import("@botiverse/raft-daemon/bundled-cli");
+    await runBundledRaftCli(cliArgv);
+  },
 ): Promise<void> {
   const legacyInvocation = parseLegacyOsSupervisorInvocation(argv);
   if (legacyInvocation) {
@@ -191,6 +195,13 @@ export async function bootstrapThenRun(
   // parses argv. `argv` defaults to process.argv, which Commander reads, so the
   // in-place strip is what makes the rescue reach the parser.
   stripCarrierName(argv);
+  // Hidden `__cli` mode (every agent `raft` call on a SEA Computer): load ONLY
+  // the bundled CLI. Going through the Computer CLI graph (`./cli`) and the
+  // daemon core first cost ~0.3 GiB and seconds per call.
+  if (argv[2] === "__cli") {
+    await runBundledCli(argv.slice(3));
+    return;
+  }
   await bootstrapSupervisedServiceEnv(argv, env, capture);
   const cli = await importCli();
   cli.runCliAsMain();

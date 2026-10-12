@@ -10,6 +10,7 @@ import {
   type AgentMigrationUserErrorCode,
 } from "@botiverse/raft-shared";
 import * as agentService from "../services/agentService";
+import * as assistantService from "../services/assistantService";
 import * as agentMigrationService from "../services/agentMigrationService";
 import { OFFICIAL_ONBOARDING_AGENT_IDENTITY } from "../services/officialOnboardingAgentIdentity";
 import * as agentRuntimeProfileService from "../services/agentRuntimeProfileService";
@@ -64,6 +65,7 @@ import {
   storeAgentAvatar,
 } from "../services/avatarService";
 import * as channelService from "../services/channelService";
+import { postAgentServerRoleChangedNotice } from "../services/agentServerRoleNoticeService";
 import { addTraceEvent, createTraceDbQueryTracer, errorClassOf, getCurrentTraceContext, tracePhase } from "../tracing/semanticTrace";
 import { RouteFailureError, resolveRouteFailureKind, resolveRouteFailureSubkind, traceRouteFailure } from "../tracing/routeFailure";
 import { isPrincipalHandleConflictError } from "../services/principalHandleService";
@@ -83,6 +85,7 @@ import {
 } from "../services/featureFlagService";
 import {
   projectExistingAgentRuntimeOptions,
+  runtimeOptionProjectionFromHeaders,
   resolveRuntimeAdmissionPolicy,
 } from "../services/runtimeAdmissionService";
 import { requireTeamBillingFeature } from "../services/planService";
@@ -94,19 +97,22 @@ import {
 } from "../services/runtimeFormDefinitionService";
 import {
   buildRuntimeConfigFromFormValues,
+  buildRuntimeFormV2EditBodyForServer,
   formValuesPointerForRuntimeConfigPointer,
+  SAVED_CONNECTION_VALUE_PREFIX,
   reconcileRuntimeFormV2SubmissionWithLiveModels,
   redactWriteOnlyRuntimeConfig,
   retainOmittedWriteOnlySecrets,
-  runtimeFormV2Entry,
-  runtimeFormValuesFromRuntimeConfig,
+
   validateRuntimeFormV2SubmitRef,
   type RuntimeFormValuesOptions,
 } from "../services/runtimeFormV2Registry";
+import { localizeRuntimeFormV2, runtimeFormCopyLocale, setRuntimeFormCopyHeaders } from "../services/runtimeFormV2Copy";
 import { sendJsonServerError } from "./errorResponse";
 import {
   assertProviderConnectionModelCompatible,
   ProviderConnectionError,
+  SAVED_CONNECTION_ID_SHAPE,
   resolveProviderConnectionSelection,
 } from "../services/providerConnectionService";
 import { isProviderConnectionsEnabled } from "../services/providerConnectionFeature";
@@ -131,6 +137,11 @@ import {
   readHostedAgentWorkspaceFile,
   type ProviderSurfaceResult,
 } from "../services/agentRuntimeProviderSurfaceService";
+import {
+  getHostedAgentModel,
+  setHostedAgentModel,
+  type HostedAgentModelResult,
+} from "../services/hostedAgentModelService";
 import { getExternalAgentDiagnostics } from "../services/externalAgentDiagnosticsService";
 import { serializeErrorForLog } from "../tracing/safeErrorLog";
 import { sendAgentRuntimeProviderError } from "./agentRuntimeProviders";
@@ -209,7 +220,6 @@ import {
 } from "../services/builtinModelCatalogCompatibility";
 import { MachineCatalogStaleError } from "../services/machineCatalogAuthority";
 import { guardUuidPathParams } from "../lib/uuidPathParams";
-import { mapWithConcurrency } from "../lib/mapWithConcurrency";
 
 export const agentRouter: RouterType = Router();
 
@@ -1174,6 +1184,28 @@ export async function canInspectAgentPrivateSurfaces(
  * client only has field values, so they are rewritten to /formValues/<field>.
  * Returns undefined for a non-v2 request, "handled" when a 400 was sent.
  */
+/**
+ * v2 saved-connection submits (capability `provider.saved_connection`): the
+ * connection's provider is resolved server-side BEFORE the field mapping, so
+ * the model kind follows the connection (a gateway connection always stores a
+ * custom model even when the typed name collides with a built-in preset id),
+ * never the client's value. An unavailable connection throws
+ * ProviderConnectionError, which each route's catch maps exactly like the
+ * direct flow. Flag off or not a connection submit: undefined, and the static
+ * fallback in the registry applies.
+ */
+async function savedConnectionProviderIdForSubmit(req: Request): Promise<string | undefined> {
+  const ref = req.body?.formDefinitionRef as { protocolVersion?: unknown; runtimeId?: unknown } | undefined;
+  if (ref?.protocolVersion !== 2 || ref.runtimeId !== "builtin") return undefined;
+  const providerId = (req.body?.formValues as { providerId?: unknown } | undefined)?.providerId;
+  if (typeof providerId !== "string" || !providerId.startsWith(SAVED_CONNECTION_VALUE_PREFIX)) return undefined;
+  const connectionId = providerId.slice(SAVED_CONNECTION_VALUE_PREFIX.length).trim();
+  if (!connectionId || !SAVED_CONNECTION_ID_SHAPE.test(connectionId)) return undefined;
+  if (!await isProviderConnectionsEnabled(req.serverId!)) return undefined;
+  const resolved = await resolveProviderConnectionSelection(req.serverId!, connectionId);
+  return resolved.providerId;
+}
+
 function adoptRuntimeFormV2Submission(
   req: Request,
   res: Response,
@@ -1185,6 +1217,25 @@ function adoptRuntimeFormV2Submission(
   if (refIssues.length > 0) {
     res.status(400).json({ error: "This runtime has no v2 runtime form", issues: refIssues });
     return "handled";
+  }
+  // An untrusted saved-connection id is a field-level 400 here — before any
+  // resolution or DB lookup (a well-formed but absent id stays a 409 from the
+  // route's connection resolution; the service also fail-closes on shape).
+  if (ref.runtimeId === "builtin") {
+    const submittedProviderId = (req.body?.formValues as { providerId?: unknown } | undefined)?.providerId;
+    if (typeof submittedProviderId === "string" && submittedProviderId.startsWith(SAVED_CONNECTION_VALUE_PREFIX)) {
+      const submittedConnectionId = submittedProviderId.slice(SAVED_CONNECTION_VALUE_PREFIX.length).trim();
+      if (!submittedConnectionId || !SAVED_CONNECTION_ID_SHAPE.test(submittedConnectionId)) {
+        res.status(400).json({
+          error: "Runtime form values are invalid",
+          issues: [{
+            code: submittedConnectionId ? "connection_id_malformed" : "select_valid_provider",
+            pointer: "/formValues/providerId",
+          }],
+        });
+        return "handled";
+      }
+    }
   }
   const built = buildRuntimeConfigFromFormValues(ref.runtimeId, req.body?.formValues, options);
   if (!built.ok) {
@@ -1248,12 +1299,6 @@ async function currentUserCanActOnAgent(
 }
 
 // List all agents in server
-// Activity is resolved per agent and can fall back to Postgres (agent rows,
-// latest persisted activity) when the cache and Redis miss. An unbounded
-// Promise.all over a large server (362 agents, 133 deleted) borrowed 139 pool
-// connections at once on prod (2026-10-06 01:45Z). Bounded until resolution is
-// batched.
-const AGENT_LIST_ACTIVITY_CONCURRENCY = 8;
 
 agentRouter.get("/", async (req, res) => {
   try {
@@ -1286,11 +1331,9 @@ agentRouter.get("/", async (req, res) => {
       ? list.filter((agent) => guestVisibleAgentIds.has(agent.id))
       : list;
     if (callerRole === "guest") {
-      const publicProfiles = await mapWithConcurrency(scopedList, AGENT_LIST_ACTIVITY_CONCURRENCY, async (agent) => {
-        const { activity, activityDetail } = await agentOrchestrator.getActivity(agent.id, {
-          parent: getCurrentTraceContext(),
-          persistedAgent: agent,
-        });
+      const guestActivities = await agentOrchestrator.getActivities(scopedList, { parent: getCurrentTraceContext() });
+      const publicProfiles = scopedList.map((agent, index) => {
+        const { activity, activityDetail } = guestActivities[index]!;
         return toGuestChannelAgentProfile({ ...agent, activity, activityDetail });
       });
       addTraceEvent("response.ready", {
@@ -1331,11 +1374,9 @@ agentRouter.get("/", async (req, res) => {
     // batch-enrich creator + createdAgents via one combined DB pass instead
     // of 2N queries. See agentService.batchEnrichAgentsWithCreatorProfile.
     const withActivity = await tracePhase(
-      () => mapWithConcurrency(scopedList, AGENT_LIST_ACTIVITY_CONCURRENCY, async (a) => {
-        const { activity, activityDetail, activityDetailKind, deliveryConsumption, wakeCrashLoop } = await agentOrchestrator.getActivity(a.id, {
-          parent: getCurrentTraceContext(),
-          persistedAgent: a,
-        });
+      async () => (await agentOrchestrator.getActivities(scopedList, { parent: getCurrentTraceContext() })).map((resolved, index) => {
+        const a = scopedList[index]!;
+        const { activity, activityDetail, activityDetailKind, deliveryConsumption, wakeCrashLoop } = resolved;
         return {
           ...withServerRoleProjection(withAgentProjection(a), roleByAgent.get(a.id) ?? null),
           activity,
@@ -1420,7 +1461,10 @@ agentRouter.post("/", async (req, res) => {
     let v2Submitted = false;
     let v2SubmittedReasoningEffort: unknown = null;
     if (!external) {
-      const v2 = adoptRuntimeFormV2Submission(req, res, { editing: false });
+      const v2 = adoptRuntimeFormV2Submission(req, res, {
+        editing: false,
+        savedConnectionProviderId: await savedConnectionProviderIdForSubmit(req),
+      });
       if (v2 === "handled") return;
       if (v2) ({ runtimeConfig, formDefinitionRef } = v2);
       v2Submitted = v2 !== undefined;
@@ -2108,6 +2152,7 @@ agentRouter.get("/:id/runtime-options", async (req, res) => {
         machine?.serverId === req.serverId ? machine.runtimes ?? [] : [],
         agent.runtime,
         policy,
+        runtimeOptionProjectionFromHeaders(req.headers),
       ),
     });
   } catch {
@@ -2264,6 +2309,107 @@ agentRouter.get("/:id/hosted-runtime/usage", async (req, res) => {
     res.json(result.body);
   } catch {
     res.status(500).json({ error: "Failed to get hosted runtime usage" });
+  }
+});
+
+function sendHostedModelFailure(
+  res: Response,
+  failure: Exclude<HostedAgentModelResult, { kind: "ok" }>,
+): { status: number; code: string; reason: string } {
+  const providerCode = "error" in failure ? failure.error?.code ?? null : null;
+  const [status, code, error] = ((): [number, string, string] => {
+    switch (failure.kind) {
+      case "not_listed": return [422, "hosted_runtime_model_not_offered", "The provider does not offer this model"];
+      case "locked": return [409, "hosted_runtime_model_locked", "An administrator has set this agent's model"];
+      case "bad_request": return [400, "hosted_runtime_model_bad_request", failure.error?.message || "The provider rejected the request"];
+      case "not_found": return [404, "hosted_runtime_model_not_found", failure.error?.message || "Not found"];
+      case "unavailable": return [409, "hosted_runtime_model_not_ready", "The hosted runtime is not ready"];
+      case "upstream_unavailable": return [502, "hosted_runtime_model_unavailable", "The hosted runtime is unavailable right now"];
+    }
+  })();
+  const reason = "reason" in failure ? failure.reason : providerCode ?? failure.kind;
+  res.status(status).json({ error, code, ...(providerCode ? { providerCode } : {}), ...("reason" in failure ? { reason: failure.reason } : {}) });
+  return { status, code, reason };
+}
+
+async function hostedModelAgentGuard(
+  req: Request,
+  res: Response,
+  action: "view" | "change",
+): Promise<{ id: string } | null> {
+  const agent = await agentService.getAgent(String(req.params.id));
+  if (!agent || agent.serverId !== req.serverId) {
+    res.status(404).json({ error: "Agent not found" });
+    return null;
+  }
+  const allowed = action === "view"
+    ? await canInspectAgentPrivateSurfaces(req.serverId!, req.userId!, agent)
+    : await currentUserCanActOnAgent(req.serverId!, req.userId!, agent, "editAgents");
+  if (!allowed) {
+    res.status(403).json({ error: `The \`editAgents\` capability or human creator authority is required to ${action} a hosted agent's model` });
+    return null;
+  }
+  const hostedRuntime = await getHostedRuntimeSummary(agent.id);
+  if (!hostedRuntime) {
+    res.status(404).json({ error: "Agent does not run on a hosted runtime provider", code: "hosted_runtime_missing" });
+    return null;
+  }
+  if (!await isAgentRuntimeProviderEnabledForServer(req.serverId!, hostedRuntime.provider)) {
+    sendAgentRuntimeProviderError(res, hostedRuntimeDisabledError(hostedRuntime.provider));
+    return null;
+  }
+  return { id: agent.id };
+}
+
+// The model a hosted agent runs on, and the models its provider offers.
+agentRouter.get("/:id/hosted-runtime/model", async (req, res) => {
+  try {
+    const agent = await hostedModelAgentGuard(req, res, "view");
+    if (!agent) return;
+    const result = await getHostedAgentModel(agent.id);
+    res.setHeader("Cache-Control", "no-store");
+    if (result.kind !== "ok") {
+      const failure = sendHostedModelFailure(res, result);
+      addTraceEvent("agent.hosted_runtime.model.failed", {
+        route_action: "hosted_runtime_model_read", outcome: "error",
+        reason: failure.reason, http_status: failure.status, response_code: failure.code,
+      });
+      return;
+    }
+    res.json(result.view);
+  } catch {
+    res.status(500).json({ error: "Failed to get the hosted agent's model" });
+  }
+});
+
+// Pick an offered model ({model: id}) or follow the provider's default
+// ({model: null}). Takes effect from the agent's next turn.
+agentRouter.put("/:id/hosted-runtime/model", async (req, res) => {
+  try {
+    const agent = await hostedModelAgentGuard(req, res, "change");
+    if (!agent) return;
+    const raw = (req.body as { model?: unknown } | undefined)?.model;
+    if (!(raw === null || (typeof raw === "string" && raw.trim().length > 0 && raw.length <= 200))) {
+      res.status(400).json({ error: "`model` must be a model id or null", code: "hosted_runtime_model_invalid" });
+      return;
+    }
+    const result = await setHostedAgentModel(agent.id, raw === null ? null : raw.trim());
+    res.setHeader("Cache-Control", "no-store");
+    if (result.kind !== "ok") {
+      const failure = sendHostedModelFailure(res, result);
+      addTraceEvent("agent.hosted_runtime.model.failed", {
+        route_action: "hosted_runtime_model_change", outcome: "error",
+        reason: failure.reason, http_status: failure.status, response_code: failure.code,
+      });
+      return;
+    }
+    addTraceEvent("agent.hosted_runtime.model.changed", {
+      route_action: "hosted_runtime_model_change", outcome: "ok",
+      model_source: result.view.source, follows_default: raw === null,
+    });
+    res.json(result.view);
+  } catch {
+    res.status(500).json({ error: "Failed to change the hosted agent's model" });
   }
 });
 
@@ -2738,16 +2884,24 @@ agentRouter.get("/:id/runtime-form", async (req, res) => {
       res.status(403).json({ error: "The `editAgents` capability or human creator authority is required to edit agents" });
       return;
     }
-    const values = runtimeFormValuesFromRuntimeConfig(existing.runtimeConfig);
-    const definition = runtimeFormV2Entry(existing.runtime)?.buildForm() ?? null;
-    if (!definition || !values) {
+    // The hydrated config, as the agent read, launch and the PATCH's `existing`
+    // see it: older rows keep a Claude custom provider only in the envVars
+    // launch mirrors, and the raw column would show it with a blank URL that
+    // the save then cannot match.
+    // Per-server build: a builtin edit on a server with provider connections
+    // carries the saved-connection capability, x-connectionOwned markers and the
+    // revision token (services/runtimeFormV2Registry).
+    const body = await buildRuntimeFormV2EditBodyForServer(existing.runtime, hydrateRuntimeConfig(existing), req.serverId!);
+    if (!body) {
       res.status(404).json({
         error: "This agent's runtime configuration has no editable runtime form",
         issues: [{ code: "no_runtime_form", pointer: "/runtimeConfig" }],
       });
       return;
     }
-    res.json({ ...definition, values });
+    const locale = runtimeFormCopyLocale(req.get("accept-language"));
+    setRuntimeFormCopyHeaders(res, locale);
+    res.json(localizeRuntimeFormV2(body, locale));
   } catch {
     res.status(500).json({ error: "Failed to load runtime form" });
   }
@@ -2774,6 +2928,7 @@ agentRouter.patch("/:id", async (req, res) => {
         editing: true,
         // Fields a v2 form does not show keep their stored value (Antigravity's model).
         existing: hydrateRuntimeConfig(existing),
+        savedConnectionProviderId: await savedConnectionProviderIdForSubmit(req),
       });
       if (v2 === "handled") return;
       if (v2) ({ runtimeConfig, formDefinitionRef } = v2);
@@ -3111,6 +3266,7 @@ agentRouter.patch("/:id", async (req, res) => {
     // above stay as fast refusals; the predicates are re-evaluated here under the locks. Telemetry, cache eviction
     // and the restart run only after commit (the restart is a runtime effect that task #93 fences).
     const afterCommit: Array<() => void> = [];
+    let serverRoleChange: { previousRole: ServerRole; nextRole: ServerRole } | null = null;
     try {
       updated = await withFencedAgentAuthority(req.serverId!, req.userId!, req.params.id, "editAgents", async (tx, lockedRole) => {
         if (nextServerRole !== undefined) {
@@ -3128,6 +3284,7 @@ agentRouter.patch("/:id", async (req, res) => {
           }
           if (agentMembership.role !== nextServerRole) {
             await serverService.updateAgentMemberRole(req.serverId!, existing.id, nextServerRole, { executor: tx });
+            serverRoleChange = { previousRole: agentMembership.role, nextRole: nextServerRole };
           }
         }
         const row = updateAgentRow
@@ -3173,6 +3330,20 @@ agentRouter.patch("/:id", async (req, res) => {
     }
     agentOrchestrator.evictCache(req.params.id);
     broadcastAgentUpdated(req, req.serverId!, req.params.id);
+    // Assigned inside the transaction callback, which TypeScript's narrowing cannot see.
+    const roleChange = serverRoleChange as { previousRole: ServerRole; nextRole: ServerRole } | null;
+    const io = req.app.get("io") as SocketServer | undefined;
+    if (roleChange && io) {
+      // Best effort: the role already changed; the notice only tells the agent.
+      await postAgentServerRoleChangedNotice(io, agentOrchestrator, {
+        serverId: req.serverId!,
+        agentId: req.params.id,
+        actorUserId: req.userId!,
+        ...roleChange,
+      }).catch((err: unknown) => {
+        console.error("agents: failed to post server role change notice:", err);
+      });
+    }
     // task #1221: a runtime-config/model change may fix what blocked automatic
     // wakes after a non-retryable start failure; lift it so the next wake starts.
     if (runtimeConfigTouched || model !== undefined || runtime !== undefined) {
@@ -3860,7 +4031,7 @@ agentRouter.post("/:id/start", async (req, res) => {
       );
       if (routing === "handled") return;
       if (routing !== "confirmed_local") {
-        sendMachineAffinityUnavailable(res, agent.machineId);
+        sendMachineAffinityUnavailable(res, agent.machineId, routing);
         return;
       }
     }
@@ -4230,7 +4401,7 @@ agentRouter.get("/:id/workspace-files", async (req, res) => {
     );
     if (routing === "handled") return;
     if (routing !== "confirmed_local") {
-      sendMachineAffinityUnavailable(res, agent.machineId);
+      sendMachineAffinityUnavailable(res, agent.machineId, routing);
       return;
     }
 
@@ -4337,7 +4508,7 @@ agentRouter.get("/:id/workspace-files/read", async (req, res) => {
     );
     if (routing === "handled") return;
     if (routing !== "confirmed_local") {
-      sendMachineAffinityUnavailable(res, agent.machineId);
+      sendMachineAffinityUnavailable(res, agent.machineId, routing);
       return;
     }
 
@@ -4402,7 +4573,7 @@ agentRouter.get("/:id/skills", async (req, res) => {
       );
       if (routing === "handled") return;
       if (routing !== "confirmed_local") {
-        sendMachineAffinityUnavailable(res, agent.machineId);
+        sendMachineAffinityUnavailable(res, agent.machineId, routing);
         return;
       }
     }
@@ -4440,6 +4611,77 @@ agentRouter.get("/:id/skills", async (req, res) => {
 // only — partial scope adds/removes are not supported (locked at
 // #proj-permission:10bdc2c9). The post-write set is broadcast over the
 // `agent:scope-updated` ws event by Noel's hot-swap layer.
+
+/**
+ * RFC 074 §2 personal assistant (v0): make an agent you created your assistant
+ * on this server (PUT), or stop it being one (DELETE). Human sessions only
+ * (`requireAuth` accepts no agent credential), and only for yourself: a
+ * server admin cannot grant reading as someone else. No UI in v0.
+ */
+agentRouter.put("/:id/assistant-owner", async (req, res) => {
+  try {
+    const result = await assistantService.setAssistantOwner({
+      serverId: req.serverId!,
+      agentId: req.params.id,
+      userId: req.userId!,
+    });
+    if (result.ok) {
+      res.json({ agentId: result.agentId, assistantOf: { userId: result.ownerUserId } });
+      return;
+    }
+    switch (result.reason) {
+      case "not_found":
+        res.status(404).json({ error: "Agent not found" });
+        return;
+      case "not_creator":
+        res.status(403).json({ error: "You can only make an agent you created your assistant.", code: "assistant_requires_creator" });
+        return;
+      case "not_enabled":
+        res.status(403).json({ error: "Personal assistants are not enabled on this server.", code: assistantService.ASSISTANT_NOT_ENABLED_CODE });
+        return;
+      case "owner_has_assistant":
+        res.status(409).json({ error: "You already have an assistant on this server. Remove it first.", code: "assistant_already_set" });
+        return;
+      case "has_channels":
+        res.status(409).json({
+          error: `An assistant can only be in its DM with you. Remove this agent from its ${result.channelCount} other channel(s) and DM(s) first.`,
+          code: "assistant_has_channels",
+        });
+        return;
+    }
+  } catch (err) {
+    sendJsonServerError(req, res, {
+      error: "Failed to set the assistant",
+      logPrefix: "agents.assistant_owner.set error:",
+      err,
+    });
+  }
+});
+
+agentRouter.delete("/:id/assistant-owner", async (req, res) => {
+  try {
+    const result = await assistantService.clearAssistantOwner({
+      serverId: req.serverId!,
+      agentId: req.params.id,
+      userId: req.userId!,
+    });
+    if (result.ok) {
+      res.json({ agentId: req.params.id, assistantOf: null });
+      return;
+    }
+    if (result.reason === "not_found") {
+      res.status(404).json({ error: "Agent not found" });
+      return;
+    }
+    res.status(403).json({ error: "Only the person this agent assists can remove it.", code: "assistant_not_owner" });
+  } catch (err) {
+    sendJsonServerError(req, res, {
+      error: "Failed to clear the assistant",
+      logPrefix: "agents.assistant_owner.clear error:",
+      err,
+    });
+  }
+});
 
 agentRouter.get("/:id/scopes", async (req, res) => {
   try {

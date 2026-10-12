@@ -371,8 +371,16 @@ test("login page follows the modern auth layout and hides social buttons unless 
   assert.match(source, /href=\{CURRENT_LEGAL_ACCEPTANCE\.termsUrl\}/);
   assert.match(source, /href=\{CURRENT_LEGAL_ACCEPTANCE\.privacyUrl\}/);
   // The legal line was text-black/60: 1.09:1 on Elegant Dark (task #663, the
-  // original desktop report). Brutal keeps the old value behind theme-brutal:.
-  assert.match(source, /className="mt-4 text-center text-xs leading-5 text-foreground-muted theme-brutal:text-black\/60"/);
+  // original desktop report). RUI TextSans `caption` supplies text-xs +
+  // text-foreground-muted; Brutal keeps the old value behind theme-brutal:.
+  assert.match(source, /<TextSans size="caption" className="mt-6 text-center leading-5 theme-brutal:text-black\/60">/);
+  // Footer hierarchy: Forgot password lives on the password label row, the
+  // switch line comes next, and the legal fine print is the last, quietest line.
+  assert.match(source, /labelAction=\{\(\s*<TextLink variant="muted"[^>]*onClick=\{onForgotPassword\}>/);
+  assert.ok(
+    source.indexOf('id: "pages.login.noAccountPrompt"') < source.indexOf('id: "pages.login.legalAgreement"'),
+    "the legal line must render after the switch-to-register line",
+  );
   assert.doesNotMatch(source, /SOCIAL_AUTH_PREVIEW_PROVIDERS/);
 });
 
@@ -413,7 +421,7 @@ test("login page exposes browser password-manager semantics on the username and 
   assert.match(source, /id="login-email"[\s\S]*name="username"[\s\S]*type="email"[\s\S]*autoComplete="username"/);
   assert.match(
     source,
-    /<FormField label=\{formatMessage\(\{ id: "pages\.login\.passwordLabel" \}\)\} labelStyle="plain" error=\{fieldErrors\.password\} htmlFor="login-password">/,
+    /<FormField\s+label=\{formatMessage\(\{ id: "pages\.login\.passwordLabel" \}\)\}\s+labelStyle="plain"[\s\S]*?error=\{fieldErrors\.password\}\s+htmlFor="login-password"\s*>/,
   );
   assert.match(source, /id="login-password"[\s\S]*name="password"[\s\S]*type="password"[\s\S]*autoComplete="current-password"/);
 });
@@ -463,6 +471,9 @@ test("social auth callback error recovery uses neutral sign-in language", () => 
   assert.match(source, /id: "auth\.backToSignIn\.button"/);
   assert.match(source, /isEmbeddedUserAgentProviderError/);
   assert.match(source, /<OpenInBrowserSignInGuide loginUrl=\{getExternalBrowserLoginUrl\(callbackParams\.returnTo\)\} \/>/);
-  assert.match(source, /<Button[\s\S]*?variant="outline"[\s\S]*?window\.location\.replace\("\/"\)/);
+  // The outline recovery button returns to the app root; the handler is a
+  // module-level function so the prop identity stays stable.
+  assert.match(source, /function navigateHome\(\) \{\s*window\.location\.replace\("\/"\);\s*\}/);
+  assert.match(source, /<Button[\s\S]*?variant="outline"[\s\S]*?onClick=\{navigateHome\}/);
   assert.doesNotMatch(source, /Return to app|bg-brutal-cyan/);
 });

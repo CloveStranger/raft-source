@@ -83,9 +83,11 @@ test("visible time display surfaces use the shared time formatter hook", () => {
     "src/components/agent/AgentDetailPanel.tsx",
     "src/components/agent/AgentRemindersSection.tsx",
     "src/components/agent/AgentWorkspace.tsx",
-    "src/components/message/ChannelFilesPanel.tsx",
+    "src/components/message/ChannelFilesPanelFileRow.tsx",
     "src/components/message/MessageItem.tsx",
-    "src/components/message/QuotedMessagePermalinkPreview.tsx",
+    // QuotedMessagePermalinkPreview's timestamp renders in QuoteCardContent
+    // (its own file since task #709).
+    "src/components/message/QuoteCardContent.tsx",
     "src/components/settings/SettingsPanel.tsx",
     "src/components/task/LegacyTaskPanel.tsx",
   ];

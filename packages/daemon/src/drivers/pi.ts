@@ -61,6 +61,12 @@ import { buildPiTokenUsageEvent } from "./piEventNormalizer";
 import { createManagedMcpPiTools } from "./managedMcpTools";
 import { createPiCommandTool } from "./piCommandTool";
 import {
+  createPiCompactionFitExtension,
+  piCompactionFitTelemetryAttrs,
+  takePiCompactionFit,
+  type PiCompactionFit,
+} from "./piCompactionFit";
+import {
   createProviderHttpClient,
   type ProviderHttpClient,
 } from "../daemonFetch";
@@ -178,6 +184,8 @@ export interface PiCompactionInputEvidence {
   messageCount: number;
   inputTextLength: number;
   configuredContextLimit: number | null;
+  /** What Raft trimmed so the summary request fit (piCompactionFit.ts); absent when nothing was trimmed. */
+  fit?: PiCompactionFit;
 }
 
 function projectPiCompactionEnd(
@@ -261,6 +269,7 @@ export function projectPiCompactionInputTelemetry(
       : reason === "overflow"
         ? "upper_bound_overflow"
         : "nonempty",
+    ...piCompactionFitTelemetryAttrs(evidence.fit),
   };
 }
 
@@ -274,10 +283,12 @@ function piCompactionInputEvidence(session: AgentSession): PiCompactionInputEvid
       PI_TELEMETRY_INPUT_LENGTH_CAP - inputTextLength,
     );
   }
+  const fit = takePiCompactionFit(session.sessionManager);
   return {
     messageCount: messages.length + (session.systemPrompt ? 1 : 0),
     inputTextLength,
     configuredContextLimit: session.model?.contextWindow ?? null,
+    ...(fit ? { fit } : {}),
   };
 }
 
@@ -1476,6 +1487,8 @@ export async function createPiAgentSessionForContext(
           settingsManager,
           resourceLoaderOptions: {
             additionalExtensionPaths: localExtensionPaths,
+            // Keeps an oversized compaction request inside the model limit (task #10).
+            extensionFactories: [createPiCompactionFitExtension()],
             systemPromptOverride: () => ctx.standingPrompt,
           },
         });
@@ -1548,7 +1561,7 @@ export async function createPiAgentSessionForContext(
           ...launchTraceEvidenceAttrs,
         },
       });
-      throw new RuntimeModelNotFoundError({ runtimeId: "builtin", model: launchRuntimeFields.model });
+      throw new RuntimeModelNotFoundError({ runtimeId: ctx.config.runtime || "pi", model: launchRuntimeFields.model });
     }
 
     const existingSessionFile = ctx.config.sessionId ? findPiSessionFile(sessionDir, ctx.config.sessionId) : null;
@@ -1598,18 +1611,27 @@ export async function createPiAgentSessionForContext(
       onWarning: (message) => console.warn("[%s] %s", logPrefix, message),
     });
 
-    const { session } = await withProcessEnvPatch(sessionCreateEnvPatch, () => createAgentSessionFromServices({
-      services,
-      sessionManager,
-      model,
-      thinkingLevel: launchRuntimeFields.reasoningEffort as ModelThinkingLevel | undefined,
-      customTools: [
-        createPiCommandTool(ctx.workingDirectory, toolSpawnEnv, {
-          observer: toolExecutionObserver,
-        }),
-        ...managedMcpTools,
-      ],
-    }), { removeFirst: providerEnvScope });
+    const { session } = await withProcessEnvPatch(sessionCreateEnvPatch, () => {
+      // task #365: right before the SDK session exists, inside the env-patch
+      // lock (waiting for it is an await too). What ran before it is local
+      // preparation only: env, the session file, the session services and
+      // the managed MCP tool list (a list call to this daemon's own proxy); no
+      // provider request and no tool execution. A stale launch throws here
+      // and the catch below releases the provider client.
+      ctx.assertLaunchCurrent?.();
+      return createAgentSessionFromServices({
+        services,
+        sessionManager,
+        model,
+        thinkingLevel: launchRuntimeFields.reasoningEffort as ModelThinkingLevel | undefined,
+        customTools: [
+          createPiCommandTool(ctx.workingDirectory, toolSpawnEnv, {
+            observer: toolExecutionObserver,
+          }),
+          ...managedMcpTools,
+        ],
+      });
+    }, { removeFirst: providerEnvScope });
     const disposeSession = session.dispose.bind(session);
     let sessionDisposed = false;
     session.dispose = () => {
@@ -1794,6 +1816,8 @@ export class PiSdkRuntimeSession implements RuntimeSession {
     this.setCurrentSessionId(sessionId);
     this.toolExecutionObserver?.setRuntimeSessionId(sessionId);
 
+    // task #365: before the native runtime session is created.
+    this.ctx.assertLaunchCurrent?.();
     const session = await this.sessionFactory({
       ...this.ctx,
       config: {
@@ -2233,6 +2257,7 @@ export class PiSdkRuntimeSession implements RuntimeSession {
 export class PiDriver implements RuntimeDriver {
   readonly id: string = "pi";
   readonly supportsNativeStandingPrompt = true;
+  readonly standingPromptRefreshesOnResume = true;
   readonly lifecycle = {
     kind: "persistent",
     stdin: "direct",

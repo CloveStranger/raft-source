@@ -612,7 +612,7 @@ test("grok closed native turn flushes ordered notification debt once through idl
     assert.equal(ap.notifications.pendingCount, 0);
     assert.deepEqual(driver.encodedCalls.map((call) => call.mode), ["idle", "idle"]);
     assert.equal((driver.encodedCalls[1]?.request as any)?.method, "session/prompt");
-    assert.match(String(((driver.encodedCalls[1]?.request as any)?.params as any)?.prompt?.[0]?.text), /2 unread messages/);
+    assert.match(String(((driver.encodedCalls[1]?.request as any)?.params as any)?.prompt?.[0]?.text), /2 messages pending your read/);
 
     const reconciliation = traceRows(sink)
       .filter((span) => span.name === "daemon.agent.busy_delivery.readiness_reconciled")
@@ -746,7 +746,7 @@ test("grok pending inbox debt survives a clean Grok subprocess restart in origin
     ]);
     assert.equal(driver.encodedCalls.length, 2);
     assert.equal(driver.encodedCalls[1]?.mode, "idle");
-    assert.match(driver.encodedCalls[1]?.text ?? "", /2 unread messages/);
+    assert.match(driver.encodedCalls[1]?.text ?? "", /2 messages pending your read/);
     assert.doesNotMatch(driver.encodedCalls[1]?.text ?? "", /first restart debt|second restart debt/);
   } finally {
     await releaseAgentManagerForTests(manager);

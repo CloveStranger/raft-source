@@ -1,4 +1,5 @@
 import { useIntl } from "react-intl";
+import { InlineCode } from "raft-ui";
 import type { MigrationErrorPresentation } from "./errors";
 
 export function MigrationErrorContent({ presentation }: { presentation: MigrationErrorPresentation }) {
@@ -19,13 +20,13 @@ export function MigrationErrorContent({ presentation }: { presentation: Migratio
             {presentation.technicalCode ? (
               <div>
                 {formatMessage({ id: "agent.detail.technicalErrorCode" })}: {" "}
-                <code>{presentation.technicalCode}</code>
+                <InlineCode>{presentation.technicalCode}</InlineCode>
               </div>
             ) : null}
             {presentation.diagnosticRef ? (
               <div>
                 {formatMessage({ id: "agent.detail.diagnosticReference" })}: {" "}
-                <code>{presentation.diagnosticRef}</code>
+                <InlineCode>{presentation.diagnosticRef}</InlineCode>
               </div>
             ) : null}
           </div>

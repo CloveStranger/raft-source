@@ -644,8 +644,7 @@ const MessageTimeline = forwardRef<MessageTimelineHandle, MessageTimelineProps>(
       prevScrollHeightRef.current = scroller.scrollHeight;
       atBottomStateRef.current = true;
       setAtBottomState(true);
-      // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [messages, initialFocusMessageId, persistKey]);
+      }, [messages, initialFocusMessageId, persistKey, beginProgrammaticScroll]);
 
     // ── Data mutation classifier (append vs prepend vs context-jump) ──────
     useLayoutEffect(() => {

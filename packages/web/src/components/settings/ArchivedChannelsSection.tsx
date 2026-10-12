@@ -1,6 +1,6 @@
-import { useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { useIntl } from "react-intl";
-import { Archive, ArchiveRestore, GitBranch, Hash, Lock } from "lucide-react";
+import { Archive, GitBranch, Hash, Lock } from "lucide-react";
 
 import { useAppNavigate } from "../../hooks/useAppNavigate";
 import { useServerPermissions } from "../../hooks/useServerPermissions";
@@ -9,12 +9,12 @@ import { useChannelStore } from "../../store/channelStore";
 import type { Channel } from "../../store/channelStore";
 import { useServerStore } from "../../store/serverStore";
 import Banner from "../ui/Banner";
-import { Button } from "raft-ui";
 import SectionHeader from "../ui/SectionHeader";
 import SurfaceListItem from "../ui/SurfaceListItem";
 import Tooltip from "../ui/Tooltip";
+import { UnarchiveChannelButton } from "./UnarchiveChannelButton";
 
-type ArchivedChannel = Channel & {
+export type ArchivedChannel = Channel & {
   type: "channel" | "private" | "joint";
   archivedAt: string;
 };
@@ -59,22 +59,25 @@ function ArchivedChannelsSectionContent() {
     [channels],
   );
 
+  const handleUnarchive = useCallback(
+    async (channel: ArchivedChannel) => {
+      setError("");
+      setBusyChannelId(channel.id);
+      try {
+        await unarchiveChannel(channel.id);
+      } catch (err: unknown) {
+        const axiosError = err as { response?: { data?: { error?: string } } };
+        setError(axiosError.response?.data?.error || formatMessage({ id: "channel.edit.failedUnarchive" }));
+      } finally {
+        setBusyChannelId(null);
+      }
+    },
+    [formatMessage, unarchiveChannel],
+  );
+
   if (!capabilities.archiveChannels || loading || archivedChannels.length === 0) {
     return null;
   }
-
-  const handleUnarchive = async (channel: ArchivedChannel) => {
-    setError("");
-    setBusyChannelId(channel.id);
-    try {
-      await unarchiveChannel(channel.id);
-    } catch (err: unknown) {
-      const axiosError = err as { response?: { data?: { error?: string } } };
-      setError(axiosError.response?.data?.error || formatMessage({ id: "channel.edit.failedUnarchive" }));
-    } finally {
-      setBusyChannelId(null);
-    }
-  };
 
   return (
     <section className="mb-6" data-testid="archived-channels-section">
@@ -143,22 +146,12 @@ function ArchivedChannelsSectionContent() {
                   </div>
                 </div>
               </div>
-              <Button
-                size="sm"
-                variant="success"
-                className="w-full sm:w-auto"
+              <UnarchiveChannelButton
+                channel={channel}
+                busy={busy}
                 disabled={busyChannelId !== null}
-                aria-label={formatMessage(
-                  { id: "settings.archivedChannels.unarchiveAriaLabel" },
-                  { name: channel.name },
-                )}
-                onClick={() => void handleUnarchive(channel)}
-              >
-                <ArchiveRestore size={14} />
-                {busy
-                  ? formatMessage({ id: "channel.edit.unarchiving" })
-                  : formatMessage({ id: "channel.create.unarchive" })}
-              </Button>
+                onUnarchive={handleUnarchive}
+              />
             </SurfaceListItem>
           );
         })}

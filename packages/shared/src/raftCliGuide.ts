@@ -654,6 +654,8 @@ export interface SelfHostedAgentGuideIdentity extends MentionsIdentity {
   description?: string | null;
   /** Display name of the server the agent belongs to. */
   serverName?: string | null;
+  /** The agent's live server role when the guide was rendered. */
+  serverRole?: string | null;
 }
 
 function buildSelfHostedIdentityParagraph(identity: SelfHostedAgentGuideIdentity | undefined): string {
@@ -667,6 +669,12 @@ function buildSelfHostedIdentityParagraph(identity: SelfHostedAgentGuideIdentity
   ];
   const role = identity.description?.trim();
   if (role) lines.push("", `Initial role: ${role}. This may evolve.`);
+  if (identity.serverRole) {
+    lines.push(
+      "",
+      `Your server role is ${identity.serverRole}. Permission checks always use your current role; \`raft server info\` shows what it allows, and a system message in your DM with the human who changed it tells you when it changes. Check before refusing an operation or preparing an action card for it.`,
+    );
+  }
   return lines.join("\n");
 }
 

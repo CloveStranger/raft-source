@@ -9,7 +9,9 @@ process.on("unhandledRejection", (reason, promise) => {
 });
 
 import { createServer } from "node:http";
-import { initDatabase, setDbTracer, startPoolMetricsReporting } from "./db/index";
+import { initDatabase, prewarmPrimaryPool, setDbTracer, startPoolMetricsReporting } from "./db/index";
+import { startMachineLivenessMetrics } from "./services/machineLivenessMetrics";
+import { getDbLivenessTracker } from "./dbLiveness";
 import { installAuditedGlobalFetch } from "./db/ambientTransaction";
 import { createApp } from "./app";
 import { setupSocket } from "./socket/index";
@@ -29,6 +31,7 @@ import {
 import { startAttachmentLifecycleSweep } from "./services/attachmentLifecycleService";
 import { startReminderArmWatchdog } from "./services/reminderArmWatchdog";
 import { startMobilePushOutboxWorker } from "./services/pushService";
+import { startAssistantDoorbellWorker } from "./services/assistantService";
 import { startReadMutationWorker } from "./services/readMutationSequencer";
 import { startAppNotificationDeliveryWorker } from "./services/appNotificationDeliveryService";
 import { startAgentInboxPushWorker } from "./services/agentInboxPushService";
@@ -63,6 +66,7 @@ import { DEFAULT_DRAIN_CLOSE_SPREAD_MS } from "./services/machineDrain";
 import { sharedSseStreamRegistry } from "./services/sseStreamRegistry";
 import { initializeTranslationProviderConfig } from "./services/messageTranslationService";
 import { isRisingWaveConfigured } from "./db/risingwave";
+import { warmContractSchemas } from "@botiverse/raft-shared";
 
 
 const PORT = Number(process.env.PORT) || 3001;
@@ -90,6 +94,12 @@ if (process.env.NODE_ENV === "production" && !isRisingWaveConfigured()) {
 }
 
 async function bootstrap() {
+  // The shared Agent API contract schemas are built on first use (so a short
+  // `raft` CLI call builds only its own route's). The server builds them all
+  // here instead: a broken schema fails startup, not the first request to its
+  // route, and no request pays the build.
+  console.log(`[Slock] Built ${warmContractSchemas()} contract schemas`);
+
   // Install the audited global fetch BEFORE any request path runs. No-op unless
   // RAFT_TX_POOL_AUDIT_FILE is set, so production fetch is untouched.
   installAuditedGlobalFetch();
@@ -120,6 +130,8 @@ async function bootstrap() {
   setStorageTracer(serverTracer.tracer);
   setReplicaRouterTracer(serverTracer.tracer);
   startPoolMetricsReporting();
+  startMachineLivenessMetrics();
+  getDbLivenessTracker().start();
 
   // Resolve direct-upload capability once at server startup. Clients consume
   // the resulting server-owned threshold/limit projection; they never copy
@@ -219,11 +231,11 @@ async function bootstrap() {
         console.error(`[ReplicaRouter] Failed to handle routed machine command for ${machineId}:`, err);
       });
     },
-    (agentId, machineId, message) => {
+    (agentId, machineId, message, deliveryOptions) => {
       runBackgroundWork(
         "server.background.routed_handler",
         { site: "routed_inbox_delivery", agent_id: agentId },
-        () => agentOrchestrator.handleRoutedInboxDelivery(agentId, machineId, message),
+        () => agentOrchestrator.handleRoutedInboxDelivery(agentId, machineId, message, deliveryOptions),
       ).catch((err) => {
         console.error(`[ReplicaRouter] Failed to handle routed inbox delivery for ${agentId}:`, err);
       });
@@ -338,6 +350,7 @@ async function bootstrap() {
   const readMutationWorker = startReadMutationWorker({ tracer: serverTracer.tracer });
   const appNotificationDeliveryWorker = startAppNotificationDeliveryWorker({ tracer: serverTracer.tracer });
   const agentInboxPushWorker = startAgentInboxPushWorker({ agentOrchestrator, tracer: serverTracer.tracer });
+  const assistantDoorbellWorker = startAssistantDoorbellWorker({ agentOrchestrator });
   const computerOutageNotificationWorker = startComputerOutageNotificationWorker();
   const agentMigrationReceiptOutboxWorker = startAgentMigrationReceiptOutboxWorker({
     io,
@@ -359,6 +372,11 @@ async function bootstrap() {
 
   // Start Prometheus metrics endpoint
   startMetricsServer();
+
+  // Open a few primary PG connections before the load balancer can route
+  // here, so a deploy's reconnect storm does not find an empty pool. Bounded
+  // and never throws; see db/poolPrewarm.ts.
+  await prewarmPrimaryPool();
 
   // Start server
   server.listen(PORT, () => {
@@ -413,7 +431,17 @@ async function bootstrap() {
     });
     const sseEnded = sharedSseStreamRegistry.endAll();
     if (sseEnded > 0) console.log(`[Slock] Drain going-away: ended ${sseEnded} SSE stream(s)`);
-    io.disconnectSockets(true);
+    // Close each browser socket's transport rather than disconnecting it at
+    // the Socket.IO layer: a server-side disconnect ("io server disconnect")
+    // is the one case socket.io-client does NOT reconnect from, so every open
+    // tab stayed offline after each deploy until refocused. A transport close
+    // is reconnected automatically, with the client's own jittered backoff.
+    let socketsClosed = 0;
+    for (const socket of io.of("/").sockets.values()) {
+      socket.conn.close();
+      socketsClosed += 1;
+    }
+    console.log(`[Slock] Drain going-away: closed ${socketsClosed} browser socket transport(s)`);
   };
 
   // The ALB severs connections to a draining target the moment the
@@ -467,6 +495,7 @@ async function bootstrap() {
     readMutationWorker.stop();
     appNotificationDeliveryWorker.stop();
     agentInboxPushWorker.stop();
+    assistantDoorbellWorker.stop();
     computerOutageNotificationWorker.stop();
     agentMigrationReceiptOutboxWorker.stop();
     agentMigrationRemediationWorker.stop();

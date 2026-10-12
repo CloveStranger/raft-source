@@ -1,5 +1,5 @@
 // Sidebar unread (GET /channels/unread, GET /servers/unread-summary) reads ONE
-// source: rw_conversation_unread_v2. Here the global test setup answers it from
+// source: rw_conversation_unread_v3. Here the global test setup answers it from
 // the Postgres reference (src/test/conversationUnreadReference.ts); the last cases
 // take the reference away to pin the RisingWave read itself and its no-fallback
 // contract.
@@ -137,7 +137,7 @@ test("the RisingWave read: one round trip, receiver-keyed, public arm only for t
 
   const summary = await getUnreadSummary(serverId, userId);
   assert.equal(reads.length, 1, "counts, mentions, read state and hasNew come from one RisingWave read");
-  assert.match(reads[0].text, /FROM rw_conversation_unread_v2/);
+  assert.match(reads[0].text, /FROM rw_conversation_unread_v3/);
   assert.match(reads[0].text, /receiver_type = 'user'/);
   assert.match(reads[0].text, /FROM rw_channels AS c/);
   assert.match(reads[0].text, /rw_target_latest_v4/);
@@ -166,7 +166,7 @@ test("the RisingWave read: one round trip, receiver-keyed, public arm only for t
   answer = [{ server_id: serverId, unread_count: "7" }];
   const other = "55555555-5555-4555-8555-555555555555";
   assert.deepEqual(await getSidebarUnreadSummaryCounts([serverId, other], userId), { [serverId]: 7, [other]: 0 });
-  assert.match(reads[0].text, /FROM rw_conversation_unread_v2/);
+  assert.match(reads[0].text, /FROM rw_conversation_unread_v3/);
   assert.match(reads[0].text, /AND subscribed/);
   assert.match(reads[0].text, /kind <> 'thread'/);
   assert.deepEqual(reads[0].values, [userId, [serverId, other]]);

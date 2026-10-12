@@ -1,12 +1,13 @@
 import { RuntimeExecutableNotFoundError } from "../spawnFailureErrors";
-import { spawn, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
+import { spawnRuntimeChild } from "./runtimeChild";
 import { existsSync, readFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { formatRuntimeProviderModelLabel, hydrateRuntimeConfig, runtimeConfigToLaunchFields, runtimeModelSourceOutcomeFromSet, type AgentConfig, type AgentMessage, type RuntimeModelInfo, type RuntimeModelSet, type RuntimeModelSourceOutcome , type AxSurfaceText } from "@botiverse/raft-shared";
 import { buildCliTransportSystemPrompt, prepareCliTransport } from "./cliTransport";
 import { resolveNodeHostLaunch } from "./nodeHostLaunch";
-import { resolveCommandOnPath, readCommandVersion, type ProbeDeps } from "./probe";
+import { lookupCommandOnPath, resolveCommandOnPath, readCommandVersion, type ProbeDeps } from "./probe";
 import type { ParsedEvent, RuntimeDriver, RuntimeProbeResult, SpawnContext, SpawnResult } from "./types";
 import { prepareManagedMcpRuntimeProxy } from "../managedMcpRuntimeProxy";
 
@@ -204,7 +205,13 @@ export async function buildOpenCodeLaunchOptions(ctx: SpawnContext, home: string
     agentCredentialKey: ctx.config.agentCredentialKey,
   });
 
-  const config = buildOpenCodeConfig(ctx, home, managedMcp);
+  const agentCliFlag = requiresAgentCliFlag(version);
+  const builtConfig = buildOpenCodeConfig(ctx, home, managedMcp);
+  // Without `--agent` (OpenCode >= 1.15, see requiresAgentCliFlag), `opencode
+  // run` uses `default_agent`, else its built-in `build` agent, whose prompt is
+  // OpenCode's own: the standing prompt in the `slock` agent was never used.
+  // Verified on 1.15.0 and 1.18.35 by capturing the provider request.
+  const config = agentCliFlag ? builtConfig : { ...builtConfig, default_agent: SLOCK_AGENT_NAME };
   const env = {
     ...slock.spawnEnv,
     OPENCODE_CONFIG_CONTENT: JSON.stringify(config),
@@ -223,7 +230,7 @@ export async function buildOpenCodeLaunchOptions(ctx: SpawnContext, home: string
     args.push("--model", launchRuntimeFields.model);
   }
 
-  if (requiresAgentCliFlag(version)) {
+  if (agentCliFlag) {
     args.push("--agent", SLOCK_AGENT_NAME);
   }
 
@@ -498,6 +505,7 @@ export class OpenCodeDriver implements RuntimeDriver {
   readonly supportsStdinNotification = false;
   readonly busyDeliveryMode = "none" as const;
   readonly supportsNativeStandingPrompt = true;
+  readonly standingPromptRefreshesOnResume = true;
   readonly terminateProcessOnTurnEnd = true;
   readonly deferSpawnUntilMessage = true;
 
@@ -516,13 +524,18 @@ export class OpenCodeDriver implements RuntimeDriver {
         ...deps,
         env: launch.env ?? deps.env,
       });
-    } catch {
-      return { available: false };
+    } catch (error) {
+      // Only a definitive PATH miss is "not installed"; a found-but-unlaunchable
+      // command (e.g. an unresolvable Windows shim) or an undecided lookup is not.
+      const lookup = error instanceof RuntimeExecutableNotFoundError ? lookupCommandOnPath("opencode", deps) : null;
+      const unavailableReason = lookup && !lookup.command ? lookup.missReason : "probe_failed";
+      return { available: false, unavailableReason };
     }
     const unsupportedMessage = unsupportedOpenCodeVersionMessage(version);
     if (unsupportedMessage) {
       return {
         available: false,
+        unavailableReason: "unsupported_version",
         version: `${version} (requires >= ${MIN_SUPPORTED_OPENCODE_VERSION})`,
       };
     }
@@ -545,7 +558,9 @@ export class OpenCodeDriver implements RuntimeDriver {
 
     const launch = await buildOpenCodeLaunchOptions(ctx, os.homedir(), version);
     const spawnSpec = resolveOpenCodeSpawn(launch.args, { env: launch.env });
-    const proc = spawn(spawnSpec.command, spawnSpec.args, {
+    // task #365: after the last await, right before the child exists.
+    ctx.assertLaunchCurrent?.();
+    const proc = spawnRuntimeChild(spawnSpec.command, spawnSpec.args, {
       cwd: ctx.workingDirectory,
       stdio: ["pipe", "pipe", "pipe"],
       env: spawnSpec.env ?? launch.env,

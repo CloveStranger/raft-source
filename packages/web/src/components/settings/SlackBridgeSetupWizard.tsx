@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useReducer, useState } from "react";
-import { AlertTriangle, Check, Plus, RefreshCw, Trash2 } from "lucide-react";
+import { useCallback, useEffect, useMemo, useReducer, useState } from "react";
+import { AlertTriangle, Check, Plus, RefreshCw } from "lucide-react";
 import { useIntl } from "react-intl";
 import { SLACK_BRIDGE_PREFLIGHT_CHECK_IDS } from "@botiverse/raft-shared";
 import {
@@ -37,6 +37,7 @@ import type {
   SlackBridgeSetupSnapshot,
   SlackBridgeSetupStage,
 } from "./slackBridgeProvisioning";
+import { RemovePairButton } from "./RemovePairButton";
 
 type SlackBridgeDisplayStage = "connect" | "channels" | "health";
 
@@ -196,6 +197,7 @@ function HealthPanel({
 }) {
   const { formatDate, formatMessage } = useIntl();
   const [showInviteHelp, setShowInviteHelp] = useState(false);
+  const toggleInviteHelp = useCallback(() => setShowInviteHelp((visible) => !visible), []);
   const health = projectSlackBridgeHealth(snapshot.rawHealth);
   const mappedChannelsWithAccessIssues = snapshot.channelPairs
     .map((pair) => snapshot.slackChannels.find((channel) => channel.id === pair.slackChannelId))
@@ -251,7 +253,7 @@ function HealthPanel({
               },
             )}</p>
           <div className="mt-3 flex flex-wrap gap-2">
-            <Button size="sm" onClick={() => setShowInviteHelp((visible) => !visible)}>
+            <Button size="sm" onClick={toggleInviteHelp}>
               {formatMessage({ id: "settings.slackBridge.showInviteSteps" })}
             </Button>
             <Button size="sm"  variant="accent" disabled={busy} onClick={onRefresh}>
@@ -453,10 +455,14 @@ function wizardReducer(state: WizardState, action: WizardAction): WizardState {
   }
 }
 
+function redirectToOAuth(url: string) {
+  window.location.assign(url);
+}
+
 export default function SlackBridgeSetupWizard({
   canManage,
   provider,
-  onOAuthRedirect = (url) => window.location.assign(url),
+  onOAuthRedirect = redirectToOAuth,
 }: SlackBridgeSetupWizardProps) {
   const { formatMessage } = useIntl();
   const [state, dispatch] = useReducer(wizardReducer, INITIAL_WIZARD_STATE);
@@ -496,25 +502,25 @@ export default function SlackBridgeSetupWizard({
     return { raft, slack };
   }, [snapshot]);
 
-  const mutate = async (operation: () => Promise<SlackBridgeProvisioningView>) => {
+  const mutate = useCallback(async (operation: () => Promise<SlackBridgeProvisioningView>) => {
     dispatch({ type: "start" });
     try {
       dispatch({ type: "view", view: await operation() });
     } catch (cause) {
       dispatch({ type: "error", partialSuccess: cause instanceof SlackBridgePartialUpdateError });
     }
-  };
+  }, []);
 
-  const refresh = async () => {
+  const refresh = useCallback(async () => {
     dispatch({ type: "start" });
     try {
       dispatch({ type: "refresh_view", view: await provider.load() });
     } catch {
       dispatch({ type: "error" });
     }
-  };
+  }, [provider]);
 
-  const connectAndAuthorize = async () => {
+  const connectAndAuthorize = useCallback(async () => {
     dispatch({ type: "start" });
     try {
       const connected = await provider.connect();
@@ -528,14 +534,47 @@ export default function SlackBridgeSetupWizard({
     } catch {
       dispatch({ type: "error" });
     }
-  };
+  }, [onOAuthRedirect, provider]);
 
-  const addPair = () => {
+  const authorize = useCallback(() => {
+    dispatch({ type: "start" });
+    void provider.beginOAuth()
+      .then((result) => {
+        if (result.kind === "redirect") onOAuthRedirect(result.url);
+        else dispatch({ type: "view", view: result.view });
+      })
+      .catch(() => dispatch({ type: "error" }));
+  }, [onOAuthRedirect, provider]);
+
+  const addPair = useCallback(() => {
     if (snapshot?.slackChannels.find((channel) => channel.id === slackChannelId)?.isMember !== true) return;
     const candidate = [...pairs, { raftChannelId, slackChannelId }];
     if (!validateSlackBridgeChannelPairs(candidate).valid) return;
     dispatch({ type: "pairs", pairs: candidate });
-  };
+  }, [pairs, raftChannelId, slackChannelId, snapshot]);
+
+  const removePair = useCallback(
+    (pair: SlackBridgeChannelPair) => dispatch({ type: "pairs", pairs: pairs.filter((item) => item !== pair) }),
+    [pairs],
+  );
+
+  const selectRaftChannel = useCallback((value: string | null) => {
+    if (value != null) dispatch({ type: "raft_channel", channelId: value });
+  }, []);
+
+  const selectSlackChannel = useCallback((value: string | null) => {
+    if (value != null) dispatch({ type: "slack_channel", channelId: value });
+  }, []);
+
+  const savePairs = useCallback(() => {
+    void mutate(() => editingMappings && mappingBaseline
+      ? applyManagedSlackBridgeChannelPairs({ provider, baseline: mappingBaseline, desiredPairs: pairs })
+      : finishSlackBridgeSetup({ provider, pairs }));
+  }, [editingMappings, mappingBaseline, mutate, pairs, provider]);
+
+  const startEditingMappings = useCallback(() => dispatch({ type: "edit_mappings" }), []);
+  const confirmDisconnect = useCallback(() => dispatch({ type: "confirm_disconnect" }), []);
+  const cancelDisconnect = useCallback(() => dispatch({ type: "cancel_disconnect" }), []);
 
   const pairValidation = validateSlackBridgeChannelPairs(pairs);
   const pairsUseMemberChannels = pairs.every((pair) =>
@@ -543,20 +582,26 @@ export default function SlackBridgeSetupWizard({
   const pairChangesValid = editingMappings && pairs.length === 0
     ? true
     : pairValidation.valid && pairsUseMemberChannels;
-  const raftChannelOptions = (snapshot?.raftChannels ?? []).map((channel) => ({
-    value: channel.id,
-    label: formatMessage({ id: "settings.slackBridge.channelName" }, { name: channel.name }),
-  }));
-  const slackChannelOptions = (snapshot?.slackChannels ?? []).map((channel) => ({
-    value: channel.id,
-    label: formatMessage(
-      { id: channel.isMember === true
-        ? "settings.slackBridge.channelName"
-        : "settings.slackBridge.channelMembershipRequiredOption" },
-      { name: channel.name },
-    ),
-    disabled: channel.isMember !== true,
-  }));
+  const raftChannelOptions = useMemo(
+    () => (snapshot?.raftChannels ?? []).map((channel) => ({
+      value: channel.id,
+      label: formatMessage({ id: "settings.slackBridge.channelName" }, { name: channel.name }),
+    })),
+    [formatMessage, snapshot],
+  );
+  const slackChannelOptions = useMemo(
+    () => (snapshot?.slackChannels ?? []).map((channel) => ({
+      value: channel.id,
+      label: formatMessage(
+        { id: channel.isMember === true
+          ? "settings.slackBridge.channelName"
+          : "settings.slackBridge.channelMembershipRequiredOption" },
+        { name: channel.name },
+      ),
+      disabled: channel.isMember !== true,
+    })),
+    [formatMessage, snapshot],
+  );
   const availableSlackChannelCount = snapshot?.slackChannels
     .filter((channel) => channel.isMember === true).length ?? 0;
   const inviteRequiredSlackChannelCount = snapshot?.slackChannels
@@ -571,6 +616,33 @@ export default function SlackBridgeSetupWizard({
     && snapshot?.rawHealth?.install?.state !== "revoked"
     && Number.isSafeInteger(disconnectConnectionEpoch)
     && disconnectConnectionEpoch > 0;
+
+  const retryFinishSetup = useCallback(() => {
+    void mutate(() => verifyAndEnableSlackBridge(provider));
+  }, [mutate, provider]);
+
+  const enableBridge = useCallback(() => {
+    void mutate(() => preflightPassed
+      ? provider.enable()
+      : verifyAndEnableSlackBridge(provider));
+  }, [mutate, preflightPassed, provider]);
+
+  const disconnect = useCallback(() => {
+    void mutate(() => provider.disconnect!(disconnectConnectionEpoch));
+  }, [disconnectConnectionEpoch, mutate, provider]);
+
+  // Re-authorizing keeps the channel pairs (the server resumes them on the
+  // OAuth callback); disconnecting revokes them. Offered wherever disconnect is.
+  const canReauthorize = canDisconnect && snapshot?.stage !== "oauth" && !!provider.beginReauthorization;
+  const reauthorize = useCallback(() => {
+    dispatch({ type: "start" });
+    void provider.beginReauthorization!()
+      .then((result) => {
+        if (result.kind === "redirect") onOAuthRedirect(result.url);
+        else dispatch({ type: "view", view: result.view });
+      })
+      .catch(() => dispatch({ type: "error" }));
+  }, [onOAuthRedirect, provider]);
 
   if (busy && !view) {
     return <div className="rounded-lg border border-line-muted bg-layer-panel p-4 text-xs font-bold text-foreground-strong theme-brutal:rounded-none theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white">{formatMessage({ id: "settings.slackBridge.loading" })}</div>;
@@ -618,7 +690,7 @@ export default function SlackBridgeSetupWizard({
           <div className="text-sm font-bold">{formatMessage({ id: "settings.slackBridge.connectTitle" })}</div>
           <p className="mt-1 text-xs text-foreground-muted">{formatMessage({ id: "settings.slackBridge.connectDescription" })}</p>
           {canManage && (
-            <Button className="mt-3" variant="accent" size="md" disabled={busy} onClick={() => void connectAndAuthorize()}>
+            <Button className="mt-3" variant="accent" size="md" disabled={busy} onClick={connectAndAuthorize}>
               {formatMessage({ id: "settings.slackBridge.connect" })}
             </Button>
           )}
@@ -635,15 +707,7 @@ export default function SlackBridgeSetupWizard({
               variant="accent"
               size="md"
               disabled={busy}
-              onClick={() => {
-                dispatch({ type: "start" });
-                void provider.beginOAuth()
-                  .then((result) => {
-                    if (result.kind === "redirect") onOAuthRedirect(result.url);
-                    else dispatch({ type: "view", view: result.view });
-                  })
-                  .catch(() => dispatch({ type: "error" }));
-              }}
+              onClick={authorize}
             >
               {formatMessage({ id: "settings.slackBridge.authorize" })}
             </Button>
@@ -674,9 +738,7 @@ export default function SlackBridgeSetupWizard({
               <FormField label={formatMessage({ id: "settings.slackBridge.raftChannel" })} size="compact" labelStyle="plain">
                 <Select
                   value={raftChannelId}
-                  onValueChange={(value) => {
-                    if (value != null) dispatch({ type: "raft_channel", channelId: value });
-                  }}
+                  onValueChange={selectRaftChannel}
                   items={raftChannelOptions}
                 >
                   <SelectTrigger className="w-full" aria-label={formatMessage({ id: "settings.slackBridge.raftChannel" })}>
@@ -702,9 +764,7 @@ export default function SlackBridgeSetupWizard({
               >
                 <Select
                   value={slackChannelId}
-                  onValueChange={(value) => {
-                    if (value != null) dispatch({ type: "slack_channel", channelId: value });
-                  }}
+                  onValueChange={selectSlackChannel}
                   items={slackChannelOptions}
                 >
                   <SelectTrigger className="w-full" aria-label={formatMessage({ id: "settings.slackBridge.slackChannel" })}>
@@ -737,7 +797,7 @@ export default function SlackBridgeSetupWizard({
                   <Plus size={14} />
                   {formatMessage({ id: "settings.slackBridge.addPair" })}
                 </Button>
-                <Button size="md"  disabled={busy} onClick={() => void refresh()}>
+                <Button size="md"  disabled={busy} onClick={refresh}>
                   <RefreshCw size={14} />
                   {formatMessage({ id: "settings.slackBridge.refreshChannels" })}
                 </Button>
@@ -757,9 +817,7 @@ export default function SlackBridgeSetupWizard({
                   )}
                 </span>
                 {canManage && (
-                  <Button size="icon-xs" variant="danger" aria-label={formatMessage({ id: "settings.slackBridge.removePair" })} onClick={() => dispatch({ type: "pairs", pairs: pairs.filter((item) => item !== pair) })}>
-                    <Trash2 size={12} />
-                  </Button>
+                  <RemovePairButton pair={pair} onRemove={removePair} />
                 )}
               </li>
             ))}
@@ -773,9 +831,7 @@ export default function SlackBridgeSetupWizard({
                 variant="accent"
                 size="md"
                 disabled={!pairChangesValid || busy || (editingMappings && !mappingBaseline)}
-                onClick={() => void mutate(() => editingMappings && mappingBaseline
-                  ? applyManagedSlackBridgeChannelPairs({ provider, baseline: mappingBaseline, desiredPairs: pairs })
-                  : finishSlackBridgeSetup({ provider, pairs }))}
+                onClick={savePairs}
               >
                 {formatMessage({
                   id: editingMappings
@@ -796,7 +852,7 @@ export default function SlackBridgeSetupWizard({
             <PreflightResults preflight={snapshot.preflight} passed={preflightPassed} />
           )}
           {canManage && (
-            <Button className="mt-3" variant="accent" size="md" disabled={busy} onClick={() => void mutate(() => verifyAndEnableSlackBridge(provider))}>
+            <Button className="mt-3" variant="accent" size="md" disabled={busy} onClick={retryFinishSetup}>
               {formatMessage({ id: "settings.slackBridge.retryFinishSetup" })}
             </Button>
           )}
@@ -818,9 +874,7 @@ export default function SlackBridgeSetupWizard({
                 variant="accent"
                 size="md"
                 disabled={busy}
-                onClick={() => void mutate(() => preflightPassed
-                  ? provider.enable()
-                  : verifyAndEnableSlackBridge(provider))}
+                onClick={enableBridge}
               >
                 {formatMessage({ id: "settings.slackBridge.retryFinishSetup" })}
               </Button>
@@ -834,15 +888,20 @@ export default function SlackBridgeSetupWizard({
           snapshot={snapshot}
           channelNames={channelNames}
           canManage={canManage}
-          onManage={() => dispatch({ type: "edit_mappings" })}
+          onManage={startEditingMappings}
           busy={busy}
-          onRefresh={() => void refresh()}
+          onRefresh={refresh}
         />
       )}
 
       {canDisconnect && !disconnectConfirmed && (
-        <div className="flex justify-end">
-          <Button variant="danger" size="sm" disabled={busy} onClick={() => dispatch({ type: "confirm_disconnect" })}>
+        <div className="flex flex-wrap justify-end gap-2" data-testid="slack-bridge-connection-actions">
+          {canReauthorize && (
+            <Button size="sm" disabled={busy} onClick={reauthorize} data-testid="slack-bridge-reauthorize">
+              {formatMessage({ id: "settings.slackBridge.reauthorize" })}
+            </Button>
+          )}
+          <Button variant="danger" size="sm" disabled={busy} onClick={confirmDisconnect}>
             {formatMessage({ id: "settings.slackBridge.disconnect" })}
           </Button>
         </div>
@@ -850,15 +909,15 @@ export default function SlackBridgeSetupWizard({
       {canDisconnect && disconnectConfirmed && (
         <div className="space-y-3 rounded-md border border-line-muted bg-danger-soft p-3 theme-brutal:rounded-none theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-brutal-red/20" data-testid="slack-bridge-disconnect-confirmation">
           <p className="text-xs font-semibold">{formatMessage({ id: "settings.slackBridge.disconnectDescription" })}</p>
-          <div className="flex justify-end gap-2">
-            <Button size="sm" disabled={busy} onClick={() => dispatch({ type: "cancel_disconnect" })}>
+          <div className="flex flex-wrap justify-end gap-2">
+            <Button size="sm" disabled={busy} onClick={cancelDisconnect}>
               {formatMessage({ id: "settings.common.cancel" })}
             </Button>
             <Button
               variant="danger"
               size="sm"
               disabled={busy}
-              onClick={() => void mutate(() => provider.disconnect!(disconnectConnectionEpoch))}
+              onClick={disconnect}
             >
               {formatMessage({ id: "settings.slackBridge.disconnectConfirm" })}
             </Button>

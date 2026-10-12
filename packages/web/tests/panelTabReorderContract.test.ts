@@ -57,7 +57,7 @@ test("top panel tabs use the shared reorderable tab bar", () => {
   assert.match(agentPanel, /<SortableTabsList<AgentTab>/);
   assert.match(
     agentPanel,
-    /<div\s+ref=\{agentTabsRef\}[\s\S]*?className=\{`min-w-0 max-w-full overflow-x-auto overflow-y-hidden scrollbar-none/,
+    /<div\s+ref=\{agentTabsRef\}[\s\S]*?className="min-w-0 max-w-full overflow-x-auto overflow-y-hidden scrollbar-none"/,
   );
   // The tab list owns no border: its parent Tabs owns the single boundary.
   // This prevents the Brutal tab strip and section header from rendering a

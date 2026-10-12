@@ -1,7 +1,7 @@
 import { Card, Button } from "raft-ui";
 import CloseButton from "../ui/CloseButton";
 import Tooltip from "../ui/Tooltip";
-import { useState } from "react";
+import { useCallback, useState } from "react";
 import { useIntl } from "react-intl";
 import { X } from "lucide-react";
 import Modal from "../Modal";
@@ -28,7 +28,7 @@ export default function CommunityAgreementDialog({
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
 
-  const handleAgree = async () => {
+  const handleAgree = useCallback(async () => {
     setSubmitting(true);
     setError("");
     try {
@@ -43,7 +43,7 @@ export default function CommunityAgreementDialog({
     } finally {
       setSubmitting(false);
     }
-  };
+  }, [agreement.id, formatMessage, onAgree]);
 
   return (
     <Modal onClose={onClose}>

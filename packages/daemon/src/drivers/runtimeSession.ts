@@ -1,5 +1,7 @@
 import { EventEmitter } from "node:events";
 import { StringDecoder } from "node:string_decoder";
+import { logger } from "../logger";
+import { takeEarlyChildEvents } from "./runtimeChild";
 import type {
   ParsedEvent,
   RuntimeDriver,
@@ -131,7 +133,12 @@ export class ChildProcessRuntimeSession implements RuntimeSession {
     };
     const { process } = await this.driver.spawn(launchCtx);
     this.process = process;
-    this.attachProcess(process);
+    const abandoned = this.attachProcess(process);
+    if (abandoned) {
+      // The child exists (its exit/close are still reported above), but it was
+      // given up before this session took it over: the start failed.
+      return { ok: false, reason: "runtime_error", error: abandoned };
+    }
     return { ok: true, acceptedAs: "prompt" };
   }
 
@@ -169,8 +176,9 @@ export class ChildProcessRuntimeSession implements RuntimeSession {
     }, opts.forceAfterMs).unref?.();
   }
 
-  private attachProcess(process: import("node:child_process").ChildProcess): void {
-    process.stdout?.on("data", (chunk: Buffer) => {
+  /** Returns the abandonment message when the child was given up before the hand-off. */
+  private attachProcess(process: import("node:child_process").ChildProcess): string | null {
+    const onStdout = (chunk: Buffer) => {
       const chunkText = this.stdoutDecoder.write(chunk);
       this.events.emit("stdout", chunkText);
       this.stdoutBuffer += chunkText;
@@ -182,30 +190,29 @@ export class ChildProcessRuntimeSession implements RuntimeSession {
           this.events.emit("runtime_event", event);
         }
       }
-    });
-
-    process.stderr?.on("data", (chunk: Buffer) => {
+    };
+    const onStderr = (chunk: Buffer) => {
       const text = chunk.toString().trim();
       if (text) this.events.emit("stderr", text);
-    });
+    };
+    process.stdout?.on("data", onStdout);
+    process.stderr?.on("data", onStderr);
 
     let errored = false;
     let exitEmitted = false;
-    process.on("error", (err) => {
+    const onError = (err: Error) => {
       errored = true;
       this.events.emit("error", err);
-    });
-
-    process.on("exit", (code, signal) => {
+    };
+    const onExit = (code: number | null, signal: NodeJS.Signals | null) => {
       exitEmitted = true;
       this.events.emit("exit", {
         code,
         signal,
         reason: this.requestedStopReason ? "requested" : "runtime_exit",
       } satisfies RuntimeExitInfo);
-    });
-
-    process.on("close", (code, signal) => {
+    };
+    const onClose = (code: number | null, signal: NodeJS.Signals | null) => {
       // A failed spawn (EACCES, ENOENT) gets `error` and `close`, never
       // `exit`; `exit` is the session's one end-of-process event, so emit it.
       if (errored && !exitEmitted) {
@@ -217,7 +224,44 @@ export class ChildProcessRuntimeSession implements RuntimeSession {
         signal,
         reason: this.requestedStopReason ? "requested" : "runtime_exit",
       } satisfies RuntimeExitInfo);
-    });
+    };
+    // A child that exits before reading its stdin makes the next write fail
+    // with EPIPE. That is not a session error: the child's own exit/close ends
+    // the session. Unlistened, it would be thrown and take the daemon down.
+    const onStdinError = (err: Error) => {
+      const code = (err as NodeJS.ErrnoException).code ?? err.name;
+      logger.warn(`[RuntimeSession ${this.ctx.agentId}] runtime stdin write failed (${code}); the process exit decides the outcome`);
+    };
+    process.on("error", onError);
+    process.on("exit", onExit);
+    process.on("close", onClose);
+    // Test doubles may give a stdin without `on`.
+    process.stdin?.on?.("error", onStdinError);
+
+    // Task #366: replay what the child reported before this session listened
+    // (no await between attaching above and taking here, so nothing is missed
+    // or doubled).
+    let abandonedMessage: string | null = null;
+    const early = takeEarlyChildEvents(process);
+    if (early) {
+      for (const err of early.stdinErrors) onStdinError(err);
+      if (early.abandoned) {
+        // Its output is gone; never replay a partial run as complete.
+        abandonedMessage = `runtime child was abandoned before this session took it over: ${early.abandoned}`;
+        onError(new Error(abandonedMessage));
+      }
+      // Arrival order, output included: a child that printed its last line
+      // and exited before the hand-off still delivers that line before its
+      // exit and close.
+      for (const event of early.events) {
+        if (event.kind === "stdout") onStdout(event.chunk);
+        else if (event.kind === "stderr") onStderr(event.chunk);
+        else if (event.kind === "error") onError(event.error);
+        else if (event.kind === "exit") onExit(event.code, event.signal);
+        else onClose(event.code, event.signal);
+      }
+    }
+    return abandonedMessage;
   }
 }
 

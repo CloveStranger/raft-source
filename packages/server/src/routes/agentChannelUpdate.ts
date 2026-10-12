@@ -7,6 +7,7 @@ import type { AgentOrchestrator } from "../services/agentOrchestrator";
 import { actorHasServerCapabilityInServer } from "../lib/actorPermissions";
 import { actorHasChannelCapability, withLockedChannelActorCapability } from "../lib/channelActorPermissions";
 import { addTraceEvent, errorClassOf } from "../tracing/semanticTrace";
+import { agentRefusalBody, agentServerRoleRequiredBody, asSentence } from "../lib/agentServerRoleRequired";
 
 export interface AgentChannelUpdateActor {
   id: string;
@@ -96,9 +97,13 @@ export async function updateChannelForAgent(input: {
     });
     return {
       status: 403,
-      body: {
-        error: "Agent requires editChannelMetadata or changeChannelVisibility capability to update channels",
-      },
+      body: await agentServerRoleRequiredBody({
+        serverId,
+        agentId: actor.id,
+        capabilities: ["editChannelMetadata", "changeChannelVisibility"],
+        action: "update channels",
+        channelAdminIn: channel.name,
+      }),
     };
   }
 
@@ -106,10 +111,22 @@ export async function updateChannelForAgent(input: {
   const updates: { name?: string; description?: string; type?: channelService.RegularChannelType } = {};
 
   if ((payload.name !== undefined || payload.description !== undefined) && !canEditChannelMetadata) {
-    return { status: 403, body: { error: "Agent lacks permission to edit channel metadata" } };
+    return {
+      status: 403,
+      body: {
+        ...await agentServerRoleRequiredBody({ serverId, agentId: actor.id, capabilities: ["editChannelMetadata"], action: "rename this channel or edit its description", channelAdminIn: channel.name }),
+        error: "Agent lacks permission to edit channel metadata",
+      },
+    };
   }
   if (payload.visibility !== undefined && !canChangeChannelVisibility) {
-    return { status: 403, body: { error: "Agent lacks permission to change channel visibility" } };
+    return {
+      status: 403,
+      body: {
+        ...await agentServerRoleRequiredBody({ serverId, agentId: actor.id, capabilities: ["changeChannelVisibility"], action: "change channel visibility" }),
+        error: "Agent lacks permission to change channel visibility",
+      },
+    };
   }
   // #all is human-managed only (@cindyz, 2026-09-07, #wg-rbac msg=c1a72093).
   // This is the exact call that produced the incident report: an admin agent ran
@@ -124,10 +141,11 @@ export async function updateChannelForAgent(input: {
     });
     return {
       status: 403,
-      body: {
-        error: channelService.ALL_CHANNEL_VISIBILITY_REFUSAL,
-        code: "all_channel_visibility_managed_separately",
-      },
+      body: agentRefusalBody(
+        channelService.ALL_CHANNEL_VISIBILITY_REFUSAL,
+        "all_channel_visibility_managed_separately",
+        "Only a human can hide or restore #all, from channel settings or server settings. Ask a server owner or admin; do not retry this call.",
+      ),
     };
   }
   // Membership is required to change visibility, for agents as for humans. A
@@ -141,10 +159,11 @@ export async function updateChannelForAgent(input: {
     });
     return {
       status: 403,
-      body: {
-        error: "Agent must be a member of this channel to change its visibility",
-        code: "channel_membership_required",
-      },
+      body: agentRefusalBody(
+        "Agent must be a member of this channel to change its visibility",
+        "channel_membership_required",
+        "Join this channel first (for a private channel, ask a member to add you), then retry.",
+      ),
     };
   }
 
@@ -257,14 +276,23 @@ export async function updateChannelForAgent(input: {
         reason: "capability_required",
         status_code: 403,
       });
-      return { status: 403, body: { error: "Agent lacks permission to edit channel metadata" } };
+      return {
+        status: 403,
+        body: {
+          ...await agentServerRoleRequiredBody({ serverId, agentId: actor.id, capabilities: ["editChannelMetadata"], action: "rename this channel or edit its description", channelAdminIn: channel.name }),
+          error: "Agent lacks permission to edit channel metadata",
+        },
+      };
     }
     if (msg.includes("Cannot rename") || msg.includes("Cannot edit") || msg.includes("Cannot change visibility") || msg.includes("reserved")) {
       addTraceEvent("agent_channel_update.request.failed", {
         reason: "forbidden_update",
         status_code: 403,
       });
-      return { status: 403, body: { error: msg } };
+      return {
+        status: 403,
+        body: agentRefusalBody(msg, "channel_update_forbidden", `${asSentence(msg)} This channel cannot be changed this way by anyone; do not retry.`),
+      };
     }
     addTraceEvent("agent_channel_update.request.failed", {
       reason: "unexpected_error",

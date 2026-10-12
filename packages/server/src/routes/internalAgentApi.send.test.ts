@@ -28,6 +28,7 @@ import { recordInboxNotificationFacts } from "../services/inboxNotificationServi
 import * as attestedSendService from "../services/attestedSendService";
 import * as taskService from "../services/taskService";
 import { referenceAgentInboxChain } from "../test/agentInboxChainReference";
+import { withChannelDelivery } from "../test/orchestratorStub";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 
@@ -1739,12 +1740,12 @@ test("agent channel mute suppresses ordinary delivery but preserves personal men
     assert.equal(state.activityMuted, true);
 
     const delivered = new Map<string, AgentMessage[]>();
-    const orchestrator = {
+    const orchestrator = withChannelDelivery({
       deliverMessage: async (agentId: string, message: AgentMessage) => {
         delivered.set(agentId, [...(delivered.get(agentId) ?? []), message]);
         return { status: "queued", reason: "replayable_inbox" } as const;
       },
-    } as AgentOrchestrator;
+    }) as AgentOrchestrator;
 
     await broadcastAndDeliver(app.io, orchestrator, {
       channelId: fixture.channelId,
@@ -1791,9 +1792,9 @@ test("agent-api freshness ignores muted ordinary messages but holds on pierce co
       activityMuted: true,
     });
 
-    const muteDeliveryOrchestrator = {
+    const muteDeliveryOrchestrator = withChannelDelivery({
       deliverMessage: async () => {},
-    } as unknown as AgentOrchestrator;
+    }) as unknown as AgentOrchestrator;
     const mutedOrdinary = await broadcastAndDeliver(app.io, muteDeliveryOrchestrator, {
       channelId: fixture.channelId,
       senderType: "user",

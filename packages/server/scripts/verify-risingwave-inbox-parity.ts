@@ -2,11 +2,10 @@
 import { closeDatabase, initDatabase } from "../src/db/index";
 import {
   getRisingWaveInboxItemsServingVersion,
-  queryRisingWave,
   RISINGWAVE_UNREAD_INBOX_CONTRACT_VERSION,
 } from "../src/db/risingwave";
+import { getActorServerRoleInServer } from "../src/lib/actorPermissions";
 import {
-  __testRisingWaveInboxFailSoft,
   getInboxItems,
   type InboxFilter,
   type InboxItem,
@@ -130,29 +129,15 @@ async function main() {
   }
 
   const options = parseArgs(process.argv.slice(2));
-  // A successful process exit is not enough: the production wrappers
-  // intentionally fail soft to Postgres on RW connection failures. Count only
-  // completed direct RW queries and require each "RW" comparison leg to have
-  // actually reached RisingWave.
-  let successfulRisingWaveQueries = 0;
-  __testRisingWaveInboxFailSoft.reset();
-  __testRisingWaveInboxFailSoft.setDeps({
-    query: async (pool, queryText, values) => {
-      const result = await queryRisingWave(pool, queryText, values);
-      successfulRisingWaveQueries += 1;
-      return result;
-    },
-  });
-  const strictRisingWaveRead = async <T>(label: string, work: () => Promise<T>): Promise<T> => {
-    const before = successfulRisingWaveQueries;
-    const result = await work();
-    if (successfulRisingWaveQueries === before) {
-      throw new Error(`${label} did not complete a direct RisingWave query (fail-soft fallback is not parity)`);
-    }
-    return result;
-  };
   await initDatabase(databaseUrl, process.env.DATABASE_URL_READ_REPLICA);
   try {
+    // Since the 2026-09-21 teardown (#8072) a default inbox read either reaches
+    // RisingWave or throws; there is no Postgres fail-soft to detect. The only
+    // default reads still served by canonical Postgres are search (never passed
+    // here) and guest access, so a guest would compare Postgres with itself.
+    if (await getActorServerRoleInServer(options.serverId, "user", options.userId) === "guest") {
+      throw new Error("guest inboxes are served by canonical Postgres; parity needs a non-guest --user-id");
+    }
     const inboxResults = [];
     for (const filter of options.filters) {
       // CONTRACT: forceCanonicalPostgres exercises the canonical inline Postgres
@@ -170,14 +155,12 @@ async function main() {
         // normal/manual parity keeps current mute-aware serving semantics.
         ...(options.bootstrapSeedBaseline ? { humanActivityMuteEnabled: false } : {}),
       });
-      const rw = await strictRisingWaveRead(`inbox ${filter}`, () =>
-        getInboxItems(options.serverId, options.userId, {
-          filter,
-          limit: options.limit,
-          offset: options.offset,
-          ...(options.bootstrapSeedBaseline ? { humanActivityMuteEnabled: false } : {}),
-        }),
-      );
+      const rw = await getInboxItems(options.serverId, options.userId, {
+        filter,
+        limit: options.limit,
+        offset: options.offset,
+        ...(options.bootstrapSeedBaseline ? { humanActivityMuteEnabled: false } : {}),
+      });
 
       assertDeepEqual(`inbox ${filter} totalCount`, rw.totalCount, pg.totalCount);
       assertDeepEqual(`inbox ${filter} totalUnreadCount`, rw.totalUnreadCount, pg.totalUnreadCount);
@@ -195,7 +178,7 @@ async function main() {
     }
 
     // Sidebar unread (getUnreadCounts / getUnreadSummary / getSidebarUnreadSummaryCounts)
-    // has no Postgres path to compare against: it reads rw_conversation_unread_v2 only.
+    // has no Postgres path to compare against: it reads rw_conversation_unread_v3 only.
 
     console.log(JSON.stringify({
       ok: true,
@@ -205,10 +188,8 @@ async function main() {
       userId: options.userId,
       inbox: inboxResults,
       bootstrapSeedBaseline: options.bootstrapSeedBaseline,
-      strictRisingWaveQueries: successfulRisingWaveQueries,
     }, null, 2));
   } finally {
-    __testRisingWaveInboxFailSoft.reset();
     await closeDatabase();
   }
 }

@@ -270,6 +270,104 @@ test("the archived-name-collision response renders catalog-backed recovery", asy
   );
 });
 
+// Typed joint-invite rejections (joint-channel task #24). The server answers with a
+// typed 400 whose `error` is an English sentence naming the invitee; before this, the
+// dialog showed that sentence verbatim, so a zh user read untranslated English and was
+// never told which field to fix. Invitee-scoped codes carry `invitee` — the person the
+// server rejected; the response's `inviteeIndex` indexes the server's deduplicated
+// invitee list, so the dialog never maps it back into the list it submitted.
+function rejectWith(data: Record<string, unknown>) {
+  useChannelStore.setState({
+    createChannel: async () => {
+      throw { response: { data } };
+    },
+  } as never);
+}
+
+function submitInvite(slug: string, people: string) {
+  fireEvent.change(screen.getByPlaceholderText("例如 partner-launch"), { target: { value: "联合频道" } });
+  fireEvent.change(screen.getByPlaceholderText("partner-workspace"), { target: { value: slug } });
+  fireEvent.change(screen.getByPlaceholderText("@admin 或 admin@example.com"), { target: { value: people } });
+  fireEvent.click(screen.getByRole("button", { name: "创建联合频道" }));
+}
+
+test("a not-admin invitee renders a localized sentence naming the person and the server", async () => {
+  seed();
+  rejectWith({
+    code: "joint_invitee_not_admin",
+    error: "Invited person must be a target server admin: admin@example.com",
+    targetServerSlug: "partner",
+    invitee: "admin@example.com",
+  });
+  renderZh();
+  submitInvite("partner", "admin@example.com");
+
+  assert.ok(await screen.findByText("admin@example.com 必须是服务器「partner」的所有者或管理员，才能被邀请。"));
+  assert.doesNotMatch(document.body.textContent ?? "", /Invited person must be/);
+});
+
+test("the invitee field names the rejected person, regardless of position in the submitted list", async () => {
+  seed();
+  rejectWith({
+    code: "joint_invitee_not_found",
+    error: "Invited person not found in target server: second@example.com",
+    targetServerSlug: "partner",
+    invitee: "second@example.com",
+  });
+  renderZh();
+  submitInvite("partner", "first@example.com, second@example.com");
+
+  assert.ok(await screen.findByText("在服务器「partner」中找不到 second@example.com，请检查 handle 或邮箱。"));
+  assert.doesNotMatch(document.body.textContent ?? "", /找不到 first@example\.com/);
+});
+
+test("an unknown target server and the current server get different sentences for one code", async () => {
+  seed();
+  rejectWith({ code: "joint_target_server_invalid", error: "Target server not found", targetServerSlug: "partner" });
+  renderZh();
+  submitInvite("partner", "admin@example.com");
+  assert.ok(await screen.findByText("找不到服务器「partner」，请检查 slug。"));
+  cleanup();
+
+  seed(); // current server slug is "s1"
+  rejectWith({ code: "joint_target_server_invalid", error: "Cannot invite the current server", targetServerSlug: "s1" });
+  renderZh();
+  submitInvite("s1", "admin@example.com");
+  assert.ok(await screen.findByText("不能邀请本服务器加入它自己的联合频道。"));
+  assert.doesNotMatch(document.body.textContent ?? "", /Cannot invite the current server/);
+});
+
+test("an unrecognized code, or a typed code it cannot resolve, keeps the previous fallback", async () => {
+  seed();
+  rejectWith({ code: "some_future_code", error: "Server said something new" });
+  renderZh();
+  submitInvite("partner", "admin@example.com");
+  assert.ok(await screen.findByText("Server said something new"));
+  cleanup();
+
+  // No invitee field: the dialog cannot name the person, so it must not guess.
+  seed();
+  rejectWith({
+    code: "joint_invitee_not_admin",
+    error: "Invited person must be a target server admin: admin@example.com",
+    targetServerSlug: "partner",
+  });
+  renderZh();
+  submitInvite("partner", "admin@example.com");
+  assert.ok(await screen.findByText("Invited person must be a target server admin: admin@example.com"));
+});
+
+test("every channel.jointInvite.* id is translated", () => {
+  const en = enMessages as Record<string, string>;
+  const zh = zhMessages as Record<string, string>;
+  const ids = Object.keys(en).filter((k) => k.startsWith("channel.jointInvite."));
+  assert.equal(ids.length, 4);
+  for (const id of ids) {
+    assert.notEqual(zh[id], en[id], `${id} is still the English string`);
+    assert.match(zh[id], /\p{Script=Han}/u, `${id} has no Chinese characters`);
+  }
+});
+
 test("every new id is translated, and no string was duplicated to get there", () => {
   const en = enMessages as Record<string, string>;
   const zh = zhMessages as Record<string, string>;

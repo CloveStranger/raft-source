@@ -29,6 +29,7 @@
  * (RFC 071 §8 "Candidate values"), to be validated, not a decision.
  * Observation carrier: ids, classes, counts and times only, never message text.
  */
+import type { AgentStartNotSpawnedReason } from "@botiverse/raft-shared";
 
 // --- Candidate values (RFC 071 §8). Candidates to validate, not decisions. ---
 
@@ -60,6 +61,16 @@ export const TERMINAL_FAILURE_LAUNCH_IDS_PER_PROCESS_MAX = 8;
 export const TERMINAL_FAILURE_ACKNOWLEDGED_UNEXITED_MAX = 16;
 /** Candidate: the resume catch-up candidate page (`RESUME_CATCHUP_MAX_CHANNELS * 4` in messageService). */
 export const TERMINAL_FAILURE_CATCHUP_MAX_CANDIDATES = 32;
+/**
+ * task #365: backoff after the n-th consecutive start the daemon proved never
+ * created a process (`not_spawned` reason `spawn_error`): 5 min × 2^(n-1),
+ * at most 6 h. Separate from the RFC 071 terminal backoff, which it never
+ * shortens. No cap on the number of attempts.
+ */
+export const TERMINAL_SPAWN_ERROR_BACKOFF_BASE_MS = 5 * 60_000;
+export const TERMINAL_SPAWN_ERROR_BACKOFF_MAX_MS = 6 * 3_600_000;
+/** task #365: the retry sweep adds a fixed per-agent delay in [0, this) after the backoff. */
+export const TERMINAL_SPAWN_ERROR_RETRY_JITTER_MAX_MS = 60_000;
 
 // --- Record (RFC 071 §4.1) ---
 
@@ -203,6 +214,18 @@ export interface CatchupBatchMessage {
   inPrefix: boolean;
 }
 
+/**
+ * An owed conversation settled at build time because the agent's read cursor
+ * already passed its owed ceiling (RFC 6 "read cursor": a row the cursor has
+ * passed is consumed by the inbox's own rule and is not re-fed). Not rendered
+ * coverage: nothing about it waits for an echo.
+ */
+export interface CatchupCursorSettlement {
+  conversationId: string;
+  readCursor: number;
+  ceiling: number;
+}
+
 export interface CatchupBatch {
   /** Also sent on agent:start (RFC 7). */
   batchId: string;
@@ -220,6 +243,8 @@ export interface CatchupBatch {
    */
   candidateCapHit: boolean;
   allUnreadCovered: boolean;
+  /** Owed conversations settled by the read cursor when this batch was built (diagnostics; not coverage). */
+  settledByCursor: CatchupCursorSettlement[];
 }
 
 export interface CatchupObligation {
@@ -269,6 +294,33 @@ export interface TerminalBreakerDiagnostics {
  * i.e. per daemon restart that produced evidence for it.
  */
 export type TerminalOutboxWatermarks = Record<string, number>;
+
+/**
+ * task #365: consecutive starts the daemon proved never created a process.
+ * Reset by a process for the current launch (`agent:process_spawned`) or an
+ * E2; kept by a human start (the start bypasses the backoff, the evidence
+ * stays).
+ */
+export interface TerminalSpawnErrorEvidence {
+  count: number;
+  lastLaunchId: string;
+  lastAtMs: number;
+}
+
+/**
+ * task #365: a wake refused by this breaker that nothing has served yet. A
+ * refused wake is not retried by anyone else (the daemon's refused outcome is
+ * final), so the retry sweep starts the agent once the spawn-error backoff
+ * passes. `seq` counts refused wakes; a claim records the `seq` it serves,
+ * and only an E2 of that launch settles the demand up to that `seq`: a wake
+ * refused later survives it. A manual stop cancels it.
+ */
+export interface TerminalWakeDemand {
+  seq: number;
+  sinceMs: number;
+  claimedSeq: number | null;
+  claimedLaunchId: string | null;
+}
 
 export interface TerminalBreakerTransition {
   from: string;
@@ -322,6 +374,10 @@ export interface TerminalFailureBreakerState {
    * claimed before that takeover, which the takeover already settled.
    */
   takeoverEpoch: number;
+  /** task #365: proven never-created starts; see `TerminalSpawnErrorEvidence`. */
+  spawnError: TerminalSpawnErrorEvidence | null;
+  /** task #365: an unserved refused wake; see `TerminalWakeDemand`. */
+  wakeDemand: TerminalWakeDemand | null;
 }
 
 export function freshTerminalFailureBreakerState(): TerminalFailureBreakerState {
@@ -348,6 +404,8 @@ export function freshTerminalFailureBreakerState(): TerminalFailureBreakerState 
     outboxWatermarks: {},
     outboxWatermarksLost: false,
     takeoverEpoch: 0,
+    spawnError: null,
+    wakeDemand: null,
   };
 }
 
@@ -369,6 +427,26 @@ function withTransition(
 
 function backoffMs(step: number): number {
   return TERMINAL_FAILURE_BACKOFF_MS[Math.min(step, TERMINAL_FAILURE_BACKOFF_MS.length - 1)]!;
+}
+
+/** task #365: 5 min × 2^(count-1), at most 6 h. */
+export function spawnErrorBackoffMs(count: number): number {
+  const doublings = Math.min(Math.max(count, 1) - 1, 30);
+  return Math.min(TERMINAL_SPAWN_ERROR_BACKOFF_BASE_MS * 2 ** doublings, TERMINAL_SPAWN_ERROR_BACKOFF_MAX_MS);
+}
+
+/**
+ * task #365: the retry sweep's fixed extra delay for one agent, in
+ * [0, TERMINAL_SPAWN_ERROR_RETRY_JITTER_MAX_MS). A hash of the agent id: every
+ * replica and every restart computes the same value, and it only adds delay.
+ */
+export function spawnErrorRetryJitterMs(agentId: string): number {
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < agentId.length; i += 1) {
+    hash ^= agentId.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return hash % TERMINAL_SPAWN_ERROR_RETRY_JITTER_MAX_MS;
 }
 
 /** `step+` of the §8 legend: min(step + 1, max). */
@@ -616,12 +694,6 @@ export interface CatchupBatchBuildInput {
   }>;
   /** Rows in the order rendered; `appendedOutOfOrder` marks the folded wake message. */
   rendered: Array<{ id: string; conversationId: string; seq: number; appendedOutOfOrder: boolean }>;
-  /**
-   * Owed conversations the batch did not read, with their current read
-   * cursor. One whose cursor has passed its ceiling is listed with
-   * `coveredUpToSeq = fromSeqExclusive`, so the echo fulfils it (RFC 6 "read cursor").
-   */
-  owedReadCursors: Record<string, number>;
   candidateCapHit: boolean;
   /**
    * Every conversation the chain reported unread at build time → its latest
@@ -689,16 +761,6 @@ export function buildCatchupBatch(obligation: CatchupObligation | null, input: C
       && row.seq > entry.fromSeqExclusive && row.seq <= entry.coveredUpToSeq;
     return { id: row.id, conversationId: row.conversationId, seq: row.seq, inPrefix };
   });
-  if (obligation) {
-    for (const [conversationId, readCursor] of Object.entries(input.owedReadCursors)) {
-      if (byConversation.has(conversationId)) continue;
-      const ceiling = obligation.owedCeilings[conversationId];
-      if (ceiling === undefined || isConversationFulfilled(obligation, conversationId)) continue;
-      const from = catchupLowerBound(obligation, conversationId, readCursor);
-      if (from < ceiling) continue;
-      coverage.push({ conversationId, fromSeqExclusive: from, coveredUpToSeq: from, truncated: false });
-    }
-  }
   const finalCoverage = new Map(coverage.map((entry) => [entry.conversationId, entry.coveredUpToSeq]));
   const allUnreadCovered = !input.candidateCapHit
     && Object.entries(input.unreadLatestSeqs).every(([conversationId, latest]) => (finalCoverage.get(conversationId) ?? -Infinity) >= latest);
@@ -710,7 +772,32 @@ export function buildCatchupBatch(obligation: CatchupObligation | null, input: C
     messages,
     candidateCapHit: input.candidateCapHit,
     allUnreadCovered,
+    // Filled when the batch is recorded (`applyCatchupBuild`), against the stored obligation.
+    settledByCursor: [],
   };
+}
+
+/**
+ * RFC 6 "read cursor": settle every unfulfilled owed conversation whose read
+ * cursor is at or past its ceiling (obligationCursor = max(cursor, ceiling)).
+ * Returns null once nothing is owed and `owedOverflow` is false; an overflow
+ * obligation keeps the complete-batch echo rule. Conversations still owed are
+ * untouched (they keep the echo rule).
+ */
+export function settleCatchupByReadCursor(
+  obligation: CatchupObligation,
+  readCursors: Record<string, number>,
+): { obligation: CatchupObligation | null; settled: CatchupCursorSettlement[] } {
+  const settled: CatchupCursorSettlement[] = [];
+  const next = structuredClone(obligation);
+  for (const [conversationId, ceiling] of Object.entries(next.owedCeilings)) {
+    const readCursor = readCursors[conversationId];
+    if (readCursor === undefined || readCursor < ceiling || isConversationFulfilled(next, conversationId)) continue;
+    next.obligationCursor[conversationId] = Math.max(next.obligationCursor[conversationId] ?? ceiling, ceiling);
+    settled.push({ conversationId, readCursor, ceiling });
+  }
+  if (settled.length === 0) return { obligation, settled };
+  return { obligation: isCatchupObligationFulfilled(next) ? null : next, settled };
 }
 
 /**
@@ -744,6 +831,44 @@ export function attachCatchupBatch(current: TerminalFailureBreakerState, batch: 
   state.catchupObligation!.pendingBatch = structuredClone(batch);
   state.currentLaunch!.catchupBatchId = batch.batchId;
   return { attached: true, state };
+}
+
+export interface CatchupBuildApplied {
+  state: TerminalFailureBreakerState;
+  write: boolean;
+  /** The batch is now the pending batch of its (current) launch; send its id. */
+  attached: boolean;
+  settled: CatchupCursorSettlement[];
+  /** The cursor settlement fulfilled the whole obligation (now null). */
+  obligationCleared: boolean;
+}
+
+/**
+ * A claimed start built its catch-up (RFC 6). One write: first settle the
+ * owed conversations the read cursor has passed (against the STORED
+ * obligation, not the build-time snapshot), then, if anything is still owed
+ * and the start renders rows, attach its batch with the settlements recorded
+ * on it. `batch` null = the start renders no rows (nothing to attach).
+ */
+export function applyCatchupBuild(
+  current: TerminalFailureBreakerState,
+  input: { readCursors: Record<string, number>; batch: CatchupBatch | null },
+): CatchupBuildApplied {
+  const obligation = current.catchupObligation;
+  if (!obligation) return { state: current, write: false, attached: false, settled: [], obligationCleared: false };
+  const { obligation: settledObligation, settled } = settleCatchupByReadCursor(obligation, input.readCursors);
+  let state = current;
+  if (settled.length > 0) {
+    state = cloneTerminalFailureBreakerState(current);
+    state.catchupObligation = settledObligation;
+  }
+  const obligationCleared = settledObligation === null;
+  if (obligationCleared || input.batch === null) {
+    return { state, write: settled.length > 0, attached: false, settled, obligationCleared };
+  }
+  const attached = attachCatchupBatch(state, { ...input.batch, settledByCursor: settled });
+  if (!attached.attached) return { state, write: settled.length > 0, attached: false, settled, obligationCleared };
+  return { state: attached.state, write: true, attached: true, settled, obligationCleared };
 }
 
 // --- E1 (RFC 071 §4.5, §8 row "E1 applied") ---
@@ -856,6 +981,22 @@ function resetCounts(state: TerminalFailureBreakerState): void {
 }
 
 /**
+ * task #365: an E2 of the launch that claimed the wake demand settles it up
+ * to the `seq` that claim recorded; a wake refused after the claim survives.
+ */
+function settleWakeDemand(state: TerminalFailureBreakerState, launchId: string): void {
+  const demand = state.wakeDemand;
+  if (demand === null || demand.claimedLaunchId !== launchId || demand.claimedSeq === null) return;
+  state.wakeDemand = demand.seq <= demand.claimedSeq ? null : { ...demand, claimedSeq: null, claimedLaunchId: null };
+}
+
+/** task #365: what a clean turn settles beyond the RFC 071 counts. */
+function applyCleanTurn(state: TerminalFailureBreakerState, launchId: string): void {
+  state.spawnError = null;
+  settleWakeDemand(state, launchId);
+}
+
+/**
  * Apply the echo of a pending batch. RFC 071 part 3: the daemon reports how
  * many batch rows it rendered (`catchupRenderedRows`). Coverage was computed
  * from every row the server put in the batch, so it holds only when the
@@ -899,6 +1040,7 @@ export function applyTurnCompletedFrame(
     if (!isSessionBound(frame, probe, input.persistedSessionId)) return ignore("session_unbound");
     const state = cloneTerminalFailureBreakerState(normalized);
     resetCounts(state);
+    applyCleanTurn(state, frame.launchId);
     state.currentLaunch = { ...probe, lastAppliedSeq: frameSeq(frame), leaseExpiresAtMs: null };
     state.lastProbe = null;
     state.blockedUntilMs = null;
@@ -917,6 +1059,7 @@ export function applyTurnCompletedFrame(
 
   const state = cloneTerminalFailureBreakerState(normalized);
   resetCounts(state);
+  applyCleanTurn(state, frame.launchId);
   // The launch stays current and the generation is unchanged (RFC 4.2, C-10).
   state.currentLaunch = { ...launch, lastAppliedSeq: frameSeq(frame) };
   const echoApplied = applyEchoIfPending(state, frame);
@@ -1138,7 +1281,13 @@ export interface TerminalWakeGateResult {
  */
 export function evaluateTerminalWakeGate(
   current: TerminalFailureBreakerState,
-  input: { nowMs: number; capability: boolean; wakeMessage: { conversationId: string; seq: number } | null },
+  input: {
+    nowMs: number;
+    capability: boolean;
+    wakeMessage: { conversationId: string; seq: number } | null;
+    /** task #365: the start serves a wake that nobody else retries; a refusal records it as demand. */
+    wakeDemand?: boolean;
+  },
 ): TerminalWakeGateResult {
   const { state: normalized, changed } = normalizeTerminalBreaker(current, input.nowMs);
   const refused = automaticRefusal(normalized, input.nowMs, input.capability);
@@ -1172,6 +1321,14 @@ export function evaluateTerminalWakeGate(
     // A failure-driven refusal now also holds the existing debt.
     mutable().catchupObligation!.engagedByFailure = true;
   }
+  // Only where outcomes are reported: nothing could settle it otherwise.
+  if (input.wakeDemand === true && input.capability) {
+    const target = mutable();
+    const demand = target.wakeDemand;
+    target.wakeDemand = demand === null
+      ? { seq: 1, sinceMs: input.nowMs, claimedSeq: null, claimedLaunchId: null }
+      : { ...demand, seq: demand.seq + 1 };
+  }
   if (write && state !== normalized) markProtectedIfEngaged(state);
   return { decision: refused.refusal, state, write };
 }
@@ -1188,6 +1345,13 @@ export interface TerminalClaimInput {
   /** The machine advertises `agent:runtime-outcome-v1`. */
   capability: boolean;
   control: TerminalStartControl;
+  /**
+   * task #365: this automatic start serves a message / app-inbox wake that
+   * nobody else retries. The claim records it as demand (and claims it), so
+   * if the launch never runs (`spawn_error`) the retry sweep re-serves it.
+   * Never set for a human start or the sweep's own start.
+   */
+  wakeDemand?: boolean;
 }
 
 /** Claim identity (RFC 4.3 step 3). Rollback applies only while it still matches. */
@@ -1281,6 +1445,19 @@ export function claimTerminalStart(current: TerminalFailureBreakerState, input: 
     takeover: false,
     catchupBatchId: null,
   };
+  // Only where outcomes are reported: without them no E2 could ever settle it
+  // (review of #9140), and the record would never expire.
+  if (input.wakeDemand === true && input.control === "automatic" && input.capability) {
+    // task #365: the wake this start serves is demand too, not only a refused one.
+    const demand = state.wakeDemand;
+    state.wakeDemand = demand === null
+      ? { seq: 1, sinceMs: input.nowMs, claimedSeq: null, claimedLaunchId: null }
+      : { ...demand, seq: demand.seq + 1 };
+  }
+  if (state.wakeDemand !== null) {
+    // task #365: this launch serves the demand recorded so far.
+    state.wakeDemand = { ...state.wakeDemand, claimedSeq: state.wakeDemand.seq, claimedLaunchId: input.launchId };
+  }
   if (input.capability && input.daemonInstanceId !== null) {
     pushUnexited(state, {
       spawnLaunchId: input.launchId,
@@ -1344,6 +1521,10 @@ export function rollbackTerminalClaim(
   if (!input.dispatchLeftReplica) {
     state.unexited = state.unexited.filter((entry) => !(entry.spawnLaunchId === token.launchId && entry.processInstanceId === null));
   }
+  if (state.wakeDemand?.claimedLaunchId === token.launchId) {
+    // task #365: the launch never ran, so the demand is unserved again.
+    state.wakeDemand = { ...state.wakeDemand, claimedSeq: null, claimedLaunchId: null };
+  }
   finishTransition(state);
   return { state, outcome: "restored" };
 }
@@ -1365,14 +1546,24 @@ export function applyTerminalLift(
   return state;
 }
 
-/** Manual Stop is not E3: half_open → open, step unchanged, probe cleared; otherwise no change. */
+/**
+ * Manual Stop is not E3: half_open → open, step unchanged, probe cleared;
+ * otherwise no change. It cancels a pending wake demand (task #365): a person
+ * stopped the agent, so no retry may start it.
+ */
 export function applyTerminalManualStop(
   current: TerminalFailureBreakerState,
   input: { nowMs: number },
 ): { state: TerminalFailureBreakerState; write: boolean } {
   const { state: normalized, expired } = normalizeTerminalBreakerLease(current, input.nowMs);
-  if (normalized.state !== "half_open") return { state: normalized, write: expired };
+  if (normalized.state !== "half_open") {
+    if (normalized.wakeDemand === null) return { state: normalized, write: expired };
+    const state = cloneTerminalFailureBreakerState(normalized);
+    state.wakeDemand = null;
+    return { state, write: true };
+  }
   const state = cloneTerminalFailureBreakerState(normalized);
+  state.wakeDemand = null;
   state.currentLaunch = null;
   withTransition(state, "open", "manual_stop", input.nowMs);
   finishTransition(state);
@@ -1505,13 +1696,20 @@ export function applyTerminalProcessSpawned(
     .filter((index) => index >= 0);
   const state = cloneTerminalFailureBreakerState(current);
   const pendings = pendingOf(state);
+  // task #365: a process for the current launch ends the run of proven spawn errors.
+  const resetsSpawnError = state.spawnError !== null
+    && state.currentLaunch !== null
+    && launches.includes(state.currentLaunch.launchId);
+  if (resetsSpawnError) state.spawnError = null;
   const removePendings = (keep: number | null) => {
     const drop = new Set(pendings.filter((index) => index !== keep));
     state.unexited = state.unexited.filter((_, index) => !drop.has(index));
   };
   let outcome: TerminalIdentityOutcome;
   if (isRecentExit(state, frame.daemonInstanceId, frame.processInstanceId)) {
-    if (pendings.length === 0) return { state: current, outcome: "settled_recent_exit", write: false };
+    if (pendings.length === 0) {
+      return resetsSpawnError ? { state, outcome: "settled_recent_exit", write: true } : { state: current, outcome: "settled_recent_exit", write: false };
+    }
     removePendings(null);
     outcome = "settled_recent_exit";
   } else {
@@ -1692,17 +1890,108 @@ export function applyTerminalDaemonReady(
   return { state, write: true };
 }
 
-/** The daemon stated the start was rejected before any spawn: the pending entry leaves the set (RFC 4.3 rule 2). */
+/**
+ * The daemon stated the start was rejected before any spawn: the pending
+ * entry leaves the set (RFC 4.3 rule 2).
+ *
+ * task #365, for the live current launch (bound by launch, generation, and no
+ * terminal outcome yet):
+ *  - reason `spawn_error` (the daemon proved no process was created) counts
+ *    in its own run: the launch becomes terminal (`e1`, so an older replica
+ *    still reads it), `lastFailure` says `spawn_error`, and the breaker opens
+ *    (or stays open) until at least now + `spawnErrorBackoffMs(count)`. It
+ *    only ever adds delay: a later `blockedUntilMs` is kept, and a probe of
+ *    a breaker that RFC 071 failures opened (`totalCount > 0`) also takes the
+ *    RFC 071 next step, as any other failed probe does. RFC 071 counts and
+ *    `needsManual` are left alone.
+ *  - any other reason counts nothing; a probe that never started ends
+ *    without a step (`half_open` → `open`, its backoff unchanged), so the
+ *    lease does not expire into a longer pause.
+ * For `spawn_error` and `stale_dispatch` a wake demand claimed by the
+ * launch is unclaimed: it was not served. `released` is the launch the daemon refused as `stale_dispatch`
+ * (the caller re-serves it on the current connection).
+ */
 export function applyTerminalStartRejectedBeforeSpawn(
   current: TerminalFailureBreakerState,
-  input: { launchId: string; daemonInstanceId: string },
-): { state: TerminalFailureBreakerState; write: boolean } {
-  const index = pendingIndex(current, input.launchId, input.daemonInstanceId);
-  if (index < 0) return { state: current, write: false };
-  const state = cloneTerminalFailureBreakerState(current);
-  state.unexited.splice(index, 1);
+  input: {
+    launchId: string;
+    daemonInstanceId: string;
+    reason?: AgentStartNotSpawnedReason | null;
+    nowMs?: number;
+    /** Only when this opens the breaker: the unread snapshot to owe; `null` owes every unread row. */
+    unreadCeilings?: Record<string, number> | null;
+  },
+): { state: TerminalFailureBreakerState; write: boolean; spawnErrorCounted: boolean; staleReleased: boolean } {
+  const { state: normalized, expired } = normalizeTerminalBreakerLease(current, input.nowMs ?? 0);
+  const index = pendingIndex(normalized, input.launchId, input.daemonInstanceId);
+  const launch = normalized.currentLaunch;
+  const bound = input.nowMs !== undefined
+    && launch !== null
+    && launch.launchId === input.launchId
+    && launch.generation === normalized.generation
+    && launch.terminal === null;
+  const counts = bound && input.reason === "spawn_error";
+  const releasesProbe = bound && !counts && normalized.state === "half_open" && launch!.isProbe;
+  // Only a launch proven never started, or refused as stale, leaves its demand
+  // unserved for a re-serve; any other refusal keeps today's rule (the next
+  // wake retries), so no reason can drive a start loop.
+  const unclaims = bound
+    && (input.reason === "spawn_error" || input.reason === "stale_dispatch")
+    && normalized.wakeDemand?.claimedLaunchId === input.launchId;
+  if (index < 0 && !counts && !releasesProbe && !unclaims) {
+    return { state: expired ? normalized : current, write: expired, spawnErrorCounted: false, staleReleased: false };
+  }
+  const state = cloneTerminalFailureBreakerState(normalized);
+  if (index >= 0) state.unexited.splice(index, 1);
+  if (unclaims) state.wakeDemand = { ...state.wakeDemand!, claimedSeq: null, claimedLaunchId: null };
+  if (counts) {
+    const nowMs = input.nowMs!;
+    const count = (state.spawnError?.count ?? 0) + 1;
+    state.spawnError = { count, lastLaunchId: input.launchId, lastAtMs: nowMs };
+    const failure: TerminalLastFailure = { kind: "spawn_error", fingerprint: "spawn_error", launchId: input.launchId, sessionId: null, atMs: nowMs };
+    state.lastFailure = failure;
+    state.diagnostics = { ...state.diagnostics, lastFailure: failure };
+    state.currentLaunch = { ...launch!, terminal: "e1", leaseExpiresAtMs: null };
+    let until = nowMs + spawnErrorBackoffMs(count);
+    if (state.state === "open" && state.blockedUntilMs !== null) until = Math.max(until, state.blockedUntilMs);
+    if (state.state === "half_open" && state.totalCount > 0) {
+      state.backoffStep = nextBackoffStep(state.backoffStep);
+      until = Math.max(until, nowMs + backoffMs(state.backoffStep));
+    }
+    state.blockedUntilMs = until;
+    if (state.state !== "open") {
+      state.openedAtMs = state.openedAtMs ?? nowMs;
+      state.catchupObligation = raiseCatchupObligation(state.catchupObligation, input.unreadCeilings ?? null);
+      withTransition(state, "open", "spawn_error", nowMs);
+    }
+  } else if (releasesProbe) {
+    state.lastProbe = state.currentLaunch;
+    state.currentLaunch = null;
+    withTransition(state, "open", "probe_not_spawned", input.nowMs!);
+  }
   finishTransition(state);
-  return { state, write: true };
+  return { state, write: true, spawnErrorCounted: counts, staleReleased: bound && input.reason === "stale_dispatch" };
+}
+
+/**
+ * task #365: may the retry sweep start this agent now? Only a breaker the
+ * spawn-error backoff opened, with an unserved wake demand, whose backoff
+ * plus the agent's fixed jitter has passed, and that nothing else blocks.
+ * The sweep still goes through the normal gate and claim (one probe).
+ */
+export function isSpawnErrorRetryDue(current: TerminalFailureBreakerState, input: { nowMs: number; jitterMs: number }): boolean {
+  const { state } = normalizeTerminalBreaker(current, input.nowMs);
+  return state.state === "open"
+    && state.lastFailure?.kind === "spawn_error"
+    && state.spawnError !== null
+    // A breaker RFC 071 failures opened waits for the next wake, as RFC 071 says.
+    && state.totalCount === 0
+    && state.wakeDemand !== null
+    && state.blockedUntilMs !== null
+    && input.nowMs >= state.blockedUntilMs + input.jitterMs
+    && state.needsManual === null
+    && !state.unexitedOverflow
+    && blockingUnexitedEntries(state).length === 0;
 }
 
 // --- Outbox frames (RFC 071 part 3: dedup watermark, one commit) ---
@@ -1745,7 +2034,7 @@ export type TerminalOutboxFrame =
   }
   | { kind: "process_exited"; daemonInstanceId: string; clientSeq: number; processInstanceId: string; spawnLaunchId: string | null; launchId: string }
   | { kind: "start_rebound"; daemonInstanceId: string; clientSeq: number; launchId: string; processInstanceId: string }
-  | { kind: "start_not_spawned"; daemonInstanceId: string; clientSeq: number; launchId: string }
+  | { kind: "start_not_spawned"; daemonInstanceId: string; clientSeq: number; launchId: string; reason?: AgentStartNotSpawnedReason | null }
   | { kind: "evidence_lost"; daemonInstanceId: string; clientSeq: number; reason: string };
 
 export function terminalOutboxFrameSeq(frame: TerminalOutboxFrame): TerminalFrameSeq {
@@ -1862,9 +2151,17 @@ export function applyTerminalOutboxFrame(
       break;
     }
     case "start_not_spawned": {
-      const applied = applyTerminalStartRejectedBeforeSpawn(current, { launchId: frame.launchId, daemonInstanceId: frame.daemonInstanceId });
+      const applied = applyTerminalStartRejectedBeforeSpawn(current, {
+        launchId: frame.launchId,
+        daemonInstanceId: frame.daemonInstanceId,
+        reason: frame.reason ?? null,
+        nowMs: input.nowMs,
+        unreadCeilings: input.unreadCeilings,
+      });
       next = applied.state;
-      outcome = applied.write ? "pending_removed" : "unmatched";
+      outcome = applied.spawnErrorCounted ? "spawn_error_counted"
+        : applied.staleReleased ? "stale_dispatch_released"
+          : applied.write ? "pending_removed" : "unmatched";
       break;
     }
     case "evidence_lost": {
@@ -2012,6 +2309,13 @@ function decodeBatch(value: unknown): Required<CatchupBatch> {
     }),
     candidateCapHit: bool(o.candidateCapHit),
     allUnreadCovered: bool(o.allUnreadCovered),
+    // Added after schema 1 shipped (dormant): a record written without it
+    // is still readable and has settled nothing by cursor. A present but
+    // malformed value is still rejected.
+    settledByCursor: o.settledByCursor === undefined ? [] : arr(o.settledByCursor, (v): Required<CatchupCursorSettlement> => {
+      const c = obj(v);
+      return { conversationId: str(c.conversationId), readCursor: num(c.readCursor), ceiling: num(c.ceiling) };
+    }),
   };
 }
 
@@ -2112,6 +2416,16 @@ export function decodeTerminalFailureBreakerState(raw: unknown): TerminalFailure
       outboxWatermarks: Object.fromEntries(Object.entries(obj(o.outboxWatermarks)).map(([id, seq]) => [id, int(seq)])),
       outboxWatermarksLost: bool(o.outboxWatermarksLost),
       takeoverEpoch: int(o.takeoverEpoch),
+      // task #365 fields may be absent (review of #9140): a replica on an
+      // older build rewrites the record without them during a rolling deploy.
+      spawnError: o.spawnError === undefined ? null : orNull(o.spawnError, (v): Required<TerminalSpawnErrorEvidence> => {
+        const e = obj(v);
+        return { count: int(e.count), lastLaunchId: str(e.lastLaunchId), lastAtMs: num(e.lastAtMs) };
+      }),
+      wakeDemand: o.wakeDemand === undefined ? null : orNull(o.wakeDemand, (v): Required<TerminalWakeDemand> => {
+        const d = obj(v);
+        return { seq: int(d.seq), sinceMs: num(d.sinceMs), claimedSeq: d.claimedSeq === null ? null : int(d.claimedSeq), claimedLaunchId: strOrNull(d.claimedLaunchId) };
+      }),
     };
     return state;
   } catch (error) {
@@ -2135,5 +2449,7 @@ export function terminalBreakerTtlSeconds(state: TerminalFailureBreakerState): n
   // let a replay apply again (review of #8824). A record holding one persists.
   if (Object.keys(state.outboxWatermarks).length > 0 || state.outboxWatermarksLost) return 0;
   if (state.needsManual !== null || state.unexited.length > 0 || state.unexitedOverflow || state.catchupObligation !== null) return 0;
+  // task #365: an unserved wake must not vanish with the record.
+  if (state.wakeDemand !== null) return 0;
   return TERMINAL_FAILURE_CLOSED_TTL_SEC;
 }

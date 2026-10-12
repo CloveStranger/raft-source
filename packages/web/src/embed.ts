@@ -87,6 +87,15 @@ export function getEmbedMode(): EmbedMode {
   return latched;
 }
 
+/** Test seam: force the latched mode, and get back a function that restores it. */
+export function __setEmbedModeForTests(mode: EmbedMode | null): () => void {
+  const previous = latched;
+  latched = mode;
+  return () => {
+    latched = previous;
+  };
+}
+
 /** True when the native shell owns the title bar ⇒ web renders no header chrome. */
 export function isHostShell(): boolean {
   const mode = getEmbedMode();
@@ -148,3 +157,16 @@ export const __embedTestInternals = {
   SUPPORTED_EMBED,
   reset: () => { latched = null; },
 };
+
+/**
+ * Whether this document shows the chat surfaces (sidebar, rail, channels, inbox).
+ *
+ * A host-shell embed renders one settings surface inside a native app: Computers,
+ * a computer, or a settings tab. None of them reads the channel list, DMs, unread
+ * counts, the inbox, saved messages, followed threads, the sidebar order or
+ * announcements, so the startup loads for those are skipped there. On a phone that
+ * is most of the requests the page used to issue before its own data.
+ */
+export function hasChatSurfaces(): boolean {
+  return !isHostShell();
+}

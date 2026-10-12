@@ -37,11 +37,17 @@ import {
 } from "./externalAttachmentTransferService";
 import { linkAttachmentsToMessageWithExecutor } from "./attachmentLinkingService";
 import { applyExternalReactionObservation } from "./externalReactionSyncService";
+import {
+  normalizeSlackMentionHandle,
+  renderSlackUsergroupMentions,
+  type SlackUsergroupMention,
+} from "./slackMentionTokens";
 
 const INBOUND_LEASE_MS = 60_000;
 const INBOUND_BLOCKED_RETRY_MS = 30_000;
 const INBOUND_PAYLOAD_SCHEMA_V1 = "external-inbound-normalized-event.v1" as const;
 const INBOUND_PAYLOAD_SCHEMA_V2 = "external-inbound-normalized-event.v2" as const;
+const INBOUND_PAYLOAD_SCHEMA_V3 = "external-inbound-normalized-event.v3" as const;
 const INBOUND_REACTION_PAYLOAD_SCHEMA = "external-inbound-normalized-reaction.v1" as const;
 const ATTACHMENT_UNAVAILABLE_MARKER = "[One or more attachments unavailable]";
 
@@ -86,11 +92,19 @@ type ExternalInboundNormalizedMessageFields = {
 export type ExternalInboundNormalizedMessage = ExternalInboundNormalizedMessageFields & (
   | { schema: typeof INBOUND_PAYLOAD_SCHEMA_V1 }
   | { schema: typeof INBOUND_PAYLOAD_SCHEMA_V2; providerFileIds: string[] }
+  | {
+      schema: typeof INBOUND_PAYLOAD_SCHEMA_V3;
+      providerFileIds: string[];
+      providerAgentMentions: SlackUsergroupMention[];
+    }
 );
 
 type ParsedExternalInboundNormalizedMessage = ExternalInboundNormalizedMessageFields & {
-  schema: typeof INBOUND_PAYLOAD_SCHEMA_V1 | typeof INBOUND_PAYLOAD_SCHEMA_V2;
+  schema: typeof INBOUND_PAYLOAD_SCHEMA_V1
+    | typeof INBOUND_PAYLOAD_SCHEMA_V2
+    | typeof INBOUND_PAYLOAD_SCHEMA_V3;
   providerFileIds: string[];
+  providerAgentMentions: SlackUsergroupMention[];
 };
 
 type ParsedExternalInboundNormalizedReaction = {
@@ -158,6 +172,16 @@ export interface ExternalInboundWorkerDependencies {
     providerUserIds: readonly string[];
     signal?: AbortSignal;
   }): Promise<readonly { providerUserId: string; displayName: string; handle: string | null }[]>;
+  resolveProviderAgentMentionHandles?(input: {
+    eventId: string;
+    frozenAuthority: ExternalInboundRuntimeAuthority;
+    providerUsergroupIds: readonly string[];
+    signal?: AbortSignal;
+  }): Promise<readonly {
+    agentId: string;
+    providerUsergroupId: string;
+    handle: string;
+  }[] | null>;
   onMessageCommitted?(input: { eventId: string; messageId: string }): Promise<void> | void;
   onMessageCommittedError?(error: unknown): void;
   onReactionCommitted?(input: { eventId: string; messageId: string }): Promise<void> | void;
@@ -296,6 +320,56 @@ async function renderProviderInboundMentions(
   return renderSlackInboundMentionLabels(content, labels);
 }
 
+type ResolvedSlackAgentMention = {
+  agentId: string;
+  handle: string;
+  providerUsergroupId: string;
+  label: string;
+};
+
+async function resolveSlackAgentMentions(
+  executor: DatabaseExecutor,
+  event: InboundEvent,
+  mentions: readonly SlackUsergroupMention[],
+  providerHandles: readonly {
+    agentId: string;
+    providerUsergroupId: string;
+    handle: string;
+  }[],
+): Promise<ResolvedSlackAgentMention[]> {
+  const requestedIds = new Set(mentions.map((mention) => mention.providerUsergroupId));
+  if (event.provider !== "slack" || requestedIds.size === 0) return [];
+  const rows = await executor.select({
+    agentId: agents.id,
+    name: agents.name,
+  }).from(channelAgents)
+    .innerJoin(channels, eq(channels.id, channelAgents.channelId))
+    .innerJoin(agents, and(
+      eq(agents.id, channelAgents.agentId),
+      eq(agents.serverId, channels.serverId),
+      isNull(agents.deletedAt),
+    ))
+    .where(eq(channelAgents.channelId, event.raftChannelId));
+  const channelAgentsById = new Map(rows.map((row) => [row.agentId, row]));
+  const byProviderId = new Map(providerHandles
+    .filter((handle) => requestedIds.has(handle.providerUsergroupId))
+    .map((handle) => [handle.providerUsergroupId, handle]));
+  const resolved = new Map<string, ResolvedSlackAgentMention>();
+  for (const mention of mentions) {
+    const providerHandle = byProviderId.get(mention.providerUsergroupId);
+    if (!providerHandle) continue;
+    const agent = channelAgentsById.get(providerHandle.agentId);
+    if (!agent) continue;
+    resolved.set(agent.agentId, {
+      agentId: agent.agentId,
+      handle: agent.name,
+      providerUsergroupId: mention.providerUsergroupId,
+      label: `@${agent.name}`,
+    });
+  }
+  return [...resolved.values()].sort((left, right) => left.agentId.localeCompare(right.agentId));
+}
+
 function parseNormalizedMessage(
   plaintext: string,
   expectedDigest: string,
@@ -318,15 +392,23 @@ function parseNormalizedMessage(
     "providerMessageId",
     "providerThreadId",
   ];
-  const expectedKeys = message.schema === INBOUND_PAYLOAD_SCHEMA_V2
-    ? [...commonKeys, "providerFileIds", "schema"].sort()
-    : [...commonKeys, "schema"].sort();
+  const expectedKeys = message.schema === INBOUND_PAYLOAD_SCHEMA_V3
+    ? [...commonKeys, "providerAgentMentions", "providerFileIds", "schema"].sort()
+    : message.schema === INBOUND_PAYLOAD_SCHEMA_V2
+      ? [...commonKeys, "providerFileIds", "schema"].sort()
+      : [...commonKeys, "schema"].sort();
   if (Object.keys(message).sort().join("\0") !== expectedKeys.join("\0")) return null;
   const providerFileIds = message.schema === INBOUND_PAYLOAD_SCHEMA_V2
+    || message.schema === INBOUND_PAYLOAD_SCHEMA_V3
     ? message.providerFileIds
     : [];
+  const providerAgentMentions = message.schema === INBOUND_PAYLOAD_SCHEMA_V3
+    ? message.providerAgentMentions
+    : [];
   if (
-    (message.schema !== INBOUND_PAYLOAD_SCHEMA_V1 && message.schema !== INBOUND_PAYLOAD_SCHEMA_V2)
+    (message.schema !== INBOUND_PAYLOAD_SCHEMA_V1
+      && message.schema !== INBOUND_PAYLOAD_SCHEMA_V2
+      && message.schema !== INBOUND_PAYLOAD_SCHEMA_V3)
     || !nonEmpty(message.projectionId)
     || !positive(message.actorProjectionRevision)
     || !nonEmpty(message.externalActorId)
@@ -340,8 +422,28 @@ function parseNormalizedMessage(
     || providerFileIds.length > 10
     || providerFileIds.some((fileId) => !nonEmpty(fileId, 320))
     || new Set(providerFileIds).size !== providerFileIds.length
+    || !Array.isArray(providerAgentMentions)
+    || providerAgentMentions.length > 50
+    || providerAgentMentions.some((mention) => {
+      if (!mention || typeof mention !== "object" || Array.isArray(mention)) return true;
+      const record = mention as Record<string, unknown>;
+      return Object.keys(record).sort().join("\0") !== "handle\0providerUsergroupId"
+        || !nonEmpty(record.providerUsergroupId, 160)
+        || !/^S[A-Z0-9]{2,}$/u.test(record.providerUsergroupId as string)
+        || !(record.handle === null || (
+          nonEmpty(record.handle, 80)
+          && normalizeSlackMentionHandle(record.handle as string) === record.handle
+        ));
+    })
+    || new Set(providerAgentMentions.map((mention) => (
+      (mention as SlackUsergroupMention).providerUsergroupId
+    ))).size !== providerAgentMentions.length
   ) return null;
-  return { ...message, providerFileIds } as unknown as ParsedExternalInboundNormalizedMessage;
+  return {
+    ...message,
+    providerFileIds,
+    providerAgentMentions,
+  } as unknown as ParsedExternalInboundNormalizedMessage;
 }
 
 function parseNormalizedReaction(
@@ -985,6 +1087,31 @@ export async function processExternalInboundEventOnce(input: {
       }).catch(() => []);
   }
 
+  let providerAgentMentionHandles: readonly {
+    agentId: string;
+    providerUsergroupId: string;
+    handle: string;
+  }[] = [];
+  if (payload && payload.providerAgentMentions.length > 0) {
+    if (!input.dependencies.resolveProviderAgentMentionHandles) {
+      await releaseClaim("provider_agent_mention_unavailable");
+      return { kind: "blocked", eventId: claim.id, reason: "provider_agent_mention_unavailable" };
+    }
+    const resolved = await input.dependencies.resolveProviderAgentMentionHandles({
+      eventId: claim.id,
+      frozenAuthority: frozen,
+      providerUsergroupIds: payload.providerAgentMentions.map((mention) => (
+        mention.providerUsergroupId
+      )),
+      signal: input.signal,
+    }).catch(() => null);
+    if (resolved === null) {
+      await releaseClaim("provider_agent_mention_unavailable");
+      return { kind: "blocked", eventId: claim.id, reason: "provider_agent_mention_unavailable" };
+    }
+    providerAgentMentionHandles = resolved;
+  }
+
   if (reactionPayload) {
     const reactionAt = input.dependencies.now?.() ?? currentDate();
     try {
@@ -1213,11 +1340,24 @@ export async function processExternalInboundEventOnce(input: {
       const unavailableAttachment = attachmentFacts.some(
         (fact) => fact.state === "unavailable" || fact.state === "revoked",
       );
+      const resolvedAgentMentions = await resolveSlackAgentMentions(
+        executor,
+        event,
+        payload.providerAgentMentions,
+        providerAgentMentionHandles,
+      );
       const providerRenderedContent = await renderProviderInboundMentions(
         executor,
         event,
         payload.content,
         providerMentionProfiles,
+      );
+      const agentRenderedContent = renderSlackUsergroupMentions(
+        providerRenderedContent,
+        new Map(resolvedAgentMentions.map((mention) => [
+          mention.providerUsergroupId,
+          mention.label,
+        ])),
       );
       const [sourceInstall] = await executor
         .select({ workspaceName: externalAppInstalls.workspaceName, botUserId: externalAppInstalls.botUserId })
@@ -1232,8 +1372,8 @@ export async function processExternalInboundEventOnce(input: {
         executor,
         channelId: target.channel.id,
         content: unavailableAttachment
-          ? appendAttachmentUnavailableMarker(providerRenderedContent)
-          : providerRenderedContent,
+          ? appendAttachmentUnavailableMarker(agentRenderedContent)
+          : agentRenderedContent,
         createdAt: new Date(payload.createdAt),
         projectionId: payload.projectionId,
         provider: event.provider,
@@ -1465,7 +1605,20 @@ export async function processExternalInboundEventOnce(input: {
           })),
         ).onConflictDoNothing();
       }
-
+      if (resolvedAgentMentions.length > 0) {
+        await executor.insert(messageMentions).values(resolvedAgentMentions.map((mention) => ({
+          messageId: result.message.id,
+          messageSeq: result.message.seq,
+          serverId: mentionOriginServerId,
+          channelId: mentionOriginChannelId,
+          targetType: "agent" as const,
+          targetId: mention.agentId,
+          handleAtSendTime: mention.handle,
+          source: "send_path" as const,
+          confidence: "exact" as const,
+          notifiableAtSend: true,
+        }))).onConflictDoNothing();
+      }
       const [messageLink] = await executor.insert(externalMessageLinks).values({
         provider: event.provider,
         installId: event.installId,

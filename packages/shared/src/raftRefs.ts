@@ -12,6 +12,48 @@ export const RAFT_REF_TASK_NUMBER_PATTERN = String.raw`[1-9]\d*`;
 export const RAFT_REF_COMPUTER_ID_PATTERN = String.raw`[\da-f]{8}-[\da-f]{4}-[1-5][\da-f]{3}-[89ab][\da-f]{3}-[\da-f]{12}`;
 export const RAFT_REF_APP_ID_PATTERN = String.raw`[a-z][a-z0-9]*(?:\.[a-z][a-z0-9]*)+`;
 
+// Han, kana and hangul may follow a handle directly: CJK writing puts particles
+// and suffixes (`@ops的`, `@opsさん`, `@ops와`) against the name without a
+// space. Latin letters, digits, `_` and `-` still continue the handle.
+const RAFT_MENTION_CJK_SUFFIX_START = String.raw`[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]`;
+const RAFT_MENTION_CJK_SUFFIX_START_RE = new RegExp(`^${RAFT_MENTION_CJK_SUFFIX_START}`, "u");
+const RAFT_MENTION_NON_CJK_HANDLE_END_RE = /[\p{Script=Latin}\p{N}_-]$/u;
+
+/**
+ * Resolve a free-text mention token against known handles.
+ *
+ * An exact match wins. Otherwise the token is split only where the writing
+ * system changes: a Latin/digit/`_`/`-` character followed by Han, kana or
+ * hangul. Nothing is guessed inside one script, so `@opsteam` never reaches
+ * `ops` and a CJK handle with a glued particle (`@민수가`) stays unresolved;
+ * the composer's identity-backed mention covers that case. If the split point
+ * is a guess (two valid splits both name members, or a longer member name is
+ * also a prefix of the token), the token stays unresolved.
+ */
+export function resolveRaftMentionHandle(
+  token: string,
+  isKnownHandle: (handle: string) => boolean,
+): { handle: string; suffix: string } | null {
+  if (isKnownHandle(token)) return { handle: token, suffix: "" };
+  const chars = Array.from(token);
+  const splits = [];
+  for (let length = 1; length < chars.length; length += 1) {
+    const handle = chars.slice(0, length).join("");
+    const suffix = chars.slice(length).join("");
+    if (!RAFT_MENTION_NON_CJK_HANDLE_END_RE.test(handle)) continue;
+    if (!RAFT_MENTION_CJK_SUFFIX_START_RE.test(suffix)) continue;
+    if (isKnownHandle(handle)) splits.push({ length, handle, suffix });
+  }
+  // `ops` and `ops君a` for `@ops君a的`: two members fit, so the split is a guess.
+  if (splits.length !== 1) return null;
+  const [{ length, handle, suffix }] = splits;
+  // A longer member name also fits (`ops` and `ops君` for `@ops君的`).
+  for (let longer = length + 1; longer < chars.length; longer += 1) {
+    if (isKnownHandle(chars.slice(0, longer).join(""))) return null;
+  }
+  return { handle, suffix };
+}
+
 export function createRaftUserRefRegex(): RegExp {
   return new RegExp(`(^|[^\\p{L}\\p{N}_-])@(${RAFT_REF_USER_NAME_PATTERN})`, "gu");
 }
@@ -20,7 +62,9 @@ export function createRaftUserRefRegex(): RegExp {
  * Match one identity-backed mention that the composer already resolved.
  *
  * Unlike free-text discovery, this intentionally has no left boundary: a
- * selected mention remains an entity in `草案@Mona` or `draft@Mona`. The
+ * selected mention remains an entity in `草案@Mona` or `draft@Mona`. On the
+ * right it may be followed by Han, kana or hangul (`@Mona的`), but not by
+ * Latin letters, digits, `_` or `-`. The
  * caller must already hold structured identity metadata for `handle`; using
  * this regex to discover mentions in arbitrary text would turn emails and
  * package-like strings into accidental notifications.
@@ -28,7 +72,7 @@ export function createRaftUserRefRegex(): RegExp {
 export function createRaftStructuredUserRefRegex(handle: string): RegExp | null {
   if (!new RegExp(`^${RAFT_REF_USER_NAME_PATTERN}$`, "u").test(handle)) return null;
   const escapedHandle = handle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  return new RegExp(`@${escapedHandle}(?![\\p{L}\\p{N}_-])`, "gu");
+  return new RegExp(`@${escapedHandle}(?!(?!${RAFT_MENTION_CJK_SUFFIX_START})[\\p{L}\\p{N}_-])`, "gu");
 }
 
 export function createRaftChannelThreadRefRegex(): RegExp {

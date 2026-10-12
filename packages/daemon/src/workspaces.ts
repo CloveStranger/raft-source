@@ -1,4 +1,5 @@
 import { access, mkdir, readdir, rm, stat, writeFile } from "node:fs/promises";
+import os from "node:os";
 import { RUNTIME_OUTCOME_OUTBOX_DIR_NAME } from "./runtimeOutcomeOutbox";
 import path from "node:path";
 import type { WorkspaceDirectoryInfo } from "@botiverse/raft-shared";
@@ -129,6 +130,15 @@ async function summarizeWorkspaceDirectory(dirPath: string): Promise<WorkspaceDi
   return summary;
 }
 
+/** `~/…` for a path under the user's home, else the absolute path; trailing separator marks a directory. */
+export function workspaceDisplayPath(dirPath: string, homeDir: string = os.homedir()): string {
+  const resolved = path.resolve(dirPath);
+  const home = path.resolve(homeDir);
+  const prefix = `${home}${path.sep}`;
+  const shown = resolved.startsWith(prefix) ? `~/${resolved.slice(prefix.length).split(path.sep).join("/")}` : resolved;
+  return `${shown}/`;
+}
+
 export async function scanWorkspaceDirectories(dataDir: string): Promise<WorkspaceDirectoryInfo[]> {
   let entries;
   try {
@@ -138,7 +148,7 @@ export async function scanWorkspaceDirectories(dataDir: string): Promise<Workspa
   }
 
   const results = await Promise.all(
-    entries.map(async (entry) => {
+    entries.map(async (entry): Promise<WorkspaceDirectoryInfo | null> => {
       // RFC 071: the runtime-outcome outbox lives beside the workspaces; it is not one.
       if (!entry.isDirectory() || entry.name === RUNTIME_OUTCOME_OUTBOX_DIR_NAME) {
         return null;
@@ -152,6 +162,7 @@ export async function scanWorkspaceDirectories(dataDir: string): Promise<Workspa
           totalSizeBytes: summary.totalSizeBytes,
           lastModified: summary.latestMtime.toISOString(),
           fileCount: summary.fileCount,
+          displayPath: workspaceDisplayPath(dirPath),
         } satisfies WorkspaceDirectoryInfo;
       } catch {
         return null;

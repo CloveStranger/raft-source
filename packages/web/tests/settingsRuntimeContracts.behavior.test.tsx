@@ -5,11 +5,9 @@ import { act, cleanup, render, screen, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 
 import api from "../src/api/client";
-import SettingsNavList from "../src/components/settings/SettingsNavList";
 import SettingsPanel, { PlanSection } from "../src/components/settings/SettingsPanel";
 import {
   SETTINGS_TABS,
-  SETTINGS_TAB_NAV_LABEL_ID,
   SETTINGS_TAB_TITLE_ID,
   canOpenSettingsTab,
 } from "../src/components/settings/settingsNavigation";
@@ -106,19 +104,14 @@ function renderEn(node: ReactNode) {
   );
 }
 
-test("every settings tab has a nav label and a header title in both catalogs", () => {
+test("every settings tab has a header title in both catalogs", () => {
   const ids = SETTINGS_TABS.map((tab) => tab.id);
   assert.ok(ids.length >= 12, `expected the full tab set, got ${ids.length}`);
   for (const id of ids) {
-    for (const [which, map] of [
-      ["nav", SETTINGS_TAB_NAV_LABEL_ID],
-      ["title", SETTINGS_TAB_TITLE_ID],
-    ] as const) {
-      const messageId = map[id];
-      assert.ok(messageId, `${id}: no ${which} message id`);
-      assert.ok(en[messageId], `${id}: ${which} id ${messageId} missing from en`);
-      assert.ok(zh[messageId], `${id}: ${which} id ${messageId} missing from zh`);
-    }
+    const messageId = SETTINGS_TAB_TITLE_ID[id];
+    assert.ok(messageId, `${id}: no title message id`);
+    assert.ok(en[messageId], `${id}: title id ${messageId} missing from en`);
+    assert.ok(zh[messageId], `${id}: title id ${messageId} missing from zh`);
   }
 });
 
@@ -175,19 +168,11 @@ test("the mounted free-plan notice renders the global last active trial day", ()
   assert.ok(screen.getByText(/Full-featured free trial remains active through Jun 22, 2026/));
 });
 
-test("the About nav item and panel header both resolve through the zh catalog", () => {
+test("the About panel header resolves through the zh catalog", () => {
   seedSettings();
-  renderZh(
-    <>
-      <SettingsNavList activeTab="about" onSelect={() => {}} />
-      <SettingsPanel tab="about" />
-    </>,
-  );
+  renderZh(<SettingsPanel tab="about" />);
 
-  const nav = screen.getByTestId("workspace-settings-navigation");
   const header = screen.getByTestId("settings-panel-header");
-  assert.ok(within(nav).getByText("关于"), "sidebar nav resolves SETTINGS_TAB_NAV_LABEL_ID.about");
   assert.ok(within(header).getByText("关于"), "panel header resolves SETTINGS_TAB_TITLE_ID.about");
-  assert.equal(within(nav).queryByText("About"), null);
   assert.equal(within(header).queryByText("About"), null);
 });

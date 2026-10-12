@@ -53,7 +53,10 @@ test("Sidebar no longer carries the unreachable machine context-menu chain", () 
 test("logout and signed-in identity copy stay on the canonical wording", () => {
   const app = read("src/App.tsx");
   const emailVerification = read("src/components/auth/EmailVerificationPage.tsx");
-  const serverSelector = read("src/components/auth/ServerSelector.tsx");
+  const serverSelector = [
+    read("src/components/auth/ServerSelector.tsx"),
+    read("src/components/auth/ServerOptionCard.tsx"),
+  ].join("\n");
   const settings = read("src/components/settings/SettingsPanel.tsx");
 
   for (const [label, source] of Object.entries({ app, emailVerification, serverSelector, settings })) {
@@ -103,11 +106,9 @@ test("raw Modal usage is pinned so new hand-rolled confirmations cannot slip in"
     // than zeroed: this is a deepEqual against the real reading, so a stale entry
     // would quietly re-permit the count it used to allow. Lowering a ratchet is as
     // deliberate an act as raising one.
-    "src/components/AnnouncementModal.tsx": 1,
     // task #677: ConfirmDialog left this map by migrating its frame to the rui
     // Dialog family — confirmations are now design-system-owned end to end.
     "src/components/agent/AgentDetailPanel.tsx": 1,
-    "src/components/agentMigration/AgentMigrationDialog.tsx": 1,
     "src/components/agent/ChannelMembers.tsx": 1,
     // Flag-off compatibility keeps the pre-overflow member modal isolated so
     // disabling the rollout really returns to the old surface.
@@ -119,14 +120,15 @@ test("raw Modal usage is pinned so new hand-rolled confirmations cannot slip in"
     // 5, not 4, since #4799 (embedded-WebView settings). Verified before bumping: none of
     // MainLayout's Modals is a confirmation — they wrap the thread panel, the legacy task
     // panel and workspace settings. The guard's PURPOSE (no hand-rolled confirmations) is
-    // intact; only its count drifted.
+    // intact; only its count drifted. Back to 4 since the Workspace grid layout and its
+    // settings Modal were removed.
     //
     // Worth noting how this broke. #4799 added the Modal at 17:43 and #4766 added this
     // baseline at 17:45, computed before #4799 landed. Both PRs were green alone and red
     // together, and staging has been red for everyone since — the same shape as tonight's
     // migration-number collisions. A baseline is a READING, and a reading can go stale while
     // you are looking away.
-    "src/components/layout/MainLayout.tsx": 5,
+    "src/components/layout/MainLayout.tsx": 4,
     "src/components/layout/SidebarSectionDialog.tsx": 1,
     "src/components/machine/AddMachineDialog.tsx": 1,
     // ForwardComposerDialog left this map and ForwardComposerDesktop entered it:

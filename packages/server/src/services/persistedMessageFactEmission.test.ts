@@ -21,6 +21,7 @@ import {
 import { prepareActionCard } from "./actionCardsService";
 import { broadcastAndDeliver, broadcastSystemMessage, recordInboxFactsForPersistedMessages } from "./messageService";
 import * as taskService from "./taskService";
+import { withChannelDelivery } from "../test/orchestratorStub";
 
 
 afterEach(async () => {
@@ -101,7 +102,7 @@ test("persisted message boundary emits inbox facts for every countable message c
 
   const { owner, member, server, agent, channel } = await seedSurface();
   const io = createIoStub();
-  const agentOrchestrator = { deliverMessage: async () => undefined } as any;
+  const agentOrchestrator = withChannelDelivery({ deliverMessage: async () => undefined }) as any;
 
   const regular = await broadcastAndDeliver(io, agentOrchestrator, {
     channelId: channel.id,

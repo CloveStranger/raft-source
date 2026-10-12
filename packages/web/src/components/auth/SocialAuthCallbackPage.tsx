@@ -19,6 +19,10 @@ function isSocialAuthProviderId(value: string | null): value is SocialAuthProvid
   return value === "google" || value === "github" || value === "apple";
 }
 
+function navigateHome() {
+  window.location.replace("/");
+}
+
 function getProviderLabel(
   provider: SocialAuthProviderId | null,
   formatMessage: IntlShape["formatMessage"],
@@ -140,6 +144,10 @@ export default function SocialAuthCallbackPage() {
     }
   }, [callbackParams, loadUser, setTokens, formatMessage]);
 
+  const handleFinishWithLegalAcceptance = useCallback(() => {
+    void finishSignIn(true);
+  }, [finishSignIn]);
+
   useLayoutEffect(() => {
     window.history.replaceState(null, "", `${window.location.pathname}${window.location.hash}`);
   }, []);
@@ -183,7 +191,7 @@ export default function SocialAuthCallbackPage() {
             <Button
               type="button"
               disabled={!acceptedLegal || finishing}
-              onClick={() => void finishSignIn(true)}
+              onClick={handleFinishWithLegalAcceptance}
               size="lg"
               variant="accent"
               className="w-full"
@@ -199,7 +207,7 @@ export default function SocialAuthCallbackPage() {
             <Button size="sm"
               type="button"
               variant="outline"
-              onClick={() => window.location.replace("/")}
+              onClick={navigateHome}
             >
               {formatMessage({ id: "auth.backToSignIn.button" })}
             </Button>

@@ -20,7 +20,9 @@
  *   the static provider select, `claude.option-source.fallback.json` Claude's
  *   bundled list while the Computer is offline, `cursor.option-source.fallback.json` Cursor's
  *   bundled list when its probe is not live, and `copilot.option-source.live.json`
- *   Copilot's declared static catalog as the Computer reports it.
+ *   Copilot's declared static catalog as the Computer reports it. Copilot CLI is
+ *   deprecated (edit-only, like the batch 2 deprecated runtimes), so it has
+ *   `copilot.edit.json` (a stored custom model) and no `.form.json`.
  * - batch 4 (Pi): `pi.form.json`; `pi.edit.json` is a built-in provider
  *   (DeepSeek; its stored API key is never in `values`) and
  *   `pi.edit.configured.json` the Configured provider with a typed custom
@@ -41,9 +43,9 @@ import { getStaticRuntimeModelSourceSet } from "@botiverse/raft-shared";
 
 import {
   buildRuntimeFormV2,
+  buildRuntimeFormV2EditBody,
   reasoningModelOptionSource,
   runtimeFormV2Entry,
-  runtimeFormValuesFromRuntimeConfig,
   type RuntimeFormOptionSourceContext,
 } from "./runtimeFormV2Registry";
 
@@ -70,10 +72,9 @@ async function nonLiveOptionSource(runtimeId: string, outcome: unknown = { kind:
   return (resolution as { source: unknown }).source;
 }
 
-const editFixture = (runtimeId: string, runtimeConfig: Record<string, unknown>) => ({
-  ...buildRuntimeFormV2(runtimeId),
-  values: runtimeFormValuesFromRuntimeConfig({ runtime: runtimeId, ...runtimeConfig }),
-});
+// The route's own builder (GET /api/agents/:id/runtime-form).
+const editFixture = (runtimeId: string, runtimeConfig: Record<string, unknown>) =>
+  buildRuntimeFormV2EditBody(runtimeId, { runtime: runtimeId, ...runtimeConfig });
 
 // Batch 2: OpenCode (create and edit) and the deprecated, edit-only Kimi CLI,
 // Gemini CLI and Antigravity CLI.
@@ -130,7 +131,8 @@ async function staticOptionSource(runtimeId: string, sourceId: string): Promise<
   return (resolution as { source: unknown }).source;
 }
 
-// Batch 3b: Claude (create and edit), Cursor (create and edit) and Copilot (create).
+// Batch 3b: Claude (create and edit), Cursor (create and edit) and the deprecated,
+// edit-only Copilot CLI.
 const batch3bFixtures = async (): Promise<Record<string, unknown>> => ({
   "claude.form.json": buildRuntimeFormV2("claude"),
   "claude.edit.json": editFixture("claude", {
@@ -149,7 +151,11 @@ const batch3bFixtures = async (): Promise<Record<string, unknown>> => ({
     envVars: { EXAMPLE_FLAG: "1" },
   }),
   "cursor.option-source.fallback.json": await nonLiveOptionSource("cursor"),
-  "copilot.form.json": buildRuntimeFormV2("copilot"),
+  "copilot.edit.json": editFixture("copilot", {
+    model: { kind: "custom", name: "vendor/copilot-custom" },
+    reasoningEffort: "high",
+    envVars: { EXAMPLE_FLAG: "1" },
+  }),
   "copilot.option-source.live.json": await nonLiveOptionSource("copilot", {
     kind: "live",
     value: getStaticRuntimeModelSourceSet("copilot"),
@@ -181,31 +187,23 @@ const batch4Fixtures = async (): Promise<Record<string, unknown>> => ({
 const fixtures: Record<string, unknown> = {
   "builtin.form.json": builtinForm,
   "kimi-sdk.form.json": kimiForm,
-  "builtin.edit.json": {
-    ...builtinForm,
-    values: runtimeFormValuesFromRuntimeConfig({
-      runtime: "builtin",
-      provider: {
-        kind: "gateway",
-        providerId: "openai-compatible",
-        baseUrl: "https://gateway.example.test/v1",
-        apiKey: "fixture-secret-must-not-appear",
-        supportsImageInput: true,
-      },
-      model: { kind: "custom", name: "example-model" },
-      loadLocalPlugins: false,
-      envVars: { EXAMPLE_FLAG: "1" },
-    }),
-  },
-  "kimi-sdk.edit.json": {
-    ...kimiForm,
-    values: runtimeFormValuesFromRuntimeConfig({
-      runtime: "kimi-sdk",
-      model: { kind: "preset", id: "kimi-k2" },
-      reasoningEffort: "high",
-      envVars: {},
-    }),
-  },
+  "builtin.edit.json": editFixture("builtin", {
+    provider: {
+      kind: "gateway",
+      providerId: "openai-compatible",
+      baseUrl: "https://gateway.example.test/v1",
+      apiKey: "fixture-secret-must-not-appear",
+      supportsImageInput: true,
+    },
+    model: { kind: "custom", name: "example-model" },
+    loadLocalPlugins: false,
+    envVars: { EXAMPLE_FLAG: "1" },
+  }),
+  "kimi-sdk.edit.json": editFixture("kimi-sdk", {
+    model: { kind: "preset", id: "kimi-k2" },
+    reasoningEffort: "high",
+    envVars: {},
+  }),
 };
 
 test("shared v2 runtime form fixtures match what the server sends", async () => {
@@ -219,7 +217,7 @@ test("shared v2 runtime form fixtures match what the server sends", async () => 
 });
 
 test("edit fixtures never carry a writeOnly value", () => {
-  for (const name of ["builtin.edit.json", "kimi-sdk.edit.json", "opencode.edit.json", "kimi.edit.json", "gemini.edit.json", "antigravity.edit.json", "codex.edit.json", "claude.edit.json", "cursor.edit.json", "pi.edit.json", "pi.edit.configured.json"]) {
+  for (const name of ["builtin.edit.json", "kimi-sdk.edit.json", "opencode.edit.json", "kimi.edit.json", "gemini.edit.json", "antigravity.edit.json", "codex.edit.json", "claude.edit.json", "cursor.edit.json", "copilot.edit.json", "pi.edit.json", "pi.edit.configured.json"]) {
     const text = readFileSync(`${FIXTURES_DIR}${name}`, "utf8");
     assert.doesNotMatch(text, /fixture-secret-must-not-appear/, name);
     const parsed = JSON.parse(text) as { values?: Record<string, unknown> | null };

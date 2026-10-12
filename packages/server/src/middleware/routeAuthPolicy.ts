@@ -341,6 +341,8 @@ export const routeAuthPolicy: readonly RouteAuthPolicyEntry[] = [
   { method: "GET", path: "/internal/agent-api/users/:name/channels", principal: "sk_agent", note: "raft user info — one user's visible facts and memberships over a window of the agent's visible channels" },
   { method: "GET", path: "/internal/agent-api/threads", principal: "sk_agent", note: "RFC v0.8 — agent-self followed thread listing" },
   { method: "GET", path: "/internal/agent-api/inbox/conversations", principal: "sk_agent", note: "raft inbox check — agent-self durable unread conversation listing" },
+  { method: "GET", path: "/internal/agent-api/assistant/owner-inbox", principal: "sk_agent", note: "RFC 074 assistant — owner's inbox minus DMs (assistants only)" },
+  { method: "GET", path: "/internal/agent-api/assistant/owner-messages", principal: "sk_agent", note: "RFC 074 assistant — read an owner-visible channel or thread, never a DM (assistants only)" },
   { method: "POST", path: "/internal/agent-api/threads/unfollow", principal: "sk_agent", note: "RFC v0.8 — agent-self thread unfollow" },
   { method: "GET", path: "/internal/agent-api/profile", principal: "sk_agent", note: "RFC v0.8 — agent-self profile show" },
   { method: "POST", path: "/internal/agent-api/profile", principal: "sk_agent", note: "RFC v0.8 — agent-self profile update" },

@@ -3,6 +3,7 @@ import { fixturePasswordHash } from "../test/integration/credentials";
 import { createApiTest } from "../test/integration/apiTest";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 
 import { and, desc, eq, inArray } from "drizzle-orm";
 import {
@@ -144,6 +145,100 @@ test("GET /api/channels records restore-list phases and constant query shape", a
   assert.equal(Object.values(readyEvent.attrs ?? {}).includes(joinedChannel.id), false);
 });
 
+
+test("GET /api/channels resolves channel authorization in a constant number of queries", async ({ seed, http }) => {
+  type PgliteLike = { query: (...args: unknown[]) => Promise<unknown> };
+  const owner = await seed.human();
+  const server = await seed.server({ owner });
+  const client = http.as(owner, server);
+  const countList = async () => {
+    const pg = (getDb() as unknown as { $client: PgliteLike }).$client;
+    const originalQuery = pg.query.bind(pg);
+    let count = 0;
+    pg.query = ((...args: unknown[]) => {
+      count += 1;
+      return originalQuery(...args);
+    }) as PgliteLike["query"];
+    try {
+      const res = await client.get("/api/channels");
+      assert.equal(res.status, 200);
+      return { count, body: await res.json() as Array<{ id: string; channelRole: string | null; channelCapabilities: Record<string, boolean>; channelAuthorityRevision: number | null }> };
+    } finally {
+      pg.query = originalQuery;
+    }
+  };
+
+  await seed.channel({ server, members: [owner] });
+  await countList();
+  const few = await countList();
+  for (let i = 0; i < 12; i += 1) await seed.channel({ server, members: [owner] });
+  await countList();
+  const many = await countList();
+
+  assert.ok(few.count > 0, "the counter must observe queries");
+  assert.ok(many.body.length >= few.body.length + 12);
+  // Per-channel authorization used to cost three queries per channel.
+  assert.equal(many.count, few.count, `${few.body.length} channels: ${few.count} queries, ${many.body.length} channels: ${many.count}`);
+  for (const channel of many.body) {
+    assert.ok(channel.channelCapabilities && typeof channel.channelCapabilities === "object", channel.id);
+  }
+});
+
+test("GET /api/channels/:id/members reads agent activity as one batch, not per agent", async ({ app, seed, http }) => {
+  type PgliteLike = { query: (...args: unknown[]) => Promise<unknown> };
+  const owner = await seed.human();
+  const server = await seed.server({ owner });
+  const channel = await seed.channel({ server, members: [owner] });
+  const client = http.as(owner, server);
+  const orchestrator = app.app.get("agentOrchestrator") as {
+    getActivity: (agentId: string) => Promise<{ activity: string; activityDetail: string }>;
+    getActivities: (rows: ReadonlyArray<{ id: string }>) => Promise<Array<{ activity: string; activityDetail: string }>>;
+  };
+  let singleReads = 0;
+  orchestrator.getActivity = async () => {
+    singleReads += 1;
+    return { activity: "offline", activityDetail: "" };
+  };
+  orchestrator.getActivities = async (rows) => rows.map(() => ({ activity: "online", activityDetail: "batched" }));
+  const addAgents = async (size: number) => {
+    for (let i = 0; i < size; i += 1) {
+      const agent = await createAgent(server.id, `members-${randomUUID().slice(0, 8)}`, { runtime: "claude", model: "sonnet" });
+      await addAgent(channel.id, agent.id);
+    }
+  };
+  const countMembers = async () => {
+    const pg = (getDb() as unknown as { $client: PgliteLike }).$client;
+    const originalQuery = pg.query.bind(pg);
+    let count = 0;
+    pg.query = ((...args: unknown[]) => {
+      count += 1;
+      return originalQuery(...args);
+    }) as PgliteLike["query"];
+    try {
+      const res = await client.get(`/api/channels/${channel.id}/members`);
+      assert.equal(res.status, 200);
+      return { count, body: await res.json() as { agents: Array<{ id: string; activity?: string; activityDetail?: string }> } };
+    } finally {
+      pg.query = originalQuery;
+    }
+  };
+
+  await addAgents(1);
+  await countMembers();
+  const few = await countMembers();
+  await addAgents(10);
+  await countMembers();
+  const many = await countMembers();
+
+  assert.ok(few.count > 0, "the counter must observe queries");
+  assert.equal(many.body.agents.length, few.body.agents.length + 10);
+  assert.equal(many.count, few.count, `${few.body.agents.length} agents: ${few.count} queries, ${many.body.agents.length} agents: ${many.count}`);
+  assert.equal(singleReads, 0, "activity is not read agent by agent");
+  for (const agent of many.body.agents) {
+    assert.equal(agent.activity, "online", agent.id);
+    assert.equal(agent.activityDetail, "batched", agent.id);
+  }
+});
 
 test("GET /api/channels default restore list excludes archived channels", async ({ seed, http }) => {
   const owner = await seed.human();
@@ -1064,14 +1159,14 @@ test("GET /api/channels/unread records unread-count phases and query shape", asy
     "http.response.finished",
   ]);
 
-  // Unread is ONE read of rw_conversation_unread_v2 (answered by its Postgres
+  // Unread is ONE read of rw_conversation_unread_v3 (answered by its Postgres
   // reference in tests); the summary adds its public hasNew arm to the same read.
   const dbEvents = span.events.filter((event) => event.name === "db.query.finished");
   assert.deepEqual(dbEvents.map((event) => event.attrs?.query_name), ["channels.unread_counts_by_user"]);
   assert.equal(dbEvents.length, 1);
   assert.equal(dbEvents[0]?.attrs?.phase, "unread_counts.loaded");
   assert.equal(dbEvents[0]?.attrs?.unread_channels_count, 2);
-  assert.equal(dbEvents[0]?.attrs?.rw_conversation_unread_view, "rw_conversation_unread_v2");
+  assert.equal(dbEvents[0]?.attrs?.rw_conversation_unread_view, "rw_conversation_unread_v3");
   assert.equal(dbEvents[0]?.attrs?.["inbox.backend"], "rw_mv");
   assert.equal(dbEvents[0]?.attrs?.["inbox.route"], "channel_unread");
   assert.equal(dbEvents[0]?.attrs?.["inbox.fallback_reason"], "none");
@@ -2621,6 +2716,7 @@ test("read-state mutations emit versioned user-room events", async () => {
         scopeId: channel.id,
         maxReadSeq: first.seq,
         readStateVersion: 1,
+        unreadCount: 1,
       },
     });
     assert.ok(
@@ -2661,6 +2757,7 @@ test("read-state mutations emit versioned user-room events", async () => {
         scopeId: channel.id,
         maxReadSeq: second.seq,
         readStateVersion: 2,
+        unreadCount: 0,
       },
     });
     const afterReadAllEventCount = events.length;
@@ -2712,6 +2809,7 @@ test("read-state mutations emit versioned user-room events", async () => {
         scopeId: channel.id,
         maxReadSeq: second.seq - 1,
         readStateVersion: 3,
+        unreadCount: 1,
       },
     });
     const afterUnreadEventCount = events.length;
@@ -3032,4 +3130,61 @@ test("changing channel visibility requires membership, for humans and agents ali
   } finally {
     await app.close();
   }
+});
+
+test("POST /api/channels/:id/resume-all-agents reports an agent whose start was skipped instead of counting it resumed", async ({ app, seed, http }) => {
+  const owner = await seed.human();
+  const server = await seed.server({ owner });
+  const channel = await seed.channel({ server, members: [owner] });
+  const started = await createAgent(server.id, `resume-ok-${randomUUID().slice(0, 8)}`, { runtime: "claude", model: "sonnet" });
+  const starting = await createAgent(server.id, `resume-busy-${randomUUID().slice(0, 8)}`, { runtime: "claude", model: "sonnet" });
+  await addAgent(channel.id, started.id);
+  await addAgent(channel.id, starting.id);
+  const orchestrator = app.app.get("agentOrchestrator") as {
+    startAgent: (agentId: string, options: { resumePrompt?: string }) => Promise<unknown>;
+  };
+  const prompts: Array<[string, string | undefined]> = [];
+  orchestrator.startAgent = async (agentId, options) => {
+    prompts.push([agentId, options.resumePrompt]);
+    return agentId === starting.id
+      ? { outcome: "skipped", reason: "wake_lock_held" }
+      : { outcome: "dispatched" };
+  };
+
+  const res = await http.as(owner, server).request(`/api/channels/${channel.id}/resume-all-agents`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ prompt: "new guidance" }),
+  });
+  assert.equal(res.status, 200);
+  const body = await res.json() as { ok: boolean; started: number; total: number; results: Array<{ agentId: string; ok: boolean; reason?: string }> };
+  assert.equal(body.ok, false, "a skipped start means the prompt did not reach that agent");
+  assert.equal(body.started, 1);
+  assert.equal(body.total, 2);
+  assert.deepEqual(
+    body.results.find((result) => result.agentId === starting.id),
+    { agentId: starting.id, ok: false, reason: "start_in_flight" },
+  );
+  assert.equal(body.results.find((result) => result.agentId === started.id)?.ok, true);
+  assert.equal(prompts.length, 2);
+
+  // The retry names only the agent that missed the guidance (plus an id from
+  // outside this channel, which is ignored): the resumed one is not started again.
+  prompts.length = 0;
+  const retry = await http.as(owner, server).request(`/api/channels/${channel.id}/resume-all-agents`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ prompt: "new guidance", agentIds: [starting.id, randomUUID()] }),
+  });
+  assert.equal(retry.status, 200);
+  const retryBody = await retry.json() as { total: number };
+  assert.deepEqual(prompts, [[starting.id, "new guidance"]]);
+  assert.equal(retryBody.total, 1);
+
+  const invalid = await http.as(owner, server).request(`/api/channels/${channel.id}/resume-all-agents`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ prompt: "new guidance", agentIds: "everyone" }),
+  });
+  assert.equal(invalid.status, 400);
 });

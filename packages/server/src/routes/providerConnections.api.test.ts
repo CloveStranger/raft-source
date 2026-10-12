@@ -369,6 +369,62 @@ async function readAssignedAgents(baseUrl: string, token: string, serverId: stri
   return { status: response.status, text: await response.text() };
 }
 
+test("a new key or endpoint on a connection lifts paused restarts of the agents using it", async () => {
+  const originalKey = process.env.SLOCK_PROVIDER_CREDENTIAL_KEY;
+  process.env.SLOCK_PROVIDER_CREDENTIAL_KEY = Buffer.alloc(32, 9).toString("base64");
+  const app = await openTestApp("pglite://", 0, { humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
+  try {
+    const owner = await seedUser("provider-lift-owner@raft.test", "provider-lift-owner");
+    const server = await createServer("Provider Lift", "provider-lift", owner.id);
+    const ownerToken = await login(app.baseUrl, owner.email);
+    await enableProviderConnections(server.id);
+    const createdResponse = await fetch(`${app.baseUrl}/api/provider-connections`, {
+      method: "POST",
+      headers: headers(ownerToken, server.id),
+      body: JSON.stringify({ name: "Lift DeepSeek", providerId: "deepseek", apiKey: "lift-secret-value" }),
+    });
+    assert.equal(createdResponse.status, 201);
+    const created = (await createdResponse.json()) as { id: string };
+    await markConnectionReady(created.id);
+    const agent = await seedAssignedAgent(app.baseUrl, ownerToken, server.id, created.id, "lift-provider-agent");
+
+    const lifted: Array<{ agentId: string; runtimeValuesChanged?: boolean }> = [];
+    Object.assign(app.app.get("agentOrchestrator"), {
+      liftWakeBlockForConfigChange: async (agentId: string, options: { runtimeValuesChanged?: boolean } = {}) => {
+        lifted.push({ agentId, ...options });
+      },
+    });
+
+    const renamed = await fetch(`${app.baseUrl}/api/provider-connections/${created.id}`, {
+      method: "PATCH",
+      headers: headers(ownerToken, server.id),
+      body: JSON.stringify({ name: "Renamed DeepSeek" }),
+    });
+    assert.equal(renamed.status, 200);
+    assert.deepEqual(lifted, [], "a rename changes nothing the runtime uses");
+
+    const rotated = await fetch(`${app.baseUrl}/api/provider-connections/${created.id}/credentials/rotate`, {
+      method: "POST",
+      headers: headers(ownerToken, server.id),
+      body: JSON.stringify({ apiKey: "lift-rotated-value" }),
+    });
+    assert.equal(rotated.status, 200);
+    assert.deepEqual(lifted, [{ agentId: agent.id, runtimeValuesChanged: true }]);
+
+    const keyPatch = await fetch(`${app.baseUrl}/api/provider-connections/${created.id}`, {
+      method: "PATCH",
+      headers: headers(ownerToken, server.id),
+      body: JSON.stringify({ apiKey: "lift-patched-value" }),
+    });
+    assert.equal(keyPatch.status, 200);
+    assert.equal(lifted.length, 2);
+  } finally {
+    await app.close();
+    if (originalKey === undefined) delete process.env.SLOCK_PROVIDER_CREDENTIAL_KEY;
+    else process.env.SLOCK_PROVIDER_CREDENTIAL_KEY = originalKey;
+  }
+});
+
 test("provider connection names the Agents that block deletion without leaking credentials", async () => {
   const originalKey = process.env.SLOCK_PROVIDER_CREDENTIAL_KEY;
   process.env.SLOCK_PROVIDER_CREDENTIAL_KEY = Buffer.alloc(32, 9).toString("base64");

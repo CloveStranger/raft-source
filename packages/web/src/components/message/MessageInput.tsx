@@ -1,8 +1,8 @@
 import { useState, useRef, useEffect, useLayoutEffect, useCallback, useMemo } from "react";
 import { useIntl } from "react-intl";
 import type { IntlShape } from "react-intl";
-import { Send, UserX, Hash, Paperclip, X, FileText, ImagePlus, Monitor, Blocks } from "lucide-react";
-import { Badge, Button, Composer, ComposerActions, ComposerAttachment, ComposerAttachmentBody, ComposerAttachmentFailedOverlay, ComposerAttachmentFile, ComposerAttachmentImage, ComposerAttachmentMeta, ComposerAttachmentRemove, ComposerAttachments, ComposerAttachmentTitle, ComposerAttachmentUploadingOverlay, ComposerAttachmentUploadProgressBar, ComposerIconButton, ComposerInput, ComposerRoot, ComposerSubmit, ComposerSuggestionAside, ComposerSuggestionContent, ComposerSuggestionGroup, ComposerSuggestionGroupLabel, ComposerSuggestionIcon, ComposerSuggestionList, ComposerSuggestionMeta, ComposerSuggestionOption, ComposerSuggestionTitle, ComposerToolbar, Spinner } from "raft-ui";
+import { Send, UserX, Hash, Paperclip, X, FileText, ImagePlus, Monitor, Blocks, ArrowLeftRight } from "lucide-react";
+import { Badge, Button, Composer, ComposerActions, ComposerAttachment, ComposerAttachmentBody, ComposerAttachmentFailedOverlay, ComposerAttachmentFile, ComposerAttachmentImage, ComposerAttachmentMeta, ComposerAttachmentRemove, ComposerAttachments, ComposerAttachmentTitle, ComposerAttachmentUploadingOverlay, ComposerAttachmentUploadProgressBar, ComposerIconButton, ComposerInput, ComposerRoot, ComposerSubmit, ComposerSuggestionAside, ComposerSuggestionContent, ComposerSuggestionGroup, ComposerSuggestionGroupLabel, ComposerSuggestionIcon, ComposerSuggestionList, ComposerSuggestionMeta, ComposerSuggestionTitle, ComposerToolbar, Spinner } from "raft-ui";
 import {
   DndContext,
   closestCenter,
@@ -43,6 +43,7 @@ import { useAutocomplete } from "../../hooks/useAutocomplete";
 import { useAppNavigate } from "../../hooks/useAppNavigate";
 import { useRankedComposerSuggestions } from "../../hooks/useRankedComposerSuggestions";
 import { SUPPORTS_FIELD_SIZING, useComposerAutosize } from "./useComposerAutosize";
+import { AutocompleteOptionRow } from "./AutocompleteOptionRow";
 import { extractClipboardFiles } from "../../utils/clipboardFiles";
 import AvatarSlot from "../ui/AvatarSlot";
 import Banner from "../ui/Banner";
@@ -60,6 +61,7 @@ import {
 import type {
   MentionCandidate,
 } from "./mentionCandidates";
+import { memberServerBadgeLabels } from "../../utils/channelLocalMembership";
 import { transparentImageBackgroundClass } from "../../utils/imagePreviewStyles";
 import { decideMessageAttachmentSelection } from "../../utils/messageAttachmentLimits";
 import { resolveAttachmentUploadLimitBytes } from "../../utils/attachmentUploadLimit";
@@ -385,6 +387,7 @@ function SortableAttachment({
   mimeType,
   uploadStatus,
   uploadProgress,
+  attachmentId,
   onRemove,
   onPreview,
 }: {
@@ -394,17 +397,22 @@ function SortableAttachment({
   mimeType: string;
   uploadStatus: PendingFile["uploadStatus"];
   uploadProgress: number;
-  onRemove: () => void;
-  onPreview?: () => void;
+  attachmentId: string | null;
+  onRemove: (pendingId: string) => void;
+  onPreview?: (attachmentId: string) => void;
 }) {
   const { formatMessage } = useIntl();
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id });
-  const style = {
+  const style = useMemo(() => ({
     transform: CSS.Transform.toString(transform),
     transition,
     opacity: isDragging ? 0.5 : 1,
     zIndex: isDragging ? 10 : undefined,
-  };
+  }), [transform, transition, isDragging]);
+  const handleRemove = useCallback(() => onRemove(id), [onRemove, id]);
+  const handlePreview = useCallback(() => {
+    if (attachmentId && onPreview) onPreview(attachmentId);
+  }, [onPreview, attachmentId]);
   return (
     <ComposerAttachment ref={setNodeRef} style={style} {...attributes}>
       {/* Drag handle: the chip body itself. Spreading dnd-kit's
@@ -422,17 +430,21 @@ function SortableAttachment({
         {...listeners}
         role={preview && onPreview ? "button" : undefined}
         tabIndex={preview && onPreview ? 0 : undefined}
-        onClick={preview && onPreview ? onPreview : undefined}
+        onClick={preview && onPreview ? handlePreview : undefined}
         onKeyDown={(e) => {
           if (!preview || !onPreview) return;
           if (e.key === "Enter" || e.key === " ") {
             e.preventDefault();
-            onPreview();
+            handlePreview();
           }
         }}
         aria-label={preview && onPreview ? formatMessage({ id: "message.composer.previewAttachment" }, { file: fileName }) : undefined}
-        className={preview && onPreview ? "cursor-zoom-in" : "cursor-grab active:cursor-grabbing"}
+        className={`${preview ? "size-full " : ""}${preview && onPreview ? "cursor-zoom-in" : "cursor-grab active:cursor-grabbing"}`}
       >
+        {/* Image chips: the brutal recipe sizes ComposerAttachmentImage as
+            size-full of this body, so the body must fill the fixed 64px
+            chip. Left at auto height, a portrait image grew to its natural
+            height and spilled over the textarea below (#bug-triage task #11). */}
         {preview ? (
           <ComposerAttachmentImage>
             <img src={preview} alt={fileName} className={`size-full object-cover ${transparentImageBackgroundClass}`} />
@@ -480,7 +492,7 @@ function SortableAttachment({
           the phones/tablets where a hover-only ✕ disappears. It stays
           OUTSIDE the drag-handle body above so taps reach onRemove. */}
       <ComposerAttachmentRemove
-        onClick={onRemove}
+        onClick={handleRemove}
         aria-label={formatMessage({ id: "message.composer.removeAttachment" }, { file: fileName })}
       >
         <X size={10} />
@@ -489,8 +501,7 @@ function SortableAttachment({
   );
 }
 
-function MentionCandidateBody({
-  candidate,
+function MentionCandidateBody({  candidate,
 }: {
   candidate: MentionCandidate;
 }) {
@@ -501,7 +512,9 @@ function MentionCandidateBody({
     ? formatMessage({ id: "message.composer.actorType.human" })
     : candidate.type === "agent"
       ? formatMessage({ id: "message.composer.actorType.agent" })
-      : null;
+      : candidate.type === "external"
+        ? formatMessage({ id: "settings.slackBridge.providerBadge" })
+        : null;
 
   return (
     <>
@@ -593,6 +606,29 @@ function MentionCandidateActivityBadge({ agentId }: { agentId: string }) {
     <AgentActivityDot agentId={agentId} size="sm" data-mention-avatar-badge-shell="true" />
   );
 }
+
+// Pointer-down blur prevention for composer buttons (Android Chrome can
+// collapse the keyboard on pointer-down blur before the click runs). Pure
+// handlers — module scope so they are never recreated per render.
+const preventSendButtonPointerDownBlur = (e: React.PointerEvent<HTMLButtonElement>) => {
+  // Android Chrome can collapse the keyboard on the pointer-down blur before
+  // the submit click runs, shifting the visual viewport and swallowing the
+  // first tap. Keep focus stable; the following click still submits.
+  e.preventDefault();
+};
+
+const preventToolbarButtonPointerDownBlur = (e: React.PointerEvent<HTMLButtonElement>) => {
+  // Toolbar buttons sit beside the textarea. Preserve focus through
+  // pointerdown so Android Chrome does not collapse the keyboard before the
+  // button click opens the picker or toggles composer state.
+  e.preventDefault();
+};
+
+const preventTaskTogglePointerDownBlur = (e: React.PointerEvent<HTMLButtonElement>) => {
+  // Keep the composer focused while toggling task mode; the following click
+  // still toggles the checkbox without sending.
+  e.preventDefault();
+};
 
 export default function MessageInput({
   channelId,
@@ -742,6 +778,24 @@ export default function MessageInput({
     draftCacheKey: string;
     authScope: string;
   } | null>(null);
+  // The composer <textarea> is deliberately NOT a React-controlled input. For a
+  // controlled textarea React also rewrites `defaultValue` — the element's text
+  // child — on every keystroke, and a DOM structure change there forces Chrome
+  // to re-evaluate every non-subject `:has()` rule against the whole page: ~58ms
+  // of style recalc per key in a 300-message channel vs ~0.06ms for a plain
+  // `.value` write (kabi-desktop task #133). `content` stays the source of
+  // truth; the DOM value follows it imperatively, exactly like React's own
+  // controlled update (`if (node.value !== value) node.value = value`) minus the
+  // text-node rewrite. Never pass `value` / `defaultValue` to the textarea.
+  // Every commit, not just on `content` changes: a textarea node attached in
+  // this commit (refs attach before the parent's layout effects) must get the
+  // current content too. One string compare per render. Precondition: `content`
+  // is updated synchronously from onChange. If it ever moves into a deferred /
+  // transition update, this would write stale content over what is being typed.
+  useLayoutEffect(() => {
+    const el = textareaRef.current;
+    if (el && el.value !== content) el.value = content;
+  });
   const composerTextareaRef = useCallback((node: HTMLTextAreaElement | null) => {
     textareaRef.current = node;
     committedComposerOwnershipRef.current = node
@@ -972,18 +1026,22 @@ export default function MessageInput({
   }, [content]);
 
   // Cleanup object URLs and in-flight uploads on unmount
-  // oxlint-disable react-hooks/exhaustive-deps -- This cleanup must intentionally read the latest refs at unmount time; mount-time snapshots would lose in-flight/ready attachment drafts.
   useEffect(() => {
     if (attachmentSelectionAbortRef.current.signal.aborted) {
       attachmentSelectionAbortRef.current = new AbortController();
     }
+    // The container is created once via useRef(new Map) and never
+    // reassigned — capture it here so the cleanup reads no `.current`.
+    // (pendingFilesRef stays a ref read: its array IS reassigned over time.)
+    const uploadControllers = uploadControllersRef.current;
+    const formatMessageFn = formatMessageRef.current;
     return () => {
       resetAttachmentSelectionValidation();
       if (preservePendingDraftFiles) {
-        const interrupted = markInterruptedUploads(pendingFilesRef.current, formatMessageRef.current);
+        const interrupted = markInterruptedUploads(pendingFilesRef.current, formatMessageFn);
         for (const p of pendingFilesRef.current) {
           if (p.uploadStatus === "uploading") {
-            uploadControllersRef.current.get(p.id)?.abort();
+            uploadControllers.get(p.id)?.abort();
           }
         }
         const currentAuthScope = getDraftPendingFilesAuthScope(useAuthStore.getState().user?.id);
@@ -991,14 +1049,14 @@ export default function MessageInput({
           saveDraftPendingFiles(draftPendingFilesCacheKeyRef.current, interrupted);
         }
       } else {
-        for (const controller of uploadControllersRef.current.values()) {
+        for (const controller of uploadControllers.values()) {
           controller.abort();
         }
         for (const p of pendingFilesRef.current) {
           if (p.preview) URL.revokeObjectURL(p.preview);
         }
       }
-      uploadControllersRef.current.clear();
+      uploadControllers.clear();
     };
   }, [preservePendingDraftFiles, resetAttachmentSelectionValidation]);
 
@@ -1045,12 +1103,14 @@ export default function MessageInput({
   useEffect(() => {
     if (!preservePendingDraftFiles || !secondaryLoadsReady) return;
     refreshRecoverableUploads();
+    // Set identity is stable (never reassigned) — capture for the cleanup.
+    const canceledIds = canceledRecoverableUploadIdsRef.current;
     return () => {
       recoverableRefreshGenerationRef.current += 1;
       recoverableRefreshControllerRef.current?.abort();
       recoverableRefreshControllerRef.current = null;
       recoverableUploadsRef.current = [];
-      canceledRecoverableUploadIdsRef.current.clear();
+      canceledIds.clear();
     };
   }, [preservePendingDraftFiles, refreshRecoverableUploads, secondaryLoadsReady]);
 
@@ -1086,7 +1146,6 @@ export default function MessageInput({
       // Keep the row visible so a transient failure remains actionable.
     }
   }, [channelId]);
-  // oxlint-enable react-hooks/exhaustive-deps
   // Stryker restore all
 
   // Save draft on content change. Writes local `content` into the external
@@ -1110,7 +1169,7 @@ export default function MessageInput({
   const machines = useMachineStore((s) => s.machines);
   const [installedApps, setInstalledApps] = useState<InstalledRapAppSummary[]>([]);
   const installedAppsServerIdRef = useRef<string | null>(null);
-  const { channelAgents, channelHumans } = useChannelMembers(mentionChannelId || channelId, {
+  const { channelAgents, channelHumans, channelExternalMembers } = useChannelMembers(mentionChannelId || channelId, {
     enabled: loadMentionMembers && secondaryLoadsReady,
   });
   const channels = useChannelStore((s) => s.channels);
@@ -1130,6 +1189,10 @@ export default function MessageInput({
   // Autocomplete hooks (state only — filtering done below)
   const mention = useAutocomplete(MENTION_TRIGGER, "@");
   const channel = useAutocomplete(CHANNEL_TRIGGER, "#");
+  // useAutocomplete returns a fresh object every render, but these are
+  // useCallback-stable — depend on the functions, not the wrapper.
+  const { dismiss: dismissMentionPopover, clampIndex: clampMentionIndex, handleKeyDown: handleMentionKeyDown, detect: detectMentionTrigger } = mention;
+  const { dismiss: dismissChannelPopover, clampIndex: clampChannelIndex, handleKeyDown: handleChannelKeyDown, detect: detectChannelTrigger } = channel;
 
   // Apps are needed only while @ autocomplete is open. Keeping this lazy avoids
   // turning every mounted composer into an unrelated registry request; the
@@ -1153,12 +1216,10 @@ export default function MessageInput({
 
   // Channel switches keep MessageInput mounted, so any open autocomplete
   // popover must be cleared explicitly instead of relying on unmount cleanup.
-  // oxlint-disable react-hooks/exhaustive-deps -- dismiss popovers on channelId change; effect correctly deps on the stable `.dismiss` callbacks + channelId. `mention`/`channel` are fresh objects every render (useAutocomplete); depending on the whole objects would dismiss the open popover every keystroke.
   useEffect(() => {
-    mention.dismiss();
-    channel.dismiss();
-  }, [channelId, mention.dismiss, channel.dismiss]);
-  // oxlint-enable react-hooks/exhaustive-deps
+    dismissMentionPopover();
+    dismissChannelPopover();
+  }, [channelId, dismissMentionPopover, dismissChannelPopover]);
 
   // Build channel member ID sets for fast lookup
   const channelMemberIds = useMemo(() => {
@@ -1169,7 +1230,6 @@ export default function MessageInput({
   }, [channelAgents, channelHumans]);
 
   // Build & filter mention candidates
-  // oxlint-disable react-hooks/exhaustive-deps -- mention scope only depends on channel type; the helper takes the channel object to keep the predicate API readable/testable.
   const allCandidates = useMemo(() => {
     const byKey = new Map<string, MentionCandidate>();
     const addCandidate = (candidate: MentionCandidate) => {
@@ -1216,11 +1276,13 @@ export default function MessageInput({
     for (const human of channelHumans) {
       if (currentUser && human.id === currentUser.id) continue;
       const isRemoteHuman = Boolean(currentServer?.id && human.serverId && human.serverId !== currentServer.id);
+      const serverLabels = memberServerBadgeLabels(human, currentServer?.id);
       addCandidate({
         id: human.id,
         serverId: isRemoteHuman ? human.serverId : undefined,
         serverName: isRemoteHuman ? human.serverName : undefined,
         serverSlug: isRemoteHuman ? human.serverSlug : undefined,
+        serverLabels: serverLabels.length > 0 ? serverLabels : undefined,
         name: human.name,
         displayName: human.displayName,
         type: "user",
@@ -1242,6 +1304,25 @@ export default function MessageInput({
         type: "agent",
         avatarUrl: agent.avatarUrl,
         description: agent.description,
+      });
+    }
+    for (const external of channelExternalMembers) {
+      // Slack-side participant — pick the first handle; when the projection
+      // has no usable handle fall back to the display name. The composer
+      // token must satisfy Raft's `\p{L}\p{N}_-` handle charset
+      // (structuredRaftMentionStillAppears rejects a token containing
+      // `.`/`'`/etc.), so sanitize every other char to `-`.
+      const rawHandle = external.handles.find((h) => h.trim().length > 0)
+        ?? external.displayName.replace(/\s+/g, "");
+      const handle = rawHandle.replace(/[^\p{L}\p{N}_-]/gu, "-");
+      if (!handle) continue;
+      addCandidate({
+        id: external.id,
+        name: handle,
+        displayName: external.displayName,
+        type: "external",
+        avatarUrl: external.avatarUrl,
+        description: formatMessage({ id: "settings.slackBridge.providerBadge" }),
       });
     }
     if (resourceReferencesGate.enabled) {
@@ -1267,8 +1348,7 @@ export default function MessageInput({
       }
     }
     return [...byKey.values()];
-  }, [currentUser, currentServer?.id, humans, agents, channelHumans, channelAgents, mentionScopeChannel?.type, machines, installedApps, resourceReferencesGate.enabled]);
-  // oxlint-enable react-hooks/exhaustive-deps
+  }, [currentUser, currentServer?.id, humans, agents, channelHumans, channelAgents, channelExternalMembers, mentionScopeChannel, machines, installedApps, resourceReferencesGate.enabled, formatMessage]);
 
   // Stryker disable all: this block is React wiring from local candidate arrays into
   // the covered composer ranker/worker hook. The behavior surface is pinned by
@@ -1304,11 +1384,11 @@ export default function MessageInput({
   const filteredChannels = useRankedComposerSuggestions(channel.query, channelSearchEntries);
   // Stryker restore all
 
-  // Clamp indices when filtered lists change
-  // oxlint-disable-next-line react-hooks/exhaustive-deps -- clamp on filtered-length change only; `mention` is a fresh object every render (useAutocomplete) so depending on it would re-run every keystroke. `mention.clampIndex` is useCallback-stable.
-  useEffect(() => { mention.clampIndex(filteredMentions.flat.length); }, [filteredMentions.flat.length]);
-  // oxlint-disable-next-line react-hooks/exhaustive-deps -- clamp on filtered-length change only; `channel` is a fresh object every render (useAutocomplete returns an unmemoized literal) so depending on it would re-run every keystroke. `channel.clampIndex` is useCallback-stable.
-  useEffect(() => { channel.clampIndex(filteredChannels.length); }, [filteredChannels.length]);
+  // Clamp indices when filtered lists change. The clamp functions are
+  // useCallback-stable (the `mention`/`channel` wrappers are fresh objects
+  // every render, so depending on them would re-run every keystroke).
+  useEffect(() => { clampMentionIndex(filteredMentions.flat.length); }, [clampMentionIndex, filteredMentions.flat.length]);
+  useEffect(() => { clampChannelIndex(filteredChannels.length); }, [clampChannelIndex, filteredChannels.length]);
 
   // Auto-resize: browser-native `field-sizing: content` when supported, else
   // a rAF-coalesced bounded measurement — see useComposerAutosize (task #20).
@@ -1734,7 +1814,7 @@ export default function MessageInput({
     }
   }, []);
 
-  const handleChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+  const handleChange = useCallback((e: React.ChangeEvent<HTMLTextAreaElement>) => {
     const val = e.target.value;
     const cursorPos = e.target.selectionStart;
     const undoSnapshot = mentionUndoSnapshotRef.current;
@@ -1749,12 +1829,12 @@ export default function MessageInput({
     scheduleAutoResize();
 
     const textBeforeCursor = val.slice(0, cursorPos);
-    if (mention.detect(textBeforeCursor, cursorPos)) {
-      channel.dismiss();
-    } else if (!channel.detect(textBeforeCursor, cursorPos)) {
+    if (detectMentionTrigger(textBeforeCursor, cursorPos)) {
+      dismissChannelPopover();
+    } else if (!detectChannelTrigger(textBeforeCursor, cursorPos)) {
       // Neither matched — both are already dismissed by detect()
     }
-  };
+  }, [scheduleAutoResize, detectMentionTrigger, detectChannelTrigger, dismissChannelPopover]);
 
   // Handle pasting copied files from the OS clipboard into the attachment flow.
   const handlePaste = useCallback((e: React.ClipboardEvent) => {
@@ -1932,7 +2012,7 @@ export default function MessageInput({
     return true;
   }, [isCommittedComposerOwner]);
 
-  const handleSubmit = async (e: React.FormEvent | React.KeyboardEvent, options?: { forceAsTask?: boolean }) => {
+  const handleSubmit = useCallback(async (e: React.FormEvent | React.KeyboardEvent, options?: { forceAsTask?: boolean }) => {
     e.preventDefault();
     if (submitDisabled || submitBusy || readChannelConversionBlocked(membershipChannelId)) return;
     const hasContent = content.trim().length > 0;
@@ -2047,8 +2127,8 @@ export default function MessageInput({
     // Stryker disable next-line ArrayDeclaration: clearing the draft-pending cache is pinned by the remount/send DOM test; `setPendingFiles([])` also keeps the in-memory chip state clear.
     saveDraftPendingFiles(draftPendingFilesCacheKeyRef.current, []);
     setPendingFiles([]);
-    mention.dismiss();
-    channel.dismiss();
+    dismissMentionPopover();
+    dismissChannelPopover();
     // Cancel the measurement queued by the last keystroke so it cannot run
     // after this clear and overwrite the height (task #513).
     cancelScheduledAutoResize();
@@ -2181,7 +2261,16 @@ export default function MessageInput({
       if (isCurrentComposer) setError(errorMessage);
       console.error("Failed to send message:", err);
     }
-  };
+  }, [
+    submitDisabled, submitBusy, membershipChannelId, content, pendingFiles,
+    allowEmptySubmit, onSendOverride, alsoCreateTask, formatMessage, channelId,
+    draftPendingFilesCacheKey, selectedMentions, resolveDeliveryChannelId,
+    isCommittedComposerOwner, startAttachmentUpload, restoreFailedSendDraft,
+    clearDraft, dismissMentionPopover, dismissChannelPopover,
+    cancelScheduledAutoResize, onWillSend, addOptimisticMessage, currentUser,
+    conversionBlockedMessage, sendMessage, onChannelResolved, setAlsoCreateTask,
+    removeOptimisticMessage,
+  ]);
 
   const clearPendingMentionActionRemovalTimers = useCallback((resolutionId?: string) => {
     const clearTimers = (timers: ReturnType<typeof setTimeout>[] | undefined) => {
@@ -2353,7 +2442,38 @@ export default function MessageInput({
     setDeliveryWarnings([]);
   }, []);
 
-  const handleKeyDown = (e: React.KeyboardEvent) => {
+  const handleRemovePendingFile = useCallback((pendingId: string) => {
+    removeFile(pendingFiles.findIndex((candidate) => candidate.id === pendingId));
+  }, [pendingFiles, removeFile]);
+
+  const handlePreviewDraftImage = useCallback((attachmentId: string) => {
+    openDraftImagePreview(attachmentId);
+  }, [openDraftImagePreview]);
+
+  const handleAttachmentDragEnd = useCallback((event: DragEndEvent) => {
+    const { active, over } = event;
+    if (over && active.id !== over.id) {
+      setPendingFiles((prev) => {
+        const oldIndex = prev.findIndex((p) => p.id === active.id);
+        const newIndex = prev.findIndex((p) => p.id === over.id);
+        return arrayMove(prev, oldIndex, newIndex);
+      });
+    }
+  }, []);
+
+  const handleAttachImageClick = useCallback(() => imageInputRef.current?.click(), []);
+
+  const handleAttachFileClick = useCallback(() => fileInputRef.current?.click(), []);
+
+  const handleSelectMentionCandidate = useCallback((candidate: MentionCandidate) => {
+    doInsertMention(candidate);
+  }, [doInsertMention]);
+
+  const handleSelectChannelCandidate = useCallback((ch: { name: string }) => {
+    doInsertChannel(ch);
+  }, [doInsertChannel]);
+
+  const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
     if (e.nativeEvent.isComposing || e.keyCode === 229) return;
 
     const undoSnapshot = mentionUndoSnapshotRef.current;
@@ -2374,12 +2494,12 @@ export default function MessageInput({
       return;
     }
 
-    if (mention.handleKeyDown(e, filteredMentions.flat.length, () => {
+    if (handleMentionKeyDown(e, filteredMentions.flat.length, () => {
       const item = filteredMentions.flat[mention.index];
       if (item) doInsertMention(item);
     })) return;
 
-    if (channel.handleKeyDown(e, filteredChannels.length, () => {
+    if (handleChannelKeyDown(e, filteredChannels.length, () => {
       const item = filteredChannels[channel.index];
       if (item) doInsertChannel(item);
     })) return;
@@ -2414,27 +2534,8 @@ export default function MessageInput({
 
     e.preventDefault();
     handleSubmit(e);
-  };
+  }, [handleMentionKeyDown, handleChannelKeyDown, filteredMentions, filteredChannels, mention.index, channel.index, doInsertMention, doInsertChannel, handleSubmit]);
 
-  const preventSendButtonPointerDownBlur = (e: React.PointerEvent<HTMLButtonElement>) => {
-    // Android Chrome can collapse the keyboard on the pointer-down blur before
-    // the submit click runs, shifting the visual viewport and swallowing the
-    // first tap. Keep focus stable; the following click still submits.
-    e.preventDefault();
-  };
-
-  const preventToolbarButtonPointerDownBlur = (e: React.PointerEvent<HTMLButtonElement>) => {
-    // Toolbar buttons sit beside the textarea. Preserve focus through
-    // pointerdown so Android Chrome does not collapse the keyboard before the
-    // button click opens the picker or toggles composer state.
-    e.preventDefault();
-  };
-
-  const preventTaskTogglePointerDownBlur = (e: React.PointerEvent<HTMLButtonElement>) => {
-    // Keep the composer focused while toggling task mode; the following click
-    // still toggles the checkbox without sending.
-    e.preventDefault();
-  };
 
   const toggleTaskModeWithoutBlur = (e: React.MouseEvent<HTMLButtonElement>) => {
     e.preventDefault();
@@ -2451,6 +2552,7 @@ export default function MessageInput({
   const compactPendingFiles = pendingFiles.filter(
     (pf) => pf.uploadStatus !== "error" || isBillingUploadQuotaError(pf.uploadError),
   );
+  const sortablePendingFileIds = useMemo(() => compactPendingFiles.map((pf) => pf.id), [compactPendingFiles]);
   const locallyOwnedUploadIds = new Set(pendingFiles.flatMap((file) => (
     file.directUploadSession ? [file.directUploadSession.uploadId] : []
   )));
@@ -2665,18 +2767,9 @@ export default function MessageInput({
           <DndContext
             sensors={dndSensors}
             collisionDetection={closestCenter}
-            onDragEnd={(event: DragEndEvent) => {
-              const { active, over } = event;
-              if (over && active.id !== over.id) {
-                setPendingFiles((prev) => {
-                  const oldIndex = prev.findIndex((p) => p.id === active.id);
-                  const newIndex = prev.findIndex((p) => p.id === over.id);
-                  return arrayMove(prev, oldIndex, newIndex);
-                });
-              }
-            }}
+            onDragEnd={handleAttachmentDragEnd}
           >
-            <SortableContext items={compactPendingFiles.map((pf) => pf.id)} strategy={horizontalListSortingStrategy}>
+            <SortableContext items={sortablePendingFileIds} strategy={horizontalListSortingStrategy}>
               <ComposerAttachments>
                 {compactPendingFiles.map((pf) => (
                   <SortableAttachment
@@ -2687,10 +2780,11 @@ export default function MessageInput({
                     mimeType={pf.file.type}
                     uploadStatus={pf.uploadStatus}
                     uploadProgress={pf.uploadProgress}
-                    onRemove={() => removeFile(pendingFiles.findIndex((candidate) => candidate.id === pf.id))}
+                    attachmentId={pf.attachmentId ?? null}
+                    onRemove={handleRemovePendingFile}
                     onPreview={
                       pf.preview && pf.uploadStatus === "ready" && pf.attachmentId
-                        ? () => openDraftImagePreview(pf.attachmentId!)
+                        ? handlePreviewDraftImage
                         : undefined
                     }
                   />
@@ -2756,21 +2850,21 @@ export default function MessageInput({
             className="z-40"
             data-testid="mention-autocomplete-popover"
           >
-            {filteredMentions.inChannel.length > 0 && (
+            {(filteredMentions.inChannel.length > 0 || filteredMentions.externals.length > 0) && (
               <ComposerSuggestionGroup>
-                {filteredMentions.notInChannel.length > 0 && (
+                {(filteredMentions.notInChannel.length > 0 || filteredMentions.externals.length > 0) && (
                   <ComposerSuggestionGroupLabel>
                     {formatMessage({ id: "message.composer.inThisChannel" })}
                   </ComposerSuggestionGroupLabel>
                 )}
                 {filteredMentions.inChannel.map((candidate, i) => (
-                  <ComposerSuggestionOption
-                    render={<button type="button" />}
+                  <AutocompleteOptionRow
                     key={`${candidate.type}:${candidate.id}`}
-                    data-ac-index={i}
-                    data-highlighted={i === mention.index ? "true" : undefined}
+                    value={candidate}
+                    flatIndex={i}
+                    highlighted={i === mention.index}
                     onMouseDown={preventAutocompleteOptionMouseDown}
-                    onClick={() => doInsertMention(candidate)}
+                    onSelect={handleSelectMentionCandidate}
                   >
                     <ComposerSuggestionIcon>
                       <MentionCandidateAvatar candidate={candidate} muted={false} />
@@ -2778,8 +2872,37 @@ export default function MessageInput({
                     <ComposerSuggestionContent>
                       <MentionCandidateBody candidate={candidate} />
                     </ComposerSuggestionContent>
-                  </ComposerSuggestionOption>
+                  </AutocompleteOptionRow>
                 ))}
+                {filteredMentions.externals.map((candidate, i) => {
+                  const flatIndex = filteredMentions.inChannel.length + i;
+                  const isSelected = flatIndex === mention.index;
+                  return (
+                    <AutocompleteOptionRow
+                      key={`external:${candidate.id}`}
+                      value={candidate}
+                      flatIndex={flatIndex}
+                      highlighted={isSelected}
+                      onMouseDown={preventAutocompleteOptionMouseDown}
+                      onSelect={handleSelectMentionCandidate}
+                      aria-label={formatMessage(
+                        { id: "message.externalIdentity.openAria" },
+                        { name: candidate.displayName ?? candidate.name },
+                      )}
+                    >
+                      <ComposerSuggestionIcon>
+                        <MentionCandidateAvatar candidate={candidate} muted={false} />
+                      </ComposerSuggestionIcon>
+                      <ComposerSuggestionIcon variant="auxiliary">
+                        {/* Slack-side participant — visually tag as external */}
+                        <ArrowLeftRight aria-hidden="true" size={10} strokeWidth={2.5} />
+                      </ComposerSuggestionIcon>
+                      <ComposerSuggestionContent>
+                        <MentionCandidateBody candidate={candidate} />
+                      </ComposerSuggestionContent>
+                    </AutocompleteOptionRow>
+                  );
+                })}
               </ComposerSuggestionGroup>
             )}
             {filteredMentions.notInChannel.length > 0 && (
@@ -2788,17 +2911,17 @@ export default function MessageInput({
                   {formatMessage({ id: "message.composer.notInThisChannel" })}
                 </ComposerSuggestionGroupLabel>
                 {filteredMentions.notInChannel.map((candidate, i) => {
-                  const flatIndex = filteredMentions.inChannel.length + i;
+                  const flatIndex = filteredMentions.inChannel.length + filteredMentions.externals.length + i;
                   const isSelected = flatIndex === mention.index;
                   return (
-                    <ComposerSuggestionOption
-                      render={<button type="button" />}
+                    <AutocompleteOptionRow
                       key={`${candidate.type}:${candidate.id}`}
-                      data-ac-index={flatIndex}
-                      data-highlighted={isSelected ? "true" : undefined}
+                      value={candidate}
+                      flatIndex={flatIndex}
+                      highlighted={isSelected}
                       className="opacity-60"
                       onMouseDown={preventAutocompleteOptionMouseDown}
-                      onClick={() => doInsertMention(candidate)}
+                      onSelect={handleSelectMentionCandidate}
                     >
                       <ComposerSuggestionIcon>
                         <MentionCandidateAvatar candidate={candidate} muted />
@@ -2809,7 +2932,7 @@ export default function MessageInput({
                       <ComposerSuggestionContent>
                         <MentionCandidateBody candidate={candidate} />
                       </ComposerSuggestionContent>
-                    </ComposerSuggestionOption>
+                    </AutocompleteOptionRow>
                   );
                 })}
               </ComposerSuggestionGroup>
@@ -2820,16 +2943,16 @@ export default function MessageInput({
                   {formatMessage({ id: "message.composer.computers" })}
                 </ComposerSuggestionGroupLabel>
                 {filteredMentions.computers.map((candidate, i) => {
-                  const flatIndex = filteredMentions.inChannel.length + filteredMentions.notInChannel.length + i;
+                  const flatIndex = filteredMentions.inChannel.length + filteredMentions.externals.length + filteredMentions.notInChannel.length + i;
                   const isSelected = flatIndex === mention.index;
                   return (
-                    <ComposerSuggestionOption
-                      render={<button type="button" />}
+                    <AutocompleteOptionRow
                       key={`computer:${candidate.id}`}
-                      data-ac-index={flatIndex}
-                      data-highlighted={isSelected ? "true" : undefined}
+                      value={candidate}
+                      flatIndex={flatIndex}
+                      highlighted={isSelected}
                       onMouseDown={preventAutocompleteOptionMouseDown}
-                      onClick={() => doInsertMention(candidate)}
+                      onSelect={handleSelectMentionCandidate}
                     >
                       <ComposerSuggestionIcon>
                         <MentionCandidateAvatar candidate={candidate} muted={false} />
@@ -2837,7 +2960,7 @@ export default function MessageInput({
                       <ComposerSuggestionContent>
                         <MentionCandidateBody candidate={candidate} />
                       </ComposerSuggestionContent>
-                    </ComposerSuggestionOption>
+                    </AutocompleteOptionRow>
                   );
                 })}
               </ComposerSuggestionGroup>
@@ -2848,16 +2971,16 @@ export default function MessageInput({
                   {formatMessage({ id: "message.composer.apps" })}
                 </ComposerSuggestionGroupLabel>
                 {filteredMentions.apps.map((candidate, i) => {
-                  const flatIndex = filteredMentions.inChannel.length + filteredMentions.notInChannel.length + filteredMentions.computers.length + i;
+                  const flatIndex = filteredMentions.inChannel.length + filteredMentions.externals.length + filteredMentions.notInChannel.length + filteredMentions.computers.length + i;
                   const isSelected = flatIndex === mention.index;
                   return (
-                    <ComposerSuggestionOption
-                      render={<button type="button" />}
+                    <AutocompleteOptionRow
                       key={`app:${candidate.id}`}
-                      data-ac-index={flatIndex}
-                      data-highlighted={isSelected ? "true" : undefined}
+                      value={candidate}
+                      flatIndex={flatIndex}
+                      highlighted={isSelected}
                       onMouseDown={preventAutocompleteOptionMouseDown}
-                      onClick={() => doInsertMention(candidate)}
+                      onSelect={handleSelectMentionCandidate}
                     >
                       <ComposerSuggestionIcon>
                         <MentionCandidateAvatar candidate={candidate} muted={false} />
@@ -2865,7 +2988,7 @@ export default function MessageInput({
                       <ComposerSuggestionContent>
                         <MentionCandidateBody candidate={candidate} />
                       </ComposerSuggestionContent>
-                    </ComposerSuggestionOption>
+                    </AutocompleteOptionRow>
                   );
                 })}
               </ComposerSuggestionGroup>
@@ -2885,13 +3008,13 @@ export default function MessageInput({
                 const isSelected = i === channel.index;
                 const isArchived = !!ch.archivedAt;
                 return (
-                  <ComposerSuggestionOption
-                    render={<button type="button" />}
+                  <AutocompleteOptionRow
                     key={ch.id}
-                    data-ac-index={i}
-                    data-highlighted={isSelected ? "true" : undefined}
+                    value={ch}
+                    flatIndex={i}
+                    highlighted={isSelected}
                     onMouseDown={preventAutocompleteOptionMouseDown}
-                    onClick={() => doInsertChannel(ch)}
+                    onSelect={handleSelectChannelCandidate}
                   >
                     <ComposerSuggestionIcon variant="framed">
                       <Hash size={12} />
@@ -2909,7 +3032,7 @@ export default function MessageInput({
                         </ComposerSuggestionAside>
                       )}
                     </ComposerSuggestionContent>
-                  </ComposerSuggestionOption>
+                  </AutocompleteOptionRow>
                 );
               })}
             </ComposerSuggestionGroup>
@@ -2921,7 +3044,6 @@ export default function MessageInput({
             id={textareaId}
             data-testid="composer-textarea"
             ref={composerTextareaRef}
-            value={content}
             onChange={handleChange}
             onKeyDown={handleKeyDown}
             onPaste={handlePaste}
@@ -2938,7 +3060,7 @@ export default function MessageInput({
                 <Tooltip content={formatMessage({ id: "message.composer.attachImage" })}>
                 <ComposerIconButton
                   onPointerDown={preventToolbarButtonPointerDownBlur}
-                  onClick={() => imageInputRef.current!.click()}
+                  onClick={handleAttachImageClick}
                   data-slot="button"
                   aria-label={formatMessage({ id: "message.composer.attachImage" })}
                 >
@@ -2948,7 +3070,7 @@ export default function MessageInput({
                 <Tooltip content={formatMessage({ id: "message.composer.attachFile" })}>
                 <ComposerIconButton
                   onPointerDown={preventToolbarButtonPointerDownBlur}
-                  onClick={() => fileInputRef.current!.click()}
+                  onClick={handleAttachFileClick}
                   data-slot="button"
                   aria-label={formatMessage({ id: "message.composer.attachFile" })}
                 >

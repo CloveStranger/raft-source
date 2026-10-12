@@ -6,6 +6,7 @@ import { featureFlagRules, featureFlags } from "../db/schema";
 import { REMOTE_COMPUTER_UPGRADE_V2_FEATURE_FLAG_KEY } from "./featureFlagService";
 import {
   COMPUTER_HANDS_MAIN_URL,
+  createBatchBroadcastPolicyEvaluator,
   evaluateBroadcastPolicy,
   isQueuedComputerUpgradePolicyCompatible,
   normalizeComputerPlatform,
@@ -229,6 +230,41 @@ test("the gate receives the serverId, so it can be opened per server rather than
   assert.deepEqual(seen, [allowOnly, "11111111-1111-4111-8111-111111111111", null]);
 });
 
+test("the batch evaluator reads the gate once per server, not once per machine", async () => {
+  // The machine list evaluates every Computer of one server. The gate only
+  // depends on serverId, so reading it per machine cost two flag queries per
+  // Computer (trace 4dbdda63: 36 slow connections on one list request).
+  const serverA = "95f993fa-2a68-4797-b8ae-7beb7d984ada";
+  const serverB = "11111111-1111-4111-8111-111111111111";
+  const seen: (string | null)[] = [];
+  const evaluate = createBatchBroadcastPolicyEvaluator({
+    isBroadcastEnabled: async (id) => { seen.push(id); return id === serverA; },
+    fetchFn: respond(),
+  });
+  const results = await Promise.all([
+    ...Array.from({ length: 5 }, () => evaluate(input({ serverId: serverA }))),
+    evaluate(input({ serverId: serverB })),
+    evaluate(input({ serverId: serverB })),
+  ]);
+  assert.deepEqual(seen, [serverA, serverB]);
+  assert.deepEqual(results.map((r) => r.reasonCode), [
+    "eligible", "eligible", "eligible", "eligible", "eligible", "broadcast_disabled", "broadcast_disabled",
+  ]);
+});
+
+test("the batch evaluator shares a failed gate read as broadcast_gate_unavailable", async () => {
+  let reads = 0;
+  const evaluate = createBatchBroadcastPolicyEvaluator({
+    isBroadcastEnabled: () => { reads += 1; throw new Error("flag store unreachable"); },
+    fetchFn: async () => { assert.fail("an unreadable gate must not reach Hands"); },
+  });
+  const results = await Promise.all([evaluate(input()), evaluate(input()), evaluate(input())]);
+  assert.equal(reads, 1);
+  assert.deepEqual(results.map((r) => r.reasonCode), [
+    "broadcast_gate_unavailable", "broadcast_gate_unavailable", "broadcast_gate_unavailable",
+  ]);
+});
+
 // ---------------------------------------------------------------------------
 // Which flag the gate reads. The tests above inject the gate; these drive the
 // REAL flag evaluation against a flag store so they prove the key: one flag,
@@ -280,4 +316,35 @@ dbTest("the gate reads remote_computer_upgrade_v2: allowed for the server opens 
   });
   assert.equal(disabled.eligibility, "no_broadcast");
   assert.equal(disabled.reasonCode, "broadcast_disabled");
+});
+
+dbTest("the batch evaluator reads the real remote_computer_upgrade_v2 flag when no gate is injected", async ({ db }) => {
+  const serverId = randomUUID();
+  const otherServerId = randomUUID();
+  await db.insert(featureFlags).values({
+    key: REMOTE_COMPUTER_UPGRADE_V2_FEATURE_FLAG_KEY,
+    description: "test remote computer upgrade v2",
+    enabled: true,
+    killSwitch: false,
+    randomizationUnit: "server",
+    defaultEnabled: false,
+    salt: "broadcast-policy-v2-batch-test",
+  });
+  await db.insert(featureFlagRules).values({
+    id: randomUUID(),
+    flagKey: REMOTE_COMPUTER_UPGRADE_V2_FEATURE_FLAG_KEY,
+    stage: "server",
+    priority: 0,
+    decision: "allow",
+    values: [serverId],
+  });
+  const evaluate = createBatchBroadcastPolicyEvaluator({ fetchFn: respond() });
+  const [first, second, other] = await Promise.all([
+    evaluate(input({ serverId })),
+    evaluate(input({ serverId })),
+    evaluate(input({ serverId: otherServerId })),
+  ]);
+  assert.equal(first.reasonCode, "eligible");
+  assert.equal(second.reasonCode, "eligible");
+  assert.equal(other.reasonCode, "broadcast_disabled");
 });

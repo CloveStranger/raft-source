@@ -111,7 +111,7 @@ async function listAgents(baseUrl: string, token: string, serverId: string) {
 test("credential-use writes are throttled per credential and resume after the window", async ({ app }) => {
   __setAgentCredentialUseThrottleMsForTests(null);
   try {
-    assert.equal(AGENT_CREDENTIAL_USE_WRITE_THROTTLE_MS, 30_000);
+    assert.equal(AGENT_CREDENTIAL_USE_WRITE_THROTTLE_MS, 60_000);
     const f = await seedFixture();
     const emitted = installFakeIo(app);
 

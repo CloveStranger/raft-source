@@ -44,6 +44,10 @@ import {
   redactFreshnessHoldForReviewerIsolation,
 } from "../freshness/_format";
 import { CliError } from "../../core/errors";
+import {
+  archiveReplacedDraft,
+  REPLACED_DRAFT_HISTORY_LIMIT,
+} from "./_replacedDraftHistory";
 
 // Hermetic regardless of test order: anything that resolves through the Raft
 // home (legacy import, the published read record) stays in a temp directory.
@@ -2101,6 +2105,95 @@ test("thread-context parent send confirmation warns before replacing an existing
   assert.equal(bodies.length, 0, "confirmation must still stop before the send API call");
   assert.match(stderr.join(""), /Warning: replacing an unsent draft for #quiet/);
   assert.match(stderr.join(""), /previous held draft/);
+  assert.match(stderr.join(""), /Recovery file:/);
+});
+
+test("replacing a >400-character draft preserves the exact body in a private recovery file", async () => {
+  const stateDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "slock-cli-replaced-draft-recovery-"));
+  process.env.SLOCK_CLI_CONSUMED_SEQ_STATE_DIR = stateDirectory;
+  process.env.SLOCK_CLI_DRAFT_STATE_DIR = stateDirectory;
+  const previousBody = `first line\n${"x".repeat(640)}\n最後の行\n`;
+  setSavedDraft("agent-send-attest", "#recovery", {
+    content: previousBody,
+    attachmentIds: [],
+    savedAt: Date.now(),
+    reholdCount: 1,
+  });
+
+  const { ctx, bodies, stdout, stderr } = sendHarness(Readable.from(["replacement body\n"]));
+  await messageSendCommand.handler(ctx, [], { target: "#recovery" });
+
+  assert.equal(bodies.length, 1);
+  assert.equal(bodies[0]!.content, "replacement body\n");
+  const diagnostic = stderr.join("");
+  const recoveryMatch = diagnostic.match(/^Recovery file: (.+)$/mu);
+  assert.ok(recoveryMatch, diagnostic);
+  const recoveryPath = JSON.parse(recoveryMatch[1]!) as string;
+  assert.equal(fs.readFileSync(recoveryPath, "utf8"), previousBody);
+  assert.equal(fs.statSync(recoveryPath).mode & 0o077, 0, "recovery body must be user-private");
+  assert.match(diagnostic, new RegExp(`Previous draft excerpt \\(${previousBody.length} chars\\):`));
+  assert.doesNotMatch(diagnostic, /x{400}/u, "stderr must remain a bounded excerpt");
+  assert.match(stdout.join(""), /Replaced an unsent draft/);
+  assert.match(stdout.join(""), new RegExp(`Recovery file: ${JSON.stringify(recoveryPath).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
+});
+
+test("a recovery write failure does not block the replacement send", async () => {
+  const stateDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "slock-cli-replaced-draft-unwritable-"));
+  process.env.SLOCK_CLI_CONSUMED_SEQ_STATE_DIR = stateDirectory;
+  process.env.SLOCK_CLI_DRAFT_STATE_DIR = stateDirectory;
+  const agentId = "agent-send-attest";
+  setSavedDraft(agentId, "#recovery-fails", {
+    content: "body whose recovery write will fail\n",
+    attachmentIds: [],
+    savedAt: Date.now(),
+    reholdCount: 1,
+  });
+  const ledgerDirectory = path.dirname(resolveStateDbPath(agentId));
+  fs.writeFileSync(path.join(ledgerDirectory, "replaced-drafts"), "blocks the history directory", { mode: 0o600 });
+
+  const { ctx, bodies, stdout, stderr } = sendHarness(Readable.from(["replacement still sends\n"]));
+  await messageSendCommand.handler(ctx, [], { target: "#recovery-fails" });
+
+  assert.equal(bodies.length, 1);
+  assert.equal(bodies[0]!.content, "replacement still sends\n");
+  assert.match(stderr.join(""), /Recovery copy: unavailable .*sending continued/u);
+  assert.match(stdout.join(""), /Replaced an unsent draft\. Recovery copy: unavailable/u);
+});
+
+test("JSON success reports the replaced draft and recovery file structurally", async () => {
+  const stateDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "slock-cli-replaced-draft-json-"));
+  process.env.SLOCK_CLI_CONSUMED_SEQ_STATE_DIR = stateDirectory;
+  process.env.SLOCK_CLI_DRAFT_STATE_DIR = stateDirectory;
+  setSavedDraft("agent-send-attest", "#recovery-json", {
+    content: "body archived for a JSON caller\n",
+    attachmentIds: [],
+    savedAt: Date.now(),
+    reholdCount: 1,
+  });
+
+  const { ctx, stdout } = sendHarness(Readable.from(["replacement body\n"]));
+  await messageSendCommand.handler(ctx, [], { target: "#recovery-json", json: true });
+
+  const payload = JSON.parse(stdout.join("")) as {
+    replacedDraft?: { replaced?: boolean; recoverySaved?: boolean; recoveryFile?: string };
+  };
+  assert.equal(payload.replacedDraft?.replaced, true);
+  assert.equal(payload.replacedDraft?.recoverySaved, true);
+  assert.equal(typeof payload.replacedDraft?.recoveryFile, "string");
+  assert.equal(fs.readFileSync(payload.replacedDraft!.recoveryFile!, "utf8"), "body archived for a JSON caller\n");
+});
+
+test("replaced-draft recovery keeps a bounded history per target", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "slock-cli-replaced-draft-retention-"));
+  const env = { ...process.env, SLOCK_CLI_STATE_DIR: root };
+  let newestPath = "";
+  for (let index = 0; index < REPLACED_DRAFT_HISTORY_LIMIT + 3; index += 1) {
+    newestPath = archiveReplacedDraft("agent-history", "#same-target", `body-${index}\n`, env);
+  }
+
+  const retained = fs.readdirSync(path.dirname(newestPath)).filter((name) => name.endsWith(".txt"));
+  assert.equal(retained.length, REPLACED_DRAFT_HISTORY_LIMIT);
+  assert.equal(fs.readFileSync(newestPath, "utf8"), `body-${REPLACED_DRAFT_HISTORY_LIMIT + 2}\n`);
 });
 
 test("thread-context parent send guard stays narrow around stale or exact thread targets", () => {
@@ -3207,34 +3300,43 @@ test("reviewer-isolation send error output never forwards upstream poison text",
 // "nothing was there" printed identically, and the only record was a telemetry
 // field the sender never sees.
 
-test("replacing a non-empty draft names the target and prints the discarded body", () => {
-  const out = formatDraftReplacedWarning("#proj-dx", "the body that is about to be lost");
+test("replacing a non-empty draft names the target, excerpt, and recovery file", () => {
+  const out = formatDraftReplacedWarning(
+    "#proj-dx",
+    "the body that is about to be archived",
+    "/tmp/replaced-draft.txt",
+  );
   assert.match(out, /replacing an unsent draft for #proj-dx/i);
-  // The discarded text is the point: after this it exists nowhere else.
-  assert.match(out, /the body that is about to be lost/);
+  assert.match(out, /the body that is about to be archived/);
+  assert.match(out, /Recovery file: "\/tmp\/replaced-draft\.txt"/);
 });
 
 test("the warning does not offer --send-draft, which would send the replacement", () => {
-  const out = formatDraftReplacedWarning("#proj-dx", "old body");
+  const out = formatDraftReplacedWarning("#proj-dx", "old body", "/tmp/replaced-draft.txt");
   // By the time this prints the slot already holds the new content, so
   // `--send-draft` would send the thing that replaced it. A confident wrong
   // next action is worse than none.
   assert.doesNotMatch(out, /--send-draft/);
 });
 
-test("a long discarded draft is truncated but reports its true length", () => {
+test("a long replaced draft is excerpted but reports its true length", () => {
   const body = "x".repeat(DRAFT_REPLACED_EXCERPT_LIMIT + 250);
-  const out = formatDraftReplacedWarning("#proj-dx", body);
-  assert.match(out, new RegExp(`${DRAFT_REPLACED_EXCERPT_LIMIT + 250} chars total`));
-  assert.match(out, /truncated/);
+  const out = formatDraftReplacedWarning("#proj-dx", body, "/tmp/replaced-draft.txt");
+  assert.match(out, new RegExp(`${DRAFT_REPLACED_EXCERPT_LIMIT + 250} chars`));
   // Bounded: a huge draft must not flood the terminal it is being reported to.
   assert.ok(out.length < DRAFT_REPLACED_EXCERPT_LIMIT + 400, `warning was ${out.length} chars`);
 });
 
 test("a short draft is printed whole, with no truncation notice", () => {
-  const out = formatDraftReplacedWarning("#proj-dx", "short body");
-  assert.doesNotMatch(out, /truncated/);
-  assert.doesNotMatch(out, /chars total/);
+  const out = formatDraftReplacedWarning("#proj-dx", "short body", "/tmp/replaced-draft.txt");
+  assert.match(out, /Previous draft excerpt \(10 chars\): short body/);
+  assert.doesNotMatch(out, /…/u);
+});
+
+test("a failed local archive is explicit and never invents a recovery path", () => {
+  const out = formatDraftReplacedWarning("#proj-dx", "short body", null);
+  assert.match(out, /Recovery copy: unavailable/);
+  assert.doesNotMatch(out, /Recovery file:/);
 });
 
 // task #111 — the SERVER_5XX saved-draft recovery guidance, under the task #115 v1

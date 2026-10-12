@@ -215,7 +215,6 @@ test(
         providerAppId: seeded.registration.providerAppId,
         providerTeamId: "T_TEST_WORKSPACE",
         providerUserId: "U_TEST_OWNER",
-        providerInstallerIsWorkspaceAdmin: true,
         botUserId: "U_TEST_BOT",
         providerBotId: "B_TEST_BOT",
         workspaceName: "Test Workspace",

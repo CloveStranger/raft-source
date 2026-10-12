@@ -1,6 +1,7 @@
 import { serializeErrorForLog } from "../tracing/safeErrorLog";
 import { Router, type Request, type Response, type Router as RouterType } from "express";
-import { UUID_RE } from "../lib/messageId";
+import { isMessageShortId, UUID_RE } from "../lib/messageId";
+import { guardUuidPathParams } from "../lib/uuidPathParams";
 import { createHash, randomUUID } from "node:crypto";
 import { and, eq } from "drizzle-orm";
 import * as messageService from "../services/messageService";
@@ -59,9 +60,13 @@ import {
 } from "../services/channelConversionFenceService";
 import { projectSlackBridgeOutboundAdmissionFailure } from "../services/externalDeliveryOutboxService";
 import { getActorServerRoleInServer } from "../lib/actorPermissions";
+import { parseOptionalIanaTimezone } from "../lib/ianaTimezone";
 
 export const messageRouter: RouterType = Router();
 export const messageV2Router: RouterType = Router();
+// Uniform 404 for non-UUID path params (task #12). `messageId` stays unguarded:
+// /context/:messageId also takes the 8-hex short id and validates inline.
+guardUuidPathParams(messageRouter, { channelId: "Channel" });
 
 export const MAX_MESSAGE_LENGTH = 32_000;
 const MAX_RANDOM_ID_LENGTH = 128;
@@ -119,7 +124,8 @@ export function parseStructuredMentions(value: unknown): messageService.Structur
     if (!item || typeof item !== "object") return "invalid";
     const raw = item as Record<string, unknown>;
     const { type, id, name } = raw;
-    if ((type !== "user" && type !== "agent") || typeof id !== "string" || !UUID_RE.test(id)) return "invalid";
+    if (type !== "user" && type !== "agent" && type !== "external") return "invalid";
+    if (typeof id !== "string" || !UUID_RE.test(id)) return "invalid";
     if (typeof name !== "string" || name.trim().length === 0 || name.length > 128) return "invalid";
     const mention: messageService.StructuredMentionInput = { type, id, name: name.trim() };
     const key = `${mention.type}:${mention.id}:${mention.name}`;
@@ -899,6 +905,17 @@ function parseContextWindowSide(raw: unknown): number {
 }
 
 messageRouter.get("/context/:messageId", async (req, res) => {
+  // A malformed id (e.g. a permalink whose `msg=` swallowed the CJK text after
+  // it) is a client error, not a uuid-cast 500.
+  const looksLikeFullUuid = UUID_RE.test(req.params.messageId);
+  if (!looksLikeFullUuid && !isMessageShortId(req.params.messageId)) {
+    res.status(400).json({ error: "Invalid message id" });
+    return;
+  }
+  if (typeof req.query.channelId === "string" && !UUID_RE.test(req.query.channelId)) {
+    res.status(400).json({ error: "Invalid channel id" });
+    return;
+  }
   try {
     const plan = await tracePhase(
       () => getServerPlan(req.serverId!),
@@ -935,7 +952,6 @@ messageRouter.get("/context/:messageId", async (req, res) => {
     }
     const contextBefore = parseContextWindowSide(req.query.before);
     const contextAfter = parseContextWindowSide(req.query.after);
-    const looksLikeFullUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(req.params.messageId);
     const contextQueryOptions = {
       attachmentCommentViewerUserId: req.userId,
       forwardedBundleViewerUserId: req.userId,
@@ -1723,6 +1739,9 @@ async function createHumanMessage(
       res.status(400).json({ error: "Invalid mentions payload" });
       return;
     }
+    // Best-effort: the web client reports its IANA zone for agents. A bad or
+    // missing value is stored as null and never fails the send.
+    const senderTimezone = parseOptionalIanaTimezone(req.body.timezone);
     if (!channelId || !content) {
       res.status(400).json({ error: "Channel ID and content are required" });
       return;
@@ -1789,6 +1808,7 @@ async function createHumanMessage(
       randomId,
       asTask,
       mentionContract,
+      senderTimezone,
     });
 
     if (mentions.some((m) => m.type === "agent")) {

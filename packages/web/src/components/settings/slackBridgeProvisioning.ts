@@ -201,6 +201,8 @@ export interface SlackBridgeProvisioningProvider {
   load(): Promise<SlackBridgeProvisioningView>;
   connect(): Promise<SlackBridgeProvisioningView>;
   beginOAuth(): Promise<SlackBridgeOAuthResult>;
+  /** Re-runs Slack OAuth for a connected workspace; the server keeps its channel pairs. */
+  beginReauthorization?(): Promise<SlackBridgeOAuthResult>;
   saveChannelPairs(pairs: readonly SlackBridgeChannelPair[]): Promise<SlackBridgeProvisioningView>;
   removeChannelPair?(pair: SlackBridgeChannelPair & { expectedBindingEpoch: number }): Promise<SlackBridgeProvisioningView>;
   disconnect?(expectedConnectionEpoch: number): Promise<SlackBridgeProvisioningView>;

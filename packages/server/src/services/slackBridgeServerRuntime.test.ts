@@ -57,6 +57,7 @@ import {
   SLACK_BRIDGE_CREDENTIAL_KEY_ID,
 } from "./slackBridgeEnvSecrets";
 import { createSlackBridgeServerRuntimeFromEnv } from "./slackBridgeServerRuntime";
+import { withChannelDelivery } from "../test/orchestratorStub";
 
 // Built at runtime so secret scanners don't flag this test sample.
 const SLACK_XOXB = "xo" + "xb-";
@@ -77,7 +78,7 @@ const MANAGED_ENV: NodeJS.ProcessEnv = {
 
 const NOW = new Date("2026-08-11T20:00:00.000Z");
 
-const noopOrchestrator = { deliverMessage: async () => undefined } as any;
+const noopOrchestrator = withChannelDelivery({ deliverMessage: async () => undefined }) as any;
 
 function createIo() {
   return {
@@ -496,6 +497,7 @@ test("managed server lifecycle consumes the database human resolver on start, ev
   let installGrantCalls = 0;
   let audienceCalls = 0;
   let privacyCalls = 0;
+  let mentionCalls = 0;
   let rateLimitNextPrivacyCall = false;
   let runtimeNow = NOW;
   let periodic: () => void = () => assert.fail("periodic callback was not scheduled");
@@ -579,6 +581,13 @@ test("managed server lifecycle consumes the database human resolver on start, ev
           },
         }), { status: 200, headers: { "content-type": "application/json" } });
       }
+      if (String(url).startsWith("https://slack.com/api/usergroups.list")) {
+        mentionCalls += 1;
+        return new Response(JSON.stringify({ ok: true, usergroups: [] }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
       audienceCalls += 1;
       const requestUrl = new URL(String(url));
       assert.equal(
@@ -608,6 +617,7 @@ test("managed server lifecycle consumes the database human resolver on start, ev
   assert.equal(installGrantCalls, 1, "server start repairs missing install authority once");
   assert.equal(audienceCalls, 1, "server start performs one live audience refresh");
   assert.equal(privacyCalls, 1, "server start verifies provider privacy separately");
+  assert.equal(mentionCalls, 1, "server start reconciles Agent mention handles");
   const startSnapshot = await getDb().select().from(externalBindingAudienceSnapshots);
   assert.equal(startSnapshot.at(-1)?.bindingId, seeded.binding.id);
   assert.equal(startSnapshot.at(-1)?.status, "matched");
@@ -617,12 +627,14 @@ test("managed server lifecycle consumes the database human resolver on start, ev
   assert.equal(installGrantCalls, 1, "fresh install authority is not re-read on every event");
   assert.equal(audienceCalls, 2, "post-ingress event reconciliation reaches the provider");
   assert.equal(privacyCalls, 2, "post-ingress event refreshes privacy freshness");
+  assert.equal(mentionCalls, 2, "post-ingress event reconciliation refreshes Agent handles");
 
   periodic();
   await waitForReceipt(3);
   assert.equal(installGrantCalls, 1, "fresh install authority is not re-read on every tick");
   assert.equal(audienceCalls, 3, "persistent periodic reconciliation reaches the provider");
   assert.equal(privacyCalls, 3, "periodic reconciliation refreshes privacy freshness");
+  assert.equal(mentionCalls, 3, "periodic reconciliation refreshes Agent handles");
 
   const [secondChannel] = await getDb().insert(channels).values({
     serverId: seeded.server.id,

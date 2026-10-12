@@ -105,7 +105,12 @@ async function runReplicaRouterRoot(
 const FLY_INSTANCE = process.env.FLY_MACHINE_ID || process.env.FLY_ALLOC_ID || null;
 
 type MachineCommandHandler = (machineId: string, message: ServerToMachineMessage) => void;
-type InboxDeliveryHandler = (agentId: string, machineId: string | null, message: AgentMessage) => void;
+type InboxDeliveryHandler = (
+  agentId: string,
+  machineId: string | null,
+  message: AgentMessage,
+  options: RoutedInboxDeliveryOptions,
+) => void;
 export type RoutedInboxDeliveryReceipt =
   | { status: "queued"; reason: string }
   | { status: "dropped"; reason: string };
@@ -245,7 +250,7 @@ const REFRESH_MACHINE_OWNER_LUA = `
     return 0
   end
   if not currentReplica and currentGeneration then
-    return 0
+    return 2
   end
 
   redis.call("SET", KEYS[1], ARGV[1], "EX", ARGV[8])
@@ -284,7 +289,12 @@ type ReceiptRequiredInboxDeliveryMessage = {
  * clears guards and trackers only on the requester.
  */
 export interface StartIntentOptions {
-  startCause?: "app_inbox_wake";
+  /**
+   * An owner on an older build reads an unknown cause as an automatic,
+   * non-human start. `internal`: the task #365 spawn-error retry sweep (never
+   * routed; see AgentOrchestrator.startAgentForRetry).
+   */
+  startCause?: "app_inbox_wake" | "start_failure_retry" | "internal";
   resumePrompt?: string;
   wakeMessage?: AgentMessage;
   wakeMessageTransient?: boolean;
@@ -462,6 +472,8 @@ type ReplicaMessage =
       machineId?: string;
       agentId: string;
       payload: unknown;
+      // Added field: older replicas ignore it and keep visibility-checking.
+      deliveryOptions?: unknown;
     }
   | ReceiptRequiredInboxDeliveryMessage
   | {
@@ -718,7 +730,12 @@ export function handleReplicaMessage(channel: string, raw: string): void {
         () => handleReceiptRequiredInboxDelivery(msg),
       );
     } else if (msg.type === "inbox:deliver" && msg.agentId && _inboxDeliveryHandler) {
-      _inboxDeliveryHandler(msg.agentId, msg.machineId ?? null, msg.payload as AgentMessage);
+      _inboxDeliveryHandler(
+        msg.agentId,
+        msg.machineId ?? null,
+        msg.payload as AgentMessage,
+        normalizeRoutedInboxDeliveryOptions(msg.deliveryOptions),
+      );
     }
   } catch (err) {
     console.error("[ReplicaRouter] Failed to parse message:", err);
@@ -786,6 +803,22 @@ export function __setInboxDeliveryReceiptRuntimeForTests(
 ): void {
   _inboxDeliveryReceiptHandler = handler;
   _inboxDeliveryReceiptPublisherForTests = publisher;
+}
+
+function inboxRouteRuntime(): InboxDeliveryReceiptRouteRuntime {
+  return _inboxDeliveryReceiptRouteRuntimeForTests ?? {
+    isAvailable: isRedisAvailable,
+    getTargetReplica: async (targetMachineId: string) => (
+      getRedis().get(machineReplicaKey(targetMachineId))
+    ),
+    publish: async (targetReplicaId: string, raw: string) => (
+      getRedis().publish(replicaChannel(targetReplicaId), raw)
+    ),
+  };
+}
+
+export function __setInboxDeliveryHandlerForTests(handler: InboxDeliveryHandler | null): void {
+  _inboxDeliveryHandler = handler;
 }
 
 export function __setInboxDeliveryReceiptRouteRuntimeForTests(
@@ -908,6 +941,13 @@ async function commitMachineReplicaGeneration(
   assertRedisTransactionSucceeded(await transaction.exec(), "machine owner registration");
 }
 
+export type MachineReplicaRefreshResult =
+  | "refreshed"
+  | "rejected_other_lease"
+  | "rejected_residual_generation"
+  | "skipped_no_generation"
+  | "redis_unavailable";
+
 /**
  * Refresh the machine→replica mapping TTL. Called on each heartbeat pong.
  */
@@ -915,9 +955,10 @@ export async function refreshMachineReplica(
   machineId: string,
   traceContext: MachineConnectTraceContext = buildRuntimeTraceContext(),
   expectedGeneration?: string,
-): Promise<void> {
-  if (!isRedisAvailable() || !expectedGeneration) return;
-  await getRedis().eval(
+): Promise<MachineReplicaRefreshResult> {
+  if (!isRedisAvailable()) return "redis_unavailable";
+  if (!expectedGeneration) return "skipped_no_generation";
+  const result = await getRedis().eval(
     REFRESH_MACHINE_OWNER_LUA,
     9,
     machineReplicaKey(machineId),
@@ -939,6 +980,7 @@ export async function refreshMachineReplica(
     String(MACHINE_REPLICA_TTL),
     FLY_INSTANCE ?? "",
   );
+  return result === 1 ? "refreshed" : result === 2 ? "rejected_residual_generation" : "rejected_other_lease";
 }
 
 function assertRedisTransactionSucceeded(
@@ -956,10 +998,134 @@ export async function hasMachineReplica(machineId: string): Promise<boolean> {
   return !!(await redis.get(machineReplicaKey(machineId)));
 }
 
+/** getMachineReplicaOwner for many machines in one round trip (MGET). */
+export async function getMachineReplicaOwners(machineIds: readonly string[]): Promise<Map<string, string | null>> {
+  const owners = new Map<string, string | null>();
+  if (!isRedisAvailable() || machineIds.length === 0) return owners;
+  const ids = [...new Set(machineIds)];
+  const values = await getRedis().mget(...ids.map(machineReplicaKey));
+  ids.forEach((id, index) => owners.set(id, values[index] ?? null));
+  return owners;
+}
+
 export async function getMachineReplicaOwner(machineId: string): Promise<string | null> {
   if (!isRedisAvailable()) return null;
   const redis = getRedis();
   return await redis.get(machineReplicaKey(machineId));
+}
+
+/**
+ * The daemon behind the current lease, written by the lease holder after a
+ * successful refresh (task #374 observation). Only returned when it belongs to
+ * the lease's current generation.
+ */
+export type MachineReplicaInstance = {
+  generation: string;
+  daemonInstanceId: string | null;
+  daemonVersion: string | null;
+  /** Short hash of the hostname the daemon reported; a clue, not host identity. */
+  reportedHostnameHash?: string | null;
+};
+
+export type MachineReplicaLease = {
+  replicaId: string | null;
+  generation: string | null;
+  updatedAtMs: number | null;
+  instance?: MachineReplicaInstance | null;
+};
+
+const machineReplicaInstanceKey = (machineId: string) => `slock:machine:${machineId}:replica_instance`;
+
+export async function setMachineReplicaInstance(
+  machineId: string,
+  instance: MachineReplicaInstance,
+  ttlSeconds: number = MACHINE_REPLICA_TTL,
+): Promise<void> {
+  if (!isRedisAvailable()) return;
+  await getRedis().set(machineReplicaInstanceKey(machineId), JSON.stringify(instance), "EX", ttlSeconds);
+}
+
+function parseMachineReplicaInstance(raw: string | null | undefined, generation: string | null): MachineReplicaInstance | null {
+  if (!raw || !generation) return null;
+  try {
+    const parsed = JSON.parse(raw) as Partial<MachineReplicaInstance>;
+    if (parsed.generation !== generation) return null;
+    return {
+      generation,
+      daemonInstanceId: typeof parsed.daemonInstanceId === "string" ? parsed.daemonInstanceId : null,
+      daemonVersion: typeof parsed.daemonVersion === "string" ? parsed.daemonVersion : null,
+      reportedHostnameHash: typeof parsed.reportedHostnameHash === "string" ? parsed.reportedHostnameHash : null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Who holds the machine's owner lease and when it was last renewed, in one
+ * round trip. Task #374: a refresh refused as `rejected_other_lease` is only
+ * evidence of a second live connection if this keeps advancing.
+ */
+export async function getMachineReplicaLease(machineId: string): Promise<MachineReplicaLease | null> {
+  if (!isRedisAvailable()) return null;
+  const [replicaId, generation, updatedAt, instance] = await getRedis().mget(
+    machineReplicaKey(machineId),
+    machineReplicaGenerationKey(machineId),
+    machineReplicaUpdatedAtKey(machineId),
+    machineReplicaInstanceKey(machineId),
+  );
+  const updatedAtMs = updatedAt === null || updatedAt === undefined ? null : Number(updatedAt);
+  return {
+    replicaId: replicaId ?? null,
+    generation: generation ?? null,
+    updatedAtMs: updatedAtMs !== null && Number.isFinite(updatedAtMs) ? updatedAtMs : null,
+    instance: parseMachineReplicaInstance(instance, generation ?? null),
+  };
+}
+
+const machineDuplicateHoldKey = (machineId: string) => `slock:machine:${machineId}:duplicate_hold`;
+
+/** The connection that won a duplicate-connection decision (task #374). */
+export type MachineDuplicateHold = {
+  replicaId: string;
+  generation: string;
+  /** Daemon version of the connection closed as the duplicate; labels later refusals. */
+  closedDaemonVersion: string | null;
+};
+
+/**
+ * Task #374: after the older of two live connections for one machine key is
+ * closed, the winner is recorded here for every replica. While it still holds
+ * the owner lease, a new connection for the machine is refused instead of
+ * taking the lease back, so two daemons on one key cannot keep kicking each
+ * other off (old daemons do not understand the close code and reconnect).
+ */
+export async function setMachineDuplicateHold(machineId: string, hold: MachineDuplicateHold, ttlSeconds: number): Promise<void> {
+  if (!isRedisAvailable()) return;
+  await getRedis().set(machineDuplicateHoldKey(machineId), JSON.stringify(hold), "EX", ttlSeconds);
+}
+
+export async function getMachineDuplicateHold(machineId: string): Promise<MachineDuplicateHold | null> {
+  if (!isRedisAvailable()) return null;
+  const raw = await getRedis().get(machineDuplicateHoldKey(machineId));
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as Partial<MachineDuplicateHold>;
+    return typeof parsed.replicaId === "string" && typeof parsed.generation === "string"
+      ? {
+        replicaId: parsed.replicaId,
+        generation: parsed.generation,
+        closedDaemonVersion: typeof parsed.closedDaemonVersion === "string" ? parsed.closedDaemonVersion : null,
+      }
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function touchMachineDuplicateHold(machineId: string, ttlSeconds: number): Promise<void> {
+  if (!isRedisAvailable()) return;
+  await getRedis().expire(machineDuplicateHoldKey(machineId), ttlSeconds);
 }
 
 export async function getMachineReplicaTraceContext(machineId: string): Promise<Partial<MachineConnectTraceContext> | null> {
@@ -1322,12 +1488,13 @@ export async function routeInboxDelivery(
   machineId: string | null,
   message: AgentMessage,
   localMachineIds: Set<string>,
+  deliveryOptions: RoutedInboxDeliveryOptions = {},
 ): Promise<boolean> {
-  if (!isRedisAvailable() || !machineId) return false;
+  const runtime = inboxRouteRuntime();
+  if (!runtime.isAvailable() || !machineId) return false;
   if (localMachineIds.has(machineId)) return false;
 
-  const redis = getRedis();
-  const targetReplica = await redis.get(machineReplicaKey(machineId));
+  const targetReplica = await runtime.getTargetReplica(machineId);
   if (!targetReplica || targetReplica === REPLICA_ID) return false;
 
   const msg: ReplicaMessage = {
@@ -1335,8 +1502,11 @@ export async function routeInboxDelivery(
     machineId,
     agentId,
     payload: message,
+    // Only `intrinsic` changes the owner's gate on this route (it skips the
+    // visibility check the sender already skipped).
+    ...(deliveryOptions.intrinsic === true ? { deliveryOptions: { intrinsic: true } } : {}),
   };
-  await redis.publish(replicaChannel(targetReplica), JSON.stringify(msg));
+  await runtime.publish(targetReplica, JSON.stringify(msg));
   return true;
 }
 
@@ -1357,15 +1527,7 @@ export async function routeInboxDeliveryWithReceipt(
   localMachineIds: Set<string>,
   deliveryOptions: RoutedInboxDeliveryOptions = {},
 ): Promise<RoutedInboxDeliveryReceiptResult> {
-  const runtime = _inboxDeliveryReceiptRouteRuntimeForTests ?? {
-    isAvailable: isRedisAvailable,
-    getTargetReplica: async (targetMachineId: string) => (
-      getRedis().get(machineReplicaKey(targetMachineId))
-    ),
-    publish: async (targetReplicaId: string, raw: string) => (
-      getRedis().publish(replicaChannel(targetReplicaId), raw)
-    ),
-  };
+  const runtime = inboxRouteRuntime();
   if (!runtime.isAvailable() || !machineId) return { routed: false };
   if (localMachineIds.has(machineId)) return { routed: false };
 
@@ -1540,6 +1702,7 @@ export function decodeActivityTypedCarriers(raw: string | undefined): PersistedA
   if (wakeCrashLoop) carriers.wakeCrashLoop = wakeCrashLoop;
   const spawnFailure = normalizeSpawnFailureActivityDiagnostic(
     record.spawnFailure as Record<string, unknown> | null | undefined,
+    { source: "server" },
   );
   if (spawnFailure) carriers.spawnFailure = spawnFailure;
   return Object.keys(carriers).length > 0 ? carriers : undefined;
@@ -1562,6 +1725,24 @@ export function projectAgentActivityFromRedisHash(data: Record<string, string>):
 /**
  * Get agent activity from Redis.
  */
+/** getAgentActivity for many agents in one round trip (pipelined HGETALL). */
+export async function getAgentActivities(
+  agentIds: readonly string[],
+): Promise<Map<string, PersistedAgentActivity | null>> {
+  const activities = new Map<string, PersistedAgentActivity | null>();
+  if (!isRedisAvailable() || agentIds.length === 0) return activities;
+  const ids = [...new Set(agentIds)];
+  const pipeline = getRedis().pipeline();
+  for (const id of ids) pipeline.hgetall(`slock:agent:${id}:activity`);
+  const results = await pipeline.exec();
+  ids.forEach((id, index) => {
+    const [error, data] = results?.[index] ?? [null, null];
+    if (error) throw error;
+    activities.set(id, projectAgentActivityFromRedisHash((data ?? {}) as Record<string, string>));
+  });
+  return activities;
+}
+
 export async function getAgentActivity(
   agentId: string,
 ): Promise<PersistedAgentActivity | null> {
@@ -1636,6 +1817,15 @@ function stringOrNull(record: Record<string, unknown>, key: string, repaired: st
 /** Optional field (added after the first records were written): absent is legal and means null. */
 function optionalStringOrNull(record: Record<string, unknown>, key: string, repaired: string[]): string | null {
   return record[key] === undefined ? null : stringOrNull(record, key, repaired);
+}
+
+/** Optional count: absent is legal and means 0; anything but a non-negative integer is repaired to 0. */
+function optionalNonNegativeInt(record: Record<string, unknown>, key: string, repaired: string[]): number {
+  const value = record[key];
+  if (value === undefined) return 0;
+  if (typeof value === "number" && Number.isInteger(value) && value >= 0) return value;
+  repaired.push(key);
+  return 0;
 }
 
 /** Optional flag: absent is legal and means false; a non-boolean is repaired to false. */
@@ -1714,6 +1904,14 @@ export function decodeWakeCrashLoopState(raw: unknown): DecodedWakeCrashLoopStat
     needsActionReason: optionalStringOrNull(record, "needsActionReason", repaired),
     catchupOwed: optionalBoolean(record, "catchupOwed", repaired),
     catchupCarriedLaunchId: optionalStringOrNull(record, "catchupCarriedLaunchId", repaired),
+    // Start-failure streak fields; absent on older records, which is not a repair.
+    startFailureCount: optionalNonNegativeInt(record, "startFailureCount", repaired),
+    lastStartFailureReason: optionalStringOrNull(record, "lastStartFailureReason", repaired),
+    lastStartFailureLaunchId: optionalStringOrNull(record, "lastStartFailureLaunchId", repaired),
+    retryAfterMs: record.retryAfterMs === undefined ? null : finiteOrNull(record, "retryAfterMs", repaired),
+    // task #365 fields; absent on older records, which is not a repair.
+    startFailureOwnedLaunchId: optionalStringOrNull(record, "startFailureOwnedLaunchId", repaired),
+    blockedByLaunchId: optionalStringOrNull(record, "blockedByLaunchId", repaired),
   };
   return { state, repaired };
 }
@@ -1851,6 +2049,24 @@ export async function setAgentRuntimeError(
   }
   pipeline.expire(key, AGENT_RUNTIME_ERROR_TTL_SEC);
   await pipeline.exec();
+}
+
+/** getAgentRuntimeError for many agents in one round trip (pipelined HGETALL). */
+export async function getAgentRuntimeErrors(
+  agentIds: readonly string[],
+): Promise<Map<string, AgentRuntimeErrorMirror | null>> {
+  const mirrors = new Map<string, AgentRuntimeErrorMirror | null>();
+  if (!isRedisAvailable() || agentIds.length === 0) return mirrors;
+  const ids = [...new Set(agentIds)];
+  const pipeline = getRedis().pipeline();
+  for (const id of ids) pipeline.hgetall(agentRuntimeErrorKey(id));
+  const results = await pipeline.exec();
+  ids.forEach((id, index) => {
+    const [error, data] = results?.[index] ?? [null, null];
+    if (error) throw error;
+    mirrors.set(id, projectAgentRuntimeErrorFromRedisHash((data ?? {}) as Record<string, string>));
+  });
+  return mirrors;
 }
 
 export async function getAgentRuntimeError(agentId: string): Promise<AgentRuntimeErrorMirror | null> {

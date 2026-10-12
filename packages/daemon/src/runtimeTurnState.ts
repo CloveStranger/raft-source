@@ -36,6 +36,11 @@ export class RuntimeTurnState {
     return this.currentTurnId;
   }
 
+  /** A turn was accepted (awaiting its start) or is running. */
+  get hasLiveTurn(): boolean {
+    return this.turnInProgress || this.pendingTurnId !== null;
+  }
+
   get canSteerBusy(): boolean {
     return Boolean(this.currentTurnId && !this.pendingTurnId && !this.steeringGateActive);
   }

@@ -1,3 +1,4 @@
+import { useCallback } from "react";
 import { GitBranch, Hash, Lock, LogIn, UserPlus } from "lucide-react";
 import { useIntl } from "react-intl";
 import { Checkbox, Button, Spinner } from "raft-ui";
@@ -52,6 +53,7 @@ export default function ForwardComposerTargetList({
 }: Props) {
   const { formatMessage } = useIntl();
   const showCheckbox = !isMobile || mobileMultiSelect;
+  const handleRetrySearch = useCallback(() => retrySearch(lowerQuery), [retrySearch, lowerQuery]);
 
   const renderSearchTarget = (target: ForwardSearchTarget) => {
     const key = searchSelectionKey(currentServerId, target);
@@ -156,7 +158,7 @@ export default function ForwardComposerTargetList({
     return (
       <div className="flex flex-col items-center gap-2 py-4 text-center">
         <p className="text-xs font-bold text-foreground-muted">{formatMessage({ id: "message.forwardComposer.searchFailed" })}</p>
-        <Button type="button" size="xs" variant="outline" onClick={() => retrySearch(lowerQuery)}>{formatMessage({ id: "message.forwardComposer.tryAgain" })}</Button>
+        <Button type="button" size="xs" variant="outline" onClick={handleRetrySearch}>{formatMessage({ id: "message.forwardComposer.tryAgain" })}</Button>
       </div>
     );
   }

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -470,57 +470,74 @@ test("account-unavailable catalogs keep placeholders aligned and fall back to En
   assert.equal(resolveAccountUnavailableLocale({}), "en");
 });
 
+// The default profile is the machine's default Raft home: ~/.slock where it
+// already exists (machines set up before the rename), else ~/.raft.
+function withHomeDir(defaultHomeDirname: ".slock" | ".raft", run: (homeDir: string) => void): void {
+  const homeDir = mkdtempSync(join(tmpdir(), "raft-computer-account-copy-"));
+  try {
+    if (defaultHomeDirname === ".slock") mkdirSync(join(homeDir, ".slock", "computer"), { recursive: true });
+    run(homeDir);
+  } finally {
+    rmSync(homeDir, { recursive: true, force: true });
+  }
+}
+
 test("account-unavailable copy identifies default/named profiles without exposing email", () => {
-  const homeDir = "/home/alice";
-  const identity = {
-    userId: "11111111-2222-4333-8444-555555555555",
-    name: "alice",
-    email: "alice-secret@example.test",
-  };
-  const common = {
-    serverLabel: "/project",
-    serverSlug: "project",
-    identity,
-    env: { LANG: "en" },
-    homeDir,
-    platform: "linux" as const,
-  };
-  const defaultCopy = accountUnavailableMessage({
-    ...common,
-    slockHome: "/home/alice/.slock",
-  });
-  const namedCopy = accountUnavailableMessage({
-    ...common,
-    slockHome: "/home/alice/.slock/profiles/client-b",
-  });
-  assert.match(defaultCopy, /profile default \(@alice\)/);
-  assert.match(namedCopy, /profile "client-b" \(@alice\)/);
-  assert.doesNotMatch(defaultCopy, /alice-secret@example\.test/);
-  const command =
-    'SLOCK_HOME="$HOME"/\'.slock/profiles/<other-profile>\' raft-computer login && ' +
-    'SLOCK_HOME="$HOME"/\'.slock/profiles/<other-profile>\' raft-computer setup \'/project\'';
-  assert.ok(defaultCopy.includes(`\`${command}\``));
-  assert.ok(namedCopy.includes(`\`${command}\``));
+  for (const dirname of [".slock", ".raft"] as const) {
+    withHomeDir(dirname, (homeDir) => {
+      const identity = {
+        userId: "11111111-2222-4333-8444-555555555555",
+        name: "alice",
+        email: "alice-secret@example.test",
+      };
+      const common = {
+        serverLabel: "/project",
+        serverSlug: "project",
+        identity,
+        env: { LANG: "en" },
+        homeDir,
+        platform: "linux" as const,
+      };
+      const defaultCopy = accountUnavailableMessage({
+        ...common,
+        slockHome: join(homeDir, dirname),
+      });
+      const namedCopy = accountUnavailableMessage({
+        ...common,
+        slockHome: join(homeDir, dirname, "profiles", "client-b"),
+      });
+      assert.match(defaultCopy, /profile default \(@alice\)/);
+      assert.match(namedCopy, /profile "client-b" \(@alice\)/);
+      assert.doesNotMatch(defaultCopy, /alice-secret@example\.test/);
+      const command =
+        `SLOCK_HOME="$HOME"/'${dirname}/profiles/<other-profile>' raft-computer login && ` +
+        `SLOCK_HOME="$HOME"/'${dirname}/profiles/<other-profile>' raft-computer setup '/project'`;
+      assert.ok(defaultCopy.includes(`\`${command}\``));
+      assert.ok(namedCopy.includes(`\`${command}\``));
+    });
+  }
 });
 
 test("account-unavailable copy renders zh-cn and a single executable Windows recovery command", () => {
-  const copy = accountUnavailableMessage({
-    serverLabel: "/项目",
-    serverSlug: "项目",
-    slockHome: "/home/alice/.slock",
-    identity: null,
-    env: { LC_ALL: "zh_CN.UTF-8" },
-    homeDir: "/home/alice",
-    platform: "win32",
+  withHomeDir(".slock", (homeDir) => {
+    const copy = accountUnavailableMessage({
+      serverLabel: "/项目",
+      serverSlug: "项目",
+      slockHome: join(homeDir, ".slock"),
+      identity: null,
+      env: { LC_ALL: "zh_CN.UTF-8" },
+      homeDir,
+      platform: "win32",
+    });
+    const command =
+      "$env:SLOCK_HOME = $HOME + '\\.slock\\profiles\\<other-profile>'; " +
+      "raft-computer login; if ($?) { raft-computer setup '/项目' }";
+    assert.match(copy, /当前 Computer 配置档 default 登录的账号（当前账号）无法访问服务器 \/项目/);
+    assert.ok(copy.includes(`\`${command}\``));
+    assert.equal(countOccurrences(copy, /`/g), 2);
+    assert.deepEqual(inferNextCommands("SETUP_SERVER_UNAVAILABLE_TO_ACCOUNT", copy), [command]);
+    assert.match(copy, /https:\/\/app\.raft\.build\/s\/%E9%A1%B9%E7%9B%AE\//);
   });
-  const command =
-    "$env:SLOCK_HOME = $HOME + '\\.slock\\profiles\\<other-profile>'; " +
-    "raft-computer login; if ($?) { raft-computer setup '/项目' }";
-  assert.match(copy, /当前 Computer 配置档 default 登录的账号（当前账号）无法访问服务器 \/项目/);
-  assert.ok(copy.includes(`\`${command}\``));
-  assert.equal(countOccurrences(copy, /`/g), 2);
-  assert.deepEqual(inferNextCommands("SETUP_SERVER_UNAVAILABLE_TO_ACCOUNT", copy), [command]);
-  assert.match(copy, /https:\/\/app\.raft\.build\/s\/%E9%A1%B9%E7%9B%AE\//);
 });
 
 test("account-unavailable recovery commands preserve adversarial values as literal argv on POSIX and PowerShell", () => {

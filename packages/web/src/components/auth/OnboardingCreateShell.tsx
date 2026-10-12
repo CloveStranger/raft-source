@@ -1,3 +1,4 @@
+import { useCallback } from "react";
 import type { ReactNode } from "react";
 import { useIntl } from "react-intl";
 import RaftBrandLockup from "../brand/RaftBrandLockup";
@@ -51,13 +52,16 @@ export function OnboardingSessionFooter() {
   const user = useAuthStore((state) => state.user);
   const loading = useAuthStore((state) => state.loading);
   const logout = useAuthStore((state) => state.logout);
+  const handleLogout = useCallback(() => {
+    void logout();
+  }, [logout]);
 
   if (!user) return null;
 
   return (
     <p className="text-center text-sm text-foreground-muted" data-testid="onboarding-session-footer">
       <SignedInAs user={user} nameClassName="font-normal" suffix=". " />
-      <TextLink variant="muted" onClick={() => logout()} disabled={loading}>
+      <TextLink variant="muted" inline onClick={handleLogout} disabled={loading}>
         {formatMessage({ id: "pages.serverSelector.logOut" })}
       </TextLink>
     </p>

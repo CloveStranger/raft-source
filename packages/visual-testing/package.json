@@ -40,9 +40,9 @@
   },
   "dependencies": {
     "@earendil-works/pi-ai": "0.84.4",
-    "sharp": "^0.35.4"
+    "sharp": "^0.35.5"
   },
   "devDependencies": {
-    "@playwright/test": "^1.59.1"
+    "@playwright/test": "^1.64.0"
   }
 }

@@ -5,6 +5,7 @@ import {
   projectTraceScopeAttrs,
   noopTracer,
   type TraceAttributes,
+  type TraceContext,
   type TraceScope,
   type TraceSpanAttrContracts,
   type Tracer,
@@ -42,6 +43,18 @@ const HTTP_REQUEST_SCOPE_ATTR_KEYS = [
   "error_code",
 ] as const;
 
+// How the request span treated the caller's traceparent (see
+// inboundTraceParent). client_* name the context an external caller sent when
+// it was recorded instead of continued; they are only written after the value
+// parsed as a W3C traceparent, otherwise client_traceparent_invalid is set.
+const HTTP_REQUEST_TRACE_PARENT_ATTR_KEYS = [
+  "trace_parent_policy",
+  "client_trace_id",
+  "client_parent_span_id",
+  "client_traceparent_invalid",
+  "trace_parent_claim_mismatch",
+] as const;
+
 const HTTP_REQUEST_TRACE_ATTR_CONTRACTS = {
   "server.http.request": {
     spanAttrs: [],
@@ -77,6 +90,7 @@ const HTTP_REQUEST_TRACE_ATTR_CONTRACTS = {
       "status_bucket",
       "status_code",
       "http.response.status_code",
+      ...HTTP_REQUEST_TRACE_PARENT_ATTR_KEYS,
     ],
   },
 } satisfies TraceSpanAttrContracts;
@@ -110,7 +124,7 @@ export function hasAgentIdHint(req: Request, routePattern: string): boolean {
 
 export function inferHttpCallerKind(req: Request, routePattern: string): HttpCallerKind {
   if (hasAgentIdHint(req, routePattern)) return "agent";
-  if (req.machineId || routePattern.startsWith("/internal/machine/") || routePattern === "/health") return "system";
+  if (req.machineId || routePattern.startsWith("/internal/machine/") || routePattern === "/health" || routePattern === "/livez") return "system";
   return "human";
 }
 
@@ -215,6 +229,66 @@ function requestTraceErrorCodeAttrs(res: { locals?: Record<string, unknown> }): 
   return typeof code === "string" && code ? { error_code: code } : {};
 }
 
+// Only the daemon's agent proxy and its managed MCP tools stamp this on
+// sk_agent_* calls (the CLI only does so with a daemon-provided context).
+const DAEMON_AGENT_CAPABILITIES_HEADER = "x-slock-agent-active-capabilities";
+
+export type TraceParentPolicy = "continued" | "linked" | "absent";
+
+interface InboundTraceParent {
+  policy: TraceParentPolicy;
+  parent: TraceContext | null;
+  /** A traceparent header was sent but is not a valid W3C traceparent. */
+  invalid: boolean;
+  /** The caller presented the daemon marker on an sk_agent_* credential. */
+  daemonClaimed: boolean;
+}
+
+/**
+ * Credentials an outside client holds itself: an agent credential not sent
+ * through the daemon (external runtime agents), a third-party app's OAuth
+ * access token, a share token. Their traceparent is the client's own business:
+ * one long-lived client span reused on every poll would otherwise fold
+ * thousands of unrelated requests into a single trace, so the request starts a
+ * new trace and only records the client's context.
+ *
+ * The decision has to be made before auth: the request span is already the
+ * parent of auth's own spans. The daemon marker is a header, so it can be
+ * forged; it only steers which trace a request lands in, never access, and
+ * after auth a forged claim is flagged (trace_parent_claim_mismatch).
+ */
+function isExternalClientCredential(req: Request): { external: boolean; daemonClaimed: boolean } {
+  const authorization = req.header?.("authorization");
+  if (!authorization?.startsWith("Bearer ")) return { external: false, daemonClaimed: false };
+  const token = authorization.slice(7);
+  if (token.startsWith("sk_agent_")) {
+    const daemonClaimed = Boolean(req.header?.(DAEMON_AGENT_CAPABILITIES_HEADER)?.trim());
+    return { external: !daemonClaimed, daemonClaimed };
+  }
+  return { external: token.startsWith("slock_at_") || token.startsWith("raft_share_"), daemonClaimed: false };
+}
+
+function inboundTraceParent(req: Request): InboundTraceParent {
+  const header = req.header?.("traceparent");
+  const parent = parseTraceparent(header);
+  const invalid = Boolean(header) && !parent;
+  const { external, daemonClaimed } = isExternalClientCredential(req);
+  if (!parent) return { policy: "absent", parent: null, invalid, daemonClaimed };
+  if (external) return { policy: "linked", parent, invalid, daemonClaimed };
+  return { policy: "continued", parent, invalid, daemonClaimed };
+}
+
+function traceParentAttrs(req: Request, inbound: InboundTraceParent): TraceAttributes {
+  return {
+    trace_parent_policy: inbound.policy,
+    ...(inbound.policy === "linked" && inbound.parent
+      ? { client_trace_id: inbound.parent.traceId, client_parent_span_id: inbound.parent.spanId }
+      : {}),
+    ...(inbound.invalid ? { client_traceparent_invalid: true } : {}),
+    ...(inbound.daemonClaimed && req.actingAgentIsExternal ? { trace_parent_claim_mismatch: true } : {}),
+  };
+}
+
 export function requestObservabilityMiddleware(req: Request, res: Response, next: NextFunction): void {
   const endTimer = httpRequestDuration.startTimer();
   const baseTracer = (req.app?.get?.("serverTracer") as Tracer | undefined) ?? noopTracer;
@@ -222,9 +296,9 @@ export function requestObservabilityMiddleware(req: Request, res: Response, next
     spanAttrContracts: HTTP_REQUEST_TRACE_ATTR_CONTRACTS,
     scopeAttrPrecedence: "caller",
   });
-  const parent = parseTraceparent(req.header?.("traceparent"));
+  const inbound = inboundTraceParent(req);
   const span = tracer.startSpan("server.http.request", {
-    parent,
+    parent: inbound.policy === "continued" ? inbound.parent : null,
     surface: "server",
     kind: "server",
   });
@@ -279,6 +353,7 @@ export function requestObservabilityMiddleware(req: Request, res: Response, next
         status_code: res.statusCode,
         "http.response.status_code": res.statusCode,
         ...requestScopeAttrs,
+        ...traceParentAttrs(req, inbound),
       },
     });
   };

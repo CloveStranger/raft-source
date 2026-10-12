@@ -30,6 +30,7 @@ import {
 import { isServerManaged, setServerManaged } from "../serverState";
 import { isDegraded, markTerminalUnlinked, readTerminalUnlinked, recordCrash } from "../health";
 import { buildDetachedServiceEnv, PARENT_LOCK_HELD_ENV_VAR } from "../service";
+import { readSupervisorRecord, writeSupervisorRecord } from "../externalSupervisor";
 import { COMPUTER_VERSION } from "../version";
 import { buildStatusReport } from "../status";
 import { writeResidentConnectedMarker } from "../residentConnectionMarker";
@@ -158,6 +159,100 @@ test("start service: serverId not in attached set throws NOT_ATTACHED", async ()
 });
 
 // --- Gate 3: SUPERVISOR_SPAWN_FAILED (spawn throws) ---
+test("task #914: start refuses to spawn when another live service on this host holds the same machine key", async () => {
+  await withHome(async (home) => {
+    await writeAttach(home, SERVER_A);
+    let spawned = 0;
+    await assert.rejects(
+      () =>
+        start(
+          { slockHome: home },
+          {
+            spawnDetachedService: async () => { spawned += 1; return 999; },
+            findDuplicateKeyHolder: async () => ({
+              root: "/Users/someone/.slock",
+              servicePid: 777,
+              computerVersion: "1.0.25",
+              serverIds: [SERVER_A],
+              fingerprints: ["0123456789abcdef"],
+            }),
+          },
+        ),
+      (err: unknown) => {
+        assert.ok(err instanceof ComputerServiceError);
+        assert.equal((err as ComputerServiceError).code, "DUPLICATE_KEY_HOLDER");
+        assert.match((err as ComputerServiceError).message, /pid 777 \(Computer version 1\.0\.25\)/);
+        assert.match((err as ComputerServiceError).message, /raft-computer stop/);
+        return true;
+      },
+    );
+    assert.equal(spawned, 0, "nothing is spawned behind a refused start");
+  });
+});
+
+test("task #915: start refuses, before reading the home or spawning, when both default homes hold Raft data", async () => {
+  await withHome(async (home) => {
+    await writeAttach(home, SERVER_A);
+    let spawned = 0;
+    let seenHome: string | null = null;
+    await assert.rejects(
+      () =>
+        start(
+          { slockHome: home },
+          {
+            spawnDetachedService: async () => { spawned += 1; return 999; },
+            findRaftHomeConflict: (slockHome) => {
+              seenHome = slockHome;
+              return {
+                homes: [
+                  { path: "/Users/alice/.slock", agentCount: 0 },
+                  { path: "/Users/alice/.raft", agentCount: 2 },
+                ],
+              };
+            },
+          },
+        ),
+      (err: unknown) => {
+        assert.ok(err instanceof ComputerServiceError);
+        assert.equal((err as ComputerServiceError).code, "RAFT_HOME_AMBIGUOUS");
+        assert.match((err as ComputerServiceError).message, /RAFT_HOME=/);
+        return true;
+      },
+    );
+    assert.equal(seenHome, home);
+    assert.equal(spawned, 0, "nothing is spawned behind a refused start");
+  });
+});
+
+test("task #914: a foreground start is refused the same way, before the service loop runs", async () => {
+  await withHome(async (home) => {
+    await writeAttach(home, SERVER_A);
+    let serviceCalled = 0;
+    await assert.rejects(
+      () =>
+        start(
+          { foreground: true, slockHome: home },
+          {
+            runService: async () => { serviceCalled += 1; },
+            findDuplicateKeyHolder: async () => ({
+              root: "/Users/someone/.slock",
+              servicePid: 777,
+              computerVersion: "1.0.25",
+              serverIds: [SERVER_A],
+              fingerprints: ["0123456789abcdef"],
+            }),
+          },
+        ),
+      (err: unknown) => {
+        assert.ok(err instanceof ComputerServiceError);
+        assert.equal((err as ComputerServiceError).code, "DUPLICATE_KEY_HOLDER");
+        return true;
+      },
+    );
+    assert.equal(serviceCalled, 0, "the foreground service loop never starts behind a refused start");
+  });
+});
+
 test("start service: spawnDetachedService failure throws SUPERVISOR_SPAWN_FAILED with cause", async () => {
   await withHome(async (home) => {
     await writeAttach(home, SERVER_A);
@@ -1072,6 +1167,10 @@ test("start service: closed-set start codes", async () => {
     "SERVICE_VERSION_SKEW",
     "SERVICE_VERSION_SKEW_SUSPECT",
     "SUPERVISOR_SPAWN_FAILED",
+    "START_SUPERVISOR_UNREACHABLE",
+    "START_SUPERVISOR_FAILED",
+    "DUPLICATE_KEY_HOLDER",
+    "RAFT_HOME_AMBIGUOUS",
     "START_DAEMON_TIMEOUT",
   ]);
   const src = await readFile(new URL("./start.ts", import.meta.url), "utf8");
@@ -1079,4 +1178,98 @@ test("start service: closed-set start codes", async () => {
   const found = new Set<string>();
   for (const m of src.matchAll(re)) found.add(m[1]);
   assert.deepEqual([...found].sort(), [...expected].sort());
+});
+
+
+// --- task #917: a systemd unit that exists for this root is started through systemd ---
+test("task #917: start delegates to `systemctl start` whenever the unit exists, even while it is inactive", async () => {
+  await withHome(async (home) => {
+    await writeAttach(home, SERVER_A);
+    let spawned = 0;
+    const calls: string[] = [];
+    const result = await start(
+      { slockHome: home },
+      {
+        spawnDetachedService: async () => { spawned += 1; return 999; },
+        inspectSupervisor: async () => ({
+          record: { kind: "systemd", scope: "user", unit: "raft-computer.service", invocationId: "x", pid: 0, recordedAt: "t" },
+          unitLoaded: true, enabledState: "enabled", activeState: "inactive", mainPid: 0, killMode: "process", reachable: true,
+        }),
+        systemctl: async (scope, args) => {
+          calls.push(`${scope}:${args.join(" ")}`);
+          if (args[0] === "start") { await writeReadyRunner(home, SERVER_A); return { code: 0, stdout: "", stderr: "" }; }
+          if (args[0] === "show" && args[2] === "MainPID") return { code: 0, stdout: "4242\n", stderr: "" };
+          return { code: 1, stdout: "", stderr: "unexpected" };
+        },
+      },
+    );
+    assert.equal(result.status, "spawned");
+    assert.equal(result.servicePid, 4242);
+    assert.equal(spawned, 0, "nothing is started beside the unit");
+    assert.deepEqual(calls, ["user:start raft-computer.service", "user:show -P MainPID raft-computer.service"]);
+  });
+});
+
+test("task #917: start refuses beside an unreachable manager and reports a failing `systemctl start`", async () => {
+  await withHome(async (home) => {
+    await writeAttach(home, SERVER_A);
+    const record = { kind: "systemd" as const, scope: "user" as const, unit: "raft-computer.service", invocationId: "x", pid: 0, recordedAt: "t" };
+    let spawned = 0;
+    await assert.rejects(
+      () => start({ slockHome: home }, {
+        spawnDetachedService: async () => { spawned += 1; return 999; },
+        inspectSupervisor: async () => ({ record, unitLoaded: false, enabledState: null, activeState: null, mainPid: null, killMode: null, reachable: false }),
+      }),
+      (err: unknown) => err instanceof ComputerServiceError && err.code === "START_SUPERVISOR_UNREACHABLE",
+    );
+    await assert.rejects(
+      () => start({ slockHome: home }, {
+        spawnDetachedService: async () => { spawned += 1; return 999; },
+        inspectSupervisor: async () => ({ record, unitLoaded: true, enabledState: "enabled", activeState: "inactive", mainPid: 0, killMode: "process", reachable: true }),
+        systemctl: async () => ({ code: 1, stdout: "", stderr: "Failed to start raft-computer.service: Unit not found." }),
+      }),
+      (err: unknown) => err instanceof ComputerServiceError && err.code === "START_SUPERVISOR_FAILED" && /Unit not found/.test(err.message),
+    );
+    assert.equal(spawned, 0);
+  });
+});
+
+test("task #917: a record whose unit file is gone is cleared and the detached spawn runs as before", async () => {
+  await withHome(async (home) => {
+    await writeAttach(home, SERVER_A);
+    await writeSupervisorRecord(home, { kind: "systemd", scope: "user", unit: "raft-computer.service", invocationId: "x", pid: 0, recordedAt: "t" });
+    const result = await start(
+      { slockHome: home },
+      {
+        spawnDetachedService: async () => { await writeReadyRunner(home, SERVER_A); return process.pid; },
+        inspectSupervisor: async () => ({
+          record: { kind: "systemd", scope: "user", unit: "raft-computer.service", invocationId: "x", pid: 0, recordedAt: "t" },
+          unitLoaded: false, enabledState: null, activeState: null, mainPid: null, killMode: null, reachable: true,
+        }),
+      },
+    );
+    assert.equal(result.status, "spawned");
+    assert.equal(await readSupervisorRecord(home), null);
+  });
+});
+
+
+test("task #917: a foreground start releases the mutation lock once the service's mutation surface exists", async () => {
+  await withHome(async (home) => {
+    await writeAttach(home, SERVER_A);
+    const order: string[] = [];
+    const result = await start(
+      { slockHome: home, foreground: true },
+      {
+        runService: async (deps) => {
+          order.push("service-start");
+          await deps?.onMutationsReady?.({} as never);
+          order.push("service-loop");
+        },
+        releaseMutationLock: async (slockHome) => { assert.equal(slockHome, home); order.push("lock-released"); },
+      },
+    );
+    assert.equal(result.status, "running");
+    assert.deepEqual(order, ["service-start", "lock-released", "service-loop"], "released after startup recovery, before the loop owns IPC");
+  });
 });

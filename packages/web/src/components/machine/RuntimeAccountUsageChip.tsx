@@ -516,6 +516,9 @@ export default function RuntimeAccountUsageChip({
       }
     }
   }, [client, machineId, provider, serverId, startFollowUpReads]);
+  const handleRefresh = useCallback(() => {
+    void refresh();
+  }, [refresh]);
 
   useEffect(() => {
     if (!open || mobile) return;
@@ -551,7 +554,7 @@ export default function RuntimeAccountUsageChip({
       loadError={loadError}
       refreshState={refreshState}
       cooldownLeftMs={cooldownLeftMs}
-      onRefresh={() => void refresh()}
+      onRefresh={handleRefresh}
       onClose={closeSurface}
     />
   );

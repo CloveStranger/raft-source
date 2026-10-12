@@ -1,4 +1,4 @@
-const BUILT_ASSET_PREFIX = "/assets/";
+const BUILT_ASSET_PREFIXES = ["/assets/", "/feedback/assets/"];
 const DESKTOP_MANIFEST_PATH = "/desktop-manifest.json";
 const IMMUTABLE_ASSET_CACHE_CONTROL = "public, max-age=31536000, immutable";
 const MAX_DESKTOP_MANIFEST_BYTES = 65_536;
@@ -7,7 +7,7 @@ const WELL_KNOWN_CHANGE_PASSWORD_PATH = `${WELL_KNOWN_PREFIX}change-password`;
 const CHANGE_PASSWORD_INTENT_PATH = "/change-password";
 
 function isBuiltAssetRequest(request) {
-  return new URL(request.url).pathname.startsWith(BUILT_ASSET_PREFIX);
+  return BUILT_ASSET_PREFIXES.some(prefix => new URL(request.url).pathname.startsWith(prefix));
 }
 
 function isHtmlResponse(response) {

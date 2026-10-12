@@ -35,6 +35,7 @@ import { __setAppWebhookEncryptionKeyForTests } from "../services/appWebhookConf
 import { startAgentInboxPushWorker } from "../services/agentInboxPushService";
 import type { WebhookPost } from "../services/appNotificationDeliveryService";
 import { traceAgentIdHash } from "../tracing/traceIdentity";
+import { withChannelDelivery } from "../test/orchestratorStub";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 __setAppWebhookEncryptionKeyForTests(Buffer.alloc(32, 7));
@@ -43,12 +44,12 @@ type Delivery = { agentId: string; message: AgentMessage; options?: DeliverMessa
 
 function recordingOrchestrator(app: { app: { set: (key: string, value: unknown) => void } }) {
   const deliveries: Delivery[] = [];
-  app.app.set("agentOrchestrator", {
+  app.app.set("agentOrchestrator", withChannelDelivery({
     deliverMessage: async (agentId: string, message: AgentMessage, options?: DeliverMessageOptions): Promise<AgentMessageDeliveryResult> => {
       deliveries.push({ agentId, message, options });
       return { status: "queued", reason: "replayable_inbox" };
     },
-  });
+  }));
   return deliveries;
 }
 
@@ -261,9 +262,9 @@ test("external agent gets an inbox push notice for the reminder", async ({ app }
 
 test("a delivery failure still answers 200: the reminder is durable", async ({ app }) => {
   const world = await seedReminderWorld();
-  app.app.set("agentOrchestrator", {
+  app.app.set("agentOrchestrator", withChannelDelivery({
     deliverMessage: async () => ({ status: "dropped", reason: "agent_unavailable" }),
-  });
+  }));
   const sink = new MemoryTraceSink();
   app.app.set("serverTracer", new BasicTracer({ sink }));
   const { token } = await seedReminderApp(app.baseUrl, world, { official: true, groups: ["agent_reminder_write"] });
@@ -278,7 +279,7 @@ test("a delivery failure still answers 200: the reminder is durable", async ({ a
 
 test("a soft-deleted reminders conversation is replaced, not a permanent block", async ({ app }) => {
   const world = await seedReminderWorld();
-  app.app.set("agentOrchestrator", { deliverMessage: async () => ({ status: "delivered" }) });
+  app.app.set("agentOrchestrator", withChannelDelivery({ deliverMessage: async () => ({ status: "delivered" }) }));
   const { token } = await seedReminderApp(app.baseUrl, world, { official: true, groups: ["agent_reminder_write"] });
   const first = await postReminder(app.baseUrl, token, { agentId: world.agent.id, idempotencyKey: "d1", text: "before" });
   assert.equal(first.status, 200, first.raw);

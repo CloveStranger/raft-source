@@ -555,6 +555,10 @@ async function quietApi(page: any, caseId: string): Promise<VisualFontRouteState
     // installed (GitHub Issues) / 1 my-app (Slack Bridge). Installed is derived
     // from marketplace records with installedAt set; my-apps = /integrations/clients.
     if (pathname.endsWith("/integrations/marketplace")) {
+      // components.settings.integrations.permission-review: the Slack Bridge
+      // listing carries a pending outbound-permission revision so the app
+      // detail shows the requested groups plus the reviewer approve action.
+      const pendingPermissionReview = caseId === "components.settings.integrations.permission-review";
       route.fulfill({
         status: 200,
         contentType: "application/json",
@@ -568,6 +572,12 @@ async function quietApi(page: any, caseId: string): Promise<VisualFontRouteState
             allowedScopes: [], logoUrl: null, humanMarketplaceVisible: true,
             createdByUserId: fxOwner.id, createdAt: fxTimes.entityCreatedAtIso, updatedAt: fxTimes.entityCreatedAtIso,
             installedAt: null, publisherName: "Raft Labs", privateShared: false,
+            appNotificationGroups: ["server"],
+            appNotificationEvents: ["server.plan_changed"],
+            appNotificationReviewPending: pendingPermissionReview,
+            appNotificationPendingGroups: pendingPermissionReview ? ["server", "agent"] : null,
+            appNotificationPendingEvents: pendingPermissionReview ? ["server.plan_changed"] : null,
+            canReviewAppNotifications: pendingPermissionReview,
           },
           {
             id: "market_github", serverId: fxServer.id, clientId: "client_github_issues",

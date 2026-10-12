@@ -13,15 +13,12 @@ export function AgentMigrationUpgradeDialog({
     <ConfirmDialog
       title={formatMessage({ id: "agent.migration.proRequired.title" })}
       message={(
-        <div className="space-y-3 text-sm leading-relaxed text-foreground-strong theme-brutal:text-black/75">
-          <p>{formatMessage({ id: "agent.migration.proRequired.description" })}</p>
-          <p className="font-bold text-foreground-strong theme-brutal:text-black">
-            {formatMessage({ id: "agent.migration.proRequired.preservedAccess" })}
-          </p>
-        </div>
+        <p className="text-sm leading-relaxed text-foreground-strong theme-brutal:text-black/75">
+          {formatMessage({ id: "agent.migration.proRequired.description" })}
+        </p>
       )}
       confirmLabel={formatMessage({ id: "agent.migration.proRequired.viewPlans" })}
-      confirmColor="bg-brutal-lime"
+      confirmVariant="accent"
       onConfirm={onViewPlans}
       onClose={onClose}
       plainMessage

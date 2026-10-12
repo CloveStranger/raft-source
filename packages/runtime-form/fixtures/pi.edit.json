@@ -247,6 +247,11 @@
       "dependsOn": "/provider"
     }
   },
+  "writeOnlyKeepRequiresUnchanged": {
+    "/apiKey": [
+      "/provider"
+    ]
+  },
   "values": {
     "provider": "deepseek",
     "providerModel": "deepseek/deepseek-v4-pro",

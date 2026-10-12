@@ -1,17 +1,15 @@
+import { isThreadMaximized, useUIStore } from "../../store/uiStore";
 import FeedbackUnreadDot from "../../feedback/FeedbackUnreadDot";
 import CloseButton from "../ui/CloseButton";
-import Tooltip from "../ui/Tooltip";
 import { ACTIVITY_SIDEBAR_INBOX_FLAG_KEY, useServerFeatureFlag } from "../../store/serverFeatureFlags";
-import { useState, useEffect, useLayoutEffect, useCallback, useMemo, useRef, Suspense, lazy } from "react";
+import { useContext, useState, useEffect, useEffectEvent, useLayoutEffect, useCallback, useMemo, useRef, Suspense, lazy } from "react";
 import {
   AppShellMainSlot,
-  AppShellPanelSlot,
   AppShellRailSlot,
   AppShellRoot,
   AppShellSidebarSlot,
   Badge,
   Button,
-  Card,
   MobileNavItem,
   MobileNavLabel,
   MobileNavRoot,
@@ -26,18 +24,16 @@ import {
 } from "../../lib/panelBounds";
 import { useResizablePanel } from "../../hooks/useResizablePanel";
 import { MASTER_DETAIL_COMPACT_PANEL_BOUNDS, resolveMasterDetailPanelWidth } from "./masterDetailPanelSizing";
-import { Routes, Route, Navigate, useParams, useNavigate, useLocation } from "react-router-dom";
+import { Routes, Route, Navigate, UNSAFE_NavigationContext as NavigationContext, useParams, useNavigate, useLocation } from "react-router-dom";
 import { useRecordRecentConversation } from "../search/useRecordRecentConversation";
 import { FormattedMessage, useIntl } from "react-intl";
 import { useChannelStore } from "../../store/channelStore";
 import { useAgentStore } from "../../store/agentStore";
 import { useMessageStore } from "../../store/messageStore";
 import { useInboxStore } from "../../store/inboxStore";
-import type { InboxItem } from "../../store/inboxStore";
 import { useTaskStore, selectChannelTaskBucket } from "../../store/taskStore";
 import { loadThreadParentTasksIfNeeded, resolveThreadHostTask } from "./threadHostTask";
 import type { Task } from "../../store/taskStore";
-import type { SavedEntry } from "../../store/savedStore";
 import { useMachineStore } from "../../store/machineStore";
 import { watchModelLabelCatalog } from "../../store/modelLabelCatalogStore";
 import { useServerStore } from "../../store/serverStore";
@@ -88,28 +84,12 @@ import { canRenderAgentDetail } from "../agent/agentDetailAvailability";
 import { getCachedAgentProfile } from "../profile/profileFallbackCache";
 import { useMobileBack } from "../../hooks/useAppNavigate";
 import PanelHeader from "../ui/PanelHeader";
+import { ContentSlotThreadPanel } from "./ContentSlotThreadPanel";
+import { InboxThreadContentRoute } from "./InboxThreadContentRoute";
 import LiveAgentActivityBar, { useClearLiveAgentActivityOnServerChange } from "./LiveAgentActivityBar";
 import MobileBottomBarStack from "./MobileBottomBarStack";
 import Modal from "../Modal";
-import {
-  WORKSPACE_GRID_DEMO_ROUTE,
-  WORKSPACE_GRID_VIEWPORT_QUERY,
-} from "../workspace/workspaceGridDemoConfig";
-import { emitWorkspaceGridDragPanel, emitWorkspaceGridOpenPanel, isWorkspaceGridDemoPath } from "../workspace/workspaceGridOpenEvents";
-import { useWorkspaceGridAvailability } from "../workspace/workspaceGridAvailability";
-import {
-  DEFAULT_WORKSPACE_GRID_SIDEBAR_WIDTH,
-  MAX_WORKSPACE_GRID_SIDEBAR_WIDTH,
-  MIN_WORKSPACE_GRID_SIDEBAR_WIDTH,
-  maxWorkspaceGridSidebarWidth,
-  useWorkspaceGridNavigationStore,
-} from "../workspace/workspaceGridNavigationStore";
-import type {
-  WorkspaceGridRailSide,
-} from "../workspace/workspaceGridNavigationStore";
-import type { WorkspacePanelRef } from "../workspace/workspaceGridDemoConfig";
 import { legacySettingsRouteRedirectSlug } from "../settings/settingsNavigation";
-import { openDesktopSettings } from "./desktopSettingsShortcut";
 import { isChangePasswordSettingsIntent } from "../../utils/changePasswordNavigation";
 import ServerSetupProjectionGate from "../onboarding/ServerSetupProjectionGate";
 import {
@@ -122,95 +102,35 @@ import {
 import { isElectronDesktopShell } from "../../utils/desktopShell";
 import { buildSidebarDisclosureRestoreState } from "./sidebarChannelFocus";
 import { useAppTheme, useOptionalAppTheme } from "../../hooks/useAppTheme";
+import { observeProfileOpenE2eImport } from "../../utils/profileOpenE2eTimeline";
 
 const THEME_CHROME_YELLOW = "#FFD440";
 const THEME_CHROME_WHITE = "#FFFFFF";
 const MOBILE_TAB_BAR_SAFE_BOTTOM = "min(env(safe-area-inset-bottom, 0px), 34px)";
-
-function useWorkspaceSidebarResize({
-  side,
-  direction,
-  width,
-  userId,
-}: {
-  side: WorkspaceGridRailSide;
-  direction: "left" | "right";
-  width: number;
-  userId: string | null;
-}) {
-  const panelRef = useRef<HTMLDivElement | null>(null);
-  const dragRef = useRef<{ pointerId: number; startX: number; startWidth: number; width: number } | null>(null);
-  const setSidebarWidth = useWorkspaceGridNavigationStore((state) => state.setSidebarWidth);
-
-  useLayoutEffect(() => {
-    if (panelRef.current) panelRef.current.style.width = `${width}px`;
-  }, [width]);
-
-  const handlePointerDown = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
-    event.preventDefault();
-    const panel = panelRef.current;
-    if (!panel) return;
-    const startWidth = panel.getBoundingClientRect().width;
-    dragRef.current = { pointerId: event.pointerId, startX: event.clientX, startWidth, width: startWidth };
-    event.currentTarget.setPointerCapture(event.pointerId);
-    document.body.style.cursor = "col-resize";
-    document.body.style.userSelect = "none";
-  }, []);
-
-  const handlePointerMove = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
-    const drag = dragRef.current;
-    const panel = panelRef.current;
-    if (!drag || !panel || drag.pointerId !== event.pointerId) return;
-    const delta = direction === "right" ? event.clientX - drag.startX : drag.startX - event.clientX;
-    const nextWidth = Math.max(
-      MIN_WORKSPACE_GRID_SIDEBAR_WIDTH,
-      Math.min(maxWorkspaceGridSidebarWidth(), drag.startWidth + delta),
-    );
-    drag.width = nextWidth;
-    panel.style.width = `${nextWidth}px`;
-  }, [direction]);
-
-  const finishResize = useCallback(() => {
-    const drag = dragRef.current;
-    if (!drag) return;
-    dragRef.current = null;
-    document.body.style.cursor = "";
-    document.body.style.userSelect = "";
-    setSidebarWidth(side, drag.width, userId);
-  }, [setSidebarWidth, side, userId]);
-
-  const resetWidth = useCallback(() => {
-    if (panelRef.current) panelRef.current.style.width = `${DEFAULT_WORKSPACE_GRID_SIDEBAR_WIDTH}px`;
-    setSidebarWidth(side, DEFAULT_WORKSPACE_GRID_SIDEBAR_WIDTH, userId);
-  }, [setSidebarWidth, side, userId]);
-
-  return {
-    panelRef,
-    handlePointerDown,
-    handlePointerMove,
-    handlePointerUp: finishResize,
-    handlePointerCancel: finishResize,
-    resetWidth,
-  };
-}
+const IN_FLOW_TAB_BAR_STYLE = { paddingBottom: MOBILE_TAB_BAR_SAFE_BOTTOM };
+const SHRINK_PANEL_HEADER_CONTAINER_PROPS = { className: "shrink-0" };
+const LG_VIEWPORT_QUERY = "(min-width: 1024px)";
 
 // Lazy-loaded route panels (code splitting)
-const AgentDetailPanel = lazy(() => import("../agent/AgentDetailPanel"));
+const AgentDetailPanel = lazy(() => observeProfileOpenE2eImport(
+  "agent-detail",
+  () => import("../agent/AgentDetailPanel"),
+));
 const AgentUnavailablePanel = lazy(() => import("../agent/AgentUnavailablePanel"));
 const MachineDetailPanel = lazy(() => import("../machine/MachineDetailPanel"));
 const HumanDetailPanel = lazy(() => import("../member/HumanDetailPanel"));
 const SettingsPanel = lazy(() => import("../settings/SettingsPanel"));
-const WorkspaceSettingsModal = lazy(() => import("../settings/WorkspaceSettingsModal"));
 const MemberGraphSection = lazy(() => import("../settings/MemberGraphSection"));
 const ReleaseNotesPanel = lazy(() => import("../settings/ReleaseNotesPanel"));
 const ThreadsInbox = lazy(() => import("../thread/ThreadsInbox"));
 const TasksPanel = lazy(() => import("../task/TasksPanel"));
 const SavedPanel = lazy(() => import("../saved/SavedPanel"));
-const ProfilePanel = lazy(() => import("../profile/ProfilePanel"));
+const ProfilePanel = lazy(() => observeProfileOpenE2eImport(
+  "profile-panel",
+  () => import("../profile/ProfilePanel"),
+));
 const LegacyTaskPanel = lazy(() => import("../task/LegacyTaskPanel"));
 const TaskModalHead = lazy(() => import("../task/TaskModalHead"));
-const WorkspaceGridDemo = lazy(() => import("../workspace/WorkspaceGridDemo"));
-const WorkspaceRailPanelFrame = lazy(() => import("../workspace/WorkspaceRailPanelFrame"));
 
 /** Returns true when the mobile bottom tab bar should be visible on the
  *  current route. Used by both the bar itself and its in-flow spacer so that
@@ -348,7 +268,7 @@ export function MobileTabBar() {
   return (
     <MobileNavRoot
       className={floatingTabBar ? "pointer-events-auto md:hidden" : "md:hidden shrink-0"}
-      style={floatingTabBar ? undefined : { paddingBottom: MOBILE_TAB_BAR_SAFE_BOTTOM }}
+      style={floatingTabBar ? undefined : IN_FLOW_TAB_BAR_STYLE}
     >
       {tabs.map((tab) => (
         <MobileNavItem
@@ -374,6 +294,7 @@ export function MobileTabBar() {
 import AddMachineDialog from "../machine/AddMachineDialog";
 import CreateAgentDialog from "../agent/CreateAgentDialog";
 import { usePageViewTracking } from "../../analytics/pageViews";
+import JointChannelLinkIntent from "../channel/JointChannelLinkIntent";
 import AnnouncementModal from "../AnnouncementModal";
 import MessageSearchPage from "../search/MessageSearchPage";
 import SearchOverlay from "../search/SearchOverlay";
@@ -518,10 +439,13 @@ function PanelFallback() {
  *  the few hundred ms of lazy chunk load we flash the split. On desktop the
  *  overlay panel is inline (`md:relative`), so `md:flex-1` restores the normal
  *  sidebar-like fill. */
-function OverlayPanelFallback() {
+function OverlayPanelFallback({ testId }: { testId?: string } = {}) {
   const { formatMessage } = useIntl();
   return (
-    <div className="absolute inset-0 z-30 flex items-center justify-center bg-layer-panel text-foreground-muted font-display text-lg font-bold md:relative md:inset-auto md:z-auto md:flex-1 md:border-l md:border-line-muted theme-brutal:bg-white theme-brutal:md:border-l-2 theme-brutal:md:border-black">
+    <div
+      className="absolute inset-0 z-30 flex items-center justify-center bg-layer-panel text-foreground-muted font-display text-lg font-bold md:relative md:inset-auto md:z-auto md:flex-1 md:border-l md:border-line-muted theme-brutal:bg-white theme-brutal:md:border-l-2 theme-brutal:md:border-black"
+      data-testid={testId}
+    >
       {formatMessage({ id: "layout.main.loading" })}
     </div>
   );
@@ -663,11 +587,7 @@ function SettingsRoute() {
   if (canonicalSlug) {
     return (
       <Navigate
-        to={{
-          pathname: location.pathname.replace(/\/settings\/[^/]+\/?$/, `/settings/${canonicalSlug}`),
-          search: location.search,
-          hash: location.hash,
-        }}
+        to={`${location.pathname.replace(/\/settings\/[^/]+\/?$/, `/settings/${canonicalSlug}`)}${location.search}${location.hash}`}
         replace
       />
     );
@@ -688,6 +608,10 @@ function MemberGraphRoute() {
   const serverSlug = server?.slug;
   const onMobileBack = useMobileBack(serverSlug ? `/s/${serverSlug}/members` : "/");
   const { formatMessage } = useIntl();
+  const mobileBackProps = useMemo(() => ({
+    "data-testid": "member-graph-mobile-back",
+    title: formatMessage({ id: "layout.memberGraph.back" }),
+  }), [formatMessage]);
 
   if (server?.role === "guest") {
     return <Navigate to={serverSlug ? `/s/${serverSlug}` : "/"} replace />;
@@ -701,7 +625,7 @@ function MemberGraphRoute() {
         icon={<GitBranch size={18} />}
         iconBg="bg-primary-soft text-foreground-strong theme-brutal:bg-soft-signal theme-brutal:text-black"
         onMobileBack={onMobileBack}
-        mobileBackProps={{ "data-testid": "member-graph-mobile-back", title: formatMessage({ id: "layout.memberGraph.back" }) }}
+        mobileBackProps={mobileBackProps}
       />
       <div className="flex-1 overflow-y-auto bg-layer-panel px-5 py-4 theme-brutal:bg-white">
         <Suspense fallback={<PanelFallback />}>
@@ -774,15 +698,7 @@ function renderContentSlot(slot: SearchContentSlot, closeSlot: () => void) {
   // seeds threadStore at click time, and useRightPanelUrlSync mirrors `?thread=`
   // so cold-load deeplinks restore threadStore (col-4 overlay never appears on
   // these routes — RightPanel's content-route guard returns null structurally).
-  return (
-    <ThreadPanel
-      presentation="side"
-      onClose={() => {
-        useThreadStore.getState().closeThread();
-        closeSlot();
-      }}
-    />
-  );
+  return <ContentSlotThreadPanel closeSlot={closeSlot} />;
 }
 
 function SearchContentRoute() {
@@ -799,19 +715,21 @@ function SearchContentRoute() {
  *  always the rail master/detail surface now. */
 function InboxContentRoute() {
   const { enabled: newInbox } = useServerFeatureFlag(ACTIVITY_SIDEBAR_INBOX_FLAG_KEY);
-  const [returnThread, setReturnThread] = useState<{ slot: SearchContentSlot; channelId: string; messageId: string } | null>(null);
+  const [returnThread, setReturnThread] = useState<InboxReturnThread | null>(null);
   const slot = useSearchContentStore((s) => s.slot);
   const closeSlot = useSearchContentStore((s) => s.close);
   if (!slot) {
     return <Suspense fallback={<PanelFallback />}><ThreadsInbox /></Suspense>;
   }
   if (slot.kind === "thread") {
-    return <ActivityThreadContentRoute slot={slot} closeSlot={closeSlot} onOpenParentChannel={newInbox ? (channelId, messageId) => {
-      setReturnThread({ slot, channelId, messageId });
-      useThreadStore.getState().closeThread();
-      const isDm = useChannelStore.getState().dmChannels.some((channel) => channel.id === channelId);
-      useSearchContentStore.getState().open({ kind: isDm ? "dm" : "channel", id: channelId, messageId });
-    } : undefined} />;
+    return (
+      <InboxThreadContentRoute
+        slot={slot}
+        closeSlot={closeSlot}
+        canOpenParentChannel={newInbox}
+        setReturnThread={setReturnThread}
+      />
+    );
   }
   if (newInbox && returnThread && slot.id === returnThread.channelId && (slot.kind === "channel" || slot.kind === "dm")) {
     return <div className="flex h-full min-h-0 flex-col">
@@ -830,6 +748,8 @@ function InboxContentRoute() {
   }
   return renderContentSlot(slot, closeSlot);
 }
+
+export type InboxReturnThread = { slot: SearchContentSlot; channelId: string; messageId: string };
 
 export function ActivityThreadContentRoute({ slot, closeSlot, onOpenParentChannel }: { slot: SearchContentSlot; closeSlot: () => void; onOpenParentChannel?: (channelId: string, messageId: string) => void }) {
   const { formatMessage } = useIntl();
@@ -879,11 +799,24 @@ export function ActivityThreadContentRoute({ slot, closeSlot, onOpenParentChanne
     ? retainedThreadIdentityRef.current
     : null;
   const threadIdentity = currentThreadIdentity ?? retainedSlotThreadIdentity;
+  const parentChannelId = threadIdentity?.parentChannelId;
+  const parentMessageId = threadIdentity?.parentMessageId;
+  const threadChannelId = threadIdentity?.threadChannelId;
+  const focusedMessageId = slot.messageId ?? null;
+  const panelThreadIdentity = useMemo(() => (
+    parentChannelId !== undefined && parentMessageId !== undefined && threadChannelId !== undefined
+      ? { parentChannelId, parentMessageId, threadChannelId, focusedMessageId }
+      : null
+  ), [focusedMessageId, parentChannelId, parentMessageId, threadChannelId]);
+  const handleFocusedMessageConsumed = useCallback(
+    () => consumeMessageFocus("thread", slot.id),
+    [consumeMessageFocus, slot.id],
+  );
 
-  if (!threadIdentity) {
+  if (!panelThreadIdentity) {
     return (
       <div className="flex h-full min-h-0 w-full flex-col bg-layer-panel theme-brutal:bg-white">
-        <PanelHeader title={formatMessage({ id: "message.threadPanel.thread" })} containerProps={{ className: "shrink-0" }} />
+        <PanelHeader title={formatMessage({ id: "message.threadPanel.thread" })} containerProps={SHRINK_PANEL_HEADER_CONTAINER_PROPS} />
         <div className="flex flex-1 items-center justify-center p-6">
           <div className="text-foreground-muted font-mono text-sm">
             {loaded
@@ -898,14 +831,9 @@ export function ActivityThreadContentRoute({ slot, closeSlot, onOpenParentChanne
   return (
     <ThreadPanel
       presentation="side"
-      threadIdentity={{
-        parentChannelId: threadIdentity.parentChannelId,
-        parentMessageId: threadIdentity.parentMessageId,
-        threadChannelId: threadIdentity.threadChannelId,
-        focusedMessageId: slot.messageId ?? null,
-      }}
+      threadIdentity={panelThreadIdentity}
       onOpenParentChannel={onOpenParentChannel}
-      onFocusedMessageConsumed={() => consumeMessageFocus("thread", slot.id)}
+      onFocusedMessageConsumed={handleFocusedMessageConsumed}
       onClose={closeSlot}
     />
   );
@@ -914,6 +842,8 @@ export function ActivityThreadContentRoute({ slot, closeSlot, onOpenParentChanne
 /** Route: * — redirect to first channel */
 function DefaultRoute() {
   const location = useLocation();
+  const navigate = useNavigate();
+  const { navigator } = useContext(NavigationContext);
   const channels = useChannelStore((s) => s.channels);
   const loading = useChannelStore((s) => s.loading);
   const slug = useServerStore((s) => s.current?.slug);
@@ -926,20 +856,28 @@ function DefaultRoute() {
     : null;
   // On mobile, don't auto-redirect — the sidebar (channel list) is shown inline
   // as the main content via the master-detail layout in MainLayout.
-  if (
+  const shouldRedirect = Boolean(
     isDesktop
     && defaultChannelPath
     && !suppressDefaultRouteRedirect
-    && location.pathname !== defaultChannelPath
-  ) {
-    return (
-      <Navigate
-        to={defaultChannelPath}
-        replace
-        state={disclosureRestoreState}
-      />
-    );
-  }
+    && location.pathname !== defaultChannelPath,
+  );
+  // Not <Navigate replace>: BrowserRouter pushes history immediately but
+  // renders the new location in a transition, so this route can still render
+  // for /s/<a> after the user already navigated on (switching servers twice
+  // quickly). A replace then would overwrite that newer entry and bounce them
+  // back to <a>. Redirect only while history still is the location we
+  // rendered for.
+  useEffect(() => {
+    if (!shouldRedirect || !defaultChannelPath) return;
+    // The router's own history, not window.location: under MemoryRouter
+    // (tests, embedded shells) window.location never moves, and reading it
+    // would suppress every redirect. BrowserRouter's history reads the URL.
+    const live = (navigator as { location?: { pathname?: string } }).location?.pathname;
+    if (live !== undefined && live !== location.pathname) return;
+    navigate(defaultChannelPath, { replace: true, state: disclosureRestoreState });
+  }, [shouldRedirect, defaultChannelPath, location.pathname, navigator, navigate, disclosureRestoreState]);
+  if (shouldRedirect) return null;
   // A wildcard test harness (or an embedding shell) can keep this element
   // mounted after the redirect reaches the canonical channel route. Do not
   // render a second ChatPanel in that settled state; the real channel route
@@ -1129,7 +1067,7 @@ function TaskModalBar({
   );
 }
 
-function ThreadPanelWrapper({ presentation = "side" }: { presentation?: "side" | "modal" | "mobile-modal" }) {
+function ThreadPanelWrapper({ presentation = "side", allowMaximize = true }: { presentation?: "side" | "modal" | "mobile-modal"; allowMaximize?: boolean }) {
   const openParentMessageId = useThreadStore((s) => s.openParentMessageId);
   const taskModal = useThreadStore((s) => s.taskModal);
   const closeThread = useThreadStore((s) => s.closeThread);
@@ -1142,14 +1080,14 @@ function ThreadPanelWrapper({ presentation = "side" }: { presentation?: "side" |
   const parentMessageId = isTaskSurface
     ? taskModal?.parentMessageId ?? openParentMessageId
     : openParentMessageId;
-  const surfaceThreadIdentity = isTaskSurface && taskModal
+  const surfaceThreadIdentity = useMemo(() => isTaskSurface && taskModal
     ? {
         parentMessageId: taskModal.parentMessageId,
         parentChannelId: taskModal.parentChannelId ?? "",
         threadChannelId: taskModal.threadChannelId,
         focusedMessageId: taskModal.focusedMessageId,
       }
-    : undefined;
+    : undefined, [isTaskSurface, taskModal]);
   const closeSurface = isTaskSurface && taskModal ? closeTaskModal : closeThread;
   const hostTask = useThreadHostTask(parentMessageId);
   // The task sheet owns the current history entry. Close the store first so
@@ -1190,13 +1128,22 @@ function ThreadPanelWrapper({ presentation = "side" }: { presentation?: "side" |
       </div>
     );
   }
-  return <SideThreadColumn key={parentMessageId} />;
+  return <SideThreadColumn key={parentMessageId} allowMaximize={allowMaximize} />;
 }
 
 /** Chat-side col-4 thread column container. Owns persisted width + resize +
  *  desktop/mobile chrome. Renders ThreadPanel for the surface content. */
-function SideThreadColumn() {
+function SideThreadColumn({ allowMaximize }: { allowMaximize: boolean }) {
+  const channelCollapsed = useUIStore((s) => s.threadMaximized);
+  const toggleChannel = useUIStore((s) => s.toggleThreadMaximized);
   const panelRef = useRef<HTMLDivElement | null>(null);
+  // Read the actual CSS result only when the user opens the menu. There is
+  // no resize subscription and no second copy of the responsive breakpoint.
+  const canToggleChannel = useCallback(() => {
+    const channel = panelRef.current?.parentElement?.querySelector<HTMLElement>(":scope > .thread-main-column");
+    return !useProfileStore.getState().profileId && !!channel && getComputedStyle(channel).display !== "none"
+      && useMessageStore.getState().currentChannelId === useThreadStore.getState().openParentChannelId;
+  }, []);
   const [dynamicMax, setDynamicMax] = useState(() =>
     getThreadPanelDynamicMax(),
   );
@@ -1233,7 +1180,7 @@ function SideThreadColumn() {
         onPointerUp={handleResizeEnd}
         onPointerCancel={handleResizeEnd}
       />
-      <ThreadPanel presentation="side" />
+      <ThreadPanel presentation="side" channelCollapsed={channelCollapsed} onToggleChannel={allowMaximize ? toggleChannel : undefined} canToggleChannel={canToggleChannel} />
     </div>
   );
 }
@@ -1252,7 +1199,11 @@ function ProfilePanelWrapper({ collapseChannel = false, collapseThread = false }
       data-collapse-channel={collapseChannel ? "true" : "false"}
       data-collapse-thread={collapseThread ? "true" : "false"}
     >
-      <Suspense fallback={<OverlayPanelFallback />}><ProfilePanel /></Suspense>
+      <Suspense fallback={(
+        <OverlayPanelFallback
+          testId={import.meta.env.VITE_E2E === "true" ? "profile-panel-fallback" : undefined}
+        />
+      )}><ProfilePanel /></Suspense>
     </div>
   );
 }
@@ -1273,7 +1224,6 @@ function LegacyTaskPanelWrapper({ presentation = "side" }: { presentation?: "sid
  */
 function RightPanel() {
   const location = useLocation();
-  const workspaceActive = useWorkspaceGridNavigationStore((s) => s.active);
   const threadOpen = useThreadStore((s) => !!s.openParentMessageId);
   const threadOpenedAt = useThreadStore((s) => s.openedAt);
   const profileOpen = useProfileStore((s) => !!s.profileId);
@@ -1284,7 +1234,6 @@ function RightPanel() {
   const closeTaskModal = useThreadStore((s) => s.closeTaskModal);
   const closeLegacyTask = useLegacyTaskPanelStore((s) => s.closeLegacyTask);
   const isTasksRoute = /\/tasks\/?$/.test(location.pathname);
-  const isWorkspaceRoute = isWorkspaceGridDemoPath(location.pathname);
   // Tasks-route: rail-visible (md+) wraps the thread / legacy task in <Modal>
   // (bounded centered card with backdrop). Mobile (no Rail, <md) renders the
   // panel directly so it behaves like a regular full-screen thread overlay.
@@ -1383,15 +1332,14 @@ function RightPanel() {
       && searchSlotKind !== "thread"
       && profileOpen
     ) {
-      base = renderStackedSidePanels(<ThreadPanelWrapper />, profileOpenSource);
+      base = renderStackedSidePanels(<ThreadPanelWrapper allowMaximize={false} />, profileOpenSource);
     } else if (profileIsTop) base = <ProfilePanelWrapper />;
     else if (threadIsTop && searchSlotKind && searchSlotKind !== "thread") {
-      base = renderStackedSidePanels(<ThreadPanelWrapper />, profileOpenSource);
+      base = renderStackedSidePanels(<ThreadPanelWrapper allowMaximize={false} />, profileOpenSource);
     }
     return <>{base}{taskModalOverlay}</>;
   }
 
-  if (workspaceActive || isWorkspaceRoute) return null;
   if (threadOpen && !isTasksRoute && profileOpen) {
     return <>{renderStackedSidePanels(<ThreadPanelWrapper />, profileOpenSource)}{taskModalOverlay}</>;
   }
@@ -1424,7 +1372,6 @@ function RightPanel() {
 function useRightPanelUrlSync() {
   const location = useLocation();
   const navigate = useNavigate();
-  const workspaceActive = useWorkspaceGridNavigationStore((s) => s.active);
   const locationRef = useRef({ pathname: location.pathname, search: location.search });
 
   // Keep a router-snapshot fallback for non-browser tests. Browser store→URL
@@ -1441,13 +1388,12 @@ function useRightPanelUrlSync() {
   // string) reopens the panel to the new target instead of staying on the
   // previously opened thread.
   useEffect(() => {
-    if (workspaceActive || isWorkspaceGridDemoPath(location.pathname)) return;
     // React can still flush an older URL→store effect after a fast close has
     // already replaced the live URL. Ignore those stale snapshots so a removed
     // ?thread= param cannot reopen the just-closed panel.
     if (!isCurrentRightPanelSearchSnapshot(location.search)) return;
     syncRightPanelStoresFromSearch(location.search);
-  }, [location.pathname, location.search, workspaceActive]);
+  }, [location.pathname, location.search]);
 
   // Store → URL: update query params when panel state changes.
   // Panels stack: both ?thread= and ?profile= can coexist. Adding a panel
@@ -1456,7 +1402,6 @@ function useRightPanelUrlSync() {
     mode: "auto" | "replace" = "auto",
     options: { resetAgentTabForProfileReopen?: boolean } = {},
   ) => {
-      if (workspaceActive || isWorkspaceGridDemoPath(locationRef.current.pathname)) return;
       // Sync locationRef synchronously after navigate(). React-router's
       // navigate() calls history.pushState under the hood, which updates
       // window.history synchronously, but the useEffect at line 413 only
@@ -1479,7 +1424,7 @@ function useRightPanelUrlSync() {
           locationRef.current = next;
         },
       });
-  }, [navigate, workspaceActive]);
+  }, [navigate]);
 
   useEffect(() => {
     const unsubThread = subscribeRightPanelThreadAnchor(() => {
@@ -1511,9 +1456,8 @@ function useRightPanelUrlSync() {
 
   // Re-add panel params after react-router navigation changes the pathname
   useEffect(() => {
-    if (workspaceActive || isWorkspaceGridDemoPath(location.pathname)) return;
     syncUrl("replace");
-  }, [location.pathname, syncUrl, workspaceActive]);
+  }, [location.pathname, syncUrl]);
 }
 
 // Two-way URL sync for the content master/detail (task #311 stdrc msg=b61ab472).
@@ -1634,11 +1578,9 @@ export default function MainLayout() {
   useTabRouteMemory();
 
   const currentUserId = useAuthStore((s) => s.user?.id ?? null);
-  const workspaceChannels = useChannelStore((s) => s.channels);
-  const workspaceDmChannels = useChannelStore((s) => s.dmChannels);
+  const channels = useChannelStore((s) => s.channels);
+  const dmChannels = useChannelStore((s) => s.dmChannels);
   const channelsLoading = useChannelStore((s) => s.loading);
-  const workspaceAgents = useAgentStore((s) => s.agents);
-  const workspaceMachines = useMachineStore((s) => s.machines);
   const setMessageStoreCurrentUserId = useMessageStore((s) => s.setCurrentUserId);
   const showAddMachine = useMachineStore((s) => s.showAddMachine);
   const setShowAddMachine = useMachineStore((s) => s.setShowAddMachine);
@@ -1662,25 +1604,6 @@ export default function MainLayout() {
   useEffect(() => {
     rememberNonSearchLocation({ pathname: location.pathname, search: location.search });
   }, [location.pathname, location.search]);
-  const workspaceAvailability = useWorkspaceGridAvailability();
-  const workspacePreferenceEnabled = useWorkspaceGridNavigationStore((s) => s.enabled);
-  const workspaceHydratedUserId = useWorkspaceGridNavigationStore((s) => s.hydratedUserId);
-  const workspaceActiveRailSide = useWorkspaceGridNavigationStore((s) => s.activeRailSide);
-  const workspaceSidebars = useWorkspaceGridNavigationStore((s) => s.sidebars);
-  const workspaceSidebarWidths = useWorkspaceGridNavigationStore((s) => s.sidebarWidths);
-  const workspaceSettingsModalOpen = useWorkspaceGridNavigationStore((s) => s.settingsModalOpen);
-  const workspaceSettingsModalSide = useWorkspaceGridNavigationStore((s) => s.settingsModalSide);
-  const hydrateWorkspacePreference = useWorkspaceGridNavigationStore((s) => s.hydrate);
-  const setWorkspaceActive = useWorkspaceGridNavigationStore((s) => s.setActive);
-  const setWorkspaceSidebarCollapsed = useWorkspaceGridNavigationStore((s) => s.setSidebarCollapsed);
-  const setWorkspaceRailMode = useWorkspaceGridNavigationStore((s) => s.setRailMode);
-  const closeWorkspaceSettingsModal = useWorkspaceGridNavigationStore((s) => s.closeSettingsModal);
-  const openWorkspaceSettingsModal = useWorkspaceGridNavigationStore((s) => s.openSettingsModal);
-
-  useEffect(() => {
-    hydrateWorkspacePreference(currentUserId);
-  }, [currentUserId, hydrateWorkspacePreference]);
-
   // Pushes the current user id into the external messageStore — write-to-
   // external-store sync, not derived local state. FP for no-derived-state-effect.
   // oxlint-disable-next-line react-doctor/no-derived-state-effect
@@ -1697,47 +1620,26 @@ export default function MainLayout() {
     return () => mq.removeEventListener("change", handler);
   }, []);
 
-  // Workspace is an editor-groups surface, not the app's general tablet
-  // desktop layout. Keep its hard gate at lg (1024px) so URL state, feature
-  // flags, and persisted preference cannot mount FlexLayout below that width.
-  const [isLg, setIsLg] = useState(() => window.matchMedia(WORKSPACE_GRID_VIEWPORT_QUERY).matches);
+  const [isLg, setIsLg] = useState(() => window.matchMedia(LG_VIEWPORT_QUERY).matches);
   useEffect(() => {
-    const mq = window.matchMedia(WORKSPACE_GRID_VIEWPORT_QUERY);
+    const mq = window.matchMedia(LG_VIEWPORT_QUERY);
     const handler = (e: MediaQueryListEvent) => setIsLg(e.matches);
     mq.addEventListener("change", handler);
     return () => mq.removeEventListener("change", handler);
   }, []);
 
-  const workspacePreferenceReady = currentUserId !== null && workspaceHydratedUserId === currentUserId;
-  const workspaceEnabled = isLg
-    && workspaceAvailability.enabled
-    && workspacePreferenceReady
-    && workspacePreferenceEnabled;
-
-  // Synchronize the effective desktop+gate result into the external navigation store consumed by Sidebar/LeftRail.
-  // oxlint-disable-next-line react-doctor/no-derived-state-effect
-  useEffect(() => {
-    setWorkspaceActive(workspaceEnabled);
-  }, [setWorkspaceActive, workspaceEnabled]);
-
   // Desktop shell: the native menu's "Settings…" (⌘,) asks the renderer to open
-  // settings. Only present in the Electron shell; Web/PWA never subscribes. Use the
-  // layout-appropriate entry: the workspace settings modal only renders when the grid
-  // is enabled (large screen + gate), so fall back to the /settings route otherwise —
-  // otherwise the shortcut would be a no-op with the grid off or the window narrow.
+  // settings. Only present in the Electron shell; Web/PWA never subscribes.
   useEffect(() => {
     const onOpenSettings = (window as {
       raftDesktop?: { onOpenSettings?: (cb: () => void) => () => void };
     }).raftDesktop?.onOpenSettings;
     if (!onOpenSettings) return;
-    return onOpenSettings(() => openDesktopSettings({
-      workspaceEnabled,
-      railSide: workspaceActiveRailSide,
-      serverSlug: useServerStore.getState().current?.slug,
-      openWorkspaceSettingsModal,
-      navigate,
-    }));
-  }, [workspaceEnabled, openWorkspaceSettingsModal, workspaceActiveRailSide, navigate]);
+    return onOpenSettings(() => {
+      const slug = useServerStore.getState().current?.slug;
+      if (slug) navigate(`/s/${slug}/settings`);
+    });
+  }, [navigate]);
 
   // Search master/detail responsive col-2 width per stdrc #proj-uiux:c2313b1d
   // msg=1351abcf (3c, 2026-05-26): at ≥1024 use the search-specific wider
@@ -1755,19 +1657,6 @@ export default function MainLayout() {
     handleResizeMove: handleSidebarResizeMove,
     handleResizeEnd: handleSidebarResizeEnd,
   } = useResizablePanel({ storageKey: "slock:sidebarWidth", ...SIDEBAR_PANEL_BOUNDS });
-
-  const leftWorkspaceSidebarResize = useWorkspaceSidebarResize({
-    side: "left",
-    direction: "right",
-    width: workspaceSidebarWidths.left,
-    userId: currentUserId,
-  });
-  const rightWorkspaceSidebarResize = useWorkspaceSidebarResize({
-    side: "right",
-    direction: "left",
-    width: workspaceSidebarWidths.right,
-    userId: currentUserId,
-  });
 
   // Search master/detail col-2 (MessageSearchPage when slot is open) — much
   // wider than the Sidebar rail because it hosts search input + filter row
@@ -1813,13 +1702,12 @@ export default function MainLayout() {
   useEffect(() => {
     if (!threadRefHandoff || !serverSlug || channelsLoading) return;
     const serverEpoch = useServerStore.getState().serverEpoch;
-    const channels = [...workspaceChannels, ...workspaceDmChannels];
     void executeThreadRefHandoffOnce({
       consumedHandoffs: consumedThreadRefHandoffsRef.current,
       intent: threadRefHandoff,
       serverSlug,
       serverEpoch,
-      channels,
+      channels: [...channels, ...dmChannels],
       consume: () => navigate(
         {
           pathname: location.pathname,
@@ -1856,7 +1744,7 @@ export default function MainLayout() {
         );
       },
     });
-  }, [channelsLoading, formatMessage, location.pathname, location.search, navigate, serverSlug, threadRefHandoff, workspaceChannels, workspaceDmChannels]);
+  }, [channelsLoading, formatMessage, location.pathname, location.search, navigate, serverSlug, threadRefHandoff, channels, dmChannels]);
 
   useClearLiveAgentActivityOnServerChange(currentServerId);
 
@@ -1866,12 +1754,6 @@ export default function MainLayout() {
       if (isGlobalSearchShortcut(event)) {
         event.preventDefault();
         if (!serverSlug) return;
-        if (workspaceEnabled) {
-          setWorkspaceRailMode("search", "left", currentUserId);
-          setWorkspaceSidebarCollapsed(false, currentUserId, "left");
-          requestAnimationFrame(() => document.dispatchEvent(new Event(SEARCH_FOCUS_REQUEST_EVENT)));
-          return;
-        }
         const searchPath = `/s/${serverSlug}/search`;
         routeGlobalSearchShortcut({
           pathname: location.pathname,
@@ -1895,44 +1777,16 @@ export default function MainLayout() {
     // keydown-global-exempt: cmdk search and system screenshot focus cleanup
     document.addEventListener("keydown", onKeyDown);
     return () => document.removeEventListener("keydown", onKeyDown);
-  }, [currentUserId, location.pathname, location.search, navigate, serverSlug, setWorkspaceRailMode, setWorkspaceSidebarCollapsed, workspaceEnabled]);
+  }, [location.pathname, location.search, navigate, serverSlug]);
 
-  useEffect(() => {
-    if (!workspaceEnabled) return;
-    const onWorkspaceKeyDown = (event: KeyboardEvent) => {
-      if (!(event.metaKey || event.ctrlKey) || event.altKey || event.shiftKey || event.key.toLowerCase() !== "b") return;
-      const target = event.target;
-      if (
-        target instanceof HTMLInputElement
-        || target instanceof HTMLTextAreaElement
-        || target instanceof HTMLSelectElement
-        || (target instanceof HTMLElement && target.isContentEditable)
-      ) return;
-      event.preventDefault();
-      setWorkspaceSidebarCollapsed(
-        !workspaceSidebars[workspaceActiveRailSide].collapsed,
-        currentUserId,
-        workspaceActiveRailSide,
-      );
-    };
-    // keydown-global-exempt: workspace sidebar visibility shortcut preserves the current focus target
-    document.addEventListener("keydown", onWorkspaceKeyDown);
-    return () => document.removeEventListener("keydown", onWorkspaceKeyDown);
-  }, [
-    currentUserId,
-    setWorkspaceSidebarCollapsed,
-    workspaceEnabled,
-    workspaceActiveRailSide,
-    workspaceSidebars,
-  ]);
-
-  // One-time hash migration: redirect old hash URLs to new paths
-  useEffect(() => {
+  // One-time hash migration: redirect old hash URLs to new paths. Runs when the
+  // server slug resolves or changes, not on every navigation.
+  const migrateLegacyHashUrl = useEffectEvent((slug: string) => {
     const hash = window.location.hash.replace(/^#/, "");
-    if (!hash || !serverSlug) return;
+    if (!hash) return;
     // Clear the hash
     window.history.replaceState(null, "", window.location.pathname + window.location.search);
-    const base = `/s/${serverSlug}`;
+    const base = `/s/${slug}`;
     if (hash === "settings") {
       navigate(`${base}/settings`, { replace: true });
       return;
@@ -1941,7 +1795,10 @@ export default function MainLayout() {
     if (id && ["channel", "dm", "agent", "machine", "human", "member"].includes(type)) {
       navigate(`${base}/${type}/${id}`, { replace: true });
     }
-  }, [serverSlug]); // eslint-disable-line react-hooks/exhaustive-deps
+  });
+  useEffect(() => {
+    if (serverSlug) migrateLegacyHashUrl(serverSlug);
+  }, [serverSlug]);
 
   useMainLayoutRealtimeBridge(mainLayoutRealtimeBridgeDriver);
 
@@ -1985,7 +1842,11 @@ export default function MainLayout() {
   const isContentRoute = isSearchRoute || isInboxRoute;
   const searchSlotOpen = useSearchContentStore((s) => !!s.slot);
   const searchSlotKind = useSearchContentStore((s) => s.slot?.kind ?? null);
-  const threadOpenForLayout = useThreadStore((s) => !!s.openParentMessageId);
+  const currentConversationId = useMessageStore((s) => s.currentChannelId);
+  const threadParentConversationId = useThreadStore((s) => s.openParentChannelId);
+  const threadMaximized = useUIStore((s) => s.threadMaximized);
+  const threadParentMessageIdForLayout = useThreadStore((s) => s.openParentMessageId);
+  const threadOpenForLayout = !!threadParentMessageIdForLayout;
   const profileOpenForLayout = useProfileStore((s) => !!s.profileId);
   // Desktop only: when the slot is open we want a real 3-col layout. Mobile
   // keeps the single-page surface — the picked entity uses the same
@@ -2007,169 +1868,7 @@ export default function MainLayout() {
     searchMasterDetail && threadOpenForLayout && !!searchSlotKind && searchSlotKind !== "thread";
   const contentRouteProfileOverlayOpen = searchMasterDetail && profileOpenForLayout;
   const searchColTwoCompact = contentRouteThreadOverlayOpen || contentRouteProfileOverlayOpen;
-  const workspaceInitialPanel = useMemo(() => {
-    const relativePath = pathBase && path.startsWith(`${pathBase}/`)
-      ? path.slice(pathBase.length + 1)
-      : "";
-    const [kind, encodedId] = relativePath.split("/");
-    const id = encodedId ? decodeURIComponent(encodedId) : null;
-
-    if (kind === "channel" && id) {
-      const channel = workspaceChannels.find((candidate) => candidate.id === id);
-      return {
-        ref: { kind: "channel", id } satisfies WorkspacePanelRef,
-        title: channel ? `#${channel.name}` : `#${id}`,
-        subtitle: formatMessage({ id: "workspace.panel.channel" }),
-      };
-    }
-    if (kind === "dm" && id) {
-      const dm = workspaceDmChannels.find((candidate) => candidate.id === id);
-      return {
-        ref: { kind: "dm", id } satisfies WorkspacePanelRef,
-        title: `@${dm?.peerDisplayName || dm?.peerName || dm?.name || id}`,
-        subtitle: formatMessage({ id: "workspace.panel.directMessage" }),
-      };
-    }
-    if (kind === "agent" && id) {
-      const agent = workspaceAgents.find((candidate) => candidate.id === id);
-      return {
-        ref: { kind: "agent", id } satisfies WorkspacePanelRef,
-        title: `@${agent?.displayName || agent?.name || id}`,
-        subtitle: formatMessage({ id: "workspace.panel.agent" }),
-      };
-    }
-    if (kind === "human" && id) {
-      return {
-        ref: { kind: "human", id } satisfies WorkspacePanelRef,
-        title: `@${id}`,
-        subtitle: formatMessage({ id: "workspace.panel.human" }),
-      };
-    }
-    if ((kind === "computer" || kind === "machine") && id) {
-      const machine = workspaceMachines.find((candidate) => candidate.id === id);
-      return {
-        ref: { kind: "machine", id } satisfies WorkspacePanelRef,
-        title: machine?.name ?? id,
-        subtitle: formatMessage({ id: "workspace.panel.computer" }),
-      };
-    }
-    if (kind === "tasks") {
-      return {
-        ref: { kind: "tasks", scope: "server" } satisfies WorkspacePanelRef,
-        title: formatMessage({ id: "workspace.panel.tasks" }),
-        subtitle: formatMessage({ id: "workspace.panel.taskQueue" }),
-      };
-    }
-
-    const fallbackChannel = workspaceChannels.find((channel) => channel.joined && channel.archivedAt == null)
-      ?? workspaceChannels.find((channel) => channel.archivedAt == null);
-    return fallbackChannel
-      ? {
-          ref: { kind: "channel", id: fallbackChannel.id } satisfies WorkspacePanelRef,
-          title: `#${fallbackChannel.name}`,
-          subtitle: formatMessage({ id: "workspace.panel.channel" }),
-        }
-      : undefined;
-  }, [formatMessage, path, pathBase, workspaceAgents, workspaceChannels, workspaceDmChannels, workspaceMachines]);
-  const openWorkspaceInboxItem = useCallback((item: InboxItem) => {
-    if (item.kind === "thread") {
-      emitWorkspaceGridOpenPanel(
-        {
-          kind: "thread",
-          channelId: item.parentChannelId,
-          threadRootId: item.parentMessageId,
-          threadChannelId: item.threadChannelId,
-        },
-        { title: formatMessage({ id: "search.panelThreadTitle" }, { id: item.parentMessageId.slice(0, 8) }), subtitle: `#${item.parentChannelName}` },
-      );
-      return;
-    }
-    emitWorkspaceGridOpenPanel(
-      { kind: item.channelType === "dm" ? "dm" : "channel", id: item.channelId },
-      { title: `${item.channelType === "dm" ? "@" : "#"}${item.channelName}`, subtitle: formatMessage({ id: "workspace.panel.activityItem" }) },
-    );
-  }, [formatMessage]);
-  const openWorkspaceTask = useCallback((task: Task) => {
-    emitWorkspaceGridOpenPanel(
-      { kind: "thread", channelId: task.channelId, threadRootId: task.messageId },
-      { title: `task #${task.taskNumber}`, subtitle: task.title },
-    );
-  }, []);
-  const openWorkspaceSavedEntry = useCallback((entry: SavedEntry) => {
-    if (entry.channelType === "thread" && entry.parentChannelId && entry.parentMessageId) {
-      emitWorkspaceGridOpenPanel(
-        {
-          kind: "thread",
-          channelId: entry.parentChannelId,
-          threadRootId: entry.parentMessageId,
-          threadChannelId: entry.channelId,
-        },
-        { title: formatMessage({ id: "search.panelThreadTitle" }, { id: entry.parentMessageId.slice(0, 8) }), subtitle: entry.parentChannelName ?? formatMessage({ id: "workspace.panel.savedMessage" }) },
-      );
-      return;
-    }
-    emitWorkspaceGridOpenPanel(
-      { kind: entry.channelType === "dm" ? "dm" : "channel", id: entry.channelId },
-      { title: `${entry.channelType === "dm" ? "@" : "#"}${entry.channelName}`, subtitle: formatMessage({ id: "workspace.panel.savedMessage" }) },
-    );
-  }, [formatMessage]);
-  const dragWorkspaceInboxItem = useCallback((event: React.DragEvent<HTMLDivElement>, item: InboxItem) => {
-    if (item.kind === "thread") {
-      emitWorkspaceGridDragPanel(
-        event.nativeEvent,
-        {
-          kind: "thread",
-          channelId: item.parentChannelId,
-          threadRootId: item.parentMessageId,
-          threadChannelId: item.threadChannelId,
-        },
-        { title: formatMessage({ id: "search.panelThreadTitle" }, { id: item.parentMessageId.slice(0, 8) }), subtitle: `#${item.parentChannelName}` },
-      );
-      return;
-    }
-    emitWorkspaceGridDragPanel(
-      event.nativeEvent,
-      { kind: item.channelType === "dm" ? "dm" : "channel", id: item.channelId },
-      { title: `${item.channelType === "dm" ? "@" : "#"}${item.channelName}`, subtitle: formatMessage({ id: "workspace.panel.activityItem" }) },
-    );
-  }, [formatMessage]);
-  const dragWorkspaceTask = useCallback((event: React.DragEvent<HTMLDivElement>, task: Task) => {
-    emitWorkspaceGridDragPanel(
-      event.nativeEvent,
-      { kind: "thread", channelId: task.channelId, threadRootId: task.messageId },
-      { title: `task #${task.taskNumber}`, subtitle: task.title },
-    );
-  }, []);
-  const dragWorkspaceSavedEntry = useCallback((event: React.DragEvent<HTMLButtonElement>, entry: SavedEntry) => {
-    if (entry.channelType === "thread" && entry.parentChannelId && entry.parentMessageId) {
-      emitWorkspaceGridDragPanel(
-        event.nativeEvent,
-        {
-          kind: "thread",
-          channelId: entry.parentChannelId,
-          threadRootId: entry.parentMessageId,
-          threadChannelId: entry.channelId,
-        },
-        { title: formatMessage({ id: "search.panelThreadTitle" }, { id: entry.parentMessageId.slice(0, 8) }), subtitle: entry.parentChannelName ?? formatMessage({ id: "workspace.panel.savedMessage" }) },
-      );
-      return;
-    }
-    emitWorkspaceGridDragPanel(
-      event.nativeEvent,
-      { kind: entry.channelType === "dm" ? "dm" : "channel", id: entry.channelId },
-      { title: `${entry.channelType === "dm" ? "@" : "#"}${entry.channelName}`, subtitle: formatMessage({ id: "workspace.panel.savedMessage" }) },
-    );
-  }, [formatMessage]);
-  const dragWorkspaceSearchResult = useCallback((
-    event: React.DragEvent<HTMLButtonElement>,
-    ref: WorkspacePanelRef,
-    source?: { title?: string; subtitle?: string },
-  ) => {
-    emitWorkspaceGridDragPanel(event.nativeEvent, ref, source);
-  }, []);
-  const hideSidebar = (workspaceEnabled
-    ? workspaceSidebars.left.collapsed || workspaceSidebars.left.activeItem === null
-    : isTasksRoute || (isContentRoute && !searchMasterDetail));
+  const hideSidebar = isTasksRoute || (isContentRoute && !searchMasterDetail);
   const isMobileTabRoot = mobileShowSidebarInline || (!isDesktop && isTasksRoute);
   // Brutal keeps the iOS-standalone chrome buckets (tab roots yellow, detail
   // routes white) and paints them on the shell wrapper. Elegant shells stay
@@ -2177,57 +1876,16 @@ export default function MainLayout() {
   // remaining safe areas show the page itself (task #678).
   const browserChromeColor = !isDesktop && !isMobileTabRoot ? THEME_CHROME_WHITE : THEME_CHROME_YELLOW;
   const shellBackgroundColor = appThemePreset === "brutal" && !isDesktop ? browserChromeColor : undefined;
+  const shellStyle = useMemo(
+    () => ({ paddingTop: "env(safe-area-inset-top, 0px)", backgroundColor: shellBackgroundColor }),
+    [shellBackgroundColor],
+  );
+  const closeAddMachine = useCallback(() => setShowAddMachine(false), [setShowAddMachine]);
+  const closeCreateAgent = useCallback(() => setShowCreateAgent(false), [setShowCreateAgent]);
+  const closeSearchOverlay = useCallback(() => {
+    if (backgroundLocation) navigate(overlayCloseTarget(backgroundLocation));
+  }, [backgroundLocation, navigate]);
   const mobileTabBarVisible = useMobileTabBarVisible();
-
-  const renderWorkspaceSidebarContent = (side: "left" | "right") => {
-    const workspaceRailMode = workspaceSidebars[side].activeItem;
-    const borderClass = side === "left" ? "border-r border-line-muted" : "border-l border-line-muted";
-    if (workspaceRailMode === "activity") {
-      return (
-        <WorkspaceRailPanelFrame mode="activity" borderClass={borderClass}>
-          <Suspense fallback={<PanelFallback />}>
-            <ThreadsInbox compactActivitySidebar onOpenItem={openWorkspaceInboxItem} onDragItem={dragWorkspaceInboxItem} />
-          </Suspense>
-        </WorkspaceRailPanelFrame>
-      );
-    }
-    if (workspaceRailMode === "tasks") {
-      return (
-        <WorkspaceRailPanelFrame mode="tasks" borderClass={borderClass}>
-          <Suspense fallback={<PanelFallback />}>
-            <TasksPanel onOpenTask={openWorkspaceTask} onDragTask={dragWorkspaceTask} />
-          </Suspense>
-        </WorkspaceRailPanelFrame>
-      );
-    }
-    if (workspaceRailMode === "search") {
-      return (
-        <WorkspaceRailPanelFrame mode="search" borderClass={borderClass}>
-          <MessageSearchPage
-            onOpenPanelRef={emitWorkspaceGridOpenPanel}
-            onDragPanelRef={dragWorkspaceSearchResult}
-          />
-        </WorkspaceRailPanelFrame>
-      );
-    }
-    if (workspaceRailMode === "saved") {
-      return (
-        <WorkspaceRailPanelFrame mode="saved" borderClass={borderClass}>
-          <Suspense fallback={<PanelFallback />}>
-            <SavedPanel onOpenEntry={openWorkspaceSavedEntry} onDragEntry={dragWorkspaceSavedEntry} />
-          </Suspense>
-        </WorkspaceRailPanelFrame>
-      );
-    }
-    return (
-      <div className={`h-full ${side === "left" ? "" : borderClass}`}>
-        <Sidebar
-          workspaceRailMode={workspaceRailMode}
-          bottomSlot={side === "left" ? <LiveAgentActivityBar /> : undefined}
-        />
-      </div>
-    );
-  };
 
   useLayoutEffect(() => {
     if (appThemePreset !== "brutal") return;
@@ -2235,15 +1893,6 @@ export default function MainLayout() {
     if (!themeColor) return;
     themeColor.content = browserChromeColor;
   }, [appThemePreset, browserChromeColor]);
-
-  const handleCloseWorkspaceSettings = useCallback(() => {
-    closeWorkspaceSettingsModal();
-    requestAnimationFrame(() => {
-      requestAnimationFrame(() => {
-        document.querySelector<HTMLButtonElement>('[data-testid="workspace-settings-trigger"]')?.focus();
-      });
-    });
-  }, [closeWorkspaceSettingsModal]);
 
   return (
     <AppShellRoot
@@ -2259,7 +1908,7 @@ export default function MainLayout() {
       // status-bar strip read white while `meta[theme-color]` said yellow
       // (task #638, ios-standalone-chrome spec). Elegant stays transparent so
       // the floating tab bar sits on the page; desktop keeps the recipe canvas.
-      style={{ paddingTop: "env(safe-area-inset-top, 0px)", backgroundColor: shellBackgroundColor }}
+      style={shellStyle}
     >
       {/* System notifications live in the Notification Center popup, hung off the LeftRail
           (desktop) and the Chat-tab navbar (mobile). The previous global
@@ -2278,7 +1927,6 @@ export default function MainLayout() {
           <LeftRail
             hidden={mobileShowSidebarInline}
             thinDivider={isActivityRoute}
-            workspaceModeAvailable={isLg && workspaceAvailability.resolved && workspaceAvailability.enabled}
           />
         </AppShellRailSlot>
 
@@ -2295,8 +1943,6 @@ export default function MainLayout() {
           }
         >
           <div
-            ref={workspaceEnabled ? leftWorkspaceSidebarResize.panelRef : undefined}
-            data-testid={workspaceEnabled ? "workspace-primary-sidebar" : undefined}
             // stdrc 2026-05-02 #proj-uiux:95e25b5b ec1523d9: invert
             // sidebar/main relationship — sidebar uses warm cream
             // (`bg-brutal-cream`), main panel uses bright white. After
@@ -2333,15 +1979,11 @@ export default function MainLayout() {
                           wideWidth: searchPanelWidth,
                           compactWidth: searchPanelCompactWidth,
                         })
-                      : workspaceEnabled ? workspaceSidebarWidths.left : sidebarWidth,
-                    ...(workspaceEnabled ? {
-                      minWidth: MIN_WORKSPACE_GRID_SIDEBAR_WIDTH,
-                      maxWidth: `min(${MAX_WORKSPACE_GRID_SIDEBAR_WIDTH}px, 40vw)`,
-                    } : {}),
+                      : sidebarWidth,
                   }
             }
           >
-            {workspaceEnabled ? renderWorkspaceSidebarContent("left") : searchMasterDetail ? (
+            {searchMasterDetail ? (
               // Col 2 master list: the Activity list on /inbox, the search
               // results on /search — same master/detail slot drives col 3.
               isInboxRoute ? (
@@ -2352,7 +1994,6 @@ export default function MainLayout() {
             ) : (
               <Sidebar
                 mobileInline={mobileShowSidebarInline}
-                workspaceRailMode={null}
                 bottomSlot={isDesktop && !hideSidebar ? (
                   <LiveAgentActivityBar />
                 ) : undefined}
@@ -2364,19 +2005,6 @@ export default function MainLayout() {
                 (per (3c) responsive policy above). Non-search uses
                 sidebarWidth as before. Two persisted widths never bleed
                 across (slock:searchPanelWidth vs slock:sidebarWidth). */}
-            {workspaceEnabled ? (
-              <div
-                className="group absolute -right-1 top-0 bottom-0 z-20 hidden w-2 cursor-col-resize touch-none select-none md:block"
-                onPointerDown={leftWorkspaceSidebarResize.handlePointerDown}
-                onPointerMove={leftWorkspaceSidebarResize.handlePointerMove}
-                onPointerUp={leftWorkspaceSidebarResize.handlePointerUp}
-                onPointerCancel={leftWorkspaceSidebarResize.handlePointerCancel}
-                onDoubleClick={leftWorkspaceSidebarResize.resetWidth}
-                data-testid="workspace-left-sidebar-resize-handle"
-              >
-                <span className="pointer-events-none absolute bottom-0 left-1/2 top-0 w-px -translate-x-1/2 bg-foreground/25 group-hover:bg-foreground theme-brutal:bg-black/25 theme-brutal:group-hover:bg-black" />
-              </div>
-            ) : (
               <div
                 className="hidden md:block absolute right-0 top-0 bottom-0 w-2 -mr-1 z-10 cursor-col-resize touch-none select-none"
                 onPointerDown={
@@ -2408,7 +2036,6 @@ export default function MainLayout() {
                     : handleSidebarResizeEnd
                 }
               />
-            )}
           </div>
         </AppShellSidebarSlot>}
 
@@ -2426,79 +2053,44 @@ export default function MainLayout() {
           <div
             className="thread-layout-container flex min-h-0 min-w-0 flex-1"
             data-testid="thread-layout-container"
+            data-thread-maximized={isThreadMaximized(threadMaximized, threadParentMessageIdForLayout, threadParentConversationId, currentConversationId, profileOpenForLayout) ? "true" : "false"}
           >
             <div
               className="thread-main-column flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden"
               data-testid="thread-main-column"
             >
-              {workspaceEnabled ? (
-                <Suspense fallback={<PanelFallback />}>
-                  <WorkspaceGridDemo initialPanel={workspaceInitialPanel} />
-                </Suspense>
-              ) : (
-                <Routes location={backgroundLocation ?? location}>
-                  <Route path="channel/:channelId" element={<ChannelRoute />} />
-                  <Route path="dm/:dmId" element={<DmRoute />} />
-                  <Route path="agent/:agentId" element={<AgentRoute />} />
-                  <Route path="computer/:machineId" element={<MachineRoute />} />
-                  {/* Legacy /machine/:id — kept so external links and bookmarks
-                      still work; redirected to /computer/:id by RailNavCompat. */}
-                  <Route path="machine/:machineId" element={<MachineRoute />} />
-                  <Route path="human/:userId" element={<HumanRoute />} />
-                  <Route path="members/graph" element={<MemberGraphRoute />} />
-                  <Route path="members" element={<EmptyRoute />} />
-                  <Route path="computers" element={<ComputersRoute />} />
-                  <Route path="search" element={<SearchContentRoute />} />
-                  <Route path="settings/:tab?/*" element={<SettingsRoute />} />
-                  <Route path="activity" element={<InboxContentRoute />} />
-                  {/* Legacy /inbox + /threads → /activity (stdrc renamed the route
-                      #proj-activity:171042a3 2026-06-23). Keep redirects so old
-                      links/bookmarks resolve. */}
-                  <Route path="inbox" element={<LegacyThreadsRedirect />} />
-                  <Route path="threads" element={<LegacyThreadsRedirect />} />
-                  <Route path="tasks" element={<TasksRoute />} />
-                  <Route path="saved" element={<SavedRoute />} />
-                  <Route path="release-notes" element={<ReleaseNotesRoute />} />
-                  <Route path={WORKSPACE_GRID_DEMO_ROUTE} element={<LegacyWorkspaceGridRedirect />} />
-                  <Route path="*" element={<DefaultRoute />} />
-                </Routes>
-              )}
+              <Routes location={backgroundLocation ?? location}>
+                <Route path="channel/:channelId" element={<ChannelRoute />} />
+                <Route path="dm/:dmId" element={<DmRoute />} />
+                <Route path="agent/:agentId" element={<AgentRoute />} />
+                <Route path="computer/:machineId" element={<MachineRoute />} />
+                {/* Legacy /machine/:id — kept so external links and bookmarks
+                    still work; redirected to /computer/:id by RailNavCompat. */}
+                <Route path="machine/:machineId" element={<MachineRoute />} />
+                <Route path="human/:userId" element={<HumanRoute />} />
+                <Route path="members/graph" element={<MemberGraphRoute />} />
+                <Route path="members" element={<EmptyRoute />} />
+                <Route path="computers" element={<ComputersRoute />} />
+                <Route path="search" element={<SearchContentRoute />} />
+                <Route path="settings/:tab?/*" element={<SettingsRoute />} />
+                <Route path="activity" element={<InboxContentRoute />} />
+                {/* Legacy /inbox + /threads → /activity (stdrc renamed the route
+                    #proj-activity:171042a3 2026-06-23). Keep redirects so old
+                    links/bookmarks resolve. */}
+                <Route path="inbox" element={<LegacyThreadsRedirect />} />
+                <Route path="threads" element={<LegacyThreadsRedirect />} />
+                <Route path="tasks" element={<TasksRoute />} />
+                <Route path="saved" element={<SavedRoute />} />
+                <Route path="release-notes" element={<ReleaseNotesRoute />} />
+                {/* Legacy /workspace from the removed Workspace grid layout. */}
+                <Route path="workspace" element={<LegacyWorkspaceGridRedirect />} />
+                <Route path="*" element={<DefaultRoute />} />
+              </Routes>
             </div>
-            {!workspaceEnabled ? <RightPanel /> : null}
+            <RightPanel />
           </div>
 
         </AppShellMainSlot>
-
-        {workspaceEnabled && !workspaceSidebars.right.collapsed && workspaceSidebars.right.activeItem !== null ? (
-          <AppShellPanelSlot
-            ref={rightWorkspaceSidebarResize.panelRef}
-            className="relative min-w-0 shrink-0 bg-layer-canvas-muted"
-            style={{
-              width: workspaceSidebarWidths.right,
-              minWidth: MIN_WORKSPACE_GRID_SIDEBAR_WIDTH,
-              maxWidth: `min(${MAX_WORKSPACE_GRID_SIDEBAR_WIDTH}px, 40vw)`,
-            }}
-            data-testid="workspace-secondary-sidebar"
-          >
-            {renderWorkspaceSidebarContent("right")}
-            <div
-              className="group absolute -left-1 top-0 bottom-0 z-20 hidden w-2 cursor-col-resize touch-none select-none md:block"
-              onPointerDown={rightWorkspaceSidebarResize.handlePointerDown}
-              onPointerMove={rightWorkspaceSidebarResize.handlePointerMove}
-              onPointerUp={rightWorkspaceSidebarResize.handlePointerUp}
-              onPointerCancel={rightWorkspaceSidebarResize.handlePointerCancel}
-              onDoubleClick={rightWorkspaceSidebarResize.resetWidth}
-              data-testid="workspace-right-sidebar-resize-handle"
-            >
-              <span className="pointer-events-none absolute bottom-0 left-1/2 top-0 w-px -translate-x-1/2 bg-foreground/25 group-hover:bg-foreground theme-brutal:bg-black/25 theme-brutal:group-hover:bg-black" />
-            </div>
-          </AppShellPanelSlot>
-        ) : null}
-        {workspaceEnabled ? (
-          <AppShellRailSlot>
-            <LeftRail side="right" hidden={mobileShowSidebarInline} />
-          </AppShellRailSlot>
-        ) : null}
       </div>
 
       {/* Brutal keeps the mobile bottom bars in normal flow so the activity
@@ -2511,32 +2103,6 @@ export default function MainLayout() {
         tabBar={<MobileTabBar />}
         floating={!isDesktop && appThemePreset !== "brutal"}
       />
-      {workspaceEnabled && workspaceSettingsModalOpen ? (
-        <Modal onClose={handleCloseWorkspaceSettings} closeOnBackdrop>
-          <Card
-            className="relative flex h-[min(86vh,880px)] w-[min(1040px,calc(100vw-2rem))] min-h-0 flex-col overflow-hidden"
-            role="dialog"
-            aria-modal="true"
-            aria-label={formatMessage({ id: "layout.main.settingsAria" })}
-            data-testid="workspace-settings-modal"
-            data-settings-trigger-side={workspaceSettingsModalSide}
-          >
-            <Suspense fallback={<PanelFallback />}>
-              <WorkspaceSettingsModal />
-            </Suspense>
-            <Tooltip content={formatMessage({ id: "common.close" })}>
-              <CloseButton
-                type="button"
-                className="absolute right-3 top-3 z-20 focus-visible:outline focus-visible:outline-2 focus-visible:outline-line-strong focus-visible:outline-offset-2 theme-brutal:focus-visible:outline-black"
-                onClick={handleCloseWorkspaceSettings}
-                aria-label={formatMessage({ id: "layout.main.closeSettingsAria" })}
-              >
-                <X size={18} />
-              </CloseButton>
-            </Tooltip>
-          </Card>
-        </Modal>
-      ) : null}
       {currentServerId && serverSlug ? (
         <ServerSetupProjectionGate
           serverId={currentServerId}
@@ -2544,20 +2110,21 @@ export default function MainLayout() {
         />
       ) : null}
       {showAddMachine && (
-        <AddMachineDialog onClose={() => setShowAddMachine(false)} />
+        <AddMachineDialog onClose={closeAddMachine} />
       )}
       {showCreateAgent && (
         <CreateAgentDialog
           onboarding={createAgentOnboarding}
-          onClose={() => setShowCreateAgent(false)}
+          onClose={closeCreateAgent}
         />
       )}
+      <JointChannelLinkIntent />
       <AnnouncementModal suppressed={shouldSuppressAnnouncements(announcementGateState, sawOnboardingThisSession)} />
       {/* Desktop ⌘K search overlay: floats the real /search over the frozen
           background channel. Dismiss (Esc/backdrop) navigates back to it. A hit
           selection navigates away on its own (clearing backgroundLocation). */}
       {backgroundLocation ? (
-        <SearchOverlay onClose={() => navigate(overlayCloseTarget(backgroundLocation))} />
+        <SearchOverlay onClose={closeSearchOverlay} />
       ) : null}
     </AppShellRoot>
   );

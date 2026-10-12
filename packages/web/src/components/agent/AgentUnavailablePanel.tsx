@@ -1,5 +1,6 @@
 import CloseButton from "../ui/CloseButton";
 import { Bot, TriangleAlert, X } from "lucide-react";
+import { useMemo } from "react";
 import { useIntl } from "react-intl";
 import { useMobileBack } from "../../hooks/useAppNavigate";
 import { useServerStore } from "../../store/serverStore";
@@ -11,16 +12,20 @@ export default function AgentUnavailablePanel({ onClose }: { onClose?: () => voi
   const { formatMessage } = useIntl();
   const slug = useServerStore((s) => s.current?.slug);
   const onMobileBack = useMobileBack(onClose ?? (slug ? `/s/${slug}/members` : "/"));
+  const mobileBackProps = useMemo(
+    () => ({
+      "data-testid": "agent-mobile-back",
+      title: formatMessage({ id: "common.announcement.back" }),
+    }),
+    [formatMessage],
+  );
 
   return (
     <div className="flex min-h-0 flex-1 flex-col bg-layer-panel theme-brutal:bg-white">
       <PanelHeader
         title={formatMessage({ id: "agent.detail.unavailableTitle" })}
         onMobileBack={onMobileBack}
-        mobileBackProps={{
-          "data-testid": "agent-mobile-back",
-          title: formatMessage({ id: "common.announcement.back" }),
-        }}
+        mobileBackProps={mobileBackProps}
         icon={<Bot size={18} />}
         iconBg="bg-fill-muted text-foreground-strong theme-brutal:bg-gray-200 theme-brutal:text-black"
         actions={onClose ? (

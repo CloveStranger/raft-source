@@ -1,74 +1,51 @@
 /**
- * Task status → badge color is a single shared source (`TASK_STATUS_UI` in
- * components/task/taskStatusUi.ts). Every surface that shows a task-status badge
- * — the message footer, the Activity/inbox thread row, task cards — reads this
- * one map, so the same task renders the same color everywhere.
+ * Task status has ONE source of appearance: raft-ui (its `TaskStatusBadge` /
+ * `TaskStatusIcon` over the `task-status-*` tokens). Slock's `taskStatusUi.ts`
+ * owns only the label copy and transition rules — it carries no colour, icon,
+ * or badge recipe, so no surface can drift the look.
  *
- * This guards the semantic that has regressed twice: `closed` is a terminal but
- * REVERSIBLE state (closed → todo is a valid transition), not a destructive
- * action, so it uses the warm-neutral `brutal-stone` token — never
- * `brutal-red`. It was fixed in task #145, then re-broke when the Activity row
- * kept its own local `statusConfig` mapping closed → brutal-red (task #543).
+ * This file guards that split (it replaced the old "every surface reads the
+ * local color map" assertions when the appearance moved into raft-ui, task
+ * #proj-rui:4f2a251d / slock #9154). The visual consistency itself (same status,
+ * same colour + icon across surfaces and themes) is asserted against the real
+ * components in the DOM suites.
  */
 
 import { strict as assert } from "node:assert";
-import {
-  getTaskStatusBadgeClassName,
-  getTaskStatusBackgroundStyle,
-  TASK_STATUS_UI,
-  STATUS_BADGE_CONFIG,
-  STATUS_STYLES,
-} from "../src/components/task/taskStatusUi";
+import { TASK_STATUS_UI, STATUS_STYLES, toRuiTaskStatus } from "../src/components/task/taskStatusUi";
+import type { TaskStatus } from "../src/store/taskStore";
 
-test("task status badges pair every solid surface with a readable foreground", () => {
-  const expected = {
-    todo: ["bg-warning-soft", "text-warning-strong", "theme-brutal:bg-brutal-orange"],
-    in_progress: ["bg-info-soft", "text-info-strong", "theme-brutal:bg-brutal-cyan"],
-    in_review: ["bg-accent-soft", "text-accent-strong", "theme-brutal:bg-brutal-lavender"],
-    done: ["bg-success-soft", "text-success-strong", "theme-brutal:bg-brutal-lime"],
-    closed: ["bg-fill-muted", "text-foreground-strong", "theme-brutal:bg-brutal-stone"],
-  } as const;
-  for (const [status, classes] of Object.entries(expected)) {
-    const actual = getTaskStatusBadgeClassName(status as keyof typeof expected);
-    for (const className of classes) assert.ok(actual.split(" ").includes(className), `${status} missing ${className}`);
-  }
-});
+const STATUSES: TaskStatus[] = ["todo", "in_progress", "in_review", "done", "closed"];
 
-test("closed task badge is neutral stone, never destructive red", () => {
-  assert.equal(TASK_STATUS_UI.closed.bg, "bg-brutal-stone");
-  assert.notEqual(TASK_STATUS_UI.closed.bg, "bg-brutal-red");
-});
-
-test("every task status maps to its design-system color token", () => {
-  assert.equal(TASK_STATUS_UI.todo.bg, "bg-brutal-orange");
-  assert.equal(TASK_STATUS_UI.in_progress.bg, "bg-brutal-cyan");
-  assert.equal(TASK_STATUS_UI.in_review.bg, "bg-brutal-lavender");
-  assert.equal(TASK_STATUS_UI.done.bg, "bg-brutal-lime");
-  assert.equal(TASK_STATUS_UI.closed.bg, "bg-brutal-stone");
-});
-
-test("STATUS_BADGE_CONFIG and STATUS_STYLES are the same source, not divergent copies", () => {
-  // Callsites read these aliases; they must stay identical to TASK_STATUS_UI or
-  // the same task renders different colors in different surfaces (the task #543
-  // bug — a local per-surface copy is exactly what drifted).
-  assert.equal(STATUS_BADGE_CONFIG, TASK_STATUS_UI);
+test("STATUS_STYLES is the same source as TASK_STATUS_UI, not a divergent copy", () => {
+  // Callsites read this alias; it must stay identical to TASK_STATUS_UI or a
+  // surface could quietly diverge again.
   assert.equal(STATUS_STYLES, TASK_STATUS_UI);
 });
 
-test("canonical task backgrounds resolve to final CSS variables from the same SSOT", () => {
-  assert.deepEqual(getTaskStatusBackgroundStyle("todo"), {
-    backgroundColor: "var(--color-brutal-orange)",
-  });
-  assert.deepEqual(getTaskStatusBackgroundStyle("in_progress"), {
-    backgroundColor: "var(--color-brutal-cyan)",
-  });
-  assert.deepEqual(getTaskStatusBackgroundStyle("in_review"), {
-    backgroundColor: "var(--color-brutal-lavender)",
-  });
-  assert.deepEqual(getTaskStatusBackgroundStyle("done"), {
-    backgroundColor: "var(--color-brutal-lime)",
-  });
-  assert.deepEqual(getTaskStatusBackgroundStyle("closed"), {
-    backgroundColor: "var(--color-brutal-stone)",
-  });
+test("taskStatusUi carries only label ids — no colour, icon, or badge recipe", () => {
+  for (const status of STATUSES) {
+    const entry = TASK_STATUS_UI[status] as Record<string, unknown>;
+    assert.equal(typeof entry.labelId, "string", `${status} must carry a labelId`);
+    // The appearance lives in raft-ui now; none of these may come back here.
+    for (const forbidden of ["bg", "icon", "variant", "appearance"]) {
+      assert.equal(
+        forbidden in entry,
+        false,
+        `${status} must not carry a local \`${forbidden}\` — appearance is raft-ui's single source`,
+      );
+    }
+  }
+});
+
+test("every status maps to its raft-ui kebab-case id", () => {
+  // The snake_case↔kebab-case converter is the one place the naming differs.
+  assert.equal(toRuiTaskStatus("todo"), "todo");
+  assert.equal(toRuiTaskStatus("in_progress"), "in-progress");
+  assert.equal(toRuiTaskStatus("in_review"), "in-review");
+  assert.equal(toRuiTaskStatus("done"), "done");
+  assert.equal(toRuiTaskStatus("closed"), "closed");
+  for (const status of STATUSES) {
+    assert.equal(typeof toRuiTaskStatus(status), "string");
+  }
 });

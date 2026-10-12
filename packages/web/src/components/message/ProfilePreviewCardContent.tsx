@@ -1,4 +1,4 @@
-import { useEffect, useMemo } from "react";
+import { useCallback, useEffect, useMemo } from "react";
 import { formatRuntimeLabelWithStatus } from "../../utils/runtimeAvailabilityLabel";
 import { useIntl } from "react-intl";
 import { isExternalAgentRuntime, REASONING_EFFORT_RUNTIMES, runtimeConfigModelValue } from "@botiverse/raft-shared";
@@ -45,6 +45,8 @@ interface ProfilePreviewCardContentProps {
   onOpenAgentActivity?: (agentId: string) => void;
 }
 
+const EMPTY_TRAJECTORY_LOG: never[] = [];
+
 export default function ProfilePreviewCardContent({ mentionType, mentionId, fallbackAgent, fallbackMember, fallbackLabel, onOpenAgentActivity }: ProfilePreviewCardContentProps) {
   const intl = useIntl();
   const { formatMessage } = intl;
@@ -53,6 +55,9 @@ export default function ProfilePreviewCardContent({ mentionType, mentionId, fall
   const { capabilities } = useServerPermissions();
   const agent = useAgentStore((s) => (mentionType === "agent" ? s.agents.find((a) => a.id === mentionId) : undefined));
   const profileAgent = mentionType === "agent" ? agent ?? fallbackAgent : undefined;
+  const handleOpenActivity = useCallback(() => {
+    if (profileAgent) onOpenAgentActivity?.(profileAgent.id);
+  }, [onOpenAgentActivity, profileAgent]);
   // task #259: same rule as the agent detail panel — no "No computer assigned" while the
   // machine store has no snapshot yet; the Computer line is simply not rendered until then.
   const machines = useMachineStore((s) => s.machines);
@@ -166,9 +171,9 @@ export default function ProfilePreviewCardContent({ mentionType, mentionId, fall
             <AvatarSlot context="mention-card" type="agent" agentAvatarUrl={profileAgent.avatarUrl} className="mt-0.5 self-start" />
             <div className="min-w-0 flex-1">
               <div className="flex items-center gap-1.5">
-                <span className="truncate text-sm font-bold text-foreground-strong theme-brutal:text-black">{displayName}</span>
+                <span className="min-w-0 truncate text-sm font-bold text-foreground-strong theme-brutal:text-black">{displayName}</span>
                 <StatusDot activity={displayState?.activity ?? "offline"} external={displayState?.isExternal && !displayState.isOnline} size="sm" />
-                <span className="truncate font-mono text-xs text-foreground-muted theme-brutal:text-black/60">
+                <span className="min-w-0 flex-1 max-w-fit truncate font-mono text-xs text-foreground-muted theme-brutal:text-black/60">
                   {renderedActivityText}
                 </span>
               </div>
@@ -202,11 +207,11 @@ export default function ProfilePreviewCardContent({ mentionType, mentionId, fall
           ) : null}
           {canViewPrivateAgentSurfaces ? (
             <MentionHoverActivityPreview
-              entries={trajectoryLog ?? []}
+              entries={trajectoryLog ?? EMPTY_TRAJECTORY_LOG}
               formatTimestamp={formatClockWithSeconds}
               onOpenActivity={
                 onOpenAgentActivity && profileAgent
-                  ? () => onOpenAgentActivity(profileAgent.id)
+                  ? handleOpenActivity
                   : undefined
               }
             />
@@ -247,5 +252,5 @@ export default function ProfilePreviewCardContent({ mentionType, mentionId, fall
         ) : null}
       </>
     );
-  }, [mentionType, profileAgent, agentMachine, agentMachineRow.kind, runtimeConfig, runtimeModels, canViewPrivateAgentSurfaces, isChannelSummaryAgent, displayState, trajectoryLog, formatClockWithSeconds, profileMember, unavailableHandle, formatMessage, intl, onOpenAgentActivity]);
+  }, [mentionType, profileAgent, agentMachine, agentMachineRow.kind, runtimeConfig, runtimeModels, canViewPrivateAgentSurfaces, isChannelSummaryAgent, displayState, trajectoryLog, formatClockWithSeconds, profileMember, unavailableHandle, formatMessage, intl, onOpenAgentActivity, handleOpenActivity]);
 }

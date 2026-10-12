@@ -75,3 +75,14 @@ test("runtime turn state resets fully between Codex process spawns", () => {
   assert.equal(state.activeTurnId, null);
   assert.equal(state.canSteerBusy, false);
 });
+
+test("hasLiveTurn covers an accepted turn and a running turn, not a completed one", () => {
+  const state = new RuntimeTurnState();
+  assert.equal(state.hasLiveTurn, false);
+  state.noteTurnAccepted("turn-1");
+  assert.equal(state.hasLiveTurn, true);
+  state.markTurnStarted("turn-1");
+  assert.equal(state.hasLiveTurn, true);
+  state.markTurnCompleted();
+  assert.equal(state.hasLiveTurn, false);
+});

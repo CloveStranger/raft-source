@@ -959,6 +959,12 @@ test("agent channel create denial names the createChannels capability", async ({
   assert.equal(res.status, 403, `expected 403, got ${res.status}`);
   assert.deepEqual(await res.json(), {
     error: "Agent requires createChannels capability to create channels",
+    code: "server_role_required",
+    suggestedNextAction:
+      "To create channels you need the member role on this server; you are not a member of this server. Ask a server owner or admin to do it, or to change your role.",
+    requiredCapabilities: ["createChannels"],
+    requiredRole: "member",
+    currentRole: null,
   });
 });
 

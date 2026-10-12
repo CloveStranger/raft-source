@@ -1,5 +1,5 @@
 // Followed-thread stats count unread with the unified chain's rule
-// (rw_inbox_normal_v4 / rw_followed_threads_v5): not own sends, not system
+// (rw_inbox_normal_v5 / rw_followed_threads_v5): not own sends, not system
 // messages the user caused, not the noise subtypes; a NULL causal actor never
 // excludes. Here the global test setup answers the RW reads from their Postgres
 // references (rw_followed_threads_v5 rows for the active list, v3 stats for the

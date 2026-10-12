@@ -45,12 +45,12 @@
 // together or that tooth goes red.
 
 // Highest official stable Computer release at the time this floor was frozen
-// (source tag computer-v1.0.42, promoted to the Hands main channel on
-// 2026-10-04). Raising the floor is a deliberate release decision; it must
+// (source tag computer-v1.0.45, promoted to the Hands main channel on
+// 2026-10-08). Raising the floor is a deliberate release decision; it must
 // move with the stable line, never ahead of it. The publish workflow's
 // carrier-version closure gate fails closed (STABLE_FLOOR_DRIFT) when this
 // constant lags the highest published stable tag.
-export const STABLE_FLOOR = "1.0.42";
+export const STABLE_FLOOR = "1.0.45";
 
 const SEMVER_RE = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$/;
 

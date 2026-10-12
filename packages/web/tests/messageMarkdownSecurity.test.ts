@@ -1,14 +1,27 @@
 import assert from "node:assert/strict";
 import { createElement } from "react";
+import type { ReactElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
+import { IntlProvider } from "react-intl";
 import ReactMarkdown from "react-markdown";
 import rehypeRaw from "rehype-raw";
 import rehypeSanitize from "rehype-sanitize";
 import MarkdownContent from "../src/components/markdown/MarkdownContent";
+import { mergedMessages } from "../src/i18n/messages";
 import {
   escapeUserRawHtmlForMessageMarkdown,
   messageMarkdownSanitizeSchema,
 } from "../src/components/message/messageMarkdownSecurity";
+
+// Custom-protocol links render CustomProtocolLink, which reads the intl
+// catalog — mirror the production provider for renders that exercise it.
+function withIntl(element: ReactElement) {
+  return createElement(
+    IntlProvider,
+    { locale: "en", messages: mergedMessages("en") },
+    element,
+  );
+}
 
 function renderMessageMarkdown(source: string) {
   return renderToStaticMarkup(
@@ -74,6 +87,38 @@ test("message markdown keeps normal markdown links", () => {
 
   assert.match(html, /<a href="https:\/\/slock\.ai"/);
   assert.match(html, />Slock<\/a>/);
+});
+
+test("message markdown allows obsidian:// links while stripping unlisted custom schemes", () => {
+  const renderWithIntl = (source: string) =>
+    renderToStaticMarkup(withIntl(createElement(MarkdownContent, {
+      source: escapeUserRawHtmlForMessageMarkdown(source),
+      rehypePlugins: [rehypeRaw, [rehypeSanitize, messageMarkdownSanitizeSchema]],
+    })));
+  const allowed = renderWithIntl("[Open note](obsidian://open?vault=Main)");
+  assert.match(allowed, /<a href="obsidian:\/\/open\?vault=Main"/);
+  assert.match(allowed, />Open note<\/a>/);
+
+  // Angle-bracket autolinks are CommonMark autolinks (any scheme), so they
+  // reach the same allowlist; bare obsidian:// text is intentionally NOT
+  // linkified (remark-gfm + remarkAutolinkBareUrls cover http(s) only).
+  const autolink = renderWithIntl("see <obsidian://open?vault=Main>");
+  assert.match(autolink, /<a href="obsidian:\/\/open\?vault=Main"/);
+
+  const stripped = renderWithIntl("[bad link](foo://bar)");
+  assert.doesNotMatch(stripped, /foo:\/\/bar/);
+  assert.doesNotMatch(stripped, /<a href=/);
+});
+
+test("shared markdown allows obsidian:// links while stripping unlisted custom schemes", () => {
+  const renderWithIntl = (source: string) =>
+    renderToStaticMarkup(withIntl(createElement(MarkdownContent, { source })));
+  const allowed = renderWithIntl("[Open note](obsidian://open?vault=Main)");
+  assert.match(allowed, /href="obsidian:\/\/open\?vault=Main"/);
+
+  const stripped = renderWithIntl("[bad link](foo://bar)");
+  assert.doesNotMatch(stripped, /foo:\/\/bar/);
+  assert.doesNotMatch(stripped, /<a href=/);
 });
 
 test("message markdown parses explicit markdown links before bare-url linkification", () => {

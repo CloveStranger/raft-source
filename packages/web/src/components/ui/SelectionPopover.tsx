@@ -1,4 +1,5 @@
-import type { KeyboardEvent, ReactNode } from "react";
+import { useCallback } from "react";
+import type { ChangeEvent, KeyboardEvent, ReactNode } from "react";
 import { Check } from "lucide-react";
 import { useIntl } from "react-intl";
 import { Card, Input } from "raft-ui";
@@ -119,6 +120,14 @@ export default function SelectionPopover(props: SelectionPopoverProps) {
     className = `absolute left-0 top-[calc(100%+8px)] z-20 ${width === "trigger" ? "w-full" : "min-w-[220px]"} border border-line-muted bg-layer-panel shadow-raft-sm theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white theme-brutal:shadow-brutal`,
   } = props;
   const emptyLabelText = emptyLabel ?? formatMessage({ id: "ui.selectionPopover.emptyLabel" });
+  const { onSearchChange, onInputKeyDown } = props;
+  const handleSearchChange = useCallback((event: ChangeEvent<HTMLInputElement>) => {
+    onSearchChange?.(event.target.value);
+  }, [onSearchChange]);
+  const handleInputKeyDown = useCallback((event: KeyboardEvent<HTMLInputElement>) => {
+    event.stopPropagation();
+    onInputKeyDown?.(event, options);
+  }, [onInputKeyDown, options]);
 
   return (
     <Card className={className} {...dismissLayerProps}>
@@ -144,11 +153,8 @@ export default function SelectionPopover(props: SelectionPopoverProps) {
             type="text"
             autoFocus
             value={props.search}
-            onChange={(event) => props.onSearchChange(event.target.value)}
-            onKeyDown={(event) => {
-              event.stopPropagation();
-              props.onInputKeyDown?.(event, options);
-            }}
+            onChange={handleSearchChange}
+            onKeyDown={handleInputKeyDown}
             placeholder={props.searchPlaceholder ?? formatMessage({ id: "ui.selectionPopover.searchPlaceholder" })}
             className="w-full px-2 py-1 text-xs font-mono"
           />

@@ -13,6 +13,7 @@ export {
 export {
   LocalRotatingTraceSink,
   type LocalRotatingTraceSinkOptions,
+  traceFileFamily,
 } from "./localTraceSink";
 export {
   LEGACY_TO_CANONICAL_TRACE_ATTRS,

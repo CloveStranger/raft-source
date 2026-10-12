@@ -55,8 +55,7 @@ import { runSetup } from "./setup";
 import { formatStatusReport } from "./status";
 import { runRunnersList, runRunnersStop } from "./runners";
 import { runStart, runStop } from "./startStop";
-import { runResident, runService, isSeaBinary, OS_SUPERVISOR_KIND_ENV_VAR, RESIDENT_CLI_PATH_ENV_VAR } from "./service";
-import type { OsSupervisorKind } from "./osSupervisor";
+import { runResident, runService, isSeaBinary, RESIDENT_CLI_PATH_ENV_VAR } from "./service";
 import { runDoctor, runDoctorMigrationDetails } from "./doctorCli";
 import { runLogs } from "./logs";
 import { CliExit, info, fail, present } from "./output";
@@ -683,17 +682,9 @@ program
   .command("__service", { hidden: true })
   .option("--slock-home <path>")
   .option("--raft-home <path>", "alias for --slock-home; --slock-home wins when both are given")
-  .option("--os-supervised <kind>")
-  .action(withCliExit(async (opts: { slockHome?: string; raftHome?: string; osSupervised?: string }) => {
+  .action(withCliExit(async (opts: { slockHome?: string; raftHome?: string }) => {
     const home = opts.slockHome ?? opts.raftHome;
     if (home) process.env.SLOCK_HOME = home;
-    if (opts.osSupervised) {
-      const kinds: OsSupervisorKind[] = ["launchd-user", "systemd-user", "windows-task"];
-      if (!kinds.includes(opts.osSupervised as OsSupervisorKind)) {
-        throw new Error(`invalid OS supervisor kind: ${opts.osSupervised}`);
-      }
-      process.env[OS_SUPERVISOR_KIND_ENV_VAR] = opts.osSupervised;
-    }
     await runService();
   }));
 program
@@ -744,7 +735,7 @@ async function runCli(): Promise<void> {
   // (not raft-computer's) handles the args. No-op for normal `raft-computer`
   // commands.
   if (process.argv[2] === "__cli") {
-    const { runBundledRaftCli } = await import("@botiverse/raft-daemon/core");
+    const { runBundledRaftCli } = await import("@botiverse/raft-daemon/bundled-cli");
     await runBundledRaftCli(process.argv.slice(3));
     return;
   }

@@ -8,6 +8,7 @@ import {
   buildReplayTargetUrl,
   handleMachineLocalRouting,
   isMachineLocalReplayAllowed,
+  sendMachineAffinityUnavailable,
   type MachineLocalRoutingDeps,
 } from "./machineLocalReplay";
 import { normalizeReplicaReplayEndpoint } from "./replicaRouter";
@@ -199,6 +200,7 @@ function routingDeps(overrides: Partial<MachineLocalRoutingDeps>): MachineLocalR
     getFlyInstance: async () => null,
     fetch: async () => new globalThis.Response(null, { status: 204 }),
     sleep: async () => {},
+    nowMs: () => 1_000_000,
     ...overrides,
   };
 }
@@ -284,7 +286,9 @@ test("a current-replica owner snapshot without a live socket fails closed", asyn
     }),
   );
 
-  assert.equal(result, "not_routed");
+  // The cleared stale snapshot was the only owner and the reread finds none:
+  // no replica holds the socket, so the machine is offline.
+  assert.equal(result, "owner_missing");
   assert.deepEqual(cleared, [{
     machineId: "machine-1",
     replicaId: "replica-a",
@@ -666,56 +670,91 @@ test("a rerouted GET clears a second exact owner_not_local without a third repla
   });
 });
 
-test("ambiguous replay timeout clears the observed owner but never replays POST", async () => {
-  const cleared: Array<{ machineId: string; replicaId: string; generation: string; version: string }> = [];
-  let fetchCount = 0;
-  let rereadCount = 0;
-  const response = makeRoutingResponse();
-  const abort = new Error("timeout");
-  abort.name = "AbortError";
+for (const [label, ownerUpdatedAtMs, expectedClears] of [
+  ["a lease refreshed under a minute ago is kept", 1_000_000 - 59_999, 0],
+  ["a lease unrefreshed for a minute is cleared", 1_000_000 - 60_000, 1],
+] as const) {
+  test(`task #440: replay timeout proves nothing about a live owner; ${label}, and POST is never replayed`, async () => {
+    const cleared: Array<{ machineId: string; replicaId: string; generation: string; version: string }> = [];
+    let fetchCount = 0;
+    let rereadCount = 0;
+    const response = makeRoutingResponse();
+    const abort = new Error("timeout");
+    abort.name = "AbortError";
+    const version = String(ownerUpdatedAtMs);
 
-  const handled = await handleMachineLocalRouting(
+    const handled = await handleMachineLocalRouting(
+      makeRoutingRequest("POST"),
+      response,
+      "machine-1",
+      false,
+      routingDeps({
+        getReplayTarget: async () => {
+          rereadCount += 1;
+          return {
+            replicaId: "replica-a",
+            endpoint: "http://replica-a",
+            generation: "generation-a",
+            version,
+            currentReplica: false,
+          };
+        },
+        clearOwner: async (machineId, replicaId, generation, clearedVersion) => {
+          cleared.push({ machineId, replicaId, generation, version: clearedVersion });
+          return "deleted";
+        },
+        fetch: async () => {
+          fetchCount += 1;
+          throw abort;
+        },
+      }),
+    );
+
+    assert.equal(handled, "handled");
+    assert.equal(fetchCount, 1);
+    assert.equal(rereadCount, 1, "non-idempotent failure must not discover a blind replay target");
+    assert.deepEqual(cleared, expectedClears === 0 ? [] : [{
+      machineId: "machine-1",
+      replicaId: "replica-a",
+      generation: "generation-a",
+      version,
+    }]);
+    assert.equal(response.statusCode, 504);
+    assert.deepEqual(response.jsonBody, {
+      error: "Timed out routing request to machine owner replica",
+      code: "machine_affinity_replay_timeout",
+      machineAffinityRoute: "timeout",
+    });
+  });
+}
+
+test("task #440: a transport failure keeps an owner whose lease is not a parseable timestamp", async () => {
+  let clears = 0;
+  const response = makeRoutingResponse();
+  await handleMachineLocalRouting(
     makeRoutingRequest("POST"),
     response,
     "machine-1",
     false,
     routingDeps({
-      getReplayTarget: async () => {
-        rereadCount += 1;
-        return {
-          replicaId: "replica-a",
-          endpoint: "http://replica-a",
-          generation: "generation-a",
-          version: "version-a",
-          currentReplica: false,
-        };
-      },
-      clearOwner: async (machineId, replicaId, generation, version) => {
-        cleared.push({ machineId, replicaId, generation, version });
+      getReplayTarget: async () => ({
+        replicaId: "replica-a",
+        endpoint: "http://replica-a",
+        generation: "generation-a",
+        version: "version-a",
+        currentReplica: false,
+      }),
+      clearOwner: async () => {
+        clears += 1;
         return "deleted";
       },
       fetch: async () => {
-        fetchCount += 1;
-        throw abort;
+        throw new Error("ECONNREFUSED");
       },
     }),
   );
-
-  assert.equal(handled, "handled");
-  assert.equal(fetchCount, 1);
-  assert.equal(rereadCount, 1, "non-idempotent failure must not discover a blind replay target");
-  assert.deepEqual(cleared, [{
-    machineId: "machine-1",
-    replicaId: "replica-a",
-    generation: "generation-a",
-    version: "version-a",
-  }]);
-  assert.equal(response.statusCode, 504);
-  assert.deepEqual(response.jsonBody, {
-    error: "Timed out routing request to machine owner replica",
-    code: "machine_affinity_replay_timeout",
-    machineAffinityRoute: "timeout",
-  });
+  assert.equal(clears, 0);
+  assert.equal(response.statusCode, 503);
 });
 
 test("business 409 is forwarded without clearing machine ownership", async () => {
@@ -759,4 +798,44 @@ test("replay target keeps the owner replica's host whatever the incoming request
   const protocolRelative = buildReplayTargetUrl("//internal.example/api/agents/agent-1/skills", endpoint);
   assert.equal(protocolRelative.host, "10.0.1.5:3001");
   assert.equal(protocolRelative.pathname, "/api/agents/agent-1/skills");
+});
+
+test("only owner_missing answers 409 machine_offline; a write while another replica owns the machine keeps 503", async () => {
+  const offline = await handleMachineLocalRouting(
+    makeRoutingRequest("GET"),
+    makeRoutingResponse(),
+    "machine-1",
+    () => false,
+    routingDeps({ getReplayTarget: async () => null }),
+  );
+  assert.equal(offline, "owner_missing");
+  const offlineResponse = makeRoutingResponse();
+  sendMachineAffinityUnavailable(offlineResponse, "machine-1", offline);
+  assert.equal(offlineResponse.statusCode, 409);
+  assert.equal((offlineResponse.jsonBody as { code: string }).code, "machine_offline");
+
+  // POST start on a machine another replica owns: the request stays here, but
+  // the machine is online, so the answer must stay the retryable 503.
+  const write = await handleMachineLocalRouting(
+    makeRoutingRequest("POST"),
+    makeRoutingResponse(),
+    "machine-1",
+    () => false,
+    routingDeps({
+      getReplayTarget: async () => ({
+        replicaId: "replica-b",
+        endpoint: "http://replica-b",
+        generation: "generation-b",
+        version: "version-b",
+        currentReplica: false,
+      }),
+    }),
+  );
+  assert.notEqual(write, "owner_missing");
+  if (write !== "handled") {
+    const writeResponse = makeRoutingResponse();
+    sendMachineAffinityUnavailable(writeResponse, "machine-1", write);
+    assert.equal(writeResponse.statusCode, 503);
+    assert.equal((writeResponse.jsonBody as { code: string }).code, "machine_affinity_unavailable");
+  }
 });

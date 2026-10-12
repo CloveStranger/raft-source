@@ -353,7 +353,10 @@ export default function AgentActivityLog({ agentId }: { agentId: string }) {
   const loadTrajectoryLog = useAgentStore((s) => s.loadTrajectoryLog);
   const bottomRef = useRef<HTMLDivElement>(null);
   const { formatClockWithSeconds } = useTimeFormatter();
-  const formatTimestamp = (timestamp: number) => formatClockWithSeconds(timestamp).toUpperCase();
+  const formatTimestamp = useCallback(
+    (timestamp: number) => formatClockWithSeconds(timestamp).toUpperCase(),
+    [formatClockWithSeconds],
+  );
 
   // Ephemeral notice when a (legitimate) thread ref can't be resolved at
   // click time — mirrors MessageItem's threadRefNotice behaviour.

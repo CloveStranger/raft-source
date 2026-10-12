@@ -64,6 +64,42 @@ export function shouldShowGroupedMessageHeader(
   );
 }
 
+/**
+ * Rhythm marker for the spacing system (2026-10-11, cindyz's 16/24): what kind
+ * of row follows `messages[index]` — a compact continuation ("compact") or a
+ * new group ("group") — or nothing at the list end (undefined). Rendered rows
+ * cannot see their neighbours through the app's per-message wrappers, so this
+ * is computed from the list data and written onto the row root as
+ * `data-followed-by`; the recipe reads it to collapse the row's bottom padding
+ * (see message-item.recipe.ts).
+ */
+export function followedByFor(
+  messages: readonly { id: string; messageType?: "chat" | "system" }[],
+  index: number,
+  grouping: ReadonlyMap<string, MessageGroupState>,
+): "compact" | "group" | undefined {
+  const next = messages[index + 1];
+  if (!next) return undefined;
+  // A system note always breaks the run (its own grouping rule), so the row
+  // above must not collapse as if another continuation followed — that
+  // mistake left the note's top seam 3px short (gzj/Josh, 2026-10-11).
+  if (next.messageType === "system") return "group";
+  const nextState = grouping.get(next.id);
+  return nextState?.showAvatar === false ? "compact" : "group";
+}
+
+/**
+ * True when the message at `index` directly follows a system note (2026-10-11):
+ * the note keeps a net 12/12 rhythm, and the following message cancels the
+ * rest of the group-break accounting via `data-follows-system`.
+ */
+export function followsSystemFor(
+  messages: readonly { messageType?: "chat" | "system" }[],
+  index: number,
+): boolean {
+  return messages[index - 1]?.messageType === "system";
+}
+
 /** Minimal shape the grouping computation needs from a message. */
 export interface GroupableMessage {
   id: string;

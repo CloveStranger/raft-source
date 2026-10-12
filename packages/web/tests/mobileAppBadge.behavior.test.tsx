@@ -57,7 +57,7 @@ function renderRail(userId: string | null) {
   return render(
     <MemoryRouter initialEntries={["/s/botiverse/channel/general"]}>
       <TestIntlProvider>
-        <LeftRail side="left" workspaceModeAvailable={false} />
+        <LeftRail />
       </TestIntlProvider>
     </MemoryRouter>,
   );

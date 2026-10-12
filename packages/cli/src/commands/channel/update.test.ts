@@ -93,7 +93,7 @@ test("update channel command resolves target and patches normalized payload", as
     },
     {
       method: "PATCH",
-      path: "/internal/agent/agent-1/channels/channel-1",
+      path: "/internal/agent-api/channels/channel-1",
       body: {
         name: "platform",
         description: "Runtime work",

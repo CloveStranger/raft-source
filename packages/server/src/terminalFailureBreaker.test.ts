@@ -2,8 +2,10 @@ import assert from "node:assert/strict";
 import {
   TERMINAL_BREAKER_UNREADABLE,
   TERMINAL_FAILURE_BACKOFF_MS,
+  TERMINAL_FAILURE_OWED_CONVERSATIONS_MAX,
   TERMINAL_FAILURE_PROBE_LEASE_MS,
   TERMINAL_FAILURE_UNEXITED_MAX,
+  applyCatchupBuild,
   applyCatchupEcho,
   applyTerminalDaemonReady,
   applyTerminalFailureFrame,
@@ -458,6 +460,7 @@ function everyFieldState(): TerminalFailureBreakerState {
     builtAtMs: 1_100,
     coverage: [{ conversationId: "c1", fromSeqExclusive: 10, coveredUpToSeq: 15, truncated: true }],
     messages: [{ id: "m11", conversationId: "c1", seq: 11, inPrefix: true }, { id: "m18", conversationId: "c1", seq: 18, inPrefix: false }],
+    settledByCursor: [{ conversationId: "c-dm", readCursor: 5, ceiling: 4 }],
     candidateCapHit: true,
     allUnreadCovered: false,
   };
@@ -484,6 +487,8 @@ function everyFieldState(): TerminalFailureBreakerState {
     outboxWatermarks: { [D1]: 17, "daemon-0": 3 },
     outboxWatermarksLost: true,
     takeoverEpoch: 3,
+    spawnError: { count: 2, lastLaunchId: "L9", lastAtMs: 1_200 },
+    wakeDemand: { seq: 4, sinceMs: 1_000, claimedSeq: 3, claimedLaunchId: "L9" },
   };
 }
 
@@ -499,9 +504,18 @@ test("R-1 encode → decode is the identity for a record with every field popula
 
 test("R-1 a record missing any single top-level field is unreadable, not silently defaulted", () => {
   const encoded = JSON.parse(encodeTerminalFailureBreakerState(everyFieldState())) as Record<string, unknown>;
+  // task #365 fields default to null when absent (rolling deploys: an older
+  // replica rewrites the record without them); every other field is strict.
+  const optional = new Set(["spawnError", "wakeDemand"]);
   for (const key of Object.keys(encoded)) {
     const { [key]: _dropped, ...rest } = encoded;
-    assert.equal(decodeTerminalFailureBreakerState(JSON.stringify(rest)), TERMINAL_BREAKER_UNREADABLE, `missing ${key}`);
+    const decoded = decodeTerminalFailureBreakerState(JSON.stringify(rest));
+    if (optional.has(key)) {
+      assert.notEqual(decoded, TERMINAL_BREAKER_UNREADABLE, `missing ${key} is readable`);
+      assert.equal((decoded as unknown as Record<string, unknown>)[key], null, `missing ${key} decodes as null`);
+    } else {
+      assert.equal(decoded, TERMINAL_BREAKER_UNREADABLE, `missing ${key}`);
+    }
   }
 });
 
@@ -689,7 +703,6 @@ function batchFor(obligation: CatchupObligation | null, launchId: string, input:
     builtAtMs: 0,
     conversations: [],
     rendered: [],
-    owedReadCursors: {},
     candidateCapHit: false,
     unreadLatestSeqs: {},
     ...input,
@@ -766,6 +779,27 @@ test("O-6 a refused wake raises that conversation's ceiling to the message seq",
   assert.equal(refused.decision, "terminal_failure_paused");
   assert.equal(refused.write, true);
   assert.equal(refused.state.catchupObligation?.owedCeilings.c1, 5);
+});
+
+test("owed bound: refused wakes in 64 conversations are tracked by ceiling; the 65th sets owedOverflow, and a tracked one still rises", () => {
+  assert.equal(TERMINAL_FAILURE_OWED_CONVERSATIONS_MAX, 64);
+  let { state } = openedAtStep0();
+  const paused = state.blockedUntilMs! - 1;
+  state.catchupObligation = null;
+  for (let i = 0; i < TERMINAL_FAILURE_OWED_CONVERSATIONS_MAX; i += 1) {
+    const refused = gate(state, paused, { wakeMessage: { conversationId: `c${i}`, seq: 10 } });
+    assert.equal(refused.decision, "terminal_failure_paused");
+    state = refused.state;
+  }
+  assert.equal(Object.keys(state.catchupObligation!.owedCeilings).length, 64);
+  assert.equal(state.catchupObligation!.owedOverflow, false, "64 conversations fit the bound");
+  const overflowed = gate(state, paused, { wakeMessage: { conversationId: "c64", seq: 10 } }).state;
+  assert.equal(overflowed.catchupObligation!.owedCeilings.c64, undefined, "the map stays bounded");
+  assert.equal(overflowed.catchupObligation!.owedOverflow, true, "the 65th conversation owes every unread row");
+  const raised = gate(overflowed, paused, { wakeMessage: { conversationId: "c0", seq: 11 } }).state;
+  assert.equal(raised.catchupObligation!.owedCeilings.c0, 11, "a tracked conversation's ceiling still rises");
+  // Only a complete batch clears the overflow (see "owedOverflow is fulfilled only by a complete batch").
+  assert.equal(applyCatchupEcho(raised.catchupObligation!, batchFor(raised.catchupObligation, "P", { candidateCapHit: true }))?.owedOverflow, true);
 });
 
 test("O-7 (state level) a daemon restart does not touch the obligation", () => {
@@ -905,10 +939,37 @@ test("O-16 read-cursor movement raises the lower bound, never lowers the obligat
   });
   assert.deepEqual(b2.messages.map((m) => m.id), ["m75"]);
   assert.equal(echo(s, b2).state.catchupObligation, null);
-  // Variant: the cursor reached 75 before B2; B2 has no rows for h1 but lists it.
-  const b2v = batchFor(s.catchupObligation, "L", { owedReadCursors: { h1: 75 } });
-  assert.deepEqual(b2v.coverage, [{ conversationId: "h1", fromSeqExclusive: 75, coveredUpToSeq: 75, truncated: false }]);
-  assert.equal(echo(s, b2v).state.catchupObligation, null);
+  // Variant: the cursor reached 75 before B2. The build settles h1 by the
+  // read cursor (consumed by the inbox's rule): no echo needed, no coverage entry.
+  const settled = applyCatchupBuild(s, { readCursors: { h1: 75 }, batch: null });
+  assert.equal(settled.obligationCleared, true);
+  assert.equal(settled.state.catchupObligation, null);
+  assert.deepEqual(settled.settled, [{ conversationId: "h1", readCursor: 75, ceiling: 75 }]);
+});
+
+test("RFC 6 read cursor (state level): a passed conversation settles at build, recorded on the batch, not as coverage; the rest keeps the echo rule; overflow is not settled by cursors", () => {
+  const obligation = obligationOf({ a: 5, b: 9 });
+  const s = stateWithObligation(obligation);
+  const batch = batchFor(obligation, "L", {
+    conversations: [{ conversationId: "b", fromSeqExclusive: 0, latestSeq: 9, truncated: false, fetchedSeqs: [9] }],
+    rendered: [{ id: "m9", conversationId: "b", seq: 9, appendedOutOfOrder: false }],
+  });
+  const built = applyCatchupBuild(s, { readCursors: { a: 6, b: 0 }, batch });
+  assert.equal(built.attached, true);
+  assert.equal(built.obligationCleared, false);
+  assert.deepEqual(built.state.catchupObligation!.obligationCursor, { a: 5 });
+  assert.deepEqual(built.state.catchupObligation!.pendingBatch!.settledByCursor, [{ conversationId: "a", readCursor: 6, ceiling: 5 }]);
+  assert.deepEqual(built.state.catchupObligation!.pendingBatch!.coverage.map((c) => c.conversationId), ["b"]);
+  assert.equal(completeE2(built.state, "L", 2, batch.batchId).state.catchupObligation, null, "b still needs its echo");
+  // A cursor below the ceiling settles nothing and writes nothing.
+  const none = applyCatchupBuild(s, { readCursors: { a: 4 }, batch: null });
+  assert.equal(none.write, false);
+  assert.deepEqual(none.state.catchupObligation, obligation);
+  // Overflow keeps the complete-batch rule even when every listed ceiling is passed.
+  const overflow = stateWithObligation({ ...raiseCatchupObligation(null, { a: 5 }), owedOverflow: true });
+  const o = applyCatchupBuild(overflow, { readCursors: { a: 5 }, batch: null });
+  assert.equal(o.obligationCleared, false);
+  assert.equal(o.state.catchupObligation!.owedOverflow, true);
 });
 
 test("owedOverflow is fulfilled only by a complete batch", () => {
@@ -999,7 +1060,7 @@ test("review-2 control: a merge does not clear a different needsManual reason or
 
 function batchWith(obligation: CatchupObligation | null, input: Partial<Parameters<typeof buildCatchupBatch>[1]>): CatchupBatch {
   return buildCatchupBatch(obligation, {
-    batchId: `B-${nextSeq()}`, launchId: "L", builtAtMs: 0, conversations: [], rendered: [], owedReadCursors: {},
+    batchId: `B-${nextSeq()}`, launchId: "L", builtAtMs: 0, conversations: [], rendered: [],
     candidateCapHit: false, unreadLatestSeqs: {}, ...input,
   } as Parameters<typeof buildCatchupBatch>[1]);
 }
@@ -1207,4 +1268,24 @@ test("review-5 a failure-driven refusal upgrades an existing identity-wait oblig
   const lost = evaluateTerminalWakeGate(waited, { nowMs: 102, capability: false, wakeMessage: null });
   assert.equal(lost.state.needsManual?.reason, "unexited_process", "the earlier block is kept");
   assert.equal(lost.state.catchupObligation?.engagedByFailure, true, "the capability-lost refusal now holds the debt");
+});
+
+test("§6 pendingBatch.settledByCursor is optional for records written before it existed, and rejected when malformed", () => {
+  const state = everyFieldState();
+  assert.ok(state.catchupObligation?.pendingBatch);
+  // A schema-1 record written by base 2107e964c has no settledByCursor: it stays readable and has settled nothing.
+  const legacy = JSON.parse(encodeTerminalFailureBreakerState(state));
+  delete legacy.catchupObligation.pendingBatch.settledByCursor;
+  const decoded = decodeTerminalFailureBreakerState(JSON.stringify(legacy));
+  assert.notEqual(decoded, TERMINAL_BREAKER_UNREADABLE);
+  assert.deepEqual(
+    decoded,
+    { ...state, catchupObligation: { ...state.catchupObligation!, pendingBatch: { ...state.catchupObligation!.pendingBatch!, settledByCursor: [] } } },
+  );
+  // A present but malformed value is still unreadable.
+  for (const bad of ["x", null, {}, [{ conversationId: "c" }]]) {
+    const record = JSON.parse(encodeTerminalFailureBreakerState(state));
+    record.catchupObligation.pendingBatch.settledByCursor = bad;
+    assert.equal(decodeTerminalFailureBreakerState(JSON.stringify(record)), TERMINAL_BREAKER_UNREADABLE, JSON.stringify(bad));
+  }
 });

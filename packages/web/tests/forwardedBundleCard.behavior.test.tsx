@@ -9,12 +9,14 @@ import ForwardedBundleCard from "../src/components/message/ForwardedBundleCard";
 import type { ForwardedBundleMetadata } from "../src/components/message/ForwardedBundleCard";
 
 const originalGet = api.get;
+const originalWindowOpen = window.open;
 
 afterEach(() => {
   resetAttachmentPreviewSummaryCache();
   resetInlineAttachmentUrlCache();
   cleanup();
   api.get = originalGet;
+  window.open = originalWindowOpen;
 });
 
 function metadata(): ForwardedBundleMetadata {
@@ -179,4 +181,43 @@ test("Forward composer can expand its preview card to the full pane width", () =
   assert.match(card.className, /\bw-full\b/);
   assert.match(card.className, /\bmax-w-none\b/);
   assert.doesNotMatch(card.className, /max-w-\[min\(34rem,100%\)\]/);
+});
+
+// task #734: forwarded content is user-authored markdown rendered through
+// MarkdownContent's DEFAULT anchor — the custom-protocol confirm must apply
+// on this surface too, not just the chat message body.
+test("Custom-protocol links in forwarded content confirm before opening", async () => {
+  const obsidianUrl = "obsidian://new?file=x&content=y&overwrite=true";
+  const openedUrls: string[] = [];
+  window.open = ((url?: string | URL) => {
+    openedUrls.push(String(url));
+    return null;
+  }) as typeof window.open;
+
+  render(
+    <TestIntlProvider>
+      <ForwardedBundleCard
+        metadata={{
+          kind: "forwarded-bundle",
+          version: 1,
+          forwardedItems: [{
+            sourceMessageId: "proto-link",
+            sourceAuthorSnapshot: { type: "user", name: "Developer" },
+            contentSnapshot: `see [note](${obsidianUrl})`,
+            attachmentSnapshots: [],
+          }],
+        }}
+      />
+    </TestIntlProvider>,
+  );
+
+  const link = screen.getByRole("link", { name: "note" });
+  fireEvent.click(link);
+
+  assert.deepEqual(openedUrls, [], "no navigation before confirmation");
+  assert.ok(await screen.findByText("Open external link?"), "confirmation dialog shown");
+  assert.ok(screen.getByText(obsidianUrl), "dialog shows the link target");
+
+  fireEvent.click(screen.getByRole("button", { name: "Open link" }));
+  assert.deepEqual(openedUrls, [obsidianUrl]);
 });

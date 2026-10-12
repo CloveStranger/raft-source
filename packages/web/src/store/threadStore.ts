@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { useUIStore } from "./uiStore";
 import api from "../api/client";
 import { useServerStore } from "./serverStore";
 import { getCurrentPrincipalId } from "./principalRuntime";
@@ -305,6 +306,8 @@ interface ThreadState {
   /** Clear unread count from local state without echoing another server write. */
   clearThreadUnreadLocally: (threadChannelId: string) => void;
   applyReadStateProjection: (threadChannelId: string, projection: ReadStateProjection) => void;
+  /** Server-reported unread for a thread whose replies are not loaded here. */
+  applyServerThreadUnread: (threadChannelId: string, unreadCount: number) => void;
   /** Follow a thread manually */
   followThread: (parentMessageId: string) => Promise<void>;
   /** Unfollow a thread */
@@ -363,6 +366,7 @@ export const useThreadStore = create<ThreadState>((set, get) => ({
       console.error("Failed to open thread: route server is not active");
       return;
     }
+    if (get().openParentChannelId !== parentChannelId) useUIStore.getState().restoreThreadLayout();
     const serverEpoch = useServerStore.getState().serverEpoch;
     // Look up threadChannelId from existing data so we can open the panel immediately
     const state = useThreadStore.getState();
@@ -504,7 +508,8 @@ export const useThreadStore = create<ThreadState>((set, get) => ({
     // Stryker restore all
   },
 
-  closeThread: () =>
+  closeThread: () => {
+    useUIStore.getState().restoreThreadLayout();
     set({
       openParentMessageId: null,
       openIntent: null,
@@ -514,7 +519,8 @@ export const useThreadStore = create<ThreadState>((set, get) => ({
       openThreadError: null,
       openThreadLoading: false,
       focusedMessageId: null,
-    }),
+    });
+  },
 
   openTaskModal: async ({
     serverSlug,
@@ -802,6 +808,38 @@ export const useThreadStore = create<ThreadState>((set, get) => ({
         ...(summaries !== state.summaries ? { summaries } : {}),
       };
       // Stryker restore all
+    });
+  },
+
+  applyServerThreadUnread: (threadChannelId, serverUnreadCount) => {
+    // A read only lowers unread. The server's count also differs from the
+    // badge's own algorithm (it ignores follow state and excludes the
+    // reader's messages), so it may lower a badge but never raise one: an
+    // unfollowed thread stays at 0.
+    set((state) => {
+      let followedThreadsChanged = false;
+      const followedThreads = state.followedThreads.map((t) => {
+        if (t.threadChannelId !== threadChannelId || t.unreadCount <= serverUnreadCount) return t;
+        followedThreadsChanged = true;
+        return { ...t, unreadCount: serverUnreadCount };
+      });
+      let summaries = state.summaries;
+      for (const [parentMessageId, summary] of Object.entries(state.summaries)) {
+        if (summary.threadChannelId !== threadChannelId || summary.unreadCount <= serverUnreadCount) continue;
+        if (summaries === state.summaries) summaries = { ...state.summaries };
+        summaries[parentMessageId] = {
+          ...summary,
+          unreadCount: serverUnreadCount,
+          // The server sends a count, not a position: keep the old jump target
+          // while anything is unread, drop it once nothing is.
+          firstUnreadMessageId: serverUnreadCount === 0 ? null : summary.firstUnreadMessageId,
+        };
+      }
+      if (!followedThreadsChanged && summaries === state.summaries) return state;
+      return {
+        ...(followedThreadsChanged ? { followedThreads } : {}),
+        ...(summaries !== state.summaries ? { summaries } : {}),
+      };
     });
   },
 

@@ -28,9 +28,12 @@ import {
   startManagedMcpOAuthConnection,
 } from "../services/managedMcpOAuthService";
 import { ManagedMcpServiceError } from "../services/managedMcpService";
+import { guardUuidPathParams } from "../lib/uuidPathParams";
 
 export const managedMcpRouter: RouterType = Router();
 export const managedMcpOAuthCallbackRouter: RouterType = Router();
+// Uniform 404 for non-UUID path params (task #12).
+guardUuidPathParams(managedMcpRouter, { agentId: "Agent", mcpServerId: "MCP server" });
 
 function body(req: Request): Record<string, unknown> {
   return typeof req.body === "object" && req.body !== null && !Array.isArray(req.body)

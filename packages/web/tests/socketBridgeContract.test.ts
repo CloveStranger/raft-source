@@ -7,7 +7,6 @@ const repoRoot = resolve(import.meta.dirname, "..");
 const EXPECTED_MAIN_LAYOUT_SOCKET_EVENTS = [
   "message:new",
   "message:updated",
-  "reaction_viewer:updated",
   "scope_read:updated",
   "read_state:updated",
   "read_state:updated_bulk",
@@ -81,7 +80,6 @@ test("socketBridge owns the MainLayout event equivalence list", () => {
 test("thread reply socket events patch Activity before the lagging snapshot refresh", () => {
   const source = readSocketBridge();
 
-  assert.match(source, /applyLiveMessageActivity\(result\.message, scheduleInboxRefresh\);/);
   assert.match(source, /if \(accepted\) applyLiveMessageActivity\(msg, scheduleInboxRefresh\);/);
   assert.match(source, /function applyLiveMessageActivity\([\s\S]*?isMessageActivitySuppressedByMute\(msg\)[\s\S]*?receiveThreadReply\(msg\)[\s\S]*?applyMessageChannelActivity\(msg, scheduleInboxRefresh\);/);
   assert.match(

@@ -1,4 +1,4 @@
-import type { AgentActivity, AgentActivityDetailKind } from "@botiverse/raft-shared";
+import type { AgentActivity, AgentActivityDetailKind, SpawnFailureActivityDiagnostic } from "@botiverse/raft-shared";
 import { createIntl, createIntlCache } from "react-intl";
 import type { IntlShape } from "react-intl";
 import type { MessageId } from "../i18n/messages";
@@ -206,4 +206,28 @@ export function formatAgentDisplayStateText(
  */
 export function getActivityText(activity: AgentActivity, detail?: string, detailKind?: AgentActivityDetailKind): string {
   return formatActivityText(enActivityIntl.formatMessage, activity, detail, detailKind);
+}
+
+/**
+ * task #1123: the text of a failed start, chosen by its typed reason (never by
+ * parsing the daemon's detail). model_not_found has catalog copy; other reasons
+ * keep the daemon's user message. While the server has paused automatic
+ * restarts, say so and how to lift it. Null when there is nothing to replace.
+ */
+export function formatSpawnFailureDetail(
+  formatMessage: IntlShape["formatMessage"],
+  spawnFailure: SpawnFailureActivityDiagnostic | undefined,
+  daemonDetail: string,
+): string | null {
+  if (!spawnFailure) return null;
+  // task #10: restarting resumes the same stuck session, so the generic paused
+  // copy ("…or restart the agent") would send people the wrong way.
+  if (spawnFailure.reason === "session_needs_reset") {
+    return String(formatMessage({ id: "activity.status.sessionNeedsReset" }));
+  }
+  const detail = spawnFailure.reason === "model_not_found"
+    ? String(formatMessage({ id: "activity.status.modelNotFound" }, { model: spawnFailure.model ?? "?" }))
+    : daemonDetail;
+  if (!spawnFailure.autoRestartPaused) return spawnFailure.reason === "model_not_found" ? detail : null;
+  return String(formatMessage({ id: "activity.status.autoRestartPaused" }, { detail }));
 }

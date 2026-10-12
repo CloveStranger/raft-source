@@ -167,3 +167,17 @@ test("old daemon unsupported maps to live only for declared closed static source
     { kind: "unsupported" },
   );
 });
+
+test("task #1242: the daemon's lookup verdict on a runtime_not_found outcome reaches the server's closed truth unchanged", () => {
+  const outcome = { kind: "error", retryable: true, code: "runtime_not_found", reason: "probe_timeout" } as const;
+  const projected = projectRuntimeModelSourceResult(
+    { type: "machine:runtime_models:result", requestId: "req", outcome, error: "error" },
+    "grok",
+  );
+  assert.deepEqual(projected, outcome);
+  // An old daemon's carrier has no verdict and gets none invented.
+  assert.deepEqual(
+    projectRuntimeModelSourceResult({ type: "machine:runtime_models:result", requestId: "req", error: "runtime_not_found" }, "grok"),
+    { kind: "error", retryable: true },
+  );
+});

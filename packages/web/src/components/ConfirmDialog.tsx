@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import { useIntl } from "react-intl";
 import type { Locale } from "../i18n/locale";
@@ -97,8 +97,14 @@ export default function ConfirmDialog({
   confirmClassName,  chromeLocale = "active",
 }: ConfirmDialogProps) {
   const { formatMessage } = useIntl();
-  const fixedChromeMessages = chromeLocale === "active" ? null : mergedMessages(chromeLocale);
-  const formatChromeMessage = (id: MessageId) => fixedChromeMessages?.[id] ?? formatMessage({ id });
+  const fixedChromeMessages = useMemo(
+    () => (chromeLocale === "active" ? null : mergedMessages(chromeLocale)),
+    [chromeLocale],
+  );
+  const formatChromeMessage = useCallback(
+    (id: MessageId) => fixedChromeMessages?.[id] ?? formatMessage({ id }),
+    [fixedChromeMessages, formatMessage],
+  );
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -109,11 +115,18 @@ export default function ConfirmDialog({
   const resolvedProcessingEllipsis = loadingLabel ?? formatChromeMessage("common.confirm.processingEllipsis");
   const confirmTone = confirmVariant ?? (confirmColor ? CONFIRM_TONES_BY_LEGACY_COLOR[confirmColor] : undefined) ?? "danger";
 
-  const handleClose = () => {
+  const handleClose = useCallback(() => {
     if (!loading) onClose();
-  };
+  }, [loading, onClose]);
 
-  const handleConfirm = async () => {
+  const handleOpenChange = useCallback(
+    (nextOpen: boolean) => {
+      if (!nextOpen) handleClose();
+    },
+    [handleClose],
+  );
+
+  const handleConfirm = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
@@ -131,7 +144,7 @@ export default function ConfirmDialog({
           (err instanceof Error ? err.message : formatChromeMessage("common.confirm.somethingWentWrong")),
       );
     }
-  };
+  }, [onConfirm, closeOnConfirm, onClose, formatChromeMessage]);
 
   return (
     <Dialog
@@ -140,9 +153,7 @@ export default function ConfirmDialog({
       // (closeOnBackdrop stayed false) — keep that: only Escape, the close
       // button and Cancel dismiss, all gated on the in-flight confirm.
       disablePointerDismissal
-      onOpenChange={(nextOpen) => {
-        if (!nextOpen) handleClose();
-      }}
+      onOpenChange={handleOpenChange}
     >
       <DialogContent
         layer={(layer ?? 0) >= 1 ? 1 : 0}

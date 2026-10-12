@@ -1,4 +1,5 @@
 import { MessageSquare } from "lucide-react";
+import { useCallback } from "react";
 import { useIntl } from "react-intl";
 import type { Message } from "../../store/messageStore";
 import { ReferenceChip } from "./ReferenceChip";
@@ -22,6 +23,10 @@ export function AttachmentCommentRefChip({
   bodyFontSizeClass?: string;
 }) {
   const { formatMessage } = useIntl();
+  const handleJumpToHost = useCallback((event: React.MouseEvent) => {
+    event.preventDefault();
+    onJumpToHost();
+  }, [onJumpToHost]);
   if (!commentRef || !commentsEnabled) return null;
 
   const detail = `${commentRef.filename}${commentRef.anchorLabel ? ` · ${commentRef.anchorLabel}` : ""}`;
@@ -34,10 +39,7 @@ export function AttachmentCommentRefChip({
           <ReferenceChip
             as="a"
             href="#"
-            onClick={(e) => {
-              e.preventDefault();
-              onJumpToHost();
-            }}
+            onClick={handleJumpToHost}
             data-message-affordance="attachment-comment-ref-chip"
             icon={MessageSquare}
             variant="muted"

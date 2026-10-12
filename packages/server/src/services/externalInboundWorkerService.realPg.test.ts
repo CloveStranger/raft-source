@@ -43,13 +43,14 @@ import {
   broadcastAndDeliver,
   drainSenderReadReceiptsForTests,
 } from "./messageService";
+import { withChannelDelivery } from "../test/orchestratorStub";
 
 const REAL_PG_URL_ENV = "EXTERNAL_INBOUND_REAL_PG_URL";
 const REAL_PG_URL = process.env[REAL_PG_URL_ENV];
 const REAL_PG_REQUIRED = process.env.EXTERNAL_INBOUND_REAL_PG_REQUIRED === "1";
 const MIGRATIONS_FOLDER = fileURLToPath(new URL("../../drizzle", import.meta.url));
 const NOW = new Date("2026-08-13T04:47:00.000Z");
-const noopOrchestrator = { deliverMessage: async () => undefined } as any;
+const noopOrchestrator = withChannelDelivery({ deliverMessage: async () => undefined }) as any;
 
 function createIo() {
   return {

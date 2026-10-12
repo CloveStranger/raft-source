@@ -1,6 +1,7 @@
 import CloseButton from "../ui/CloseButton";
 import { Input, Card, Checkbox, Button, Status } from "raft-ui";
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
+import type { ChangeEvent } from "react";
 import { X, CheckCircle, Monitor, Cloud } from "lucide-react";
 import { useIntl } from "react-intl";
 import { useMachineStore } from "../../store/machineStore";
@@ -113,7 +114,7 @@ export default function AddMachineDialog({ onClose }: { onClose: () => void }) {
   // The dropped-event polling fallback now lives in useComputerConnectionWatch,
   // alongside the baseline it belongs with.
 
-  const handleSelectType = async () => {
+  const handleSelectType = useCallback(async () => {
     setRegistering(true);
     setError("");
     setConfirmedComputerMatch(false);
@@ -130,9 +131,9 @@ export default function AddMachineDialog({ onClose }: { onClose: () => void }) {
     } finally {
       setRegistering(false);
     }
-  };
+  }, [formatMessage, registerMachine]);
 
-  const handleCancel = async () => {
+  const handleCancel = useCallback(async () => {
     // If we created a raw daemon placeholder but never confirmed a Computer
     // pivot, clean the placeholder rather than treating the heuristic match as
     // the final operation target.
@@ -144,11 +145,12 @@ export default function AddMachineDialog({ onClose }: { onClose: () => void }) {
       }
     }
     onClose();
-  };
+  }, [confirmedComputerMatch, deleteMachine, isConnected, needsComputerMatchConfirmation, onClose, registeredMachineId]);
 
-  const handleDone = async () => {
+  const pendingHostname = pendingMachine?.hostname;
+  const handleDone = useCallback(async () => {
     if (needsComputerMatchConfirmation && !confirmedComputerMatch) return;
-    const finalName = name.trim() || pendingMachine?.hostname || "";
+    const finalName = name.trim() || pendingHostname || "";
     if (finalName && machineId && finalName !== "my-computer") {
       setSaving(true);
       try {
@@ -169,7 +171,20 @@ export default function AddMachineDialog({ onClose }: { onClose: () => void }) {
     useMachineStore.getState().clearPendingApiKey();
     onClose();
     nav.toMachine(machineId);
-  };
+  }, [
+    confirmedComputerMatch,
+    deleteMachine,
+    machineId,
+    name,
+    nav,
+    needsComputerMatchConfirmation,
+    onClose,
+    pendingHostname,
+    registeredMachineId,
+    renameMachine,
+  ]);
+
+  const handleNameChange = useCallback((e: ChangeEvent<HTMLInputElement>) => setName(e.target.value), []);
 
   const deploymentEnv = import.meta.env?.VITE_DEPLOYMENT_ENV;
   const computerCommands = getComputerCommands(serverSlug, deploymentEnv, serverUrl, {
@@ -181,6 +196,7 @@ export default function AddMachineDialog({ onClose }: { onClose: () => void }) {
   });
   const computerSetupCommand = computerCommands?.setup ?? null;
   const computerInstall = computerCommands?.install ?? null;
+  const computerInstallAndSetup = computerCommands?.installAndSetup ?? null;
   const windowsComputerSetupCommand = windowsComputerCommands?.setup ?? null;
   const windowsComputerInstall = windowsComputerCommands?.install ?? null;
 
@@ -309,6 +325,7 @@ export default function AddMachineDialog({ onClose }: { onClose: () => void }) {
               className="mb-4"
               computerCommand={computerSetupCommand}
               computerInstallCommand={computerInstall}
+              computerInstallAndSetupCommand={computerInstallAndSetup}
               windowsComputerCommand={windowsComputerSetupCommand}
               windowsComputerInstallCommand={windowsComputerInstall}
             />
@@ -375,7 +392,7 @@ export default function AddMachineDialog({ onClose }: { onClose: () => void }) {
               <Input
                 type="text"
                 value={name}
-                onChange={(e) => setName(e.target.value)}
+                onChange={handleNameChange}
                 className="w-full text-sm"
                 placeholder={pendingMachine?.hostname || formatMessage({ id: "machine.add.computerNamePlaceholder" })}
                 autoFocus
@@ -386,7 +403,7 @@ export default function AddMachineDialog({ onClose }: { onClose: () => void }) {
               <label className="mb-4 flex items-start gap-2 border-2 border-line-muted theme-brutal:border-black bg-layer-panel theme-brutal:bg-white p-3 text-sm font-bold">
                 <Checkbox
                   checked={confirmedComputerMatch}
-                  onCheckedChange={(event) => setConfirmedComputerMatch(event)}
+                  onCheckedChange={setConfirmedComputerMatch}
                   className="mt-0.5"
                   aria-label={formatMessage({ id: "machine.add.confirmComputerMatch" }, { hostname: pendingMachine?.hostname ? ` (${pendingMachine.hostname})` : "" })}
                 />

@@ -2,6 +2,7 @@ import { revokeSocketAccess } from "../socket/accessRevocation";
 import { createHash } from "crypto";
 import { eq, and, asc, isNull, inArray, sql, count, ne } from "drizzle-orm";
 import { getDb, type DatabaseExecutor } from "../db/index";
+import { sqlUuidOrNull } from "../db/sqlUuid";
 import { CURRENT_CONTRACT_VERSION } from "./serverSetupStateService";
 import { servers, serverMembers, serverMembershipDepartures, serverMemberRoleAuditEvents, serverAgentMembers, users, channels, channelHumans, messages, agents, subscriptions, threadFollows, oauthAccessTokens } from "../db/schema";
 import { emitAppFacingMemberEvents, kickAppNotificationDelivery } from "./appNotificationDeliveryService";
@@ -627,18 +628,33 @@ export async function getAgentMemberRole(
   agentId: string,
   executor: DatabaseExecutor = getDb(),
 ): Promise<ServerRole | null> {
-  const db = executor;
-  const [member] = await db
-    .select({ role: serverAgentMembers.role })
+  return (await getAgentMemberRoles(serverId, [agentId], executor)).get(agentId) ?? null;
+}
+
+/**
+ * getAgentMemberRole for several agents in one query. An agent with no role
+ * here (another server's agent, deleted, no membership row) is absent.
+ */
+export async function getAgentMemberRoles(
+  serverId: string,
+  agentIds: readonly string[],
+  executor: DatabaseExecutor = getDb(),
+): Promise<Map<string, ServerRole>> {
+  const ids = [...new Set(agentIds)];
+  if (ids.length === 0) return new Map();
+  const rows = await executor
+    .select({ agentId: serverAgentMembers.agentId, role: serverAgentMembers.role })
     .from(serverAgentMembers)
     .innerJoin(agents, eq(serverAgentMembers.agentId, agents.id))
     .where(and(
       eq(serverAgentMembers.serverId, serverId),
-      eq(serverAgentMembers.agentId, agentId),
+      inArray(serverAgentMembers.agentId, ids),
       eq(agents.serverId, serverId),
       isNull(agents.deletedAt),
     ));
-  return (member?.role as ServerRole | undefined) || null;
+  const roles = new Map<string, ServerRole>();
+  for (const row of rows) if (row.role) roles.set(row.agentId, row.role as ServerRole);
+  return roles;
 }
 
 export async function getServerAgentRoleMap(serverId: string): Promise<Map<string, ServerRole>> {
@@ -1704,6 +1720,25 @@ export async function getMemberRole(
   return (member?.role as ServerRole | undefined) || null;
 }
 
+/**
+ * The users among these ids that are members of this (non-deleted) server,
+ * by id: getMemberRole + getUser's id and name for a list, in one query.
+ */
+export async function getServerMemberUsersByIds(
+  serverId: string,
+  userIds: readonly string[],
+): Promise<Map<string, { id: string; name: string }>> {
+  const ids = [...new Set(userIds)];
+  if (ids.length === 0) return new Map();
+  const rows = await getDb()
+    .select({ id: users.id, name: users.name })
+    .from(serverMembers)
+    .innerJoin(servers, eq(serverMembers.serverId, servers.id))
+    .innerJoin(users, eq(users.id, serverMembers.userId))
+    .where(and(eq(serverMembers.serverId, serverId), inArray(serverMembers.userId, ids), isNull(servers.deletedAt)));
+  return new Map(rows.map((row) => [row.id, row]));
+}
+
 export async function userCanEditServerSettings(serverId: string, userId: string): Promise<boolean> {
   return hasServerCapability(await getMemberRole(serverId, userId), "editServerSettings");
 }
@@ -1785,6 +1820,10 @@ export async function getMemberSidebarOrder(serverId: string, userId: string, op
 export async function getSanitizedMemberSidebarOrder(serverId: string, userId: string, opts: { traceQuery?: DbQueryTracer } = {}): Promise<SidebarOrderPreferences | null> {
   const db = getDb();
   const traceQuery = opts.traceQuery ?? untracedDbQuery;
+  // Stored ids are text; turn each into a uuid once (NULL when it is not
+  // one) so the existence checks below are primary-key probes. Comparing
+  // id::text instead hides the channels/agents primary keys.
+  const sidebarElementUuid = sqlUuidOrNull(sql.raw("e.id"));
   const result = await traceQuery(
     "servers.sidebar_order_by_member_sanitized",
     () => db.execute(sql`
@@ -1792,10 +1831,11 @@ export async function getSanitizedMemberSidebarOrder(serverId: string, userId: s
         COALESCE((
           SELECT array_agg(id ORDER BY ord)
           FROM json_array_elements_text(COALESCE(sm.sidebar_channel_order, '[]'::json)) WITH ORDINALITY e(id, ord)
+          CROSS JOIN LATERAL (SELECT ${sidebarElementUuid} AS uid) e_uuid
           WHERE EXISTS (
             SELECT 1
             FROM channels c
-            WHERE c.id::text = e.id
+            WHERE c.id = e_uuid.uid
               AND c.server_id = ${serverId}
               AND (
                 c.type = 'channel'
@@ -1816,10 +1856,11 @@ export async function getSanitizedMemberSidebarOrder(serverId: string, userId: s
         COALESCE((
           SELECT array_agg(id ORDER BY ord)
           FROM json_array_elements_text(COALESCE(sm.sidebar_agent_order, '[]'::json)) WITH ORDINALITY e(id, ord)
+          CROSS JOIN LATERAL (SELECT ${sidebarElementUuid} AS uid) e_uuid
           WHERE EXISTS (
             SELECT 1
             FROM agents a
-            WHERE a.id::text = e.id
+            WHERE a.id = e_uuid.uid
               AND a.server_id = ${serverId}
               AND a.deleted_at IS NULL
           )
@@ -1827,13 +1868,14 @@ export async function getSanitizedMemberSidebarOrder(serverId: string, userId: s
         COALESCE((
           SELECT array_agg(id ORDER BY ord)
           FROM json_array_elements_text(COALESCE(sm.sidebar_dm_order, '[]'::json)) WITH ORDINALITY e(id, ord)
+          CROSS JOIN LATERAL (SELECT ${sidebarElementUuid} AS uid) e_uuid
           WHERE EXISTS (
             SELECT 1
             FROM channels c
             INNER JOIN channel_humans ch
               ON ch.channel_id = c.id
              AND ch.user_id = ${userId}
-            WHERE c.id::text = e.id
+            WHERE c.id = e_uuid.uid
               AND c.server_id = ${serverId}
               AND c.type = 'dm'
           )
@@ -1846,10 +1888,11 @@ export async function getSanitizedMemberSidebarOrder(serverId: string, userId: s
         COALESCE((
           SELECT array_agg(id ORDER BY ord)
           FROM json_array_elements_text(COALESCE(sm.pinned_channel_ids, '[]'::json)) WITH ORDINALITY e(id, ord)
+          CROSS JOIN LATERAL (SELECT ${sidebarElementUuid} AS uid) e_uuid
           WHERE EXISTS (
             SELECT 1
             FROM channels c
-            WHERE c.id::text = e.id
+            WHERE c.id = e_uuid.uid
               AND c.server_id = ${serverId}
               AND (
                 c.type = 'channel'
@@ -1872,7 +1915,7 @@ export async function getSanitizedMemberSidebarOrder(serverId: string, userId: s
             INNER JOIN channel_humans ch
               ON ch.channel_id = c.id
              AND ch.user_id = ${userId}
-            WHERE c.id::text = e.id
+            WHERE c.id = e_uuid.uid
               AND c.server_id = ${serverId}
               AND c.type = 'dm'
           )
@@ -1880,10 +1923,11 @@ export async function getSanitizedMemberSidebarOrder(serverId: string, userId: s
         COALESCE((
           SELECT array_agg(id ORDER BY ord)
           FROM json_array_elements_text(COALESCE(sm.pinned_agent_ids, '[]'::json)) WITH ORDINALITY e(id, ord)
+          CROSS JOIN LATERAL (SELECT ${sidebarElementUuid} AS uid) e_uuid
           WHERE EXISTS (
             SELECT 1
             FROM agents a
-            WHERE a.id::text = e.id
+            WHERE a.id = e_uuid.uid
               AND a.server_id = ${serverId}
               AND a.deleted_at IS NULL
           )
@@ -1891,10 +1935,11 @@ export async function getSanitizedMemberSidebarOrder(serverId: string, userId: s
         COALESCE((
           SELECT array_agg(id ORDER BY ord)
           FROM json_array_elements_text(COALESCE(sm.pinned_order, '[]'::json)) WITH ORDINALITY e(id, ord)
+          CROSS JOIN LATERAL (SELECT ${sidebarElementUuid} AS uid) e_uuid
           WHERE EXISTS (
             SELECT 1
             FROM channels c
-            WHERE c.id::text = e.id
+            WHERE c.id = e_uuid.uid
               AND c.server_id = ${serverId}
               AND (
                 c.type = 'channel'
@@ -1917,14 +1962,14 @@ export async function getSanitizedMemberSidebarOrder(serverId: string, userId: s
             INNER JOIN channel_humans ch
               ON ch.channel_id = c.id
              AND ch.user_id = ${userId}
-            WHERE c.id::text = e.id
+            WHERE c.id = e_uuid.uid
               AND c.server_id = ${serverId}
               AND c.type = 'dm'
           )
           OR EXISTS (
             SELECT 1
             FROM agents a
-            WHERE a.id::text = e.id
+            WHERE a.id = e_uuid.uid
               AND a.server_id = ${serverId}
               AND a.deleted_at IS NULL
           )
@@ -1932,13 +1977,14 @@ export async function getSanitizedMemberSidebarOrder(serverId: string, userId: s
         COALESCE((
           SELECT array_agg(id ORDER BY ord)
           FROM json_array_elements_text(COALESCE(sm.hidden_dm_ids, '[]'::json)) WITH ORDINALITY e(id, ord)
+          CROSS JOIN LATERAL (SELECT ${sidebarElementUuid} AS uid) e_uuid
           WHERE EXISTS (
             SELECT 1
             FROM channels c
             INNER JOIN channel_humans ch
               ON ch.channel_id = c.id
              AND ch.user_id = ${userId}
-            WHERE c.id::text = e.id
+            WHERE c.id = e_uuid.uid
               AND c.server_id = ${serverId}
               AND c.type = 'dm'
           )

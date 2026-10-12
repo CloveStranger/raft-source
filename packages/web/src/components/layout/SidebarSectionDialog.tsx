@@ -1,6 +1,7 @@
 import { Card, InputGroup, InputGroupAddon, InputGroupInput, Button } from "raft-ui";
 import CloseButton from "../ui/CloseButton";
-import { useState } from "react";
+import { useCallback, useState } from "react";
+import type { ChangeEvent } from "react";
 import { X } from "lucide-react";
 import { useIntl } from "react-intl";
 import Modal from "../Modal";
@@ -25,6 +26,7 @@ export default function SidebarSectionDialog({
   const [name, setName] = useState(initialName);
   const [emoji, setEmoji] = useState(initialEmoji);
   const trimmedName = name.trim();
+  const handleNameChange = useCallback((event: ChangeEvent<HTMLInputElement>) => setName(event.target.value), []);
 
   return (
     <Modal onClose={onClose} closeOnBackdrop>
@@ -56,7 +58,7 @@ export default function SidebarSectionDialog({
                 aria-label={formatMessage({ id: "layout.sidebar.sectionName" })}
                 maxLength={80}
                 value={name}
-                onChange={(event) => setName(event.target.value)}
+                onChange={handleNameChange}
                 className="min-w-0 flex-1 normal-case"
                 placeholder={formatMessage({ id: "layout.sidebar.sectionNamePlaceholder" })}
               />

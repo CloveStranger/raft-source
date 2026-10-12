@@ -1,5 +1,5 @@
 import { Badge, Button, InlineCode } from "raft-ui";
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { Globe, FolderOpen, RefreshCw } from "lucide-react";
 import { useIntl } from "react-intl";
 import apiClient from "../../api/client";
@@ -11,6 +11,8 @@ interface SkillsData {
   global: SkillInfo[];
   workspace: SkillInfo[];
 }
+
+const EMPTY_SKILLS: SkillInfo[] = [];
 
 function SkillCard({ skill }: { skill: SkillInfo }) {
   return (
@@ -95,7 +97,7 @@ export default function AgentSkills({ agentId, embedded }: { agentId: string; em
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  const fetchSkills = async () => {
+  const fetchSkills = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
@@ -106,16 +108,14 @@ export default function AgentSkills({ agentId, embedded }: { agentId: string; em
     } finally {
       setLoading(false);
     }
-  };
+  }, [agentId]);
 
-  // oxlint-disable react-hooks/exhaustive-deps -- fetch skills only when the agent id changes; `fetchSkills` is recreated each render and closes over the current `agentId`, so depending on it would refetch every render.
   // Async-loader pattern: `loading` is a transient async-fetch indicator, not
   // prop-derived state. Same FP family as AgentDetailPanel L228.
   useEffect(() => {
     // oxlint-disable-next-line react-doctor/no-derived-state
     fetchSkills();
-  }, [agentId]);
-  // oxlint-enable react-hooks/exhaustive-deps
+  }, [fetchSkills]);
 
   if (loading) {
     return (
@@ -154,13 +154,13 @@ export default function AgentSkills({ agentId, embedded }: { agentId: string; em
           <SkillSubSection
             label={formatMessage({ id: "agent.skills.global" })}
             icon={Globe}
-            skills={data?.global || []}
+            skills={data?.global || EMPTY_SKILLS}
             emptyText={formatMessage({ id: "agent.skills.globalEmpty" })}
           />
           <SkillSubSection
             label={formatMessage({ id: "agent.skills.workspace" })}
             icon={FolderOpen}
-            skills={data?.workspace || []}
+            skills={data?.workspace || EMPTY_SKILLS}
             emptyText={formatMessage({ id: "agent.skills.workspaceEmpty" })}
           />
         </div>

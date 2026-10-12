@@ -17,7 +17,6 @@ import { useChannelStore } from "../src/store/channelStore";
 import { useMachineStore } from "../src/store/machineStore";
 import { useMessageStore } from "../src/store/messageStore";
 import { useServerStore } from "../src/store/serverStore";
-import { useWorkspaceGridNavigationStore } from "../src/components/workspace/workspaceGridNavigationStore";
 
 // layout namespace (react-intl migration acceptance): the app-chrome copy
 // finalized by @AngLee on 2026-07-22 (notes/i18n-layout-zh-final.md) must
@@ -60,7 +59,6 @@ afterEach(() => {
   useMachineStore.setState({ machines: [], loading: true });
   useServerStore.setState({ current: null, servers: [], members: [] });
   useAuthStore.setState({ user: null, loading: false, initialized: true });
-  useWorkspaceGridNavigationStore.setState({ active: false, enabled: false, railMode: null });
 });
 
 /** A channel name no catalog string could ever contain — so finding it in the

@@ -87,6 +87,30 @@ export const AGENT_INBOX_TARGET_ROW_KEYS = [
   "attentionHint",
 ] as const satisfies readonly (keyof AgentInboxTargetRow)[];
 
+/**
+ * The daemon groups every third-party app event for an agent under one
+ * transport-only DM target (the server names the channel
+ * `third-party-agent-events:<agentId>`). It is not a conversation:
+ * `raft message read` on it fails with "Channel not found", and its raw name
+ * means nothing to the agent. The events are fetched with `raft message check`
+ * (each then carries its own `agent-event:<id8>`, keyed by the event id, which
+ * this grouped row does not have). Every surface that shows
+ * a pending target (inbox notices here, `raft inbox check` in the CLI) labels
+ * this one through these helpers, so none of them hands the agent a target it
+ * cannot open.
+ */
+export const THIRD_PARTY_EVENTS_TARGET_PREFIX = "dm:@third-party-agent-events:";
+
+export const THIRD_PARTY_EVENTS_LABEL = "Third-party app events";
+
+export function isThirdPartyEventsTarget(target: string): boolean {
+  return target.startsWith(THIRD_PARTY_EVENTS_TARGET_PREFIX);
+}
+
+function formatAgentInboxRowTarget(row: AgentInboxTargetRow): string {
+  return isThirdPartyEventsTarget(row.target) ? THIRD_PARTY_EVENTS_LABEL : row.target;
+}
+
 export function formatAgentInboxSnapshot(rows: readonly AgentInboxTargetRow[]): string {
   if (rows.length === 0) return "Inbox: empty";
   // A suppressed-only target is a THIRD state -- "there is something, and it was
@@ -103,7 +127,7 @@ export function formatAgentInboxSnapshot(rows: readonly AgentInboxTargetRow[]): 
     header,
     "",
     ...rows.flatMap((row) => [
-      row.target,
+      formatAgentInboxRowTarget(row),
       formatAgentInboxRowDetails(row),
       "",
     ]),
@@ -116,12 +140,18 @@ export function formatAgentInboxDelta(
 ): string {
   const totalPendingMessages = options.totalPendingMessages;
   const header = typeof totalPendingMessages === "number"
-    ? `Inbox update: ${totalPendingMessages} unread message${totalPendingMessages === 1 ? "" : "s"} total; ${rows.length === 0 ? "no" : rows.length} changed target${rows.length === 1 ? "" : "s"}`
+    // "pending your read across all conversations", not "unread ... total": this number
+    // is totalPendingMessages, the SAME measure the rows below call `pending`, summed over
+    // every conversation. `raft inbox check` uses the word "unread" for a DIFFERENT measure
+    // (the RW-backed read cursor), so this header must not borrow that word. Two agents
+    // misread this line on 2026-10-10: one mapped the total onto the single row beneath it,
+    // the other mapped `inbox check`'s unread onto the rows' pending. Keep the two words apart.
+    ? `Inbox update: ${totalPendingMessages} message${totalPendingMessages === 1 ? "" : "s"} pending your read across all conversations; ${rows.length === 0 ? "no" : rows.length} changed target${rows.length === 1 ? "" : "s"}`
     : `Inbox update: ${rows.length} changed target${rows.length === 1 ? "" : "s"}`;
   if (rows.length === 0) return typeof totalPendingMessages === "number" ? header : "Inbox update: no pending targets";
   return [
     header,
-    ...rows.map((row) => `${row.target}  ${formatAgentInboxRowDetails(row)}`),
+    ...rows.map((row) => `${formatAgentInboxRowTarget(row)}  ${formatAgentInboxRowDetails(row)}`),
   ].join("\n");
 }
 
@@ -131,8 +161,12 @@ function formatAgentInboxRowDetails(row: AgentInboxTargetRow): string {
   if (row.firstPendingMsgId) parts.push(`first msg=${shortMessageId(row.firstPendingMsgId)}`);
   if (row.latestSenderName) parts.push(`latest sender @${row.latestSenderName}`);
   if (row.latestMsgId) parts.push(`latest msg=${shortMessageId(row.latestMsgId)}`);
-  parts.push(...row.flags.map(formatAgentInboxFlag));
+  // The grouped third-party row rides a synthetic DM channel for transport;
+  // its `dm` flag would make it read like a conversation it is not.
+  const flags = isThirdPartyEventsTarget(row.target) ? row.flags.filter((flag) => flag !== "dm") : row.flags;
+  parts.push(...flags.map(formatAgentInboxFlag));
   if (row.attentionHint) parts.push(`attention_hint=${formatAttentionHintField(row.attentionHint)}`);
+  if (isThirdPartyEventsTarget(row.target)) parts.push("fetch with raft message check");
   return parts.join(" · ");
 }
 

@@ -10,6 +10,8 @@ const settingsPanelSource = readFileSync(resolve(repoRoot, "src/components/setti
 const serverSwitcherSource = readFileSync(resolve(repoRoot, "src/components/ui/ServerSwitcherMenu.tsx"), "utf8");
 const messageInputSource = readFileSync(resolve(repoRoot, "src/components/message/MessageInput.tsx"), "utf8");
 const messageItemSource = readFileSync(resolve(repoRoot, "src/components/message/MessageItem.tsx"), "utf8");
+const chatPanelSource = readFileSync(resolve(repoRoot, "src/components/message/ChatPanel.tsx"), "utf8");
+const hoverToolbarSource = readFileSync(resolve(repoRoot, "src/components/message/MessageHoverToolbar.tsx"), "utf8");
 const agentDetailSource = readFileSync(resolve(repoRoot, "src/components/agent/AgentDetailPanel.tsx"), "utf8");
 const quotedMessageCardSource = readFileSync(resolve(repoRoot, "src/components/ui/cards/QuotedMessageCard.tsx"), "utf8");
 const searchPageSource = readFileSync(resolve(repoRoot, "src/components/search/MessageSearchPage.tsx"), "utf8");
@@ -41,6 +43,45 @@ test("AvatarSlot uses RUI identity frames and real images fill the themed conten
     gravatarAvatarSource,
     /: "absolute inset-0 h-full w-full object-cover opacity-0 pointer-events-none"/,
     "pending human Gravatar probes should stay mounted and full-frame instead of display:none",
+  );
+});
+
+test("the message row avatar opts out of the forced frame so the rui recipe owns size", () => {
+  // The message row used the panel-header context, whose `!size-9 !border-2`
+  // (!important) beat rui's own `messageItem.avatarSlot` recipe — the img
+  // stayed 32 in a 36 frame, and narrow-elegant overflowed 4px because
+  // `!size-9` also beat the `max-md` 32-slot/24-avatar tier. The row now uses
+  // a context with no forced size/frame: recipe controls both breakpoints.
+  assert.match(avatarSlotSource, /"message-row": \{ size: "md", className: "" \}/);
+  assert.match(avatarSlotSource, /\| "message-row"/);
+  assert.equal(
+    (messageItemSource.match(/context="message-row"/g) ?? []).length,
+    2,
+    "both message sender avatar call sites use the message-row context",
+  );
+  assert.equal(
+    (messageItemSource.match(/context="panel-header"/g) ?? []).length,
+    0,
+    "the message sender avatar must not force the panel-header frame again",
+  );
+});
+
+test("the message list leaves the avatar's left edge to the rui recipe", () => {
+  // raft-ui 0.5.36 owns the alignment: header icon and message avatar at 20
+  // from the panel edge, title and message text at 68, in both themes
+  // (cindyz, 2026-10-09). The two per-theme levers slock used to carry on its
+  // message callsites fought that and put the Elegant avatar back at 36, so
+  // they must not come back.
+  assert.doesNotMatch(chatPanelSource, /\[data-theme=elegant\]_&\]:px-\[/, "no elegant padding lever on message rows");
+  assert.doesNotMatch(chatPanelSource, /\[data-theme=brutal\]_&\]:mx-/, "no brutal margin lever on message rows");
+});
+
+test("the hover toolbar's right edge rides the header action line", () => {
+  // Measured wide/narrow: the toolbar sat 22/28 px left of the header's
+  // settings button. The levers put its right edge on the same line.
+  assert.match(
+    hoverToolbarSource,
+    /className=\{`right-2 max-md:right-0\.5 max-md:\[\[data-theme=brutal\]_&\]:-right-1\.5 pointer-events-auto /,
   );
 });
 

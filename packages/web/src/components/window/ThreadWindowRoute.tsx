@@ -1,5 +1,5 @@
 import CloseButton from "../ui/CloseButton";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useEffectEvent, useMemo, useState } from "react";
 import { MapPin, X } from "lucide-react";
 import { useIntl } from "react-intl";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
@@ -14,6 +14,8 @@ import { selectChannelTaskBucket, useTaskStore } from "../../store/taskStore";
 import { useThreadStore } from "../../store/threadStore";
 import { resolveThreadHostTask } from "../layout/threadHostTask";
 import { buildTaskChannelUrl, closeThreadWindow } from "./closeThreadWindow";
+
+const NON_INTERACTIVE_TOOLTIP_PROPS = { className: "pointer-events-none" };
 
 /**
  * Minimal host for `_blank` thread/task windows. This route intentionally
@@ -54,7 +56,7 @@ export default function ThreadWindowRoute() {
     || (legacyTaskParam !== null && !legacyTaskParam.includes(":"))
     || (legacyTaskParam === null && !threadParam?.includes(":"));
 
-  const closeWindow = () => {
+  const closeWindow = useCallback(() => {
     closeThreadWindow({
       serverSlug,
       closeThread,
@@ -63,9 +65,9 @@ export default function ThreadWindowRoute() {
       isBrowserWindowClosed: () => window.closed,
       navigate,
     });
-  };
+  }, [closeLegacyTask, closeThread, navigate, serverSlug]);
 
-  const viewInChannel = (
+  const viewInChannel = useCallback((
     channelId: string,
     messageId?: string | null,
     isLegacy = false,
@@ -78,12 +80,20 @@ export default function ThreadWindowRoute() {
         .find((item) => item.id === channelId)?.type === "dm" ? "dm" : "channel"
     );
     navigate(buildTaskChannelUrl(serverSlug, channelId, messageId, isLegacy, resolvedChannelType), { replace: true });
-  };
+  }, [closeLegacyTask, closeThread, navigate, serverSlug]);
+
+  // Non-reactive reads for the load effect below: the URL identity
+  // (server, thread/legacyTask target, task intent) is the route contract, so
+  // a locale change or a `msg` focus change must not reload the window.
+  const showLoadFailure = useEffectEvent(() => {
+    setAsyncError(formatMessage({ id: "message.threadPanel.loadFailedTitle" }));
+  });
+  const readFocusedMessageId = useEffectEvent(() => params.get("msg"));
 
   useEffect(() => {
     let cancelled = false;
     const fail = () => {
-      if (!cancelled) setAsyncError(formatMessage({ id: "message.threadPanel.loadFailedTitle" }));
+      if (!cancelled) showLoadFailure();
     };
     closeThread();
     closeLegacyTask();
@@ -134,6 +144,7 @@ export default function ThreadWindowRoute() {
     if (!parentChannelId || !parentMessageId) {
       return () => { cancelled = true; };
     }
+    const focusedMessageId = readFocusedMessageId();
     void ensureChannel(parentChannelId).then((resolved) => {
       if (cancelled) return;
       if (!resolved) {
@@ -144,27 +155,59 @@ export default function ThreadWindowRoute() {
         serverSlug,
         parentChannelId,
         parentMessageId,
-        focusedMessageId: params.get("msg"),
+        focusedMessageId,
         intent: taskIntent ? "task" : "thread",
       });
     }).catch(() => {
       fail();
     });
     return () => { cancelled = true; };
-  // URL identity is the route contract; store actions are stable Zustand refs.
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [serverSlug, threadParam, legacyTaskParam, taskIntent]);
+    // URL identity is the route contract; store actions are stable Zustand refs.
+  }, [
+    serverSlug,
+    threadParam,
+    legacyTaskParam,
+    taskIntent,
+    closeThread,
+    closeLegacyTask,
+    ensureChannel,
+    loadTasks,
+    loadServerTasks,
+    openLegacyTask,
+    openThread,
+  ]);
 
   const task = taskIntent
     ? resolveThreadHostTask(surfaceParentMessageId, { tasks, parentChannelTasks, serverTasks })
     : null;
+  const taskChannelId = task?.channelId;
+  const taskMessageId = task?.messageId;
+  const taskChannelType = task?.channelType;
+  const viewTaskInChannel = useCallback(() => {
+    if (taskChannelId === undefined) return;
+    viewInChannel(taskChannelId, taskMessageId, false, taskChannelType === "dm" ? "dm" : undefined);
+  }, [taskChannelId, taskChannelType, taskMessageId, viewInChannel]);
+  const legacyChannelId = legacyTask?.channelId;
+  const legacyMessageId = legacyTask?.messageId;
+  const legacyChannelType = legacyTask?.channelType;
+  const taskThreadIdentity = useMemo(() => taskIntent && taskModal ? {
+    parentMessageId: taskModal.parentMessageId,
+    parentChannelId: taskModal.parentChannelId ?? "",
+    threadChannelId: taskModal.threadChannelId,
+    focusedMessageId: taskModal.focusedMessageId,
+  } : undefined, [taskIntent, taskModal]);
+
+  const viewLegacyTaskInChannel = useCallback(() => {
+    if (legacyChannelId === undefined) return;
+    viewInChannel(legacyChannelId, legacyMessageId, true, legacyChannelType === "dm" ? "dm" : undefined);
+  }, [legacyChannelId, legacyChannelType, legacyMessageId, viewInChannel]);
   const taskPageSlot = task ? (
     <>
       <div className="flex shrink-0 items-center justify-between gap-3 border-b border-line-hairline bg-layer-panel px-4 py-2 theme-brutal:border-b-2 theme-brutal:border-black theme-brutal:bg-white">
         <Tooltip
           content={task.title}
           disableHoverablePopup
-          contentProps={{ className: "pointer-events-none" }}
+          contentProps={NON_INTERACTIVE_TOOLTIP_PROPS}
         >
           <strong className="truncate text-sm" data-testid="task-page-identity">
             {formatMessage({ id: "task.modal.taskWithNumber" }, { taskNumber: task.taskNumber })}
@@ -174,11 +217,11 @@ export default function ThreadWindowRoute() {
           <Tooltip
             content={formatMessage({ id: "message.threadPanel.viewInChannel" })}
             disableHoverablePopup
-            contentProps={{ className: "pointer-events-none" }}
+            contentProps={NON_INTERACTIVE_TOOLTIP_PROPS}
           >
             <Button
               type="button"
-              onClick={() => viewInChannel(task.channelId, task.messageId, false, task.channelType === "dm" ? "dm" : undefined)}
+              onClick={viewTaskInChannel}
               size="icon-sm"
               variant="outline"
               className="size-7"
@@ -191,7 +234,7 @@ export default function ThreadWindowRoute() {
           <Tooltip
             content={formatMessage({ id: "task.modal.close" })}
             disableHoverablePopup
-            contentProps={{ className: "pointer-events-none" }}
+            contentProps={NON_INTERACTIVE_TOOLTIP_PROPS}
           >
             <CloseButton
               type="button"
@@ -224,7 +267,7 @@ export default function ThreadWindowRoute() {
             presentation="modal"
             mobilePage
             onClose={closeWindow}
-            onViewInChannel={() => viewInChannel(legacyTask.channelId, legacyTask.messageId, true, legacyTask.channelType === "dm" ? "dm" : undefined)}
+            onViewInChannel={viewLegacyTaskInChannel}
           />
         ) : surfaceParentMessageId ? (
           <div data-testid="thread-window-surface" className={`flex w-full max-w-none flex-col bg-layer-canvas sm:max-w-3xl sm:border sm:border-line-muted sm:shadow-raft-md theme-brutal:sm:border-2 theme-brutal:sm:border-black theme-brutal:sm:bg-white theme-brutal:sm:shadow-brutal ${
@@ -234,12 +277,7 @@ export default function ThreadWindowRoute() {
           }`}>
             <div className="min-h-0 flex-1">
               <ThreadPanel presentation="modal" mobilePage onClose={closeWindow} hideHeader={!!task} hideParentMessage={!!task} parentSlot={taskPageSlot}
-                threadIdentity={taskIntent && taskModal ? {
-                  parentMessageId: taskModal.parentMessageId,
-                  parentChannelId: taskModal.parentChannelId ?? "",
-                  threadChannelId: taskModal.threadChannelId,
-                  focusedMessageId: taskModal.focusedMessageId,
-                } : undefined} />
+                threadIdentity={taskThreadIdentity} />
             </div>
           </div>
         ) : (

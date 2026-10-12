@@ -24,7 +24,17 @@ const whole = {
 
 // The task #1221 fields are optional on the type: records written before them
 // lack them, and they decode to their defaults without counting as a repair.
-const task1221Defaults = { needsActionReason: null, catchupOwed: false, catchupCarriedLaunchId: null };
+const task1221Defaults = {
+  needsActionReason: null,
+  catchupOwed: false,
+  catchupCarriedLaunchId: null,
+  startFailureCount: 0,
+  lastStartFailureReason: null,
+  lastStartFailureLaunchId: null,
+  retryAfterMs: null,
+  startFailureOwnedLaunchId: null,
+  blockedByLaunchId: null,
+};
 
 test("a whole record decodes unchanged with nothing repaired", () => {
   const decoded = decodeWakeCrashLoopState(JSON.stringify(whole));
@@ -57,6 +67,12 @@ const everyFieldSet: Required<WakeCrashLoopEpisodeState> = {
   needsActionReason: "model_not_configured",
   catchupOwed: true,
   catchupCarriedLaunchId: "launch-3",
+  startFailureCount: 3,
+  lastStartFailureReason: "model_not_found",
+  lastStartFailureLaunchId: "launch-2",
+  retryAfterMs: 1_700_000_004_000,
+  startFailureOwnedLaunchId: "launch-owned",
+  blockedByLaunchId: "launch-blocker",
 };
 
 test("every field of the episode state round-trips through the Redis codec", () => {

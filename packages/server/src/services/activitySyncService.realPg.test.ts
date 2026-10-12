@@ -213,8 +213,9 @@ test(
         snapshot("real-pg-retry-disabled-a"),
         snapshot("real-pg-retry-disabled-b"),
       ]);
+      // Hook arrival order can differ from the client request order; either request may win.
       assert.deepEqual(
-        retryDisabledResponses.map((response) => response.status),
+        retryDisabledResponses.map((response) => response.status).sort(),
         [200, 500],
         "without the retry, concurrent first use must expose the PostgreSQL serialization abort",
       );

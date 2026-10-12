@@ -110,7 +110,7 @@ function renderBulkControls() {
   return render(
     <TestIntlProvider locale="en">
       <MemoryRouter initialEntries={["/s/acme/settings/computers/computer-1"]}>
-        <MachineDetailPanel machine={onlineComputer} workspaceEmbedded />
+        <MachineDetailPanel machine={onlineComputer} hideHeader />
       </MemoryRouter>
     </TestIntlProvider>,
   );
@@ -155,7 +155,7 @@ test("mounted MachineDetailPanel surfaces Chinese Computer chrome and the OS row
   render(
     <TestIntlProvider locale="zh-cn">
       <MemoryRouter initialEntries={["/s/acme/settings/computers/computer-1"]}>
-        <MachineDetailPanel machine={onlineComputer} workspaceEmbedded />
+        <MachineDetailPanel machine={onlineComputer} hideHeader />
       </MemoryRouter>
     </TestIntlProvider>,
   );
@@ -174,7 +174,7 @@ test("online Computer keeps restart available while its version is still syncing
       <MemoryRouter initialEntries={["/s/acme/settings/computers/computer-1"]}>
         <MachineDetailPanel
           machine={{ ...onlineComputer, computerVersion: null, computerUpgradeAvailable: null }}
-          workspaceEmbedded
+          hideHeader
         />
       </MemoryRouter>
     </TestIntlProvider>,

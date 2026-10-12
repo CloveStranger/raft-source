@@ -36,6 +36,8 @@ import {
   actorHasChannelCapability,
   channelActorHasCapability,
   resolveChannelActorContext,
+  resolveChannelActorContextsMany,
+  type ChannelActorContext,
   withLockedChannelActorCapability,
   withLockedChannelActorCapabilities,
 } from "../lib/channelActorPermissions";
@@ -45,7 +47,7 @@ import { addTraceEvent, createTraceDbQueryTracer, getCurrentTraceContext, traceP
 import { getThumbnailUrl, normalizeAttachmentFilename, resolveAttachmentMimeType } from "./attachments";
 import { CHANNEL_NOT_FOUND_BODY, denyChannelAccess } from "./channelAccessDenial";
 import { MAX_MESSAGE_LENGTH } from "./messages";
-import { respondToRisingWaveOverload, sendJsonServerError } from "./errorResponse";
+import { respondToRisingWaveOverload, respondToRisingWaveUnavailable, sendJsonServerError } from "./errorResponse";
 import { UUID_RE as ANY_UUID_RE } from "../lib/messageId";
 import { guardUuidPathParams } from "../lib/uuidPathParams";
 import {
@@ -87,6 +89,23 @@ async function attachHumanChannelAuthorization<T extends { id: string }>(
   userId: string,
 ) {
   const context = await resolveChannelActorContext(serverId, channel.id, "user", userId);
+  return withHumanChannelAuthorization(channel, context);
+}
+
+/**
+ * attachHumanChannelAuthorization for a whole list: the actor contexts in three
+ * queries total (resolveChannelActorContextsMany) instead of three per channel.
+ */
+async function attachHumanChannelAuthorizations<T extends { id: string }>(
+  channelList: readonly T[],
+  serverId: string,
+  userId: string,
+) {
+  const contexts = await resolveChannelActorContextsMany(serverId, channelList.map((channel) => channel.id), "user", userId);
+  return channelList.map((channel) => withHumanChannelAuthorization(channel, contexts.get(channel.id) ?? null));
+}
+
+function withHumanChannelAuthorization<T extends { id: string }>(channel: T, context: ChannelActorContext | null) {
   return {
     ...channel,
     channelRole: context?.channelRole ?? null,
@@ -277,6 +296,7 @@ function emitReadStateUpdated(req: Request, state: channelService.ReadStateMutat
     scopeId: state.channelId,
     maxReadSeq: state.maxReadSeq,
     readStateVersion: state.readStateVersion,
+    ...(typeof state.unreadCount === "number" ? { unreadCount: state.unreadCount } : {}),
   });
 }
 
@@ -297,6 +317,7 @@ function emitReadStateUpdatedBulk(req: Request, scopes: channelService.ReadState
       scopeId: scope.channelId,
       maxReadSeq: scope.maxReadSeq,
       readStateVersion: scope.readStateVersion,
+      ...(typeof scope.unreadCount === "number" ? { unreadCount: scope.unreadCount } : {}),
     })),
   });
 }
@@ -489,6 +510,9 @@ function sendJointInviteValidationError(res: Response, error: unknown): boolean 
     error: error.message,
     code: error.code,
     ...(error.targetServerSlug ? { targetServerSlug: error.targetServerSlug } : {}),
+    // `inviteeIndex` refers to the deduplicated/merged invitee list, so clients
+    // cannot map it back to the list they submitted; send the invitee itself.
+    ...(error.invitee !== undefined ? { invitee: error.invitee } : {}),
     ...(error.inviteeIndex !== undefined ? { inviteeIndex: error.inviteeIndex } : {}),
   });
   return true;
@@ -634,18 +658,12 @@ async function filterGuestInboxResult<T extends {
   activeUnreadCount: number;
 }>(result: T, userId: string, serverId: ServerId): Promise<T> {
   if (await getActorServerRoleInServer(serverId, "user", userId) !== "guest") return result;
-  const visibleByChannel = new Map<string, boolean>();
-  const canSee = async (channelId: string) => {
-    const cached = visibleByChannel.get(channelId);
-    if (cached !== undefined) return cached;
-    const visible = await channelService.canUserAccessChannel(channelId, userId, serverId);
-    visibleByChannel.set(channelId, visible);
-    return visible;
-  };
-  const itemVisibility = await Promise.all(result.items.map((item) => canSee(item.kind === "thread" ? item.parentChannelId : item.channelId)));
-  const items = result.items.filter((_, index) => itemVisibility[index]);
-  const groupVisibility = await Promise.all(result.groups.map((group) => canSee(group.channelId)));
-  const groups = result.groups.filter((_, index) => groupVisibility[index]);
+  const visible = await guestVisibleChannelIds([
+    ...result.items.map(inboxItemAccessChannelId),
+    ...result.groups.map((group) => group.channelId),
+  ], userId, serverId);
+  const items = result.items.filter((item) => visible.has(inboxItemAccessChannelId(item)));
+  const groups = result.groups.filter((group) => visible.has(group.channelId));
   const totalUnreadCount = items.reduce((sum, item) => sum + item.unreadCount, 0);
   return { ...result, items, groups, totalCount: items.length, totalUnreadCount, activeUnreadCount: totalUnreadCount };
 }
@@ -656,12 +674,17 @@ async function filterGuestHistoryResult<T extends { items: channelService.InboxI
   serverId: ServerId,
 ): Promise<T> {
   if (await getActorServerRoleInServer(serverId, "user", userId) !== "guest") return result;
-  const visibility = await Promise.all(result.items.map((item) => channelService.canUserAccessChannel(
-    item.kind === "thread" ? item.parentChannelId : item.channelId,
-    userId,
-    serverId,
-  )));
-  return { ...result, items: result.items.filter((_, index) => visibility[index]) };
+  const visible = await guestVisibleChannelIds(result.items.map(inboxItemAccessChannelId), userId, serverId);
+  return { ...result, items: result.items.filter((item) => visible.has(inboxItemAccessChannelId(item))) };
+}
+
+function inboxItemAccessChannelId(item: channelService.InboxItem): string {
+  return item.kind === "thread" ? item.parentChannelId : item.channelId;
+}
+
+/** The channels among these a guest can access, in one batched check. */
+async function guestVisibleChannelIds(channelIds: readonly string[], userId: string, serverId: ServerId): Promise<Set<string>> {
+  return channelService.filterUserAccessibleChannelIds([...new Set(channelIds)], userId, serverId);
 }
 
 async function requireChannelConversionEnabled(req: Request, res: Response): Promise<boolean> {
@@ -784,11 +807,11 @@ channelRouter.get("/", async (req, res) => {
       channels_count: list.length,
       joined_channels_count: countJoinedChannels(list),
     });
-    res.json(await Promise.all((await channelConversionService.attachLatestChannelConversionJobs(list)).map((channel) => attachHumanChannelAuthorization(
-      channel,
+    res.json(await attachHumanChannelAuthorizations(
+      await channelConversionService.attachLatestChannelConversionJobs(list),
       req.serverId!,
       req.userId!,
-    ))));
+    ));
   } catch {
     res.status(500).json({ error: "Failed to list channels" });
   }
@@ -1152,7 +1175,7 @@ channelRouter.get("/unread", async (req, res) => {
     });
     res.json(wantsSummary ? { channels: loaded } : loaded);
   } catch (err) {
-    if (respondToRisingWaveOverload(err, res)) return;
+    if (respondToRisingWaveUnavailable(err, res)) return;
     res.status(500).json({ error: "Failed to get unread counts" });
   }
 });
@@ -1264,12 +1287,14 @@ channelRouter.get("/inbox", async (req, res) => {
     const qParam = typeof req.query.q === "string" ? req.query.q.trim().slice(0, 200) : "";
     const q = qParam || undefined;
     const sort = req.query.sort === "asc" ? "asc" as const : "desc" as const;
+    const scope = req.query.scope === "dms" ? "dms" as const : undefined;
     addTraceEvent("inbox.load.started", {
       filter,
       limit,
       offset,
       channel_id_present: Boolean(channelId),
       query_present: Boolean(q),
+      scope: scope ?? "all",
     });
     const plan = await tracePhase(
       () => getServerPlan(req.serverId!),
@@ -1288,6 +1313,7 @@ channelRouter.get("/inbox", async (req, res) => {
         offset,
         channelId,
         q,
+        scope,
         sort,
         historyCutoff,
         includeUnfollowedThreads: filter === "all",
@@ -3394,26 +3420,41 @@ channelRouter.post("/:id/resume-all-agents", async (req, res) => {
       res.status(404).json({ error: "Channel not found" });
       return;
     }
-    const { prompt } = req.body as { prompt?: string };
+    const { prompt, agentIds } = req.body as { prompt?: string; agentIds?: unknown };
     if (prompt && (typeof prompt !== "string" || prompt.length > 10000)) {
       res.status(400).json({ error: "Prompt must be a string under 10000 characters" });
       return;
     }
-    const agents = await channelService.getChannelAgents(req.params.id);
+    if (agentIds !== undefined && (!Array.isArray(agentIds) || !agentIds.every((id) => typeof id === "string"))) {
+      res.status(400).json({ error: "agentIds must be an array of agent ids" });
+      return;
+    }
+    // A retry names only the agents the last attempt missed, so the ones that
+    // already got the guidance do not get it again. Ids outside this channel are ignored.
+    const requested = agentIds ? new Set(agentIds as string[]) : null;
+    const agents = (await channelService.getChannelAgents(req.params.id))
+      .filter((agent) => !requested || requested.has(agent.id));
     const agentOrchestrator = req.app.get("agentOrchestrator") as AgentOrchestrator;
-    const results: { agentId: string; ok: boolean; error?: string }[] = [];
+    const results: { agentId: string; ok: boolean; reason?: string; error?: string }[] = [];
     await Promise.allSettled(
       agents.map(async (agent) => {
         try {
           // RFC 071 §5: a person resumed the channel's agents: human starts (E3).
-          await agentOrchestrator.startAgent(agent.id, { resumePrompt: prompt, control: "human_start" });
+          const result = await agentOrchestrator.startAgent(agent.id, { resumePrompt: prompt, control: "human_start" });
+          if (result.outcome === "skipped") {
+            // Not started, so the person's prompt was not delivered. A held
+            // wake lock means another start for this agent is in flight.
+            results.push({ agentId: agent.id, ok: false, reason: result.reason === "wake_lock_held" ? "start_in_flight" : result.reason });
+            return;
+          }
           results.push({ agentId: agent.id, ok: true });
         } catch (err: unknown) {
           results.push({ agentId: agent.id, ok: false, error: (err as Error).message });
         }
       })
     );
-    res.json({ ok: true, started: results.filter((r) => r.ok).length, total: agents.length, results });
+    const started = results.filter((r) => r.ok).length;
+    res.json({ ok: started === agents.length, started, total: agents.length, results });
   } catch {
     res.status(500).json({ error: "Failed to resume agents" });
   }
@@ -3444,6 +3485,14 @@ channelRouter.get("/:id/members", async (req, res) => {
     const viewerCanChangeRoles = viewerContext
       ? channelActorHasCapability(viewerContext, "changeChannelMemberRoles")
       : false;
+    // A joint roster merges every server's projection, but a role can only be
+    // set on this server's own members (their rows are on this projection).
+    const localMemberIds = channel.type === "joint" && viewerCanChangeRoles
+      ? await channelService.getLocalChannelMemberIds(channel.id)
+      : null;
+    const isRoleTargetable = (id: string) => !localMemberIds
+      || localMemberIds.userIds.has(id)
+      || localMemberIds.agentIds.has(id);
     const projectMemberRole = <T extends { id: string; serverRole?: string | null; role?: string | null; channelRole?: string | null }>(member: T) => {
       // Human roster rows historically expose the server role as `role`,
       // while Agent rows use `serverRole`. Normalize before projecting the
@@ -3462,6 +3511,7 @@ channelRouter.get("/:id/members", async (req, res) => {
           ? member.channelRole === "admin" ? "both" : "server_role"
           : member.channelRole === "admin" ? "channel_role" : null,
         canChangeChannelRole: viewerCanChangeRoles
+          && isRoleTargetable(member.id)
           && member.id !== req.userId
           && serverRole !== "owner"
           && serverRole !== "admin"
@@ -3494,14 +3544,20 @@ channelRouter.get("/:id/members", async (req, res) => {
       return;
     }
     const agentOrchestrator = req.app.get("agentOrchestrator") as AgentOrchestrator;
-    const agents = await Promise.all(members.agents.map(async (agent) => {
-      try {
-        const { activity, activityDetail } = await agentOrchestrator.getActivity(agent.id);
-        return projectMemberRole({ ...agent, activity, activityDetail });
-      } catch {
-        return projectMemberRole(agent);
-      }
-    }));
+    // Every member's activity in one batch (#all lists the whole server):
+    // one agent row read, then getActivities, instead of a read per agent.
+    let activityById = new Map<string, { activity: string; activityDetail: string }>();
+    try {
+      const rows = await agentService.getAgentsByIds(members.agents.map((agent) => agent.id));
+      const activities = await agentOrchestrator.getActivities(rows);
+      activityById = new Map(rows.map((row, index) => [row.id, activities[index]!]));
+    } catch {
+      // As before, a failed activity read lists the member without activity.
+    }
+    const agents = members.agents.map((agent) => {
+      const resolved = activityById.get(agent.id);
+      return projectMemberRole(resolved ? { ...agent, ...resolved } : agent);
+    });
     const humans = members.humans.map(projectMemberRole);
     if (await shouldFilterChannelHumansForRequester(channel, req.userId!)) {
       res.json({
@@ -3571,16 +3627,14 @@ channelRouter.post("/:id/members/batch", async (req, res) => {
       return;
     }
 
-    const [targetAgents, targetUsers] = await Promise.all([
-      Promise.all(batch.agentIds.map((agentId) => agentService.getAgent(agentId))),
-      Promise.all(batch.userIds.map(async (userId) => {
-        const [role, user] = await Promise.all([
-          getActorServerRoleInServer(req.serverId!, "user", userId),
-          userService.getUser(userId),
-        ]);
-        return role && user ? user : null;
-      })),
+    // Every target in two queries, not one or two per id.
+    const [agentRows, memberUsers] = await Promise.all([
+      agentService.getAgentsByIds(batch.agentIds),
+      serverService.getServerMemberUsersByIds(req.serverId!, batch.userIds),
     ]);
+    const agentById = new Map(agentRows.map((agent) => [agent.id, agent]));
+    const targetAgents = batch.agentIds.map((agentId) => agentById.get(agentId) ?? null);
+    const targetUsers = batch.userIds.map((userId) => memberUsers.get(userId) ?? null);
     const invalidAgentIds = batch.agentIds.filter((_, index) => targetAgents[index]?.serverId !== req.serverId);
     if (invalidAgentIds.length > 0) {
       res.status(400).json({
@@ -3698,6 +3752,8 @@ channelRouter.post("/:id/members/batch", async (req, res) => {
       res.status(403).json({ error: err.message });
     } else if (err instanceof Error && err.message === "Channel capability required") {
       res.status(403).json({ error: "You do not have permission to add channel members" });
+    } else if (err instanceof Error && err.message === channelService.ASSISTANT_CHANNEL_FORBIDDEN_MESSAGE) {
+      res.status(403).json({ error: err.message, code: channelService.ASSISTANT_CHANNEL_FORBIDDEN_CODE });
     } else if (err instanceof Error && err.message === "Human is not a member of this channel's server") {
       res.status(400).json({ error: "One or more users are not members of this server", code: "users_not_in_server" });
     } else if (err instanceof Error && err.message === "Agent is not a member of this channel's server") {
@@ -3830,6 +3886,8 @@ channelRouter.post("/:id/members", async (req, res) => {
       res.status(403).json({ error: err.message });
     } else if (err instanceof Error && err.message === "Channel capability required") {
       res.status(403).json({ error: "You do not have permission to add channel members" });
+    } else if (err instanceof Error && err.message === channelService.ASSISTANT_CHANNEL_FORBIDDEN_MESSAGE) {
+      res.status(403).json({ error: err.message, code: channelService.ASSISTANT_CHANNEL_FORBIDDEN_CODE });
     } else {
       res.status(500).json({ error: "Failed to add member" });
     }

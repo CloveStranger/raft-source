@@ -131,7 +131,7 @@ function everyFieldState(): TerminalFailureBreakerState {
         batchId: "B9", launchId: "L9", builtAtMs: 1_100,
         coverage: [{ conversationId: "c1", fromSeqExclusive: 10, coveredUpToSeq: 15, truncated: true }],
         messages: [{ id: "m11", conversationId: "c1", seq: 11, inPrefix: true }, { id: "m18", conversationId: "c1", seq: 18, inPrefix: false }],
-        candidateCapHit: true, allUnreadCovered: false,
+        candidateCapHit: true, allUnreadCovered: false, settledByCursor: [{ conversationId: "c-dm", readCursor: 5, ceiling: 4 }],
       },
       engagedByFailure: true,
     },
@@ -140,6 +140,8 @@ function everyFieldState(): TerminalFailureBreakerState {
     outboxWatermarks: { [D1]: 17, "daemon-0": 3 },
     outboxWatermarksLost: true,
     takeoverEpoch: 3,
+    spawnError: { count: 2, lastLaunchId: "L9", lastAtMs: 1_200 },
+    wakeDemand: { seq: 4, sinceMs: 1_000, claimedSeq: 3, claimedLaunchId: "L9" },
   };
 }
 

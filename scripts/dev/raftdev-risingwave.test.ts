@@ -535,14 +535,20 @@ test("actual RFC bootstrap preserves dependency order and excludes superseded ge
   before("rw_inbox_target_mute_states_v2", "rw_subs_v2");
   before("rw_servers", "rw_target_eligible_v1");
   before("rw_message_target_v3", "rw_target_latest_v4");
-  before("rw_target_eligible_v1", "rw_inbox_normal_v4");
-  before("rw_receiver_cursors_v1", "rw_inbox_muted_prefix_v1");
-  before("rw_muted_subs_v1", "rw_inbox_muted_full_v1");
+  before("rw_target_eligible_v1", "rw_inbox_normal_v5");
+  before("rw_target_latest_v4", "rw_inbox_normal_v5");
+  before("rw_receiver_cursors_v1", "rw_inbox_muted_prefix_v2");
+  before("rw_muted_subs_v1", "rw_inbox_muted_full_v2");
   before("rw_thread_parent_v3", "rw_inbox_mention_v6");
-  before("rw_inbox_mention_v6", "rw_inbox_items_v10");
-  before("rw_activity_watermark_v5", "rw_inbox_serving_v6");
-  before("rw_inbox_serving_v6", "rw_activity_totals_v4");
-  before("rw_inbox_muted_full_v1", "rw_conversation_unread_v2");
+  before("rw_inbox_mention_v6", "rw_inbox_items_v11");
+  before("rw_inbox_muted_prefix_v2", "rw_inbox_items_v11");
+  before("rw_inbox_items_v11", "rw_inbox_items_v12");
+  before("rw_thread_parent_v3", "rw_inbox_items_v12");
+  before("rw_thread_parent_v3", "rw_activity_watermark_v6");
+  before("rw_activity_watermark_v6", "rw_inbox_serving_v8");
+  before("rw_inbox_items_v12", "rw_inbox_serving_v8");
+  before("rw_inbox_serving_v8", "rw_activity_totals_v6");
+  before("rw_inbox_muted_full_v2", "rw_conversation_unread_v3");
   before("rw_receiver_cursors_v1", "rw_followed_threads_v5");
   before("rw_tasks", "rw_followed_threads_v5");
 
@@ -571,6 +577,17 @@ test("actual RFC bootstrap preserves dependency order and excludes superseded ge
     "rw_agent_inbox_v3",
     "rw_agent_inbox_v4",
     "rw_conversation_unread_v1",
+    "rw_conversation_unread_v2",
+    "rw_inbox_normal_v4",
+    "rw_inbox_muted_prefix_v1",
+    "rw_inbox_muted_full_v1",
+    "rw_inbox_items_v10",
+    "rw_inbox_serving_v6",
+    "rw_activity_totals_v4",
+    "rw_agent_inbox_v5",
+    "rw_inbox_serving_v7",
+    "rw_activity_totals_v5",
+    "rw_activity_watermark_v5",
     "rw_followed_thread_stats_v1",
     "rw_followed_thread_stats_v2",
     "rw_followed_thread_stats_v3",
@@ -632,11 +649,11 @@ test("release-QA emitter uses the exact raftdev/real-RW relation contract", { sk
 
 test("bootstrap composition rejects out-of-order, unknown-source, and missing relations", { skip: inSourceSnapshot }, () => {
   const actual = loadActualBootstrapArtifacts();
-  const chain068 = "infra/risingwave/sql/068-chain-mention-v6-consumers.sql";
+  const chain076 = "infra/risingwave/sql/076-cursor-decouple-consumers.sql";
   const mention067 = "infra/risingwave/sql/067-mention-v6.sql";
-  // 068 before 067: rw_inbox_items_v10 reads rw_inbox_mention_v6, not yet created.
+  // 076 without 067: rw_inbox_items_v11 reads rw_inbox_mention_v6, not yet created.
   assert.throws(
-    () => buildRisingWaveBootstrapStatements({ ...actual, [mention067]: "", [chain068]: actual[chain068] }),
+    () => buildRisingWaveBootstrapStatements({ ...actual, [mention067]: "", [chain076]: actual[chain076] }),
     /rw_inbox_mention_v6 exactly once/,
   );
   assert.throws(
@@ -655,7 +672,7 @@ test("bootstrap composition rejects out-of-order, unknown-source, and missing re
     /unknown CDC source other_prod_cdc/,
   );
   assert.throws(
-    () => buildRisingWaveBootstrapStatements({ ...actual, [chain068]: `${actual[chain068]}\nDROP MATERIALIZED VIEW rw_x;` }),
+    () => buildRisingWaveBootstrapStatements({ ...actual, [chain076]: `${actual[chain076]}\nDROP MATERIALIZED VIEW rw_x;` }),
     /unsupported executable statement/,
   );
   assert.deepEqual(

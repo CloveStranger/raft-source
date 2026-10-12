@@ -111,6 +111,12 @@ export function connectSocket() {
     });
     s.on("disconnect", (reason) => {
       console.log("[Socket.io] Disconnected:", reason);
+      // socket.io-client never reconnects on its own after the server closed
+      // the socket ("io server disconnect"), and a draining server task does
+      // exactly that to every connection (server.ts drain going-away). Without
+      // this, every open tab stays offline after each deploy until the user
+      // refocuses it. Spread the reconnects so a deploy is not a stampede.
+      if (reason === "io server disconnect") scheduleServerDisconnectReconnect(s);
     });
 
     // socket.io-client's built-in reconnect (Manager-level) does not pass
@@ -187,7 +193,25 @@ async function runReconnectAuthRefresh(s: Socket): Promise<void> {
   }
 }
 
+let serverDisconnectReconnectTimer: ReturnType<typeof setTimeout> | null = null;
+
+/** Reconnect 1–5 s after a server-initiated disconnect, if we are still signed in and nothing reconnected meanwhile. */
+function scheduleServerDisconnectReconnect(s: Socket): void {
+  if (serverDisconnectReconnectTimer) return;
+  const delayMs = 1_000 + Math.floor(Math.random() * 4_000);
+  serverDisconnectReconnectTimer = setTimeout(() => {
+    serverDisconnectReconnectTimer = null;
+    if (socket !== s || s.connected || !localStorage.getItem("slock_access_token")) return;
+    s.auth = freshAuth();
+    s.connect();
+  }, delayMs);
+}
+
 export function disconnectSocket() {
+  if (serverDisconnectReconnectTimer) {
+    clearTimeout(serverDisconnectReconnectTimer);
+    serverDisconnectReconnectTimer = null;
+  }
   if (socket) {
     socket.disconnect();
   }

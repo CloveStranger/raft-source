@@ -1,9 +1,10 @@
-import { Input,
+import {
   Badge,
   Button,
   CopyableCode,
   CopyableCodeAction,
   CopyableCodeRoot,
+  PanelTitle,
   SortableTabsList,
   SortableTabsTab,
   Tabs,
@@ -20,7 +21,6 @@ import EditProviderConnectionModal from "../settings/EditProviderConnectionModal
 import { useState, useEffect, useLayoutEffect, useRef, useMemo, useCallback } from "react";
 import type { ComponentType, ReactNode } from "react";
 import { useIntl } from "react-intl";
-import { createPortal } from "react-dom";
 import {
   Activity,
   Play,
@@ -72,7 +72,7 @@ import type {
   ServerRole,
 } from "@botiverse/raft-shared";
 import { formatRuntimeAvailabilitySuffix, formatRuntimeLabelWithStatus } from "../../utils/runtimeAvailabilityLabel";
-import { classifyRuntimeError, RUNTIME_ERROR_LABEL_ID } from "../../utils/classifyRuntimeError";
+import { classifyRuntimeError, RUNTIME_ERROR_LABEL_ID, RUNTIME_LOOKUP_DISPLAY_MESSAGE_ID, runtimeLookupDisplayForReason } from "../../utils/classifyRuntimeError";
 import type { RuntimeErrorKind } from "../../utils/classifyRuntimeError";
 import { reasoningEffortLabelId, reconcileReasoningEffort } from "../../utils/reasoningEffortOptions";
 import { MachineRunLabel } from "../machine/MachineRunLabel";
@@ -157,7 +157,7 @@ import type {
 import { formatRuntimeConfigBuildError } from "../../utils/runtimeConfigBuildErrorPresentation";
 import AgentProfileOverflowMenu from "./AgentProfileOverflowMenu";
 
-import { formatActivityText, formatAgentDisplayStateText } from "../../utils/activity";
+import { formatActivityText, formatSpawnFailureDetail } from "../../utils/activity";
 import { getServerUrl } from "../../utils/server";
 import { canViewMachineRuntimeAccountUsage } from "../../utils/machineRuntimeUsageVisibility";
 import StatusDot from "../ui/StatusDot";
@@ -168,7 +168,7 @@ import { DEFAULT_COPY_FEEDBACK_TIMEOUT_MS, useCopyText } from "../../hooks/useCo
 import CopyButton from "../ui/CopyButton";
 import { isCustomAvatar } from "./PixelAvatar";
 import { useImageLightboxStore } from "../../store/imageLightboxStore";
-import PanelHeader from "../ui/PanelHeader";
+import PanelHeader, { PROFILE_HEADER_SURFACE_CLASS, PROFILE_HANDLE_SIZE_CLASS } from "../ui/PanelHeader";
 import SectionEyebrow from "../ui/SectionEyebrow";
 import SectionHeader from "../ui/SectionHeader";
 import ShowMoreToggle from "../ui/ShowMoreToggle";
@@ -184,7 +184,6 @@ import AgentSkills from "./AgentSkills";
 import AgentRemindersSection from "./AgentRemindersSection";
 import AgentAppAccessTab from "./AgentAppAccessTab";
 import ReportIssueDialog from "./ReportIssueDialog";
-import AvatarListRow from "../ui/AvatarListRow";
 import { AgentDMConversationList } from "./AgentDMConversationList";
 import type { AgentDMConversation } from "./AgentDMConversationList";
 import RolePermissionHelpDialog from "../member/RolePermissionHelpDialog";
@@ -206,6 +205,14 @@ import { AgentMigrationSection } from "../agentMigration/AgentMigrationSection";
 import { describeHostedRuntime, HostedRuntimeStatus } from "./HostedRuntimeStatus";
 import { AgentConnections } from "./AgentConnections";
 import { AgentHostedRuntimeUsage } from "./AgentHostedRuntimeUsage";
+import { AgentHostedRuntimeModel } from "./AgentHostedRuntimeModel";
+import { CreatedAgentRow } from "./CreatedAgentRow";
+import { EnvVarEntryRow } from "./EnvVarEntryRow";
+import type { EnvVarEntry } from "./EnvVarEntryRow";
+import { ExternalSetupCopyButton } from "./ExternalSetupCopyButton";
+import { recordProfileOpenE2eEvent } from "../../utils/profileOpenE2eTimeline";
+
+recordProfileOpenE2eEvent({ kind: "module-evaluated", module: "agent-detail" });
 
 const HOSTED_RUNTIME_POLL_MS = 5_000;
 const FEEDBACK_EXPORT_ENABLED = Boolean(import.meta.env?.VITE_FEEDBACK_EXPORT_URL?.replace(/\/+$/, ""));
@@ -349,6 +356,7 @@ function AgentChatTab({ agentId }: { agentId: string }) {
   const visibleChannels = channelsExpanded
     ? channels.items
     : channels.items.slice(0, AGENT_CHAT_CHANNEL_PREVIEW_LIMIT);
+  const toggleChannelsExpanded = useCallback(() => setChannelsExpanded((expanded) => !expanded), []);
 
   return (
     <div className="flex-1 overflow-y-auto bg-layer-panel theme-brutal:bg-white">
@@ -442,7 +450,7 @@ function AgentChatTab({ agentId }: { agentId: string }) {
                 ))}
                 {canExpandChannels && (
                   <ShowMoreToggle
-                    onClick={() => setChannelsExpanded((expanded) => !expanded)}
+                    onClick={toggleChannelsExpanded}
                     expanded={channelsExpanded}
                     collapsedLabel={formatMessage({ id: "agent.detail.showAllChannels" }, { count: channels.items.length })}
                     expandedLabel={formatMessage({ id: "agent.detail.showFewer" })}
@@ -490,7 +498,7 @@ function EnvVarsSection({ agent, canManageAgent }: { agent: Agent; canManageAgen
   const { formatMessage } = useIntl();
   const updateAgent = useAgentStore((s) => s.updateAgent);
   const [editing, setEditing] = useState(false);
-  const [entries, setEntries] = useState<{ key: string; value: string }[]>([]);
+  const [entries, setEntries] = useState<EnvVarEntry[]>([]);
 
   const envVars = agent.envVars;
   const hasVars = envVars && Object.keys(envVars).length > 0;
@@ -504,7 +512,7 @@ function EnvVarsSection({ agent, canManageAgent }: { agent: Agent; canManageAgen
     setEditing(true);
   };
 
-  const handleSave = async () => {
+  const handleSave = useCallback(async () => {
     const newVars: Record<string, string> = {};
     for (const entry of entries) {
       const k = entry.key.trim();
@@ -514,7 +522,14 @@ function EnvVarsSection({ agent, canManageAgent }: { agent: Agent; canManageAgen
       envVars: Object.keys(newVars).length > 0 ? newVars : null,
     });
     setEditing(false);
-  };
+  }, [entries, updateAgent, agent.id]);
+  const cancelEditing = useCallback(() => setEditing(false), []);
+  const updateEntry = useCallback((index: number, patch: Partial<EnvVarEntry>) => {
+    setEntries((current) => current.map((entry, j) => (j === index ? { ...entry, ...patch } : entry)));
+  }, []);
+  const removeEntry = useCallback((index: number) => {
+    setEntries((current) => current.filter((_, j) => j !== index));
+  }, []);
 
   if (!hasVars && !canManageAgent) return null;
 
@@ -540,38 +555,7 @@ function EnvVarsSection({ agent, canManageAgent }: { agent: Agent; canManageAgen
       {editing ? (
         <div className="space-y-2">
           {entries.map((entry, i) => (
-            <div key={i} className="flex items-center gap-2">
-              <Input
-                type="text"
-                value={entry.key}
-                onChange={(e) => {
-                  const updated = [...entries];
-                  updated[i] = { ...updated[i], key: e.target.value };
-                  setEntries(updated);
-                }}
-                className="border border-line-muted bg-layer-card px-2 py-1 text-xs font-mono shadow-raft-sm focus:outline-none w-1/3 theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white theme-brutal:shadow-brutal-sm"
-                placeholder={formatMessage({ id: "agent.runtimeConfig.envVarName" })}
-              />
-              <span className="text-foreground-muted">=</span>
-              <Input
-                type="text"
-                value={entry.value}
-                onChange={(e) => {
-                  const updated = [...entries];
-                  updated[i] = { ...updated[i], value: e.target.value };
-                  setEntries(updated);
-                }}
-                className="border border-line-muted bg-layer-card px-2 py-1 text-xs font-mono shadow-raft-sm focus:outline-none flex-1 theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white theme-brutal:shadow-brutal-sm"
-                placeholder={formatMessage({ id: "agent.runtimeConfig.envVarFallback" })}
-              />
-              <Button variant="danger" size="icon-sm"
-                type="button"
-                onClick={() => setEntries(entries.filter((_, j) => j !== i))}
-                className=""
-              >
-                <Trash2 size={12} />
-              </Button>
-            </div>
+            <EnvVarEntryRow key={i} index={i} entry={entry} onChange={updateEntry} onRemove={removeEntry} />
           ))}
           <div className="flex items-center gap-2">
             <button
@@ -591,7 +575,7 @@ function EnvVarsSection({ agent, canManageAgent }: { agent: Agent; canManageAgen
               {formatMessage({ id: "machine.detail.save" })}
             </Button>
             <Button variant="outline" size="sm"
-              onClick={() => setEditing(false)}
+              onClick={cancelEditing}
               className=""
             >
               {formatMessage({ id: "common.confirm.cancel" })}
@@ -628,12 +612,12 @@ function EnvVarsSection({ agent, canManageAgent }: { agent: Agent; canManageAgen
  */
 function InfoRow({ label, actions, children, testId }: { label: ReactNode; actions?: ReactNode; children: ReactNode; testId?: string }) {
   return (
-    <div className="grid grid-cols-[6.5rem_minmax(0,1fr)] items-start gap-x-4" data-testid={testId}>
-      <dt className="flex min-h-5 items-center gap-1.5 text-xs text-foreground-muted theme-brutal:text-black/50">
+    <div className="grid grid-cols-[7.75rem_minmax(0,1fr)] items-start gap-x-4" data-testid={testId}>
+      <dt className="flex min-h-5 items-center gap-1.5 text-[13px] text-foreground-hint theme-brutal:text-black/50">
         <span className="truncate">{label}</span>
         {actions}
       </dt>
-      <dd className="m-0 min-w-0 text-sm text-foreground-strong theme-brutal:text-black">{children}</dd>
+      <dd className="m-0 min-w-0 text-sm text-foreground-muted theme-brutal:text-black">{children}</dd>
     </div>
   );
 }
@@ -664,7 +648,10 @@ function AgentHeaderName({ agent, onEdit }: { agent: Agent; onEdit?: () => void 
   return (
     <>
       <Tooltip content={agent.displayName || agent.name}>
-        <div className="min-w-0 truncate text-lg font-bold leading-tight text-foreground-strong">{agent.displayName || agent.name}</div>
+        {/* PanelTitle source (cindyz 2026-10-10): the detail-block name follows the
+            panel-title spec (17 / selected weight / heading family) so the same
+            name reads identically in the header and the body. */}
+        <PanelTitle className="min-w-0 text-foreground-muted theme-brutal:text-black theme-brutal:text-lg">{agent.displayName || agent.name}</PanelTitle>
       </Tooltip>
       {onEdit && (
         <Tooltip content={formatMessage({ id: "agent.detail.editDisplayName" })}>
@@ -681,6 +668,19 @@ function AgentHeaderName({ agent, onEdit }: { agent: Agent; onEdit?: () => void 
     </>
   );
 }
+
+type PendingConfirm = {
+  title: string;
+  message: ReactNode;
+  confirmLabel: string;
+  loadingLabel: string;
+  confirmColor: string;
+  plainMessage?: boolean;
+  maxWidthClass?: string;
+  onConfirm: () => Promise<void>;
+};
+
+const NO_CREATED_AGENTS: NonNullable<Agent["createdAgents"]> = [];
 
 function AgentProfileInfo({ agent, canManageAgent, canChangeAgentRole, onOpenProfile, onEdit, showOperationalInfo = true }: { agent: Agent; canManageAgent: boolean; canChangeAgentRole: boolean; onOpenProfile?: (type: "agent" | "human", id: string) => void; onEdit?: (field: AgentProfileEditField) => void; showOperationalInfo?: boolean }) {
   const { formatDate, formatList, formatMessage } = useIntl();
@@ -708,14 +708,17 @@ function AgentProfileInfo({ agent, canManageAgent, canChangeAgentRole, onOpenPro
   const machineStatus = agentMachine ? agentMachine.status : agent.machineId ? "offline" : null;
   const configRef = useRef<HTMLDivElement>(null);
   const runtimeConfigModalRef = useRef<HTMLDivElement>(null);
-  // oxlint-disable-next-line react-hooks/exhaustive-deps -- intentionally recompute only on the runtime-relevant agent fields (envVars/model/reasoningEffort/runtime/runtimeConfig); depending on the whole `agent` would recompute on every unrelated agent update (activity/status/name) and churn the hydrated form.
-  const currentRuntimeConfig = useMemo(() => hydrateRuntimeConfigForm(agent), [
-    agent.envVars,
-    agent.model,
-    agent.reasoningEffort,
-    agent.runtime,
-    agent.runtimeConfig,
-  ]);
+  // Recompute only on the runtime-relevant agent fields; depending on the whole
+  // `agent` would recompute on every unrelated agent update (activity/status/name)
+  // and churn the hydrated form.
+  const { envVars: agentEnvVars, model: agentModel, reasoningEffort: agentReasoningEffort, runtime: agentRuntime, runtimeConfig: agentRuntimeConfig } = agent;
+  const currentRuntimeConfig = useMemo(() => hydrateRuntimeConfigForm({
+    envVars: agentEnvVars,
+    model: agentModel,
+    reasoningEffort: agentReasoningEffort,
+    runtime: agentRuntime,
+    runtimeConfig: agentRuntimeConfig,
+  }), [agentEnvVars, agentModel, agentReasoningEffort, agentRuntime, agentRuntimeConfig]);
   const currentRuntimeModel = runtimeConfigModelValue(currentRuntimeConfig);
   // Runtime-config draft buffers. The edit form (L1099 `{editingRuntimeConfig && ...}`)
   // is the ONLY render path that reads these, and `startRuntimeConfigEditing` re-seeds
@@ -754,16 +757,7 @@ function AgentProfileInfo({ agent, canManageAgent, canChangeAgentRole, onOpenPro
   const [externalSetupTab, setExternalSetupTab] = useState<ExternalSetupTab>("hermes");
   const effectiveExternalSetupTab = externalSetupTab;
   const openProfile = useProfileStore((s) => s.openProfile);
-  const [pendingConfirm, setPendingConfirm] = useState<{
-    title: string;
-    message: ReactNode;
-    confirmLabel: string;
-    loadingLabel: string;
-    confirmColor: string;
-    plainMessage?: boolean;
-    maxWidthClass?: string;
-    onConfirm: () => Promise<void>;
-  } | null>(null);
+  const [pendingConfirm, setPendingConfirm] = useState<PendingConfirm | null>(null);
   const isActive = displayState.isOnline || agent.status === "active";
   const activeRuntime = editingRuntimeConfig ? draftRuntime : currentRuntimeConfig.runtime;
   const runtimeModels = useRuntimeModels(agent.machineId, activeRuntime);
@@ -827,16 +821,17 @@ function AgentProfileInfo({ agent, canManageAgent, canChangeAgentRole, onOpenPro
   const v2EditValues = v2EditDraft ?? v2EditInitial;
   const v2EditChanged = Boolean(v2EditDraft && v2EditInitial && JSON.stringify(v2EditDraft) !== JSON.stringify(v2EditInitial));
   // The v2 form's own save gate: v1's gate reads v1 draft fields the v2 form does not use.
-  // A required field whose option source is unavailable cannot be saved (option_source.status).
-  const v2EditSourceUnavailable = runtimeFormV2Edit.status === "ready" && v2EditValues !== null
+  // A required field whose option source is unavailable cannot be saved (option_source.status),
+  // nor a blank secret whose bound fields changed (writeOnlyKeepRequiresUnchanged).
+  const v2EditBlocked = runtimeFormV2Edit.status === "ready" && v2EditValues !== null
     && Object.values(validateRuntimeFormV2(runtimeFormV2Edit.form, runtimeFormV2Edit.sources, v2EditValues, { editing: true }))
-      .includes("source_unavailable");
-  const v2EditSaveDisabled = savingRuntimeConfig || runtimeFormV2Edit.status !== "ready" || !v2EditChanged || v2EditSourceUnavailable;
-  const changeV2EditValue = (key: string, value: RuntimeFormV2Value) => {
+      .some((code) => code === "source_unavailable" || code === "secret_reentry_required");
+  const v2EditSaveDisabled = savingRuntimeConfig || runtimeFormV2Edit.status !== "ready" || !v2EditChanged || v2EditBlocked;
+  const changeV2EditValue = useCallback((key: string, value: RuntimeFormV2Value) => {
     if (runtimeFormV2Edit.status !== "ready" || !v2EditValues) return;
     setV2EditServerErrors({});
     setV2EditDraft(applyRuntimeFormV2Change(runtimeFormV2Edit.form, runtimeFormV2Edit.sources, v2EditValues, key, value));
-  };
+  }, [runtimeFormV2Edit, v2EditValues]);
   const draftFormDefinition = draftSchemaBacked ? draftFormDefinitionEntry?.definition ?? null : null;
   const draftSchemaModelSource = draftFormDefinition?.optionSources.model?.kind === "select"
     ? draftFormDefinition.optionSources.model
@@ -1056,27 +1051,66 @@ function AgentProfileInfo({ agent, canManageAgent, canChangeAgentRole, onOpenPro
       clearInterval(timer);
     };
   }, [agent.id, canManageAgent, fetchExternalAgentStatus, hostedRuntimeInProgress, isExternalAgent]);
-  const handleRetryHostedRuntime = async () => {
+  const handleRetryHostedRuntime = useCallback(async () => {
     await retryHostedRuntimeProvisioning(agent.id);
     setExternalStatus(await fetchExternalAgentStatus(agent.id));
-  };
+  }, [agent.id, fetchExternalAgentStatus, retryHostedRuntimeProvisioning]);
 
-  const handleCopyExternalCommand = async (text = externalSetupInstruction, target = "setup") => {
+  const handleCopyExternalCommand = useCallback(async (text: string, target: string) => {
     await copyTextToClipboard(text);
     setExternalCopiedTarget(target);
     window.setTimeout(() => setExternalCopiedTarget(null), 2000);
-  };
+  }, []);
+  const changeExternalSetupTab = useCallback((value: ExternalSetupTab) => {
+    setExternalSetupTab(value);
+    setExternalCopiedTarget(null);
+  }, []);
 
-
-  const formatIdentityValue = (value: string | null) => value && value.trim()
-    ? value
-    : formatMessage({ id: "agent.detail.blank" });
   const currentOnboardingIdentityPreview = onboardingIdentityState.agentId === agent.id ? onboardingIdentityState.preview : null;
   const currentOnboardingIdentityError = onboardingIdentityState.agentId === agent.id ? onboardingIdentityState.error : "";
 
-  const handleAdoptOnboardingIdentity = () => {
+  const closeRuntimeConfigEditor = useCallback(() => {
+    setV2EditDraft(null);
+    setV2EditServerErrors({});
+    setEditingRuntimeConfig(false);
+    setRuntimeConfigSaveError("");
+    setDraftRuntime(currentRuntimeConfig.runtime);
+    setDraftModel(currentRuntimeModel);
+    setDraftCustomModelMode(currentRuntimeConfig.model.kind === "custom");
+    setDraftProviderMode(runtimeConfigProviderMode(currentRuntimeConfig));
+    setDraftProviderApiUrl(runtimeConfigApiUrl(currentRuntimeConfig));
+    setDraftProviderApiKey(runtimeConfigApiKey(currentRuntimeConfig));
+    setDraftBuiltInProviderMode(runtimeConfigBuiltInProviderMode(currentRuntimeConfig));
+    setDraftBuiltInProviderApiKey(runtimeConfigBuiltInProviderApiKey(currentRuntimeConfig));
+    setDraftBuiltInProviderBaseUrl(runtimeConfigBuiltInProviderBaseUrl(currentRuntimeConfig));
+    setDraftBuiltInProviderSupportsImageInput(runtimeConfigBuiltInProviderSupportsImageInput(currentRuntimeConfig));
+    setDraftLoadLocalPlugins(currentRuntimeConfig.runtime === "builtin" && currentRuntimeConfig.loadLocalPlugins === true);
+    setDraftProviderConnectionId(currentProviderConnectionId);
+    setDraftPiProviderMode(runtimeConfigPiProviderMode(currentRuntimeConfig));
+    setDraftPiProviderApiKey(runtimeConfigPiProviderApiKey(currentRuntimeConfig));
+    setDraftFastMode(runtimeConfigFastMode(currentRuntimeConfig));
+    setDraftCommand(runtimeConfigCommand(currentRuntimeConfig));
+    setDraftEnvVarEntries(
+      currentRuntimeConfig.envVars
+        ? Object.entries(currentRuntimeConfig.envVars).map(([key, value]) => ({ key, value }))
+        : [],
+    );
+    setRuntimeConfigAdvancedOpen(false);
+    setDraftReasoningEffort(currentRuntimeConfig.reasoningEffort ?? null);
+  }, [currentRuntimeConfig, currentRuntimeModel, currentProviderConnectionId]);
+
+  const requestConfirm = useCallback((config: PendingConfirm) => {
+    closeRuntimeConfigEditor();
+    setPendingConfirm(config);
+  }, [closeRuntimeConfigEditor]);
+  const closePendingConfirm = useCallback(() => setPendingConfirm(null), []);
+
+  const handleAdoptOnboardingIdentity = useCallback(() => {
     const onboardingIdentityPreview = currentOnboardingIdentityPreview;
     if (!onboardingIdentityPreview || onboardingIdentityPreview.changes.length === 0) return;
+    const formatIdentityValue = (value: string | null) => value && value.trim()
+      ? value
+      : formatMessage({ id: "agent.detail.blank" });
     const grantsServerAdmin = onboardingIdentityPreview.changes.some(
       (change) => change.field === "serverRole" && change.after === "admin",
     );
@@ -1125,57 +1159,13 @@ function AgentProfileInfo({ agent, canManageAgent, canChangeAgentRole, onOpenPro
         setOnboardingIdentityState({ agentId: agent.id, preview: result, error: "" });
       },
     });
-  };
+  }, [adoptOnboardingIdentity, agent.id, currentOnboardingIdentityPreview, formatMessage, requestConfirm]);
 
   const createdDate = formatDate(agent.createdAt, {
     year: "numeric",
     month: "short",
     day: "numeric",
   });
-
-  const closeRuntimeConfigEditor = () => {
-    setV2EditDraft(null);
-    setV2EditServerErrors({});
-    setEditingRuntimeConfig(false);
-    setRuntimeConfigSaveError("");
-    setDraftRuntime(currentRuntimeConfig.runtime);
-    setDraftModel(currentRuntimeModel);
-    setDraftCustomModelMode(currentRuntimeConfig.model.kind === "custom");
-    setDraftProviderMode(runtimeConfigProviderMode(currentRuntimeConfig));
-    setDraftProviderApiUrl(runtimeConfigApiUrl(currentRuntimeConfig));
-    setDraftProviderApiKey(runtimeConfigApiKey(currentRuntimeConfig));
-    setDraftBuiltInProviderMode(runtimeConfigBuiltInProviderMode(currentRuntimeConfig));
-    setDraftBuiltInProviderApiKey(runtimeConfigBuiltInProviderApiKey(currentRuntimeConfig));
-    setDraftBuiltInProviderBaseUrl(runtimeConfigBuiltInProviderBaseUrl(currentRuntimeConfig));
-    setDraftBuiltInProviderSupportsImageInput(runtimeConfigBuiltInProviderSupportsImageInput(currentRuntimeConfig));
-    setDraftLoadLocalPlugins(currentRuntimeConfig.runtime === "builtin" && currentRuntimeConfig.loadLocalPlugins === true);
-    setDraftProviderConnectionId(currentProviderConnectionId);
-    setDraftPiProviderMode(runtimeConfigPiProviderMode(currentRuntimeConfig));
-    setDraftPiProviderApiKey(runtimeConfigPiProviderApiKey(currentRuntimeConfig));
-    setDraftFastMode(runtimeConfigFastMode(currentRuntimeConfig));
-    setDraftCommand(runtimeConfigCommand(currentRuntimeConfig));
-    setDraftEnvVarEntries(
-      currentRuntimeConfig.envVars
-        ? Object.entries(currentRuntimeConfig.envVars).map(([key, value]) => ({ key, value }))
-        : [],
-    );
-    setRuntimeConfigAdvancedOpen(false);
-    setDraftReasoningEffort(currentRuntimeConfig.reasoningEffort ?? null);
-  };
-
-  const requestConfirm = (config: {
-    title: string;
-    message: ReactNode;
-    confirmLabel: string;
-    loadingLabel: string;
-    confirmColor: string;
-    plainMessage?: boolean;
-    maxWidthClass?: string;
-    onConfirm: () => Promise<void>;
-  }) => {
-    closeRuntimeConfigEditor();
-    setPendingConfirm(config);
-  };
 
   const draftSupportsReasoning = REASONING_EFFORT_RUNTIMES.has(draftRuntime)
     && (draftRuntime !== "kimi-sdk" || draftSchemaBacked);
@@ -1319,17 +1309,18 @@ function AgentProfileInfo({ agent, canManageAgent, canChangeAgentRole, onOpenPro
   // Change the drafted model and reconcile reasoning against the new model's
   // declared supportedReasoningEfforts (e.g. switching to GPT-5.6 luna drops an
   // Ultra selection down to Medium).
-  const changeDraftModel = (nextModel: string) => {
+  const runtimeModelList = runtimeModels.models;
+  const changeDraftModel = useCallback((nextModel: string) => {
     setDraftModel(nextModel);
     if (draftRuntime !== "kimi-sdk") {
       setDraftReasoningEffort((prev) => reconcileReasoningEffort(
         draftRuntime,
         nextModel,
         prev as ReasoningEffort | null,
-        runtimeModels.models,
+        runtimeModelList,
       ));
     }
-  };
+  }, [draftRuntime, runtimeModelList]);
 
   const startRuntimeConfigEditing = () => {
     setRuntimeConfigSaveError("");
@@ -1359,7 +1350,7 @@ function AgentProfileInfo({ agent, canManageAgent, canChangeAgentRole, onOpenPro
     setEditingRuntimeConfig(true);
   };
 
-  const changeDraftProviderConnection = (connection: ProviderConnectionSummary | null) => {
+  const changeDraftProviderConnection = useCallback((connection: ProviderConnectionSummary | null) => {
     setDraftProviderConnectionId(connection?.id ?? "");
     if (!connection) {
       if (draftProviderConnectionId) {
@@ -1379,7 +1370,80 @@ function AgentProfileInfo({ agent, canManageAgent, canChangeAgentRole, onOpenPro
     });
     setDraftModel(nextModel.model);
     setDraftCustomModelMode(nextModel.customModelMode);
-  };
+  }, [draftModel, draftProviderConnectionId]);
+
+  const changeDraftRuntime = useCallback((id: string) => {
+    setDraftRuntime(id);
+    const nextModel = getDefaultModel(id);
+    setDraftModel(nextModel);
+    setDraftCustomModelMode(false);
+    setDraftProviderMode("default");
+    setDraftProviderApiUrl("");
+    setDraftProviderApiKey("");
+    setDraftBuiltInProviderMode(BUILTIN_RUNTIME_DEFAULT_PROVIDER_ID);
+    setDraftBuiltInProviderApiKey("");
+    setDraftBuiltInProviderBaseUrl("");
+    setDraftBuiltInProviderSupportsImageInput(false);
+    setDraftLoadLocalPlugins(false);
+    setDraftProviderConnectionId("");
+    setDraftPiProviderMode(PI_PROVIDER_CONFIGURED);
+    setDraftPiProviderApiKey("");
+    setDraftFastMode(false);
+    setDraftCommand("");
+    if (!REASONING_EFFORT_RUNTIMES.has(id)) {
+      setDraftReasoningEffort(null);
+    } else {
+      setDraftReasoningEffort(reconcileReasoningEffort(id, nextModel, null));
+    }
+  }, []);
+
+  const changeDraftBuiltInProviderMode = useCallback((next: BuiltInProviderMode) => {
+    setDraftBuiltInProviderMode(next);
+    setDraftBuiltInProviderSupportsImageInput(false);
+    setDraftLoadLocalPlugins(false);
+    if (isBuiltInGatewayProviderMode(next)) {
+      setDraftModel("");
+      setDraftCustomModelMode(true);
+      return;
+    }
+    setDraftBuiltInProviderBaseUrl("");
+    const defaultModel = builtInProviderDefaultModel(next);
+    if (defaultModel) {
+      setDraftModel(defaultModel);
+      setDraftCustomModelMode(false);
+    }
+  }, []);
+
+  const changeDraftPiProviderMode = useCallback((next: PiProviderMode) => {
+    setDraftPiProviderMode(next);
+    // Switching to a builtin provider locks the Model picker
+    // to that provider's SDK first-class set; reset draftModel
+    // to the provider's default so the picker shows a valid
+    // value.
+    if (next !== PI_PROVIDER_CONFIGURED) {
+      const defaultModel = piBuiltinProviderDefaultModel(next);
+      if (defaultModel) {
+        setDraftModel(defaultModel);
+        setDraftCustomModelMode(false);
+      }
+    }
+  }, []);
+
+  const runtimeFormV2EditProps = useMemo(() => v2EditActive ? {
+    state: runtimeFormV2Edit,
+    values: v2EditValues,
+    onChange: changeV2EditValue,
+    serverErrors: v2EditServerErrors,
+    editing: true,
+  } : undefined, [changeV2EditValue, runtimeFormV2Edit, v2EditActive, v2EditServerErrors, v2EditValues]);
+
+  const closeRoleHelp = useCallback(() => setShowRoleHelp(false), []);
+  const closeEditingProviderConnection = useCallback(() => setEditingProviderConnection(null), []);
+  const refreshProviderConnections = providerConnectionCatalog.refresh;
+  const completeEditingProviderConnection = useCallback(async () => {
+    setEditingProviderConnection(null);
+    await refreshProviderConnections();
+  }, [refreshProviderConnections]);
 
   const saveRuntimeConfiguration = async (
     nextConfig: {
@@ -1717,7 +1781,7 @@ function AgentProfileInfo({ agent, canManageAgent, canChangeAgentRole, onOpenPro
             </Tooltip>
           )}
         </div>
-        <p className="text-sm text-foreground-strong theme-brutal:text-black">
+        <p className="text-sm text-foreground-muted theme-brutal:text-black">
           {agent.description || (
             <span className="italic text-foreground-placeholder theme-brutal:text-black/40">{formatMessage({ id: "machine.detail.noDescription" })}</span>
           )}
@@ -1755,10 +1819,7 @@ function AgentProfileInfo({ agent, canManageAgent, canChangeAgentRole, onOpenPro
             )}
             <ExternalSetupTabSegmentedControl
               value={effectiveExternalSetupTab}
-              onValueChange={(value) => {
-                setExternalSetupTab(value);
-                setExternalCopiedTarget(null);
-              }}
+              onValueChange={changeExternalSetupTab}
             />
             {externalStepSetupSteps ? (
               <div className="space-y-3">
@@ -1774,15 +1835,11 @@ function AgentProfileInfo({ agent, canManageAgent, canChangeAgentRole, onOpenPro
                           <span className="text-xs font-bold uppercase text-foreground-muted theme-brutal:text-black/60">
                             {formatMessage({ id: "agent.detail.stepNumber" }, { step: idx + 1 })}
                           </span>
-                          <Button variant="outline" size="sm"
-                            type="button"
-                            onClick={() => void handleCopyExternalCommand(step.command, copyTarget)}
-                            className=""
-                          >
+                          <ExternalSetupCopyButton text={step.command} target={copyTarget} onCopy={handleCopyExternalCommand}>
                             {externalCopiedTarget === copyTarget
                               ? formatMessage({ id: "agent.detail.copied" })
                               : formatMessage({ id: "agent.detail.copyStep" })}
-                          </Button>
+                          </ExternalSetupCopyButton>
                         </div>
                         <p className="text-sm font-bold text-foreground-strong theme-brutal:text-black">{step.title}</p>
                         <div className="break-all border border-line-muted theme-brutal:border-black/20 bg-layer-panel theme-brutal:bg-white/80 p-2 font-mono text-xs text-foreground-strong theme-brutal:text-black whitespace-pre-wrap">
@@ -1821,15 +1878,11 @@ function AgentProfileInfo({ agent, canManageAgent, canChangeAgentRole, onOpenPro
             </>)}
             <div className="flex flex-wrap items-center gap-2">
               {!hostedRuntime && effectiveExternalSetupTab === "other-agents" && (
-                <Button variant="outline" size="sm"
-                  type="button"
-                  onClick={() => void handleCopyExternalCommand()}
-                  className=""
-                >
+                <ExternalSetupCopyButton text={externalSetupInstruction} target="setup" onCopy={handleCopyExternalCommand}>
                   {externalCopiedTarget === "setup"
                     ? formatMessage({ id: "agent.detail.copied" })
                     : formatMessage({ id: "agent.detail.copySetup" })}
-                </Button>
+                </ExternalSetupCopyButton>
               )}
               {externalStatusError && (
                 <span className="text-xs font-bold text-warning-strong theme-brutal:text-brutal-orange">{externalStatusError}</span>
@@ -1841,6 +1894,7 @@ function AgentProfileInfo({ agent, canManageAgent, canChangeAgentRole, onOpenPro
 
       {showOperationalInfo && isExternalAgent && canManageAgent && hostedRuntime?.state === "active" && (
         <>
+          <AgentHostedRuntimeModel key={`model-${agent.id}`} agentId={agent.id} />
           <AgentConnections key={agent.id} agentId={agent.id} />
           <AgentHostedRuntimeUsage key={`usage-${agent.id}`} agentId={agent.id} />
         </>
@@ -1903,7 +1957,7 @@ function AgentProfileInfo({ agent, canManageAgent, canChangeAgentRole, onOpenPro
                   <Tooltip content={agentMachine.name}>
                     <button
                       onClick={() => { useProfileStore.getState().closeProfile(); useThreadStore.getState().closeThread(); nav.toMachine(agentMachine.id); }}
-                      className="block max-w-full truncate text-left font-mono font-semibold text-foreground-strong theme-brutal:text-black hover:underline"
+                      className="block max-w-full truncate text-left text-foreground-muted theme-brutal:text-black hover:underline"
                     >
                       {agentMachine.name}
                     </button>
@@ -1919,7 +1973,7 @@ function AgentProfileInfo({ agent, canManageAgent, canChangeAgentRole, onOpenPro
                   {/* "Computer status", not "Status": the header already shows the agent's own
                       activity, and these are two different things. */}
                   <InfoRow label={formatMessage({ id: "agent.detail.computerStatus" })} testId="agent-computer-connection">
-                    <span className="flex items-center gap-1.5">
+                    <span className="flex items-center gap-1.5 font-mono">
                       <StatusDot
                         tone={machineStatus === "online" ? "bg-brutal-lime" : "bg-gray-400"}
                         className="shrink-0"
@@ -1935,7 +1989,9 @@ function AgentProfileInfo({ agent, canManageAgent, canChangeAgentRole, onOpenPro
                 </>
               )}
               {/* Created */}
-              <InfoRow label={formatMessage({ id: "machine.detail.created" })}>{createdDate}</InfoRow>
+              <InfoRow label={formatMessage({ id: "machine.detail.created" })}>
+                <span className="tabular-nums theme-brutal:font-mono">{createdDate}</span>
+              </InfoRow>
               {/* Creator */}
               <InfoRow label={formatMessage({ id: "agent.detail.creator" })}>
                 {agent.creator ? (
@@ -1962,8 +2018,8 @@ function AgentProfileInfo({ agent, canManageAgent, canChangeAgentRole, onOpenPro
                         agentAvatarUrl={agent.creator.avatarUrl}
                       />
                     )}
-                    <span className="min-w-0 truncate font-medium">{agent.creator.displayName || agent.creator.name}</span>
-                    <span className="min-w-0 shrink truncate font-mono text-xs text-foreground-muted theme-brutal:text-black/50">@{agent.creator.name}</span>
+                    <span className="min-w-0 truncate">{agent.creator.displayName || agent.creator.name}</span>
+                    <span className="min-w-0 flex-1 max-w-fit truncate font-mono text-xs text-foreground-hint theme-brutal:text-black/50">@{agent.creator.name}</span>
                   </button>
                   </Tooltip>
                 ) : (
@@ -2042,13 +2098,13 @@ function AgentProfileInfo({ agent, canManageAgent, canChangeAgentRole, onOpenPro
                     <>
                       <InfoRow label={formatMessage({ id: "agent.runtimeConfig.provider" })}>
                         {currentProviderApiUrl
-                            ? <span className="font-mono text-xs text-foreground-strong theme-brutal:text-black">{currentProviderApiUrl}</span>
-                            : <span className="text-xs italic text-foreground-placeholder theme-brutal:text-black/40">{formatMessage({ id: "agent.runtimeConfig.default" })}</span>}
+                            ? <span className="break-all font-mono text-sm text-foreground-muted theme-brutal:text-black">{currentProviderApiUrl}</span>
+                            : <span className="text-sm italic text-foreground-placeholder theme-brutal:text-black/40">{formatMessage({ id: "agent.runtimeConfig.default" })}</span>}
                       </InfoRow>
                       <InfoRow label={formatMessage({ id: "agent.runtimeConfig.command" })}>
                         {currentCommand
-                            ? <span className="font-mono text-xs text-foreground-strong theme-brutal:text-black">{currentCommand}</span>
-                            : <span className="text-xs italic text-foreground-placeholder theme-brutal:text-black/40">{formatMessage({ id: "agent.runtimeConfig.default" })}</span>}
+                            ? <span className="break-all font-mono text-sm text-foreground-muted theme-brutal:text-black">{currentCommand}</span>
+                            : <span className="text-sm italic text-foreground-placeholder theme-brutal:text-black/40">{formatMessage({ id: "agent.runtimeConfig.default" })}</span>}
                       </InfoRow>
                     </>
                   )}
@@ -2061,7 +2117,7 @@ function AgentProfileInfo({ agent, canManageAgent, canChangeAgentRole, onOpenPro
           )}
 
           <AgentCreatedAgentsSection
-            createdAgents={agent.createdAgents || []}
+            createdAgents={agent.createdAgents || NO_CREATED_AGENTS}
             onOpenProfile={onOpenProfile}
           />
         </>
@@ -2078,7 +2134,7 @@ function AgentProfileInfo({ agent, canManageAgent, canChangeAgentRole, onOpenPro
           maxWidthClass={pendingConfirm.maxWidthClass}
           chromeLocale="active"
           onConfirm={pendingConfirm.onConfirm}
-          onClose={() => setPendingConfirm(null)}
+          onClose={closePendingConfirm}
           layer={1}
         />
       )}
@@ -2086,7 +2142,7 @@ function AgentProfileInfo({ agent, canManageAgent, canChangeAgentRole, onOpenPro
       {showRoleHelp && (
         <RolePermissionHelpDialog
           subject="agent"
-          onClose={() => setShowRoleHelp(false)}
+          onClose={closeRoleHelp}
         />
       )}
 
@@ -2108,30 +2164,7 @@ function AgentProfileInfo({ agent, canManageAgent, canChangeAgentRole, onOpenPro
             >
               <RuntimeConfigFields
                 runtime={draftRuntime}
-                onRuntimeChange={(id) => {
-                  setDraftRuntime(id);
-                  const nextModel = getDefaultModel(id);
-                  setDraftModel(nextModel);
-                  setDraftCustomModelMode(false);
-                  setDraftProviderMode("default");
-                  setDraftProviderApiUrl("");
-                  setDraftProviderApiKey("");
-                  setDraftBuiltInProviderMode(BUILTIN_RUNTIME_DEFAULT_PROVIDER_ID);
-                  setDraftBuiltInProviderApiKey("");
-                  setDraftBuiltInProviderBaseUrl("");
-                  setDraftBuiltInProviderSupportsImageInput(false);
-                  setDraftLoadLocalPlugins(false);
-                  setDraftProviderConnectionId("");
-                  setDraftPiProviderMode(PI_PROVIDER_CONFIGURED);
-                  setDraftPiProviderApiKey("");
-                  setDraftFastMode(false);
-                  setDraftCommand("");
-                  if (!REASONING_EFFORT_RUNTIMES.has(id)) {
-                    setDraftReasoningEffort(null);
-                  } else {
-                    setDraftReasoningEffort(reconcileReasoningEffort(id, nextModel, null));
-                  }
-                }}
+                onRuntimeChange={changeDraftRuntime}
                 runtimeOptions={runtimeOptions}
                 model={draftModel}
                 persistedModel={
@@ -2152,22 +2185,7 @@ function AgentProfileInfo({ agent, canManageAgent, canChangeAgentRole, onOpenPro
                 providerApiKey={draftProviderApiKey}
                 onProviderApiKeyChange={setDraftProviderApiKey}
                 builtInProviderMode={draftBuiltInProviderMode}
-                onBuiltInProviderModeChange={(next) => {
-                  setDraftBuiltInProviderMode(next);
-                  setDraftBuiltInProviderSupportsImageInput(false);
-                  setDraftLoadLocalPlugins(false);
-                  if (isBuiltInGatewayProviderMode(next)) {
-                    setDraftModel("");
-                    setDraftCustomModelMode(true);
-                    return;
-                  }
-                  setDraftBuiltInProviderBaseUrl("");
-                  const defaultModel = builtInProviderDefaultModel(next);
-                  if (defaultModel) {
-                    setDraftModel(defaultModel);
-                    setDraftCustomModelMode(false);
-                  }
-                }}
+                onBuiltInProviderModeChange={changeDraftBuiltInProviderMode}
                 builtInProviderApiKey={draftBuiltInProviderApiKey}
                 onBuiltInProviderApiKeyChange={setDraftBuiltInProviderApiKey}
                 builtInProviderBaseUrl={draftBuiltInProviderBaseUrl}
@@ -2177,20 +2195,7 @@ function AgentProfileInfo({ agent, canManageAgent, canChangeAgentRole, onOpenPro
                 builtInProviderSupportsImageInput={draftBuiltInProviderSupportsImageInput}
                 onBuiltInProviderSupportsImageInputChange={setDraftBuiltInProviderSupportsImageInput}
                 piProviderMode={draftPiProviderMode}
-                onPiProviderModeChange={(next) => {
-                  setDraftPiProviderMode(next);
-                  // Switching to a builtin provider locks the Model picker
-                  // to that provider's SDK first-class set; reset draftModel
-                  // to the provider's default so the picker shows a valid
-                  // value.
-                  if (next !== PI_PROVIDER_CONFIGURED) {
-                    const defaultModel = piBuiltinProviderDefaultModel(next);
-                    if (defaultModel) {
-                      setDraftModel(defaultModel);
-                      setDraftCustomModelMode(false);
-                    }
-                  }
-                }}
+                onPiProviderModeChange={changeDraftPiProviderMode}
                 piProviderApiKey={draftPiProviderApiKey}
                 onPiProviderApiKeyChange={setDraftPiProviderApiKey}
                 fastMode={draftFastMode}
@@ -2213,13 +2218,7 @@ function AgentProfileInfo({ agent, canManageAgent, canChangeAgentRole, onOpenPro
                 onProviderConnectionChange={changeDraftProviderConnection}
                 onEditProviderConnection={capabilities.manageExternalAuth ? setEditingProviderConnection : undefined}
                 schemaBacked={draftSchemaBacked || v2EditActive}
-                runtimeFormV2={v2EditActive ? {
-                  state: runtimeFormV2Edit,
-                  values: v2EditValues,
-                  onChange: changeV2EditValue,
-                  serverErrors: v2EditServerErrors,
-                  editing: true,
-                } : undefined}
+                runtimeFormV2={runtimeFormV2EditProps}
                 formDefinition={draftFormDefinition}
                 formDefinitionLoading={draftSchemaBacked && runtimeFormDefinitionCatalog.loading}
                 formDefinitionError={draftSchemaBacked && !runtimeFormDefinitionCatalog.loading && Boolean(draftFormDefinitionEntry?.error)}
@@ -2273,11 +2272,8 @@ function AgentProfileInfo({ agent, canManageAgent, canChangeAgentRole, onOpenPro
           key={editingProviderConnection.id}
           connection={editingProviderConnection}
           providerOptions={providerConnectionCatalog.providerOptions}
-          onClose={() => setEditingProviderConnection(null)}
-          onCompleted={async () => {
-            setEditingProviderConnection(null);
-            await providerConnectionCatalog.refresh();
-          }}
+          onClose={closeEditingProviderConnection}
+          onCompleted={completeEditingProviderConnection}
         />
       )}
     </>
@@ -2298,26 +2294,12 @@ function AgentCreatedAgentsSection({ createdAgents, onOpenProfile }: { createdAg
       {createdAgents.length > 0 ? (
         <div className="space-y-2">
           {createdAgents.map((createdAgent) => (
-            <AvatarListRow
-              key={createdAgent.id}
-              avatar={<AvatarSlot context="surface-list" type="agent" agentAvatarUrl={createdAgent.avatarUrl} />}
-              name={createdAgent.displayName || createdAgent.name}
-              subtitle={formatRuntimeLabelWithStatus(createdAgent.runtime, formatMessage)}
-              rightContent={<CreatedAgentStatusDot agentId={createdAgent.id} />}
-              onClick={() => (onOpenProfile ?? openProfile)("agent", createdAgent.id)}
-            />
+            <CreatedAgentRow key={createdAgent.id} createdAgent={createdAgent} onOpenProfile={onOpenProfile ?? openProfile} />
           ))}
         </div>
       ) : null}
     </div>
   );
-}
-
-function CreatedAgentStatusDot({ agentId }: { agentId: string }) {
-  const intl = useIntl();
-  const displayState = useAgentDisplayState(agentId);
-  const activityText = formatAgentDisplayStateText(intl, displayState);
-  return <StatusDot activity={displayState.activity} title={activityText} />;
 }
 
 // Isolated start/stop button — subscribes to activity for this agent only.
@@ -2326,9 +2308,10 @@ function AgentStartStopButton({ agentId, onShowStopConfirm }: { agentId: string;
   const displayState = useAgentDisplayState(agentId);
   const startAgent = useAgentStore((s) => s.startAgent);
   const isOnline = displayState.isOnline;
+  const handleStart = useCallback(() => startAgent(agentId), [startAgent, agentId]);
   return (
     <Button variant="outline" size="md"
-      onClick={isOnline ? onShowStopConfirm : () => startAgent(agentId)}
+      onClick={isOnline ? onShowStopConfirm : handleStart}
       className="flex w-full items-center justify-center gap-2"
     >
       {isOnline ? <Square size={14} /> : <Play size={14} />}
@@ -2348,14 +2331,11 @@ function AgentStatusBadge({ agentId, showDetail, fallbackStatus, externalStatus 
   // task #1123: a failed start carries a typed reason; pick catalog copy by
   // reason (never by parsing the detail text) and let it stand in for the
   // daemon's detail so the existing offline + runtime_unavailable text path
-  // (which keeps the detail) renders it. Only model_not_found has its own copy
-  // today; other reasons keep the daemon's user message.
+  // (which keeps the detail) renders it. See formatSpawnFailureDetail.
   const spawnFailure = rawDisplayState.activityDetailKind === "runtime_unavailable"
     ? activityState?.spawnFailure
     : undefined;
-  const spawnFailureText = spawnFailure?.reason === "model_not_found"
-    ? formatMessage({ id: "activity.status.modelNotFound" }, { model: spawnFailure.model ?? "?" })
-    : null;
+  const spawnFailureText = formatSpawnFailureDetail(formatMessage, spawnFailure, rawDisplayState.activityDetail ?? "");
   const displayState = spawnFailureText
     ? { ...rawDisplayState, activityDetail: spawnFailureText }
     : rawDisplayState;
@@ -2449,9 +2429,12 @@ function AgentStatusBadge({ agentId, showDetail, fallbackStatus, externalStatus 
   );
 }
 
+const NO_ROLE_OPTIONS: ReturnType<typeof useEditableAgentRoleOptions> = [];
+const AGENT_HEADER_CONTAINER_PROPS = { className: `agent-profile-header-container ${PROFILE_HEADER_SURFACE_CLASS}` };
+
 // Isolated header component — only re-renders on activity changes for this agent,
 // without triggering re-render of ChatPanel / tabs below.
-function AgentDetailHeader({ agent, canControlAgentRuntime, canMessageAgent, onMessage, onClose, onBack, onShowResetDialog, onShowStopConfirm, workspaceEmbedded = false, headerActionsHost = null }: {   agent: Agent;
+function AgentDetailHeader({ agent, canControlAgentRuntime, canMessageAgent, onMessage, onClose, onBack, onShowResetDialog, onShowStopConfirm }: {   agent: Agent;
   canControlAgentRuntime: boolean;
   canMessageAgent: boolean;
   onMessage: () => void;
@@ -2459,8 +2442,6 @@ function AgentDetailHeader({ agent, canControlAgentRuntime, canMessageAgent, onM
   onBack?: () => void;
   onShowResetDialog: () => void;
   onShowStopConfirm: () => void;
-  workspaceEmbedded?: boolean;
-  headerActionsHost?: Element | null;
 }) {
   const { formatMessage } = useIntl();
   const slug = useServerStore((s) => s.current?.slug);
@@ -2489,10 +2470,17 @@ function AgentDetailHeader({ agent, canControlAgentRuntime, canMessageAgent, onM
       ? agent.serverName || agent.serverSlug || null
       : null;
   void sourceServerLabel;
-  const handleStartStop = () => {
+  const handleStartStop = useCallback(() => {
     if (isOnline) onShowStopConfirm();
     else void startAgent(agent.id);
-  };
+  }, [agent.id, isOnline, onShowStopConfirm, startAgent]);
+  const mobileBackTitle = formatMessage({ id: "common.announcement.back" });
+  const mobileBackProps = useMemo(
+    () => ({ "data-testid": "agent-mobile-back", title: mobileBackTitle }),
+    [mobileBackTitle],
+  );
+  const headerTitle = agent.displayName || agent.name;
+  const titleClickProps = useMemo(() => ({ title: headerTitle }), [headerTitle]);
 
   const overflowActions = !isDeleted ? (
     <AgentProfileOverflowMenu
@@ -2521,21 +2509,11 @@ function AgentDetailHeader({ agent, canControlAgentRuntime, canMessageAgent, onM
     </>
   );
 
-  if (workspaceEmbedded) {
-    if (!headerActionsHost) return null;
-    const workspaceActions = (
-      <div className="workspace-grid-tabset-actions" data-testid="workspace-grid-agent-actions">
-        {overflowActions}
-      </div>
-    );
-    return createPortal(workspaceActions, headerActionsHost);
-  }
-
   return (
     <PanelHeader
       onMobileBack={headerBack}
       backButtonVisibility={onBack ? "always" : "responsive"}
-      mobileBackProps={{ "data-testid": "agent-mobile-back", title: formatMessage({ id: "common.announcement.back" }) }}
+      mobileBackProps={mobileBackProps}
       iconSlot={
         <AvatarSlot
           context="panel-header"
@@ -2545,8 +2523,13 @@ function AgentDetailHeader({ agent, canControlAgentRuntime, canMessageAgent, onM
         />
       }
       iconAlwaysVisible
-      title={agent.displayName || agent.name}
-      titleClickProps={{ title: agent.displayName || agent.name }}
+      iconKind="avatar"
+      title={headerTitle}
+      // Handle parity with the human profile header (cindyz 2026-10-10, #737):
+      // title = display name, subtitle = the weaker @handle in the same meta spec.
+      subtitle={`@${agent.name}`}
+      subtitleClassName={PROFILE_HANDLE_SIZE_CLASS}
+      titleClickProps={titleClickProps}
       titleSuffix={
         isDeleted ? (
           <div className="flex min-w-0 items-center gap-1.5">
@@ -2556,13 +2539,13 @@ function AgentDetailHeader({ agent, canControlAgentRuntime, canMessageAgent, onM
           </div>
         ) : undefined
       }
-      containerProps={{ className: "agent-profile-header-container" }}
+      containerProps={AGENT_HEADER_CONTAINER_PROPS}
       actions={actions}
     />
   );
 }
 
-export default function AgentDetailPanel({ agent, onClose, onBack, onOpenProfile, workspaceEmbedded = false, headerActionsHost = null }: { agent: Agent; onClose?: () => void; onBack?: () => void; onOpenProfile?: (type: "agent" | "human", id: string) => void; workspaceEmbedded?: boolean; headerActionsHost?: Element | null }) {
+export default function AgentDetailPanel({ agent, onClose, onBack, onOpenProfile }: { agent: Agent; onClose?: () => void; onBack?: () => void; onOpenProfile?: (type: "agent" | "human", id: string) => void }) {
   const { formatMessage } = useIntl();
   const formatMessageRef = useRef(formatMessage);
   formatMessageRef.current = formatMessage;
@@ -2678,7 +2661,23 @@ export default function AgentDetailPanel({ agent, onClose, onBack, onOpenProfile
   // Runtime-error sentinel: known stable runtime errors map to catalog copy;
   // unknown errors keep the raw text / generic fallback (never mistranslated).
   const runtimeErrorKind = typedRuntimeErrorErrKind ?? (rawRuntimeError ? classifyRuntimeError(rawRuntimeError) : null);
-  const activityErrorText = runtimeErrorKind
+  // task #735: a "not installed" classification only keeps the install copy
+  // when the start failure's typed carrier confirms the miss (lookupReason
+  // "not_on_path"). A timed-out/denied/failed lookup — and an old daemon that
+  // carries no reason — is unresolved, never "install it".
+  const startLookupDisplay = runtimeErrorKind === "notInstalled"
+    ? runtimeLookupDisplayForReason(
+        activityState?.spawnFailure?.reason === "runtime_not_found"
+          ? activityState.spawnFailure.lookupReason
+          : undefined,
+      )
+    : null;
+  const activityErrorText = startLookupDisplay && startLookupDisplay !== "confirmed_missing"
+    ? formatMessage(
+        { id: RUNTIME_LOOKUP_DISPLAY_MESSAGE_ID[startLookupDisplay] },
+        { runtimeName: getRuntimeDisplayName(agent.runtime) },
+      )
+    : runtimeErrorKind
     ? formatMessage({ id: RUNTIME_ERROR_LABEL_ID[runtimeErrorKind] })
     : hasRuntimeError
       ? formatActivityText(formatMessage, "error", rawRuntimeError)
@@ -2971,7 +2970,7 @@ export default function AgentDetailPanel({ agent, onClose, onBack, onOpenProfile
     await loadReminders();
   }, [loadReminders]);
 
-  const handleStop = async () => {
+  const handleStop = useCallback(async () => {
     setStartError("");
     try {
       await stopAgent(agent.id);
@@ -2979,15 +2978,42 @@ export default function AgentDetailPanel({ agent, onClose, onBack, onOpenProfile
       const axiosErr = err as { response?: { data?: { error?: string } } };
       setStartError(axiosErr.response?.data?.error || formatMessage({ id: "agent.detail.stopAgentFailed" }));
     }
-  };
+  }, [agent.id, formatMessage, stopAgent]);
 
-  const handleDelete = async () => {
+  const handleDelete = useCallback(async () => {
     await deleteAgent(agent.id);
     setShowDeleteConfirm(false);
-  };
+  }, [agent.id, deleteAgent]);
+
+  const handleMessage = useCallback(async () => {
+    useProfileStore.getState().closeProfile();
+    useThreadStore.getState().closeThread();
+    if (dmChannel) {
+      nav.toDm(dmChannel.id);
+    } else if (!agent.deletedAt) {
+      const ch = await openDM(agent.id);
+      if (ch) nav.toDm(ch.id);
+    }
+  }, [agent.deletedAt, agent.id, dmChannel, nav, openDM]);
+  const openResetDialog = useCallback(() => setShowResetDialog(true), []);
+  const closeResetDialog = useCallback(() => setShowResetDialog(false), []);
+  const openStopConfirm = useCallback(() => setShowStopConfirm(true), []);
+  const closeStopConfirm = useCallback(() => setShowStopConfirm(false), []);
+  const openReportDialog = useCallback(() => setShowReportDialog(true), []);
+  const closeReportDialog = useCallback(() => setShowReportDialog(false), []);
+  const openDeleteConfirm = useCallback(() => setShowDeleteConfirm(true), []);
+  const closeDeleteConfirm = useCallback(() => setShowDeleteConfirm(false), []);
+  const editAvatar = useCallback(() => setEditField("avatar"), []);
+  const editDisplayName = useCallback(() => setEditField("displayName"), []);
+  const closeEditField = useCallback(() => setEditField(null), []);
+  const agentAvatarUrl = agent.avatarUrl;
+  const agentTitle = agent.displayName || agent.name;
+  const viewAvatar = useCallback(() => {
+    useImageLightboxStore.getState().openImage(agentAvatarUrl!, agentTitle);
+  }, [agentAvatarUrl, agentTitle]);
 
   return (
-    <ProfilePanelBody className="flex min-h-0 flex-1 flex-col bg-layer-panel theme-brutal:bg-white">
+    <ProfilePanelBody className="flex min-h-0 flex-1 flex-col bg-layer-panel font-sans theme-brutal:bg-white">
       {/* Header — isolated component to prevent activity changes from re-rendering ChatPanel */}
       <AgentDetailHeader
         agent={agent}
@@ -2995,20 +3021,9 @@ export default function AgentDetailPanel({ agent, onClose, onBack, onOpenProfile
         canMessageAgent={!isBoundedPublicProjection}
         onClose={onClose}
         onBack={onBack}
-        onMessage={async () => {
-          useProfileStore.getState().closeProfile();
-          useThreadStore.getState().closeThread();
-          if (dmChannel) {
-            nav.toDm(dmChannel.id);
-          } else if (!agent.deletedAt) {
-            const ch = await openDM(agent.id);
-            if (ch) nav.toDm(ch.id);
-          }
-        }}
-        onShowResetDialog={() => setShowResetDialog(true)}
-        onShowStopConfirm={() => setShowStopConfirm(true)}
-        workspaceEmbedded={workspaceEmbedded}
-        headerActionsHost={headerActionsHost}
+        onMessage={handleMessage}
+        onShowResetDialog={openResetDialog}
+        onShowStopConfirm={openStopConfirm}
       />
 
       {/* Start error */}
@@ -3070,9 +3085,9 @@ export default function AgentDetailPanel({ agent, onClose, onBack, onOpenProfile
       {/* Tab bar — horizontally scrollable */}
       <div
         ref={agentTabsRef}
-        className={`min-w-0 max-w-full overflow-x-auto overflow-y-hidden scrollbar-none ${workspaceEmbedded ? "workspace-grid-agent-secondary-nav" : ""}`}
+        className="min-w-0 max-w-full overflow-x-auto overflow-y-hidden scrollbar-none"
       >
-        <Tabs<AgentTab> value={activeTab} onValueChange={setActiveTab} className="border-b theme-brutal:border-b-2 border-line-muted bg-layer-panel theme-brutal:border-black theme-brutal:bg-white">
+        <Tabs<AgentTab> value={activeTab} onValueChange={setActiveTab} className="bg-layer-panel theme-brutal:border-b-2 theme-brutal:border-black theme-brutal:bg-white">
           <SortableTabsList<AgentTab>
             value={orderedAgentTabIds}
             onReorder={reorderAgentTabs}
@@ -3118,7 +3133,7 @@ export default function AgentDetailPanel({ agent, onClose, onBack, onOpenProfile
                 type="button"
                 aria-label={formatMessage({ id: "agent.detail.changeAvatar" })}
                 data-testid="agent-change-avatar"
-                onClick={() => setEditField("avatar")}
+                onClick={editAvatar}
                 variant="outline"
                 className="group relative size-16 shrink-0 !p-0"
               >
@@ -3132,7 +3147,7 @@ export default function AgentDetailPanel({ agent, onClose, onBack, onOpenProfile
               <Tooltip content={formatMessage({ id: "agent.detail.viewAvatar" })}>
               <Button
                 type="button"
-                onClick={() => useImageLightboxStore.getState().openImage(agent.avatarUrl!, agent.displayName || agent.name)}
+                onClick={viewAvatar}
                 variant="outline"
                 className="group relative size-16 shrink-0 !p-0"
                 aria-label={formatMessage({ id: "agent.detail.viewAvatar" })}
@@ -3152,14 +3167,14 @@ export default function AgentDetailPanel({ agent, onClose, onBack, onOpenProfile
               <div className="flex min-w-0 items-center gap-2">
                 <AgentHeaderName
                   agent={agent}
-                  onEdit={canManageAgent && !agent.deletedAt ? () => setEditField("displayName") : undefined}
+                  onEdit={canManageAgent && !agent.deletedAt ? editDisplayName : undefined}
                 />
               </div>
               {/* The hover title duplicates the visible handle but is load-bearing
                   for the i18n literal gate: scripts/i18n-literal-baseline.json audits
                   this exact template literal (protocol class), so removing the
                   attribute would force a three-baseline ratchet. Kept deliberately. */}
-              <div className="truncate text-sm text-foreground-muted font-mono" title={`@${agent.name}`}>@{agent.name}</div>
+              <div className={`truncate text-sm ${PROFILE_HANDLE_SIZE_CLASS} text-foreground-placeholder theme-brutal:text-foreground-muted font-mono`} title={`@${agent.name}`}>@{agent.name}</div>
               {/* Live activity has its own line under the handle, so it never squeezes the name. */}
               {!agent.deletedAt && (
                 <div className="mt-1 min-w-0">
@@ -3175,8 +3190,8 @@ export default function AgentDetailPanel({ agent, onClose, onBack, onOpenProfile
               agent={agent}
               open
               field={editField}
-              onClose={() => setEditField(null)}
-              roleOptions={canChangeAgentRole && !agent.deletedAt ? editableRoleOptions : []}
+              onClose={closeEditField}
+              roleOptions={canChangeAgentRole && !agent.deletedAt ? editableRoleOptions : NO_ROLE_OPTIONS}
             />
           )}
 
@@ -3197,6 +3212,10 @@ export default function AgentDetailPanel({ agent, onClose, onBack, onOpenProfile
             </div>
           )}
 
+          {canManageAgent && !agent.deletedAt && !isExternalAgent && (
+            <AgentMigrationSection agent={agent} />
+          )}
+
           {/* Actions */}
           {canManageAgent && !agent.deletedAt && (
             <div className="px-5 py-4 border-t border-line-muted theme-brutal:border-black/10">
@@ -3206,10 +3225,9 @@ export default function AgentDetailPanel({ agent, onClose, onBack, onOpenProfile
               <div className="space-y-2">
                 {!isExternalAgent && (
                   <>
-                    <AgentMigrationSection agent={agent} />
-                    <AgentStartStopButton agentId={agent.id} onShowStopConfirm={() => setShowStopConfirm(true)} />
+                    <AgentStartStopButton agentId={agent.id} onShowStopConfirm={openStopConfirm} />
                     <Button variant="outline" size="md"
-                      onClick={() => setShowResetDialog(true)}
+                      onClick={openResetDialog}
                       className="flex w-full items-center justify-center gap-2"
                     >
                       <RotateCcw size={14} />
@@ -3238,7 +3256,7 @@ export default function AgentDetailPanel({ agent, onClose, onBack, onOpenProfile
                 </CopyButton>
                 {FEEDBACK_EXPORT_ENABLED && (
                   <Button variant="warning" size="md"
-                    onClick={() => setShowReportDialog(true)}
+                    onClick={openReportDialog}
                     className="flex w-full items-center justify-center gap-2"
                   >
                     <Bug size={14} />
@@ -3246,7 +3264,7 @@ export default function AgentDetailPanel({ agent, onClose, onBack, onOpenProfile
                   </Button>
                 )}
                 <Button variant="danger" size="md"
-                  onClick={() => setShowDeleteConfirm(true)}
+                  onClick={openDeleteConfirm}
                   className="flex w-full items-center justify-center gap-2"
                 >
                   <Trash2 size={14} />
@@ -3302,7 +3320,7 @@ export default function AgentDetailPanel({ agent, onClose, onBack, onOpenProfile
           agentName={agent.displayName || agent.name}
           canFullReset={canResetAgentWorkspace}
           memberRuntimeOnly={currentRole === "member"}
-          onClose={() => setShowResetDialog(false)}
+          onClose={closeResetDialog}
         />
       )}
 
@@ -3310,7 +3328,7 @@ export default function AgentDetailPanel({ agent, onClose, onBack, onOpenProfile
         <ReportIssueDialog
           agent={agent}
           dmChannelId={dmChannel?.id}
-          onClose={() => setShowReportDialog(false)}
+          onClose={closeReportDialog}
         />
       )}
 
@@ -3326,7 +3344,7 @@ export default function AgentDetailPanel({ agent, onClose, onBack, onOpenProfile
           confirmColor="bg-brutal-orange"
           chromeLocale="active"
           onConfirm={handleStop}
-          onClose={() => setShowStopConfirm(false)}
+          onClose={closeStopConfirm}
         />
       )}
 
@@ -3346,7 +3364,7 @@ export default function AgentDetailPanel({ agent, onClose, onBack, onOpenProfile
           loadingLabel={formatMessage({ id: "agent.detail.deleting" })}
           chromeLocale="active"
           onConfirm={handleDelete}
-          onClose={() => setShowDeleteConfirm(false)}
+          onClose={closeDeleteConfirm}
         />
       )}
     </ProfilePanelBody>

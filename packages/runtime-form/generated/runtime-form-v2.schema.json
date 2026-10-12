@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$comment": "Generated from packages/runtime-form/contract/runtime-form-v2.contract.json (sha256 1556344f2749e4c0). Do not edit.",
+  "$comment": "Generated from packages/runtime-form/contract/runtime-form-v2.contract.json (sha256 8b82ac6e39a87e8d). Do not edit.",
   "$defs": {
     "Definition": {
       "type": "object",
@@ -40,9 +40,21 @@
             "type": "string"
           }
         },
+        "revision": {
+          "type": "string"
+        },
         "values": {
           "type": "object",
           "additionalProperties": {}
+        },
+        "writeOnlyKeepRequiresUnchanged": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
         }
       },
       "additionalProperties": true
@@ -100,6 +112,9 @@
         },
         "x-optionsFrom": {
           "$ref": "#/$defs/OptionsFrom"
+        },
+        "x-connectionOwned": {
+          "type": "boolean"
         },
         "additionalProperties": {}
       },
@@ -270,7 +285,7 @@
     },
     "OptionSource": {
       "type": "object",
-      "description": "Response of the option-sources endpoint. select: options + defaultValue. dependent_select: per-value lists keyed by the value of dependsOn. `customValueAllowed`, `status`, `reason` and `retryable` are sent only on the v2 endpoint and only to forms that list the matching capability (`select.custom_value`, `option_source.status`); a form without the capability gets the source exactly as before.",
+      "description": "Response of the option-sources endpoint. select: options + defaultValue. dependent_select: per-value lists keyed by the value of dependsOn. `customValueAllowed`, `status`, `reason` and `retryable` are sent only on the v2 endpoint and only to forms that list the matching capability (`select.custom_value`, `option_source.status`); a form without the capability gets the source exactly as before. Form-consistency parameter `?formRevision=<token>` (Definition.revision), optional, three outcomes: (1) absent — the source answers with the plain direct-option protocol and NEVER includes saved-connection options (Option.connectionId) or connection-keyed model maps, so pre-existing clients keep working unchanged; (2) present and matching the server's current build — the source answers within the capability range the form declared; (3) present and not matching — HTTP 409 with code `form_revision_stale` and recovery `refetch_form`; the client must refetch the whole form and must never merge new options into a stale form. The revision guards form consistency only; authorization and connection state are re-checked on every source request and again on save.",
       "required": [
         "sourceId",
         "kind",
@@ -374,6 +389,25 @@
           }
         },
         "defaultReasoningEffort": {
+          "type": "string"
+        },
+        "connectionId": {
+          "type": "string"
+        },
+        "underlyingProviderId": {
+          "type": "string"
+        },
+        "group": {
+          "type": "string",
+          "enum": [
+            "saved",
+            "direct"
+          ]
+        },
+        "unavailable": {
+          "type": "boolean"
+        },
+        "unavailableReason": {
           "type": "string"
         }
       },

@@ -716,7 +716,14 @@ export async function deleteProviderConnection(input: {
   });
 }
 
+/** Connection ids are UUIDs; an untrusted id never reaches the UUID column (a
+ *  malformed value is "unavailable", never a database error). */
+export const SAVED_CONNECTION_ID_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 export async function resolveProviderConnectionSelection(serverId: string, connectionId: string) {
+  if (!SAVED_CONNECTION_ID_SHAPE.test(connectionId)) {
+    throw new ProviderConnectionError("Provider connection is unavailable", "provider_connection_unavailable");
+  }
   const [row] = await getDb().select({
     connection: providerConnections,
     credentialVersion: providerConnectionCredentials.credentialVersion,

@@ -335,21 +335,43 @@ export interface ColdIdleRecycleStop {
  * at-wake recycle applies — this is how the recycle reaches the fleet's
  * dominant cold-wake shape (long-lived processes woken via stdin).
  */
+/** Why the sweep left a running process alone (one per view per sweep). */
+export type ColdIdleSkipReason =
+  | "disabled"
+  | "not_idle"
+  | "unsupported_runtime"
+  | "no_session"
+  | "recent_event"
+  | "session_facts_unavailable"
+  | "recent_activity"
+  | "context_below_threshold"
+  | "no_transcript"
+  | "background_tasks_unknown"
+  | "background_tasks_outstanding";
+
 export async function selectColdIdleRecycleStops(
   views: readonly ColdIdleRuntimeView[],
-  opts: { nowMs?: number; homeDir?: string; processEnv?: NodeJS.ProcessEnv } = {},
+  opts: {
+    nowMs?: number;
+    homeDir?: string;
+    processEnv?: NodeJS.ProcessEnv;
+    /** Called once for every view the sweep does not stop, with the gate that held it. */
+    onSkip?: (agentId: string, reason: ColdIdleSkipReason) => void;
+  } = {},
 ): Promise<ColdIdleRecycleStop[]> {
   const nowMs = opts.nowMs ?? Date.now();
   const out: ColdIdleRecycleStop[] = [];
+  const skip = (agentId: string, reason: ColdIdleSkipReason) => opts.onSkip?.(agentId, reason);
   for (const view of views) {
     const cfg = resolveWakeRecycleConfig(view.config.constructedWakeContext, view.config.envVars, opts.processEnv ?? process.env);
-    if (!cfg.enabled || !view.idle) continue;
-    if (!WAKE_RECYCLE_ENABLED_RUNTIMES.has(view.config.runtime ?? "claude")) continue;
+    if (!cfg.enabled) { skip(view.agentId, "disabled"); continue; }
+    if (!view.idle) { skip(view.agentId, "not_idle"); continue; }
+    if (!WAKE_RECYCLE_ENABLED_RUNTIMES.has(view.config.runtime ?? "claude")) { skip(view.agentId, "unsupported_runtime"); continue; }
     const sessionId = view.liveSessionId ?? view.config.sessionId;
-    if (!sessionId) continue;
-    if (nowMs - view.lastEventAtMs <= cfg.minColdGapMs) continue;
+    if (!sessionId) { skip(view.agentId, "no_session"); continue; }
+    if (nowMs - view.lastEventAtMs <= cfg.minColdGapMs) { skip(view.agentId, "recent_event"); continue; }
     const facts = await readRuntimeSessionResumeFacts(view.config.runtime ?? "claude", sessionId, opts.homeDir);
-    if (facts.lastActivityAtMs === null || facts.lastContextTokens === null) continue;
+    if (facts.lastActivityAtMs === null || facts.lastContextTokens === null) { skip(view.agentId, "session_facts_unavailable"); continue; }
     // A turn-idle runtime can still host live background work (subagents,
     // monitors) whose activity lands in the session's sidecar directory, not
     // the main transcript. Stopping mid-subagent loses that work — count the
@@ -359,14 +381,15 @@ export async function selectColdIdleRecycleStops(
       ? await latestMtimeUnder(facts.transcriptPath.replace(/\.jsonl$/, ""))
       : null;
     const lastActive = Math.max(facts.lastActivityAtMs, view.lastEventAtMs, sidecarActivityAtMs ?? 0);
-    if (nowMs - lastActive <= cfg.minColdGapMs) continue;
-    if (facts.lastContextTokens <= cfg.minContextTokens) continue;
+    if (nowMs - lastActive <= cfg.minColdGapMs) { skip(view.agentId, "recent_activity"); continue; }
+    if (facts.lastContextTokens <= cfg.minContextTokens) { skip(view.agentId, "context_below_threshold"); continue; }
     // Sweep only sessions with DEFINITELY zero outstanding background tasks
     // right now: a runtime holding an armed monitor/background task may have
     // silent pending intent the daemon cannot see; leave it alone.
-    if (!facts.transcriptPath) continue;
+    if (!facts.transcriptPath) { skip(view.agentId, "no_transcript"); continue; }
     const outstanding = await transcriptOutstandingBackgroundTasks(facts.transcriptPath);
-    if (outstanding === null || outstanding > 0) continue;
+    if (outstanding === null) { skip(view.agentId, "background_tasks_unknown"); continue; }
+    if (outstanding > 0) { skip(view.agentId, "background_tasks_outstanding"); continue; }
     out.push({
       agentId: view.agentId,
       sessionId,

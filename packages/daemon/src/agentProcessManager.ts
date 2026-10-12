@@ -55,6 +55,8 @@ import {
   type FeedbackTranscriptLookupReason,
   type FeedbackTranscriptUploadableContentKind,
   MODEL_SEEN_MAX_ITEMS_PER_REPORT,
+  NON_RETRYABLE_SPAWN_FAILURE_REASONS,
+  RETRY_ONCE_SPAWN_FAILURE_REASONS,
 } from "@botiverse/raft-shared";
 import { appInboxItemTraceAttrs } from "@botiverse/raft-shared/src/appRuntimeTrace";
 import { getActiveTraceContext, runWithActiveSpan, runWithoutActiveSpan, withCanonicalTraceAttributes } from "@botiverse/raft-trace-client";
@@ -69,6 +71,7 @@ import {
 } from "./feedbackTranscriptCollector";
 import { collectFeedbackMachineLogTailAttachment } from "./feedbackMachineLogTail";
 import { uploadFeedbackTranscriptOutcome, type FeedbackTranscriptOutcomeUploadStatus } from "./feedbackTranscriptOutcomeUpload";
+import { startFeedbackAgentEventTail, type FeedbackAgentEventTailOutcome } from "./feedbackAgentEventTail";
 import { collectFeedbackMachineState, collectFeedbackTraceTail, redactedOrNull } from "./feedbackMachineEvidence";
 import { collectObservedFailureSummary } from "./observedFailureSummary";
 import { parseSkillFrontmatter } from "./skillFrontmatter";
@@ -90,7 +93,8 @@ import {
   type RuntimeSendResult,
 } from "./drivers/index";
 import { logger } from "./logger";
-import { bindContextGenerationToSession, configPassiveAx, rememberSessionContext, writeContextGeneration } from "./contextGeneration";
+import { bindContextGenerationToSession, configPassiveAx, readContextGeneration, rememberSessionContext, runtimeReportsCompaction, writeContextGeneration } from "./contextGeneration";
+import { elideSeenSendersInMessages, openSenderLedger, senderLedgerPath } from "./senderLedger";
 import { resolvePassiveAx } from "./passiveAxGate";
 import { buildCliTransportDir } from "./drivers/cliTransport";
 import { reapOrphanProcesses } from "./daemonOrphanReaper";
@@ -224,6 +228,14 @@ import {
 } from "./runtimeCommunicationTrace";
 import { resolveRaftHome, resolveRaftHomePath } from "./raftHome";
 import {
+  applyStandingPromptUpdate,
+  planStandingPromptRefresh,
+  stableStandingPromptConfig,
+  standingPromptHash,
+  StandingPromptLedger,
+} from "./standingPromptRefresh";
+import { SessionCompactionFailureLedger, SESSION_NEEDS_RESET_THRESHOLD } from "./sessionCompactionFailureLedger";
+import {
   createTurnOutcomeCounters,
   noteTurnOutcomeEvent,
   terminalFailureFromRawText,
@@ -271,6 +283,16 @@ const DEFAULT_MAX_CONCURRENT_AGENT_STARTS = 5;
 const DEFAULT_AGENT_START_INTERVAL_MS = 500;
 const RUNNER_CREDENTIAL_MINT_MAX_ATTEMPTS = 3;
 
+interface SenderElisionResult {
+  messages: AgentMessage[];
+  /** Call once with whether the stdin write succeeded. */
+  settle: (delivered: boolean) => void;
+}
+
+function NO_SENDER_ELISION(messages: AgentMessage[]): SenderElisionResult {
+  return { messages, settle: () => {} };
+}
+
 function assertNeverApmEffect(effect: never): never {
   throw new Error(`Unhandled APM gated steering effect: ${String(effect)}`);
 }
@@ -309,10 +331,17 @@ const WORKSPACE_IMAGE_MIME_BY_EXTENSION: Record<string, string> = {
   ".webp": "image/webp",
 };
 
+/** Runtimes whose sessions get stuck on a compaction that can never fit (task #10). */
+const COMPACTION_LEDGER_RUNTIMES: ReadonlySet<string> = new Set(["pi", "builtin"]);
+
 const WORKSPACE_NEVER_VISIBLE_HIDDEN_NAMES = new Set([
   ".aws",
   ".gnupg",
   ".ssh",
+  // Both Raft home names (~/.raft on new machines, ~/.slock on older ones)
+  // hold credentials, so a workspace that contains the user's home must not
+  // expose them. This also hides a workspace's own `.raft/` activity detail.
+  ".raft",
   ".slock",
   ".slock-runtime",
 ]);
@@ -367,6 +396,17 @@ function readNonNegativeIntegerEnv(name: string, fallback: number): number {
  * launch error as `cause` and mirrors its spawn-failure code so
  * `classifySpawnFailure` still decides by code after the message was rewritten.
  */
+/**
+ * task #365: the launch about to be spawned was claimed by the server against
+ * another connection than the current one; no process was created for it.
+ */
+export class StaleDispatchError extends Error {
+  constructor(agentId: string, readonly launchId: string) {
+    super(`Runtime not started for ${agentId}: launch ${launchId} was claimed against an earlier connection`);
+    this.name = "StaleDispatchError";
+  }
+}
+
 /** RFC 071 outbox: the open-launch record could not be written, so the runtime process was not spawned. */
 export class RuntimeOutcomeStorageBlockedError extends Error {
   constructor(agentId: string) {
@@ -420,6 +460,27 @@ export class RuntimeSessionStartError extends Error {
     this.name = "RuntimeSessionStartError";
     this.spawnFailureCode = spawnFailureCodeOf(cause);
   }
+}
+
+/**
+ * task #365: the runtime's child was proven never created: it has no pid and
+ * the spawn syscall itself failed (EACCES, ENOENT, ...). Settled `not_spawned`
+ * with reason `spawn_error` for a server that counts it
+ * (`SERVER_CAPABILITY_START_SPAWN_ERROR_V1`). Says nothing about whether the
+ * cause is temporary.
+ */
+export class RuntimeSpawnNoProcessError extends Error {
+  constructor(message: string, readonly syscall: string | null) {
+    super(message);
+    this.name = "RuntimeSpawnNoProcessError";
+  }
+}
+
+/** task #365: how long a start without a pid waits for its spawn error before its outcome is unknown. */
+export const SPAWN_EVIDENCE_WAIT_MS = 5_000;
+
+function isSpawnSyscall(syscall: string | null): boolean {
+  return typeof syscall === "string" && /^spawn(\s|$)/.test(syscall);
 }
 
 export class RunnerCredentialMintError extends Error {
@@ -557,7 +618,8 @@ function runtimeTier(runtime: string): string {
 export { resolveRuntimeSessionRef };
 export type { ResolveRuntimeSessionRefOptions };
 export { classifySpawnFailure } from "./spawnFailureClassification";
-import { RuntimeExecutableNotFoundError, spawnFailureCodeOf, type SpawnFailureReason } from "./spawnFailureErrors";
+import { classifySpawnFailure, startFailureActivity, type SpawnFailureClassification, type StartFailureActivity } from "./spawnFailureClassification";
+import { RuntimeExecutableNotFoundError, RuntimeSessionNeedsResetError, spawnFailureCodeOf, type SpawnFailureReason } from "./spawnFailureErrors";
 export type { SpawnFailureClassification, SpawnFailureReason } from "./spawnFailureClassification";
 
 /** Max chars for thinking/text content in trajectory entries (sent over WebSocket) */
@@ -567,11 +629,21 @@ const TRAJECTORY_COALESCE_MS = 350;
 /** Interval (ms) at which the daemon re-sends the current activity to prevent server-side stale timeout */
 const ACTIVITY_HEARTBEAT_MS = 60_000;
 const STDIN_NOTIFICATION_INITIAL_DELAY_MS = 3_000;
+/** A busy agent with no runtime progress for this long is treated as idle for
+ * App Inbox notices (a missed turn-end event must not block them for hours). */
+const APP_INBOX_BUSY_STALE_MS = 10 * 60_000;
+/** How long an idle write may go without the runtime reporting a turn. */
+const TURN_START_OBSERVATION_MS = 30_000;
 const STDIN_NOTIFICATION_RETRY_DELAY_MS = 15_000;
 const SESSION_READY_DELIVERY_RETRY_DELAY_MS = 15_000;
 const RUNTIME_ERROR_DELIVERY_BACKOFF_BASE_MS = 10_000;
 const RUNTIME_ERROR_DELIVERY_BACKOFF_MAX_MS = 5 * 60_000;
 const RUNTIME_ERROR_FINGERPRINT_FENCE_THRESHOLD = 3;
+/** A failed start the owner should keep seeing until the agent starts or is stopped. */
+interface LastStartFailure extends StartFailureActivity {
+  launchId: string | null;
+}
+
 /** RFC 071: accepted launches waiting for a final result, per agent (candidate bound). */
 const ACCEPTED_LAUNCHES_PER_AGENT_MAX = 32;
 
@@ -586,6 +658,11 @@ const ACCEPTED_LAUNCHES_PER_AGENT_MAX = 32;
 const SPAWN_FAIL_BACKOFF_BASE_MS = 1_000;
 const SPAWN_FAIL_BACKOFF_MAX_MS = 30_000;
 const SPAWN_FAIL_BACKOFF_THRESHOLD = 0;
+// After this many daemon-local restart failures in a row (about 30s of backoff
+// at 1s, 2s, 4s, 8s, 16s) the daemon stops restarting the agent by itself and
+// hands it to the Server, whose wake breaker pauses it after as many failed
+// starts and tells the owner. Typed configuration failures stop at once.
+const SPAWN_FAIL_MAX_ATTEMPTS = 5;
 // Runner credential mint has its own inner retry loop. Once that loop is
 // exhausted, do not require three more wake cycles before suppressing retry.
 const RUNNER_CREDENTIAL_MINT_BACKOFF_BASE_MS = 60_000;
@@ -686,6 +763,8 @@ function agentProcessStartupReady(startup: AgentProcessStartupState): AgentProce
 
 interface AgentProcess {
   providerRequest?: import("@botiverse/raft-shared").ProviderRequestActivity;
+  /** task #13: hash of the stable standing prompt this launch runs on (recorded per session at session_init). */
+  standingPromptHash?: string;
   runtime: RuntimeSession;
   driver: RuntimeDriver;
   inbox: AgentMessage[];
@@ -755,6 +834,15 @@ interface AgentProcess {
   runtimeErrorDeliveryBackoff: RuntimeErrorDeliveryBackoffState;
   sessionReadyDeliveryRetry: SessionReadyDeliveryRetryState;
   spawnError: string | null;
+  /** task #365: `syscall` of the runtime's `error`, e.g. "spawn claude"; set only by that event. */
+  spawnErrorSyscall: string | null;
+  /**
+   * task #365: this child was proven never created (no pid and a spawn-syscall
+   * error) and its start was settled `not_spawned` / `spawn_error`. Its later
+   * `exit` / `close` (Node emits `close` after a failed spawn, and the runtime
+   * session synthesises an `exit` from it) must not report a process exit.
+   */
+  spawnNoProcess: boolean;
   processInstanceId: string;
   spawnedAtMs: number;
   exit: AgentProcessExitState;
@@ -1417,6 +1505,8 @@ export class AgentProcessManager {
    * Server's outcome or by the agent starting for any reason.
    */
   private readonly pendingServerWakes = new Map<string, PendingServerWake>();
+  /** See `reportStartFailure`. */
+  private readonly lastStartFailures = new Map<string, LastStartFailure>();
   /**
    * RFC 071 §6: the `catchupBatchId` of the latest server start per agent,
    * bound to that start's launchId. The spawn that renders the start's
@@ -1436,6 +1526,10 @@ export class AgentProcessManager {
   private serverUrl: string;
   private slockHome: string;
   private dataDir: string;
+  /** task #13: the standing prompt each Codex / Claude / … session runs on, on disk. */
+  private standingPromptLedger: StandingPromptLedger;
+  /** task #10: consecutive terminal compaction failures per Pi / Built-in session, on disk. */
+  private compactionFailureLedger: SessionCompactionFailureLedger;
   private runtimeSessionHomeDir: string;
   private coldIdleSweepTimer: ReturnType<typeof setInterval> | null = null;
   private frozenClockMs: number | null = null;
@@ -1471,6 +1565,18 @@ export class AgentProcessManager {
    */
   private readonly daemonVersion: string | null;
   private readonly daemonInstanceId: string | null;
+  /**
+   * task #365: what the connected server advertised. `spawnErrorCapable`: it
+   * counts a proven never-created child (`spawn_error`) in its own bounded
+   * backoff; without it a failed spawn keeps today's crash reporting, which
+   * an older server's #1119 breaker relies on. `connectionEpochId`: the
+   * server's id for the current connection; an automatic start claimed
+   * against another one is stale.
+   */
+  private serverStartContext: { spawnErrorCapable: boolean; connectionEpochId: string | null } = {
+    spawnErrorCapable: false,
+    connectionEpochId: null,
+  };
   private readonly runtimeProcessGate: RuntimeProcessGate | null;
   /** RFC 071: per agent, the start held for the server capability (cancelled by a stop). */
   private readonly capabilityHolds = new Map<string, CapabilityWait>();
@@ -1479,6 +1585,7 @@ export class AgentProcessManager {
   private readonly fetchImpl: FetchLike;
   private readonly serverConnected: () => boolean;
   readonly #appInboxForAgent: ((agentId: string) => AgentAppInboxStore) | null;
+  readonly #onAgentWorkingToIdle: ((agentId: string) => void) | null;
   private readonly appInboxNoticedItemIds = new Map<string, Set<string>>();
   /**
    * per_turn runtimes (opencode, cursor, gemini, copilot) cannot take a notice
@@ -1487,7 +1594,20 @@ export class AgentProcessManager {
    * advisory notices instead ride in the next start's first input.
    */
   private readonly appInboxNoticesAfterTurn = new Map<string, { wake: boolean }>();
+  /**
+   * A busy runtime that cannot take a notice right now (e.g. codex between
+   * steerable points) fails the write; the caller retries each period and the
+   * idle drain re-offers it. Trace the state change only: the first busy
+   * failure, then the outcome that ends the wait (with attempts and wait).
+   */
+  private readonly appInboxBusyDeferrals = new Map<string, { firstAtMs: number; attempts: number }>();
   private readonly appInboxIdleDrains = new Set<string>();
+  // After a runtime rejects a turn/start as busy, the idle drain waits one
+  // retry interval instead of re-offering at once: the rejection marks the
+  // agent idle again, and an immediate drain would be rejected the same way,
+  // looping as fast as the runtime answers (10–25 writes/s seen on kimi-sdk).
+  private readonly appInboxDrainDeferredUntil = new Map<string, number>();
+  private readonly appInboxDeferredDrainTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly runtimeErrorProcessRestartTimers = new Map<string, unknown>();
   private readonly busyDelivery = new RuntimeBusyDeliveryCoordinator<AgentProcess>({
     nowMs: () => this.clockNow(),
@@ -1530,6 +1650,8 @@ export class AgentProcessManager {
       };
       serverConnected?: () => boolean;
       appInboxForAgent?: (agentId: string) => AgentAppInboxStore;
+      /** Called when an agent finishes work and goes from Working to Idle (built-in apps time advisory hints by it). */
+      onAgentWorkingToIdle?: (agentId: string) => void;
       /** RFC 071 outbox: every spawn and rebind first durably records the process as open. */
       runtimeProcessGate?: RuntimeProcessGate;
     },
@@ -1540,7 +1662,10 @@ export class AgentProcessManager {
     this.serverUrl = opts.serverUrl;
     this.slockHome = opts.slockHome ? path.resolve(opts.slockHome) : resolveRaftHome();
     this.#appInboxForAgent = opts.appInboxForAgent ?? null;
+    this.#onAgentWorkingToIdle = opts.onAgentWorkingToIdle ?? null;
     this.dataDir = opts.dataDir || resolveRaftHomePath("agents", this.slockHome);
+    this.standingPromptLedger = new StandingPromptLedger(this.dataDir, () => this.clockNow());
+    this.compactionFailureLedger = new SessionCompactionFailureLedger(this.dataDir);
     this.runtimeSessionHomeDir = opts.runtimeSessionHomeDir || os.homedir();
     this.driverResolver = opts.driverResolver || getDriver;
     this.defaultAgentEnvVarsProvider = opts.defaultAgentEnvVarsProvider || null;
@@ -1604,7 +1729,21 @@ export class AgentProcessManager {
       lastEventAtMs: ap.runtimeProgress.lastEventAt,
       liveSessionId: ap.sessionId,
     }));
-    for (const stop of await selectColdIdleRecycleStops(views, { homeDir: this.runtimeSessionHomeDir })) {
+    // RFC 070 observability: one event per sweep with how many processes each
+    // gate held, so "the sweep never stops anything" shows which gate it is.
+    const skipped: Record<string, number> = {};
+    const stops = await selectColdIdleRecycleStops(views, {
+      homeDir: this.runtimeSessionHomeDir,
+      onSkip: (_agentId, reason) => { skipped[reason] = (skipped[reason] ?? 0) + 1; },
+    });
+    if (views.length > 0) {
+      this.recordDaemonEvent("daemon.agent.cold_idle_sweep", {
+        views: views.length,
+        stops: stops.length,
+        ...Object.fromEntries(Object.entries(skipped).map(([reason, n]) => [`skipped_${reason}`, n])),
+      });
+    }
+    for (const stop of stops) {
       const ap = this.agents.get(stop.agentId);
       if (!ap || !this.isApmIdle(ap) || this.hasUntoldInboxWork(ap) || ap.exit.kind !== "live") continue;
       logger.info(`[Agent ${stop.agentId}] Stopping cold idle runtime (idle ${Math.round(stop.idleMs / 60_000)}m, ~${Math.round(stop.priorContextTokens / 1000)}k context, session ${stop.sessionId}, ${ap.inbox.length} notified unread); next wake decides resume vs fresh briefing`);
@@ -1869,6 +2008,7 @@ export class AgentProcessManager {
           logger.error(`[Agent ${agentId}] Failed to start from pending inbox after spawn-fail cooldown`, err);
           this.lifecycleRecords.setRestartSnapshot(agentId, restartSnapshot);
           const report = this.recordSpawnFailure(agentId, "spawn_error");
+          if (this.stopLocalRestartAfterFailure(agentId, restartSnapshot, err, report.attempts, "spawn_fail_cooldown_expired")) return;
           if (report.backoffActive) {
             this.enterSpawnFailCooldownResidency(agentId, restartSnapshot, report.untilMs, "spawn_fail_cooldown_expired", "spawn_error");
           }
@@ -2175,7 +2315,9 @@ export class AgentProcessManager {
       launch_id: ap.launchId || "",
       session_id_present: Boolean(ap.sessionId),
       runtime: ap.config.runtime,
-      delivery_path: path,
+      // Not `delivery_path`: the trace sink drops any `*_path` key as a
+      // filesystem path, which left this field empty on every daemon version.
+      delivery_write_kind: path,
       episode: observation.episode,
       unconsumed_deliveries: observation.unconsumedDeliveries,
       first_unconsumed_age_ms_bucket: observation.firstUnconsumedAtMs === null ? null : bucketMs(nowMs - observation.firstUnconsumedAtMs),
@@ -3081,6 +3223,10 @@ export class AgentProcessManager {
     // queued start keeps one only while it still carries that launch.
     const recoveryGrant = start.recoveryGrant ?? item.recoveryGrant ?? null;
     item.recoveryGrant = recoveryGrant && recoveryGrant.launchId === nextLaunchId ? recoveryGrant : null;
+    // task #365: the claimed epoch belongs to the launch the item now carries.
+    item.claimedConnectionEpochId = start.launchId && start.launchId === nextLaunchId
+      ? start.claimedConnectionEpochId ?? null
+      : item.claimedConnectionEpochId ?? null;
     item.startDispatchId = start.startDispatchId ?? item.startDispatchId;
     if (start.wakeMessage) {
       item.wakeMessage = start.wakeMessage;
@@ -3309,6 +3455,84 @@ export class AgentProcessManager {
     return true;
   }
 
+  /** task #365: from `machine:context` (see `serverStartContext`). */
+  setServerStartContext(context: { spawnErrorCapable: boolean; connectionEpochId: string | null }): void {
+    this.serverStartContext = { ...context };
+  }
+
+  /** task #365: the current connection's server-side id, null before `machine:context` or from an older server. */
+  /**
+   * task #365: a start's claimed connection epoch (`claimedConnectionEpochId`,
+   * carried with the start itself) names another connection than the current
+   * one. A start without one (older server, human start, daemon-internal
+   * restart) has no claim to check.
+   */
+  private isStaleClaim(claimedConnectionEpochId: string | null): boolean {
+    const current = this.serverStartContext.connectionEpochId;
+    return Boolean(claimedConnectionEpochId && current && claimedConnectionEpochId !== current);
+  }
+
+  get currentConnectionEpochId(): string | null {
+    return this.serverStartContext.connectionEpochId;
+  }
+
+  /** task #365: whether a proven never-created child is reported as `not_spawned: spawn_error` (else: today's crash path). */
+  get reportsSpawnError(): boolean {
+    return this.serverStartContext.spawnErrorCapable;
+  }
+
+  /**
+   * task #365: after `start()` returned without a pid, wait for the spawn
+   * outcome. `spawn_error`: the runtime's `error` named a spawn syscall (the
+   * listener in spawnAgentProcess records it; an error that fired before this
+   * call is seen through `spawnErrorSyscall`). `closed`: the child closed with
+   * no spawn error. `unknown`: neither within the bound; whether a process was
+   * created is not known.
+   */
+  private waitForSpawnEvidence(runtime: RuntimeSession, ap: AgentProcess, timeoutMs: number): Promise<"spawn_error" | "closed" | "unknown"> {
+    if (isSpawnSyscall(ap.spawnErrorSyscall)) return Promise.resolve("spawn_error");
+    return new Promise((resolve) => {
+      let settled = false;
+      const finish = (result: "spawn_error" | "closed" | "unknown") => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(result);
+      };
+      // Registered after spawnAgentProcess's own error listener, so the
+      // syscall is already recorded when this one runs.
+      runtime.on("error", () => {
+        if (isSpawnSyscall(ap.spawnErrorSyscall)) finish("spawn_error");
+      });
+      runtime.on("close", () => finish(isSpawnSyscall(ap.spawnErrorSyscall) ? "spawn_error" : "closed"));
+      const timer = setTimeout(() => finish("unknown"), timeoutMs);
+      (timer as { unref?: () => void }).unref?.();
+    });
+  }
+
+  /**
+   * task #365: a start whose spawn outcome stayed unknown past the bound. It
+   * is not settled and its pending identity stays (the server keeps it in
+   * `unexited`, so automatic starts stay refused); the record stays
+   * registered, so the agent cannot overlap it. A spawn error that arrives
+   * later proves it never existed and settles it then.
+   */
+  private holdUnknownSpawn(agentId: string, ap: AgentProcess, runtime: RuntimeSession, launchId: string | null): void {
+    runtime.on("error", () => {
+      if (!isSpawnSyscall(ap.spawnErrorSyscall) || this.agents.get(agentId) !== ap) return;
+      ap.spawnNoProcess = true;
+      this.settleAllAcceptedLaunches(agentId, "spawn_error");
+      if (!ap.spawnReported && this.runtimeProcessGate && this.daemonInstanceId) {
+        this.runtimeProcessGate.processNotStarted(agentId, ap.processInstanceId);
+      }
+      this.agentStarts.clearStarting(agentId);
+      const error = new RuntimeSpawnNoProcessError(ap.spawnError ?? "spawn failed", ap.spawnErrorSyscall);
+      this.cleanupFailedRuntimeStart(agentId, ap, error);
+      this.recordDaemonEvent("daemon.agent.spawn.late_spawn_error", { agentId, launchId: launchId ?? undefined });
+      this.sendAgentStatus(agentId, "inactive", launchId);
+    });
+  }
+
   /**
    * RFC 071: a start DaemonCore failed on its own (before or around the
    * process manager). Settles the launch `not_spawned` only if it is still
@@ -3348,13 +3572,25 @@ export class AgentProcessManager {
       outcome: string,
       status: "ok" | "error",
       mode?: "idle" | "busy",
-    ) => this.recordDaemonEvent("daemon.agent.app_inbox_notice", {
-      ...traceAttrs,
-      outcome,
-      ...(mode ? { mode } : {}),
-      pending_app_items: count,
-      message_identity_created: false,
-    }, status);
+      extra?: Record<string, unknown>,
+    ) => {
+      const deferral = this.appInboxBusyDeferrals.get(agentId);
+      if (deferral) this.appInboxBusyDeferrals.delete(agentId);
+      this.recordDaemonEvent("daemon.agent.app_inbox_notice", {
+        ...traceAttrs,
+        outcome,
+        ...(mode ? { mode } : {}),
+        pending_app_items: count,
+        message_identity_created: false,
+        ...extra,
+        ...(deferral
+          ? {
+            busy_retry_attempts: deferral.attempts,
+            busy_wait_ms: Math.max(0, this.clockNow() - deferral.firstAtMs),
+          }
+          : {}),
+      }, status);
+    };
     if (count === 0) {
       recordNotice("empty", "error");
       return false;
@@ -3369,6 +3605,11 @@ export class AgentProcessManager {
     if (ap && this.canDeliverToRuntimeSession(ap)) {
       const idle = this.isApmIdle(ap);
       const mode = idle ? "idle" : "busy";
+      if (!idle && noticeOptions?.requireIdle) {
+        // Not marked delivered: the next idle drain offers it.
+        recordNotice("deferred_until_idle", "ok", mode);
+        return true;
+      }
       if ((idle && !ap.driver.supportsStdinNotification) || (!idle && ap.runtime.descriptor.busyDelivery !== "direct")) {
         if (ap.driver.lifecycle.kind === "per_turn") {
           const wake = noticeOptions?.startStoppedAgent !== false
@@ -3380,15 +3621,63 @@ export class AgentProcessManager {
         recordNotice("unsupported_delivery", "error", mode);
         return false;
       }
-      if (idle) this.commitApmIdleState(agentId, ap, false);
-      const result = this.runtimeProcessBindingFence.send(
-        agentId,
-        ap,
-        { mode, text: notice, sessionId: ap.sessionId },
-        "app_inbox_notice",
+      // Claim the turn before writing (the write may synchronously emit runtime
+      // events), but never leave the agent marked busy by a write that did not
+      // land: a stuck busy flag makes every later notice take the busy path,
+      // which a non-steerable runtime refuses forever.
+      if (idle) {
+        this.commitApmIdleState(agentId, ap, false);
+        this.startRuntimeTrace(agentId, ap, "app-inbox-notice");
+      }
+      let result!: RuntimeSendResult;
+      try {
+        result = this.runtimeProcessBindingFence.send(
+          agentId,
+          ap,
+          { mode, text: notice, sessionId: ap.sessionId },
+          "app_inbox_notice",
+        );
+      } finally {
+        if (idle && !result?.ok) {
+          this.endRuntimeTrace(ap, "error", { outcome: "app_inbox_notice_not_written", ...runtimeTraceCounterAttrs(ap) });
+          this.restoreApmIdleWithoutDrain(agentId, ap);
+        }
+      }
+      if (!result.ok && mode === "busy") {
+        // Busy must be backed by evidence; if it is not, offer the notice the
+        // idle way instead of retrying a write the runtime will keep refusing.
+        const drainHeld = this.appInboxIdleDrains.has(agentId);
+        if (!drainHeld) this.appInboxIdleDrains.add(agentId);
+        let cleared = false;
+        try {
+          cleared = this.revertBusyWithoutLiveTurn(agentId, ap, "app_inbox_notice")
+            || this.clearStaleBusy(agentId, ap, "app_inbox_notice");
+        } finally {
+          if (!drainHeld) this.appInboxIdleDrains.delete(agentId);
+        }
+        if (cleared) {
+          recordNotice("busy_state_cleared", "ok", mode, { failure_reason: result.reason });
+          return this.notifyAgentAppInbox(agentId, item, noticeOptions);
+        }
+      }
+      if (!result.ok && mode === "busy") {
+        const deferral = this.appInboxBusyDeferrals.get(agentId);
+        if (deferral) {
+          deferral.attempts += 1;
+        } else {
+          recordNotice("write_failed", "error", mode, { failure_reason: result.reason });
+          this.appInboxBusyDeferrals.set(agentId, { firstAtMs: this.clockNow(), attempts: 1 });
+        }
+        return false;
+      }
+      recordNotice(
+        result.ok ? "written" : "write_failed",
+        result.ok ? "ok" : "error",
+        mode,
+        result.ok ? undefined : { failure_reason: result.reason },
       );
-      recordNotice(result.ok ? "written" : "write_failed", result.ok ? "ok" : "error", mode);
       if (result.ok) {
+        if (idle) this.watchTurnStart(agentId, ap, "app_inbox_notice");
         this.markAppInboxNoticeDelivered(agentId, appItems);
         this.observeDeliveryWrite(agentId, ap, item.itemId, "app_inbox_notice");
       }
@@ -3597,7 +3886,7 @@ export class AgentProcessManager {
    * outbox); every internal caller (restart, cold start, ...) passes none and
    * is checked as an automatic start.
    */
-  async startAgent(agentId: string, config: AgentConfig, wakeMessage?: AgentMessage, unreadSummary?: Record<string, number>, resumePrompt?: string, launchId?: string, wakeMessageTransient = false, resumeMessages?: AgentMessage[], startDispatchId?: string, traceParent?: TraceContext | null, catchupBatchId?: string, recoveryGrant: RecoveryGrant | null = null) {
+  async startAgent(agentId: string, config: AgentConfig, wakeMessage?: AgentMessage, unreadSummary?: Record<string, number>, resumePrompt?: string, launchId?: string, wakeMessageTransient = false, resumeMessages?: AgentMessage[], startDispatchId?: string, traceParent?: TraceContext | null, catchupBatchId?: string, recoveryGrant: RecoveryGrant | null = null, claimedConnectionEpochId: string | null = null) {
     // Any start settles a parked server wake: the pending app-inbox items are
     // replayed to the new process by the ordinary start path.
     this.pendingServerWakes.delete(agentId);
@@ -3615,7 +3904,7 @@ export class AgentProcessManager {
         ...this.agentStartDispatch.traceAttrs(agentId, config, wakeMessage, unreadSummary, resumePrompt, launchId, wakeMessageTransient, resumeMessages, startDispatchId),
         reason: "already_running",
       });
-      this.rebindRunningStart(agentId, { config, wakeMessage, unreadSummary, resumePrompt, launchId, wakeMessageTransient, resumeMessages, startDispatchId, recoveryGrant }, "already_running");
+      this.rebindRunningStart(agentId, { config, wakeMessage, unreadSummary, resumePrompt, launchId, wakeMessageTransient, resumeMessages, startDispatchId, recoveryGrant, claimedConnectionEpochId }, "already_running");
       logger.info(`[Agent ${agentId}] Start rebound (already running, launchId=${launchId ?? "none"})`);
       return;
     }
@@ -3634,6 +3923,7 @@ export class AgentProcessManager {
         resumeMessages,
         startDispatchId,
         recoveryGrant,
+        claimedConnectionEpochId,
         stopEpochAtRebind: this.lifecycleRecords.stopEpoch(agentId),
       });
       logger.info(`[Agent ${agentId}] Start rebind deferred (startup in progress)`);
@@ -3644,7 +3934,7 @@ export class AgentProcessManager {
         ...this.agentStartDispatch.traceAttrs(agentId, config, wakeMessage, unreadSummary, resumePrompt, launchId, wakeMessageTransient, resumeMessages, startDispatchId),
         reason: "already_queued",
       });
-      this.rebindQueuedStart(agentId, { config, wakeMessage, unreadSummary, resumePrompt, launchId, wakeMessageTransient, resumeMessages, startDispatchId, recoveryGrant }, "already_queued");
+      this.rebindQueuedStart(agentId, { config, wakeMessage, unreadSummary, resumePrompt, launchId, wakeMessageTransient, resumeMessages, startDispatchId, recoveryGrant, claimedConnectionEpochId }, "already_queued");
       logger.info(`[Agent ${agentId}] Queued start rebound (startup already queued)`);
       return;
     }
@@ -3662,6 +3952,7 @@ export class AgentProcessManager {
         resumePrompt,
         launchId,
         recoveryGrant,
+        claimedConnectionEpochId,
         traceParent: traceParent ?? getActiveTraceContext(),
         resolve,
         reject,
@@ -3765,6 +4056,7 @@ export class AgentProcessManager {
       item.startDispatchId,
       item.traceParent ?? null,
       item.recoveryGrant ?? null,
+      item.claimedConnectionEpochId ?? null,
     ).then(() => {
       this.releaseAgentStartSlot(item.agentId, "spawn attempted");
       item.resolve();
@@ -3827,7 +4119,7 @@ export class AgentProcessManager {
   // Wraps one spawn attempt in a short span. The spawn span is passed down
   // by value and is not made active, because the new process outlives it and
   // its later events must not attach to this span.
-  private async startAgentNow(agentId: string, config: AgentConfig, wakeMessage?: AgentMessage, unreadSummary?: Record<string, number>, resumePrompt?: string, launchId?: string, wakeMessageTransient = false, resumeMessages?: AgentMessage[], startDispatchId?: string, traceParent: TraceContext | null = null, recoveryGrant: RecoveryGrant | null = null) {
+  private async startAgentNow(agentId: string, config: AgentConfig, wakeMessage?: AgentMessage, unreadSummary?: Record<string, number>, resumePrompt?: string, launchId?: string, wakeMessageTransient = false, resumeMessages?: AgentMessage[], startDispatchId?: string, traceParent: TraceContext | null = null, recoveryGrant: RecoveryGrant | null = null, claimedConnectionEpochId: string | null = null) {
     const spawnSpan = this.tracer.startSpan("daemon.agent.spawn", {
       parent: traceParent,
       surface: "daemon",
@@ -3852,6 +4144,7 @@ export class AgentProcessManager {
         resumeMessages,
         startDispatchId,
         recoveryGrant,
+        claimedConnectionEpochId,
       ));
       spawnSpan.end("ok");
     } catch (err) {
@@ -3871,13 +4164,13 @@ export class AgentProcessManager {
     }
   }
 
-  private async spawnAgentProcess(spawnTraceparent: string, agentId: string, config: AgentConfig, wakeMessage?: AgentMessage, unreadSummary?: Record<string, number>, resumePrompt?: string, launchId?: string, wakeMessageTransient = false, resumeMessages?: AgentMessage[], startDispatchId?: string, recoveryGrant: RecoveryGrant | null = null) {
+  private async spawnAgentProcess(spawnTraceparent: string, agentId: string, config: AgentConfig, wakeMessage?: AgentMessage, unreadSummary?: Record<string, number>, resumePrompt?: string, launchId?: string, wakeMessageTransient = false, resumeMessages?: AgentMessage[], startDispatchId?: string, recoveryGrant: RecoveryGrant | null = null, claimedConnectionEpochId: string | null = null) {
     if (this.agents.has(agentId)) {
       this.recordDaemonEvent("daemon.agent.spawn.skipped", {
         ...this.agentStartDispatch.traceAttrs(agentId, config, wakeMessage, unreadSummary, resumePrompt, launchId, wakeMessageTransient, resumeMessages, startDispatchId),
         reason: "already_running",
       }, "ok", spawnTraceparent);
-      this.rebindRunningStart(agentId, { config, wakeMessage, unreadSummary, resumePrompt, launchId, wakeMessageTransient, resumeMessages, startDispatchId, recoveryGrant }, "already_running");
+      this.rebindRunningStart(agentId, { config, wakeMessage, unreadSummary, resumePrompt, launchId, wakeMessageTransient, resumeMessages, startDispatchId, recoveryGrant, claimedConnectionEpochId }, "already_running");
       logger.info(`[Agent ${agentId}] Start rebound (already running, launchId=${launchId ?? "none"})`);
       return;
     }
@@ -3896,6 +4189,7 @@ export class AgentProcessManager {
         resumeMessages,
         startDispatchId,
         recoveryGrant,
+        claimedConnectionEpochId,
         stopEpochAtRebind: this.lifecycleRecords.stopEpoch(agentId),
       });
       logger.info(`[Agent ${agentId}] Start rebind deferred (startup in progress)`);
@@ -3915,6 +4209,7 @@ export class AgentProcessManager {
       buildInitialMemoryMd(initialRuntimeConfig),
       getOnboardingSeedMode(config) === FIRST_CINDY_SEED_MODE ? buildCindySeedFiles() : [], config.envVars,
     );
+    this.refuseResumingStuckSession(agentId, config, launchId);
 
     // RFC 071 outbox: the one spawn entry every start goes through (server
     // starts, crash respawn, wake / message cold start, restart on message,
@@ -3979,6 +4274,7 @@ export class AgentProcessManager {
       config = pendingStartRebind.config;
       unreadSummary = pendingStartRebind.unreadSummary;
       resumePrompt = pendingStartRebind.resumePrompt;
+      if (pendingStartRebind.launchId) claimedConnectionEpochId = pendingStartRebind.claimedConnectionEpochId ?? null;
       launchId = pendingStartRebind.launchId || launchId;
       resumeMessages = pendingStartRebind.resumeMessages;
       startStopEpoch = pendingStartRebind.stopEpochAtRebind ?? startStopEpoch;
@@ -4041,6 +4337,17 @@ export class AgentProcessManager {
     // RFC 070 phase 1: at a cold wake with a large prior context, retire the
     // session (drop driver `--resume`) but keep the ladder's resume semantics.
     const wakeRecycle = await planWakeSessionRecycle({ config: runtimeConfig, hasResumePrompt: Boolean(resumePrompt), homeDir: this.runtimeSessionHomeDir });
+    if (wakeRecycle.action === "resume") {
+      // RFC 070 observability: the recycle's resume reason (flag off, warm
+      // cache, small context, unreadable transcript, ...) was a local log line
+      // only; trace it so a fleet that never recycles shows why.
+      this.recordDaemonEvent("daemon.agent.wake_recycle_skipped", {
+        agentId,
+        runtime: runtimeConfig.runtime ?? "claude",
+        reason: wakeRecycle.reason,
+        has_session: Boolean(runtimeConfig.sessionId),
+      });
+    }
     if (wakeRecycle.action === "recycle") {
       if (runtimeConfig.sessionId) {
         rememberSessionContext(buildCliTransportDir(this.slockHome, agentId, launchId), runtimeConfig.sessionId, null);
@@ -4052,6 +4359,23 @@ export class AgentProcessManager {
     }
     const isResume = !!runtimeConfig.sessionId || wakeRecycle.action === "recycle";
     const standingPrompt = driver.buildSystemPrompt(runtimeConfig, agentId);
+    // task #13: a resumed session may still run on the standing prompt it
+    // started with; plan re-delivering the current one (standingPromptRefresh.ts).
+    const stableStandingPrompt = String(driver.buildSystemPrompt(stableStandingPromptConfig(runtimeConfig), agentId));
+    const standingPromptRefresh = {
+      hash: standingPromptHash(stableStandingPrompt),
+      plan: planStandingPromptRefresh({
+        ledger: this.standingPromptLedger,
+        agentId,
+        resumeSessionId: runtimeConfig.sessionId ?? null,
+        refreshesOnResume: driver.standingPromptRefreshesOnResume === true,
+        promptHash: standingPromptHash(stableStandingPrompt),
+        nowMs: this.clockNow(),
+      }),
+    };
+    // A resumed session that keeps its original standing prompt never sees a
+    // release notice placed there, so it gets the notice in its first input.
+    const standingPromptReachesSession = !runtimeConfig.sessionId || driver.standingPromptRefreshesOnResume === true;
     let prompt: AxSurfaceText;
     let promptSource: string;
     let wakeMessageDeliveredAsInboxUpdate = false;
@@ -4081,7 +4405,7 @@ export class AgentProcessManager {
       startingInboxMessages,
     );
     if (runtimeConfig.runtimeProfileControl && !wakeMessage) {
-      prompt = driver.supportsNativeStandingPrompt
+      prompt = driver.supportsNativeStandingPrompt && standingPromptReachesSession
         ? NATIVE_STANDING_PROMPT_STARTUP_INPUT
         : formatRuntimeProfileControlStartupInput(runtimeConfig.runtimeProfileControl, driver);
       promptSource = "runtime_profile_control";
@@ -4183,6 +4507,16 @@ export class AgentProcessManager {
         }
       }
     }
+    ({ prompt, promptSource } = applyStandingPromptUpdate(standingPromptRefresh.plan, stableStandingPrompt, prompt, promptSource));
+    if (standingPromptRefresh.plan.action === "inject" || standingPromptRefresh.plan.action === "baseline_unknown") {
+      this.recordDaemonEvent("daemon.agent.standing_prompt_stale", {
+        agentId,
+        launchId: launchId || undefined,
+        runtime: runtimeConfig.runtime ?? "claude",
+        action: standingPromptRefresh.plan.action === "inject" ? "injected" : "baseline_unknown",
+        ...(standingPromptRefresh.plan.action === "inject" ? { stale_for_ms: standingPromptRefresh.plan.staleForMs } : {}),
+      });
+    }
     const runtimeInputTraceAttrs = buildRuntimeInputTraceAttrs({
       source: promptSource,
       prompt,
@@ -4209,6 +4543,11 @@ export class AgentProcessManager {
       resumeCatchupInputMessages.length === 0 &&
       (!unreadSummary || Object.keys(unreadSummary).length === 0);
     if (canDeferEmptyStart) {
+      // task #365: a stale launch is refused, not settled `deferred` (which
+      // would also report the agent active for a start that never counted).
+      if (effectiveLaunchId && this.isStaleClaim(claimedConnectionEpochId)) {
+        throw new StaleDispatchError(agentId, effectiveLaunchId);
+      }
       const pendingMessages = this.startingInboxes.drainOnSpawn(agentId);
       this.agentStarts.clearStarting(agentId);
       this.closeNoProcessResidency(agentId, "suppressed", { negativeEvidenceBucket: "defer_until_concrete_message" });
@@ -4278,6 +4617,11 @@ export class AgentProcessManager {
       agentAppInbox: this.#appInboxForAgent?.(agentId),
       cliTransportTraceDir: this.cliTransportTraceDir,
       tracer: this.tracer,
+      assertLaunchCurrent: () => {
+        if (effectiveLaunchId && this.isStaleClaim(claimedConnectionEpochId)) {
+          throw new StaleDispatchError(agentId, effectiveLaunchId);
+        }
+      },
     };
     const runtime = driver.createSession?.(runtimeContext) ?? createChildProcessRuntimeSession(driver, runtimeContext);
     const liveProcessConfig: AgentConfig = {
@@ -4307,6 +4651,7 @@ export class AgentProcessManager {
         ? resumeCatchupInputMessages
         : startingInboxMessages;
     agentProcess = {
+      ...(driver.standingPromptRefreshesOnResume ? {} : { standingPromptHash: standingPromptRefresh.hash }),
       runtime,
       driver,
       inbox: startupInputMessages,
@@ -4347,6 +4692,8 @@ export class AgentProcessManager {
       runtimeErrorDeliveryBackoff: createRuntimeErrorDeliveryBackoffState(),
       sessionReadyDeliveryRetry: createSessionReadyDeliveryRetryState(),
       spawnError: null,
+      spawnErrorSyscall: null,
+      spawnNoProcess: false,
       processInstanceId,
       spawnedAtMs: Date.now(),
       exit: { kind: "live", stalledRecoverySigtermTimer: null },
@@ -4416,7 +4763,9 @@ export class AgentProcessManager {
         this.runtimeProcessBindingFence.recordMissingProcessEvent(agentId, event, driver.id);
         return;
       }
+      const wasIdle = this.isApmIdle(boundAgentProcess);
       this.handleParsedEvent(agentId, event, driver);
+      if (wasIdle) this.revertBusyWithoutLiveTurn(agentId, boundAgentProcess, `event:${event.kind}`);
     });
 
     runtime.on("stderr", (text) => {
@@ -4485,6 +4834,8 @@ export class AgentProcessManager {
       if (!this.runtimeProcessBindingFence.acceptOutput(agentId, boundAgentProcess, runtime, "error")) return;
       const current = boundAgentProcess;
       current.spawnError = err.message;
+      const syscall = (err as NodeJS.ErrnoException).syscall;
+      current.spawnErrorSyscall = typeof syscall === "string" ? syscall : null;
       this.clearRuntimeStartupTimeout(current);
       this.recordDaemonEvent("daemon.agent.process.error", {
         ...this.processLifecycleIdentityAttrs(agentId, current),
@@ -4494,6 +4845,16 @@ export class AgentProcessManager {
     });
 
     runtime.on("exit", ({ code, signal }) => {
+      // task #365: a child proven never created was already settled
+      // `not_spawned`; there is no process whose exit could be reported.
+      if (boundAgentProcess.spawnNoProcess) {
+        this.recordDaemonEvent("daemon.agent.process.exit_ignored", {
+          agentId,
+          reason: "spawn_no_process",
+          exit_code: code,
+        });
+        return;
+      }
       const current = this.agents.get(agentId);
       if (current && current.runtime === runtime) {
         this.clearStalledRecoverySigtermWatchdog(current);
@@ -4756,6 +5117,7 @@ export class AgentProcessManager {
           }
           this.broadcastActivity(agentId, "online", "Process idle", [], undefined, "idle");
           this.wakeForAppInboxNoticeAfterTurn(agentId);
+          this.notifyAgentWorkingToIdle(agentId);
         } else {
           // Crash (non-zero) or killed by signal (code === null) while still in map
           const reason = formatCrashReason(finalCode, finalSignal, ap);
@@ -4841,6 +5203,13 @@ export class AgentProcessManager {
       }
     });
 
+    // task #365: checked here and again by the driver itself after its last
+    // await, right before the child (or native session) is created
+    // (`assertLaunchCurrent`): a launch claimed against another connection
+    // never gets a process.
+    if (effectiveLaunchId && this.isStaleClaim(claimedConnectionEpochId)) {
+      throw new StaleDispatchError(agentId, effectiveLaunchId);
+    }
     let startResult: RuntimeSendResult;
     // task #1120: keep the driver's typed launch failure so the classifier can
     // decide by code; the flattened `error` string is for logs/diagnostics only.
@@ -4863,6 +5232,36 @@ export class AgentProcessManager {
       startFailureCause = error;
       startResult = { ok: false, reason: "runtime_error", error: message };
     }
+    // task #365: the driver refused a stale launch before creating anything:
+    // not a runtime failure, and never a spawn_error.
+    if (startFailureCause instanceof StaleDispatchError) throw startFailureCause;
+    // task #365: `start()` reports ok once the driver returned a child, pid or
+    // not; a failed spawn (EACCES, ENOENT) has no pid and its error arrives a
+    // tick later. With a server that counts it, prove the outcome before
+    // reporting a process: never `process_spawned` / `active` for a child that
+    // was not created. An older server keeps today's path (the crash it reports
+    // is what its #1119 breaker counts).
+    if (startResult.ok && typeof runtime.pid !== "number" && this.serverStartContext.spawnErrorCapable) {
+      const evidence = await this.waitForSpawnEvidence(runtime, agentProcess, SPAWN_EVIDENCE_WAIT_MS);
+      if (evidence === "spawn_error") {
+        agentProcess.spawnNoProcess = true;
+        const message = agentProcess.spawnError ?? "spawn failed";
+        startFailureCause = new RuntimeSpawnNoProcessError(message, agentProcess.spawnErrorSyscall);
+        startResult = { ok: false, reason: "runtime_error", error: message };
+      } else if (evidence === "closed") {
+        startFailureCause = new Error("runtime closed before a process id was observed");
+        startResult = { ok: false, reason: "runtime_error", error: "runtime closed before a process id was observed" };
+      } else {
+        this.recordDaemonEvent("daemon.agent.spawn.evidence_timeout", {
+          agentId,
+          launchId: effectiveLaunchId ?? undefined,
+          wait_ms: SPAWN_EVIDENCE_WAIT_MS,
+        });
+        logger.warn(`[Agent ${agentId}] No pid and no spawn error within ${SPAWN_EVIDENCE_WAIT_MS}ms; start outcome unknown, holding it`);
+        this.holdUnknownSpawn(agentId, agentProcess, runtime, effectiveLaunchId);
+        return;
+      }
+    }
     if (!startResult.ok && typeof runtime.pid === "number") {
       // RFC 071 negative control: the start failed but a child process was
       // created. It is reported as spawned (its exit follows), never as
@@ -4876,6 +5275,12 @@ export class AgentProcessManager {
         runtime_start_reason: startResult.reason,
         error_present: Boolean(startResult.error),
         runtime_error_class: diagnostics?.spanAttrs.runtime_error_class,
+        // The typed launch code (as on daemon.agent.spawn.failed) plus the
+        // scrubbed fingerprint and HTTP status, so failures group by cause
+        // without the raw text.
+        failure_reason: spawnFailureCodeOf(startFailureCause) ?? "runtime_spawn_failed",
+        runtime_error_fingerprint: diagnostics?.spanAttrs.runtime_error_fingerprint,
+        runtime_error_http_status: diagnostics?.spanAttrs.runtime_error_http_status,
       }, "error", spawnTraceparent);
       if (startResult.error) {
         agentProcess.lastRuntimeError = startResult.error;
@@ -4903,6 +5308,7 @@ export class AgentProcessManager {
     }
     // RFC 071 §4.3 rule 2: the identity of the process this launch spawned.
     this.sendProcessSpawned(agentId, agentProcess, effectiveLaunchId);
+    this.lastStartFailures.delete(agentId);
     const startupAcceptedMessages = wakeMessage ? [wakeMessage] : resumeCatchupInputMessages.length > 0 ? resumeCatchupInputMessages : startingInboxMessages;
     if (this.containsOrdinaryInboxMessage(startupAcceptedMessages)) this.broadcastMessageReceivedActivity(agentId);
     this.closeNoProcessResidency(agentId, "advanced");
@@ -4959,10 +5365,34 @@ export class AgentProcessManager {
     }
 
     } catch (err) {
+      if (err instanceof StaleDispatchError) {
+        // task #365: only the stale launch is refused; the agent's status is
+        // left alone (a current start may own it). A start that arrived
+        // while this one was being prepared is started on its own.
+        this.settleServerStartNotSpawned(agentId, err.launchId, "stale_dispatch");
+        if (agentProcess && !agentProcess.spawnReported && this.runtimeProcessGate && this.daemonInstanceId) {
+          this.runtimeProcessGate.processNotStarted(agentId, agentProcess.processInstanceId);
+        }
+        this.agentStarts.clearStarting(agentId);
+        this.closeNoProcessResidency(agentId, "suppressed", { negativeEvidenceBucket: "start_cancelled" });
+        this.cleanupFailedRuntimeStart(agentId, agentProcess, err);
+        const late = this.lifecycleRecords.getPendingStartRebind(agentId);
+        this.lifecycleRecords.deletePendingStartRebind(agentId);
+        if (late) {
+          void this.startAgent(agentId, late.config, late.wakeMessage, late.unreadSummary, late.resumePrompt, late.launchId, late.wakeMessageTransient, late.resumeMessages, late.startDispatchId, null, undefined, late.recoveryGrant, late.claimedConnectionEpochId ?? null)
+            .catch((startErr: unknown) => logger.warn(`[Agent ${agentId}] Start after a refused stale launch failed: ${startErr instanceof Error ? startErr.message : String(startErr)}`));
+        }
+        throw err;
+      }
       // RFC 071: every launch still waiting has no process: either no child
       // was created, or it was folded after the child was reported (then it
       // was never carried by it).
-      this.settleAllAcceptedLaunches(agentId, err instanceof RuntimeOutcomeStorageBlockedError ? "terminal_failure_outcome_storage_blocked" : "spawn_failed");
+      this.settleAllAcceptedLaunches(
+        agentId,
+        err instanceof RuntimeOutcomeStorageBlockedError
+          ? "terminal_failure_outcome_storage_blocked"
+          : agentProcess?.spawnNoProcess ? "spawn_error" : "spawn_failed",
+      );
       // Never reported spawned: no process exists and no process_exited will
       // close its open record, so close it now (else a restart reads it as unknown).
       if (agentProcess && !agentProcess.spawnReported && this.runtimeProcessGate && this.daemonInstanceId) {
@@ -5041,6 +5471,31 @@ export class AgentProcessManager {
     this.lifecycleRecords.deleteRestartSnapshot(agentId);
     if (this.lifecycleRecords.deleteTerminalFailure(agentId)) {
       this.closeNoProcessResidency(agentId, "terminal", { negativeEvidenceBucket: "runtime_start_failed" });
+    }
+    // task #357: a start can fail while a spawn-fail cooldown is still active
+    // (a server `agent:start` or manual start during the cooldown). The
+    // manager's own restart paths re-cache the restart config in their catch;
+    // outside callers only rethrow, and a cooldown without a restart config
+    // is an invariant violation that rejects every later wake of this agent
+    // (reminders, deliveries, profile reports) until the cooldown ends. A
+    // real runtime start failure keeps the cooldown restartable from the
+    // config that was just attempted. A refusal that never started anything
+    // (outbox storage blocked; a start the Server already superseded) must
+    // NOT be re-cached: the cooldown expiry would otherwise restart a launch
+    // the Server refused, so drop the backoff and leave the next start to it.
+    if (this.isSpawnFailBackoffActive(agentId)) {
+      // task #365: a stale launch (claimed against an earlier connection) is
+      // also a refusal, never re-cached.
+      if (err instanceof RuntimeOutcomeStorageBlockedError || err instanceof StaleDispatchError) {
+        this.resetSpawnFailBackoff(agentId, "suppressed");
+      } else {
+        this.lifecycleRecords.setRestartSnapshot(agentId, {
+          config: this.buildRestartSafeConfig(ap.config, ap.sessionId),
+          sessionId: ap.sessionId,
+          launchId: ap.launchId,
+          processInstanceId: ap.processInstanceId,
+        });
+      }
     }
     this.resetRuntimeErrorFingerprintFenceIfNonresident(agentId, "runtime_start_failed_cleanup", ap);
   }
@@ -5403,6 +5858,15 @@ export class AgentProcessManager {
     this.lifecycleRecords.deleteRestartSnapshot(agentId);
     this.cancelRuntimeErrorProcessRestart(agentId);
     if (!silent) {
+      this.resetSpawnFailBackoff(agentId, "suppressed");
+      this.lastStartFailures.delete(agentId);
+    } else if (!this.agents.has(agentId) && this.isSpawnFailBackoffActive(agentId)) {
+      // task #357: a silent stop keeps the backoff so stop/start churn of a
+      // live process cannot bypass the cap, but with no process and the
+      // restart config just deleted there is nothing the cooldown could
+      // restart; the next start is the Server's. Keeping the backoff would
+      // leave "active cooldown without restart config", which rejects every
+      // later wake of this agent until the cooldown runs out.
       this.resetSpawnFailBackoff(agentId, "suppressed");
     }
     if (this.lifecycleRecords.deleteTerminalFailure(agentId)) {
@@ -5882,6 +6346,10 @@ export class AgentProcessManager {
           }
           this.lifecycleRecords.setRestartSnapshot(agentId, cached);
           const report = this.recordSpawnFailure(agentId, "spawn_error");
+          if (this.stopLocalRestartAfterFailure(agentId, cached, err, report.attempts, "idle_auto_restart")) {
+            this.assertStartPendingDeliveryInvariants("idle-auto-restart-stopped");
+            return false;
+          }
           this.assertStartPendingDeliveryInvariants("idle-auto-restart-spawn-failure");
           if (report.backoffActive) {
             this.enterSpawnFailCooldownResidency(agentId, cached, report.untilMs, "idle_auto_restart", "spawn_error");
@@ -5928,8 +6396,15 @@ export class AgentProcessManager {
         cached_idle_config_present: false,
       }), "error");
       traceContext.onRejectedNoProcess?.();
-      this.sendAgentStatus(agentId, "inactive", null);
-      this.broadcastActivity(agentId, "offline", "Process unavailable; restart required", [], undefined, "runtime_unavailable");
+      const lastStartFailure = this.lastStartFailures.get(agentId);
+      if (lastStartFailure) {
+        // Keep showing why the agent is not running, not a bare "restart required".
+        this.sendAgentStatus(agentId, "inactive", lastStartFailure.launchId);
+        this.sendStartFailureActivity(agentId, lastStartFailure);
+      } else {
+        this.sendAgentStatus(agentId, "inactive", null);
+        this.broadcastActivity(agentId, "offline", "Process unavailable; restart required", [], undefined, "runtime_unavailable");
+      }
       return false;
     }
 
@@ -6323,12 +6798,18 @@ export class AgentProcessManager {
     // RFC 071: starts held for the server capability end without a spawn.
     for (const wait of [...this.capabilityHolds.values()]) wait.cancel();
     this.lifecycleRecords.clearRestartSnapshots();
-
-    // Snapshot PIDs before stopAgent clears the agents Map (line ~4267).
-    const pids: number[] = [];
-    for (const ap of this.agents.values()) {
-      if (typeof ap.runtime.pid === "number") pids.push(ap.runtime.pid);
+    // task #357: the restart configs are gone, so an agent still inside a
+    // spawn-fail cooldown would read as "active cooldown without restart
+    // config" at the next manager-wide invariant check during this shutdown.
+    // The backoff is in-memory only and the process is exiting; drop it.
+    for (const agentId of [...this.lifecycleRecords.activeSpawnFailBackoffs.keys()]) {
+      this.resetSpawnFailBackoff(agentId, "suppressed");
     }
+
+    // Snapshot the runtimes (not bare pids) before stopAgent clears the agents
+    // Map: the reaper re-checks each one right before signalling.
+    const runtimes = [...this.agents.values()].map((ap) => ap.runtime);
+    const pids = runtimes.flatMap((runtime) => (typeof runtime.pid === "number" ? [runtime.pid] : []));
 
     const ids = [...this.agents.keys()];
 
@@ -6342,7 +6823,7 @@ export class AgentProcessManager {
       },
     });
     try {
-      await runWithActiveSpan(span, () => this.stopAllAgents(ids, pids));
+      await runWithActiveSpan(span, () => this.stopAllAgents(ids, runtimes));
       span.end("ok");
     } catch (err) {
       span.end("error", { attrs: { error_class: errorClassOf(err) } });
@@ -6350,8 +6831,16 @@ export class AgentProcessManager {
     }
   }
 
-  private async stopAllAgents(ids: string[], pids: number[]): Promise<void> {
+  private async stopAllAgents(ids: string[], runtimes: Array<Pick<RuntimeSession, "pid" | "closed">>): Promise<void> {
     await Promise.all(ids.map((id) => this.stopAgent(id, { wait: true, silent: true })));
+
+    // Only children we have not reaped yet. The kernel can reuse a pid only
+    // after its parent reaps the child, and Node sets exitCode/signalCode in
+    // that same callback, so a closed runtime's pid may already belong to an
+    // unrelated process: signalling it could SIGKILL that process. An open
+    // runtime's pid is still ours (#proj-dx:7a5efdf3).
+    const pids = runtimes.flatMap((runtime) =>
+      !runtime.closed && typeof runtime.pid === "number" ? [runtime.pid] : []);
 
     // Shutdown process-tree orphan safeguard: the RuntimeSessions are torn down
     // by now, so the whole-tree survivor probe + SIGKILL is session-independent
@@ -6675,6 +7164,17 @@ export class AgentProcessManager {
         }
         this.lifecycleRecords.setRestartSnapshot(agentId, cached);
         const report = this.recordSpawnFailure(agentId, "spawn_error");
+        if (this.stopLocalRestartAfterFailure(agentId, cached, err, report.attempts, "runtime_profile_auto_restart")) {
+          this.assertStartPendingDeliveryInvariants("runtime-profile-auto-restart-stopped");
+          span.end("error", {
+            attrs: {
+              outcome: "local_restart_stopped",
+              runtime: cached.config.runtime,
+              launchId: cached.launchId || undefined,
+            },
+          });
+          return false;
+        }
         this.assertStartPendingDeliveryInvariants("runtime-profile-auto-restart-spawn-failure");
         if (report.backoffActive) {
           this.enterSpawnFailCooldownResidency(agentId, cached, report.untilMs, "runtime_profile_auto_restart", "spawn_error");
@@ -7154,6 +7654,32 @@ export class AgentProcessManager {
       feedbackReportId,
       requestId,
       daemonVersion,
+      serverUrl: this.serverUrl,
+      daemonApiKey: this.daemonApiKey,
+      workerUrl: this.workerUrl,
+      tracer: this.tracer,
+      fetchImpl: this.fetchImpl,
+    });
+  }
+
+  /**
+   * task #1230: collect and upload the agent_event_tail object for one
+   * request. Call only AFTER the result frame was sent. Never rejects; its own
+   * budget aborts the scan and every upload hop; never retried.
+   */
+  uploadFeedbackAgentEventTail(
+    agentId: string,
+    feedbackReportId: string,
+    requestId: string,
+    reportGeneratedAt: string,
+  ): Promise<FeedbackAgentEventTailOutcome | "not_attempted"> {
+    if (!this.workerUrl) return Promise.resolve("not_attempted");
+    return startFeedbackAgentEventTail({
+      agentId,
+      feedbackReportId,
+      requestId,
+      reportGeneratedAt,
+      machineDir: this.machineDir,
       serverUrl: this.serverUrl,
       daemonApiKey: this.daemonApiKey,
       workerUrl: this.workerUrl,
@@ -7993,7 +8519,14 @@ export class AgentProcessManager {
     const restoredNotificationCount = ap.driver.supportsStdinNotification && ap.sessionId && restoredMessages.length > 0
       ? ap.notifications.add(restoredMessages.length)
       : 0;
+    const busyRejection = event.code === "turn.agent_busy";
     if (event.requestMethod === "turn/start") {
+      // A rejected turn/start may have carried an App Inbox notice; forget
+      // which items it covered so the idle drain below offers them again.
+      this.appInboxNoticedItemIds.delete(agentId);
+      // The runtime said it is busy: offer again after the retry interval,
+      // not on the idle transition this commit triggers.
+      if (busyRejection) this.appInboxDrainDeferredUntil.set(agentId, this.clockNow() + this.stdinNotificationRetryMs);
       this.commitApmIdleState(agentId, ap, true);
     }
     const idleRetryScheduled = event.requestMethod === "turn/start" && restoredNotificationCount > 0
@@ -8016,6 +8549,7 @@ export class AgentProcessManager {
       busy_delivery_mode: ap.driver.busyDeliveryMode,
       restored_idle_state: event.requestMethod === "turn/start",
       idle_retry_scheduled: idleRetryScheduled,
+      app_inbox_drain_deferred_ms: event.requestMethod === "turn/start" && busyRejection ? this.stdinNotificationRetryMs : 0,
     };
     this.recordRuntimeTraceEvent(agentId, ap, "runtime.delivery.async_rejected", attrs);
     this.recordDaemonEvent("daemon.agent.stdin_delivery.async_rejected", {
@@ -8054,7 +8588,19 @@ export class AgentProcessManager {
     const wasIdle = this.isApmIdle(ap);
     ap.gatedSteering = commitApmGatedSteeringDecisionState(nextState);
     if (!wasIdle && this.isApmIdle(ap)) {
+      // A restore after an unwritten notice is not the end of any work.
+      if (!this.appInboxIdleDrains.has(agentId)) this.notifyAgentWorkingToIdle(agentId);
       this.drainAppInboxAfterIdleTransition(agentId);
+    }
+  }
+
+  private notifyAgentWorkingToIdle(agentId: string): void {
+    if (!this.#onAgentWorkingToIdle) return;
+    try {
+      this.#onAgentWorkingToIdle(agentId);
+    } catch (error) {
+      // Runs inside runtime event and process-exit handling; never let it escape.
+      logger.error(`[Agent ${agentId}] Working-to-idle listener failed`, error);
     }
   }
 
@@ -8094,9 +8640,110 @@ export class AgentProcessManager {
     for (const item of items) delivered.add(item.itemId);
   }
 
+  /**
+   * Busy must come from an observed turn. A runtime that reports its own turn
+   * lifecycle can emit a stray event after a turn ended (Codex: an orphan
+   * `tool_output` minutes later); that event must not leave the agent marked
+   * busy with no turn to end it, or every later notice takes the busy path.
+   */
+  private revertBusyWithoutLiveTurn(agentId: string, ap: AgentProcess, source: string): boolean {
+    if (this.agents.get(agentId) !== ap) return false;
+    if (this.isApmIdle(ap) || ap.driver.hasLiveTurn !== false) return false;
+    this.recordDaemonEvent("daemon.agent.busy_state_reverted", {
+      agentId,
+      launchId: ap.launchId || undefined,
+      runtime: ap.config.runtime,
+      reason: "no_live_turn",
+      source,
+    }, "error");
+    this.returnToIdle(agentId, ap);
+    return true;
+  }
+
+  /**
+   * Busy for this long with no runtime progress while the runtime reports no
+   * live turn means a turn end was missed; clear it instead of trusting it.
+   * Runtimes that do not report turns keep the flag: silence alone is not
+   * evidence (a long quiet tool run is legitimately busy).
+   */
+  private clearStaleBusy(agentId: string, ap: AgentProcess, source: string): boolean {
+    if (this.isApmIdle(ap) || ap.driver.hasLiveTurn !== false) return false;
+    const ageMs = ap.runtimeProgress.ageMs(this.clockNow());
+    if (ageMs < APP_INBOX_BUSY_STALE_MS) return false;
+    this.recordDaemonEvent("daemon.agent.busy_state_stale", {
+      agentId,
+      launchId: ap.launchId || undefined,
+      runtime: ap.config.runtime,
+      runtime_progress_age_ms: ageMs,
+      source,
+    }, "error");
+    this.returnToIdle(agentId, ap);
+    return true;
+  }
+
+  /**
+   * "Written" is not "running": after an idle write, a runtime that reports
+   * its own turn lifecycle must show the turn within a short window, or the
+   * agent returns to idle instead of waiting for a turn end that never comes.
+   */
+  private watchTurnStart(agentId: string, ap: AgentProcess, source: string): void {
+    if (ap.driver.hasLiveTurn === undefined) return;
+    const writtenAtMs = this.clockNow();
+    const timer = setTimeout(() => {
+      if (this.agents.get(agentId) !== ap || this.isApmIdle(ap)) return;
+      if (ap.driver.hasLiveTurn !== false) return;
+      if (ap.runtimeProgress.lastEventAt > writtenAtMs) return;
+      this.recordDaemonEvent("daemon.agent.turn_start_not_observed", {
+        agentId,
+        launchId: ap.launchId || undefined,
+        runtime: ap.config.runtime,
+        source,
+        wait_ms: TURN_START_OBSERVATION_MS,
+      }, "error");
+      this.returnToIdle(agentId, ap);
+    }, TURN_START_OBSERVATION_MS);
+    (timer as { unref?: () => void }).unref?.();
+  }
+
+  /** Close any open turn trace and publish idle (stops the working heartbeat). */
+  private returnToIdle(agentId: string, ap: AgentProcess): void {
+    this.endRuntimeTrace(ap, "error", { outcome: "busy_state_cleared", ...runtimeTraceCounterAttrs(ap) });
+    this.commitApmIdleState(agentId, ap, true);
+    this.broadcastActivity(agentId, "online", "Idle", [], undefined, "idle");
+  }
+
+  /** Mark the agent idle again without re-entering the idle App Inbox drain:
+   * the caller is already handling the notice. */
+  private restoreApmIdleWithoutDrain(agentId: string, ap: AgentProcess): void {
+    const drainHeld = this.appInboxIdleDrains.has(agentId);
+    if (!drainHeld) this.appInboxIdleDrains.add(agentId);
+    try {
+      this.commitApmIdleState(agentId, ap, true);
+    } finally {
+      if (!drainHeld) this.appInboxIdleDrains.delete(agentId);
+    }
+  }
+
   private drainAppInboxAfterIdleTransition(agentId: string): void {
     if (!this.#appInboxForAgent) return;
     if (this.appInboxIdleDrains.has(agentId)) return;
+    const deferredUntil = this.appInboxDrainDeferredUntil.get(agentId);
+    if (deferredUntil !== undefined) {
+      const waitMs = deferredUntil - this.clockNow();
+      if (waitMs > 0) {
+        if (!this.appInboxDeferredDrainTimers.has(agentId)) {
+          const timer = setTimeout(() => {
+            this.appInboxDeferredDrainTimers.delete(agentId);
+            const current = this.agents.get(agentId);
+            if (current && this.isApmIdle(current)) this.drainAppInboxAfterIdleTransition(agentId);
+          }, waitMs);
+          timer.unref?.();
+          this.appInboxDeferredDrainTimers.set(agentId, timer);
+        }
+        return;
+      }
+      this.appInboxDrainDeferredUntil.delete(agentId);
+    }
     let appItems: readonly AgentInboxAppItem[];
     try {
       appItems = this.#appInboxForAgent(agentId).list();
@@ -8546,6 +9193,10 @@ export class AgentProcessManager {
         lastActivity: ap.lastActivityKind || undefined,
         lastActivityDetailKind: ap.lastActivityDetailKind,
       });
+      // An alive runtime that stays silent is not stalled, but it is not proven
+      // busy either: without a live turn the busy flag is cleared, not kept
+      // alive by this heartbeat forever.
+      this.clearStaleBusy(agentId, ap, "activity_heartbeat");
       return false;
     }
 
@@ -8906,6 +9557,7 @@ export class AgentProcessManager {
           });
           this.runtimeProcessBindingFence.rebindSession(agentId, ap, event.sessionId, "session_init");
           ap.sessionId = event.sessionId;
+          if (ap.standingPromptHash) this.recordSessionStandingPrompt(agentId, event.sessionId, ap.standingPromptHash);
           const retryReason = prepareSessionInitDeliveryDebtRetry(ap, previousSessionId);
           if (retryReason) this.scheduleSessionReadyDeliveryRetry(agentId, ap, retryReason);
         }
@@ -8998,6 +9650,7 @@ export class AgentProcessManager {
       case "compaction_finished":
         this.flushPendingTrajectory(agentId);
         if (ap) this.recordRuntimeTraceEvent(agentId, ap, "runtime.context_compaction.finished");
+        if (ap && COMPACTION_LEDGER_RUNTIMES.has(ap.driver.id)) this.compactionFailureLedger.clear(agentId);
         if (ap) this.clearCompactionWatchdog(ap);
         this.broadcastActivity(agentId, "working", "Context compaction finished", [{ kind: "compaction_finished" }], undefined, "compaction_finished");
         if (ap) {
@@ -9193,6 +9846,7 @@ export class AgentProcessManager {
             message: event.message,
           }) ?? null;
           const structuredCompactionTerminalFailure = projectStructuredRuntimeTerminalFailure(event, ap.driver.id);
+          if (structuredCompactionTerminalFailure) this.countTerminalCompactionFailure(agentId, ap, event);
           const terminalFailure = backoffFailPoint && Object.prototype.hasOwnProperty.call(backoffFailPoint, "terminalFailure")
             ? backoffFailPoint.terminalFailure ?? null
             : structuredCompactionTerminalFailure ?? classifyTerminalFailure(ap);
@@ -9548,6 +10202,142 @@ export class AgentProcessManager {
     this.sendAgentStatus(agentId, "inactive", launchId ?? null);
   }
 
+  /**
+   * A start failed: a server-dispatched one, or a daemon-local restart this
+   * manager stopped retrying. Report `inactive` and the failure's activity, and
+   * remember it until the agent starts or is stopped, so a delivery that later
+   * finds no process shows this failure again instead of a bare "restart
+   * required" (the owner keeps seeing what to fix).
+   */
+  reportStartFailure(
+    agentId: string,
+    launchId: string | null | undefined,
+    classification: SpawnFailureClassification,
+    model: string | null | undefined,
+  ): void {
+    const report: LastStartFailure = { launchId: launchId ?? null, ...startFailureActivity(classification, model) };
+    this.lastStartFailures.set(agentId, report);
+    this.sendAgentStatus(agentId, "inactive", report.launchId);
+    this.sendStartFailureActivity(agentId, report);
+  }
+
+  private sendStartFailureActivity(agentId: string, report: LastStartFailure): void {
+    // Accepted ambient clock: telemetry records the daemon's observed wall-clock time for this failure.
+    this.sendToServer({
+      type: "agent:activity",
+      agentId,
+      detail: report.detail,
+      detailKind: "runtime_unavailable",
+      ...(report.launchId ? { launchId: report.launchId } : {}),
+      observedAtMs: Date.now(),
+      isHeartbeat: false,
+      spawnFailure: report.spawnFailure,
+    });
+  }
+
+  /**
+   * task #10: count a terminal compaction failure against the session it
+   * happened in (on disk, so restarts do not reset it).
+   */
+  private countTerminalCompactionFailure(agentId: string, ap: AgentProcess, event: ParsedEvent): void {
+    if (!COMPACTION_LEDGER_RUNTIMES.has(ap.driver.id)) return;
+    const sessionId = ap.driver.currentSessionId ?? ap.sessionId ?? ap.config.sessionId ?? null;
+    if (!sessionId) return;
+    let count: number;
+    try {
+      count = this.compactionFailureLedger.recordFailure(agentId, sessionId, ap.config.model ?? null);
+    } catch (error) {
+      logger.warn(`[Agent ${agentId}] compaction failure not recorded: ${error instanceof Error ? error.message : String(error)}`);
+      return;
+    }
+    this.recordDaemonEvent("daemon.agent.compaction.terminal_failure_counted", {
+      agentId,
+      launchId: ap.launchId || undefined,
+      runtime: ap.config.runtime,
+      model: ap.config.model,
+      failure_reason: event.kind === "error" ? event.compaction?.failureReason ?? "unknown" : "unknown",
+      consecutive_failures: count,
+      needs_reset: count >= SESSION_NEEDS_RESET_THRESHOLD,
+    });
+  }
+
+  /**
+   * task #10: a start that would resume a session whose compaction failed
+   * SESSION_NEEDS_RESET_THRESHOLD times in a row is refused as
+   * `session_needs_reset`: resuming it fails the same way every time. The
+   * start-failure path reports it and the Server pauses automatic starts;
+   * Reset Session (a new session id) or another model gets out.
+   */
+  private refuseResumingStuckSession(agentId: string, config: AgentConfig, launchId: string | undefined): void {
+    if (!COMPACTION_LEDGER_RUNTIMES.has(config.runtime) || !config.sessionId) return;
+    const failures = this.compactionFailureLedger.needsReset(agentId, config.sessionId, config.model ?? null);
+    if (failures === null) return;
+    this.recordDaemonEvent("daemon.agent.start.session_needs_reset", {
+      agentId,
+      launchId: launchId || undefined,
+      runtime: config.runtime,
+      model: config.model,
+      consecutive_failures: failures,
+    }, "error");
+    throw new RuntimeSessionNeedsResetError({ runtimeId: config.runtime, failures });
+  }
+
+  /**
+   * task #13: once the runtime reports the session a launch runs on, record
+   * the standing prompt it runs on (a fresh session got the current one; a
+   * resumed one got it re-delivered, or is recorded as its baseline).
+   */
+  private recordSessionStandingPrompt(agentId: string, sessionId: string, promptHash: string): void {
+    try {
+      const current = this.standingPromptLedger.read(agentId);
+      if (current?.sessionId === sessionId && current.promptHash === promptHash) return;
+      this.standingPromptLedger.write(agentId, sessionId, promptHash);
+    } catch (error) {
+      logger.warn(`[Agent ${agentId}] standing prompt record not written: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  /**
+   * A daemon-local restart (idle auto-restart, runtime-profile restart, end of
+   * a spawn-fail cooldown) failed. Stop restarting the agent locally when the
+   * failure is configuration the server decides retries for (a reason retrying
+   * cannot fix, or a retry-once reason) or after SPAWN_FAIL_MAX_ATTEMPTS
+   * failures in a row: drop the restart snapshot and the buffered deliveries
+   * (the Server still holds those messages; the next start carries them as
+   * unread) and report the failure like a server-started one, so the owner
+   * sees why and the Server's wake breaker counts it. Returns true when it
+   * stopped.
+   */
+  private stopLocalRestartAfterFailure(
+    agentId: string,
+    cached: { config: AgentConfig; launchId: string | null },
+    err: unknown,
+    attempts: number,
+    source: string,
+  ): boolean {
+    const classification = classifySpawnFailure(err);
+    const configuration = NON_RETRYABLE_SPAWN_FAILURE_REASONS.includes(classification.reason)
+      || RETRY_ONCE_SPAWN_FAILURE_REASONS.includes(classification.reason);
+    if (!configuration && attempts < SPAWN_FAIL_MAX_ATTEMPTS) return false;
+    this.lifecycleRecords.deleteRestartSnapshot(agentId);
+    this.resetSpawnFailBackoff(agentId, "terminal");
+    const dropped = this.startingInboxes.count(agentId);
+    this.startingInboxes.cancelStart(agentId);
+    logger.warn(`[Agent ${agentId}] Local restarts stopped after ${attempts} failed start(s) (${classification.reason}); ${dropped} buffered delivery(ies) left to the Server`);
+    this.recordDaemonEvent("daemon.agent.spawn.local_restart_stopped", {
+      agentId,
+      launchId: cached.launchId || undefined,
+      runtime: cached.config.runtime,
+      source,
+      failure_reason: classification.reason,
+      stop_cause: configuration ? "configuration" : "attempts_exhausted",
+      attempts,
+      dropped_count: dropped,
+    }, "error");
+    this.reportStartFailure(agentId, cached.launchId, classification, cached.config.model);
+    return true;
+  }
+
   private reportRunnerCredentialMintFailure(
     agentId: string,
     err: unknown,
@@ -9795,6 +10585,28 @@ export class AgentProcessManager {
     }
   }
 
+  /**
+   * One event per written delivery, under its own delivery id. The batch event
+   * names only the first message's id, so a delivery queued earlier (e.g.
+   * `queued_busy_mention`) could not be joined to the write that finally
+   * carried it to the runtime.
+   */
+  private recordDeliveriesWritten(agentId: string, ap: AgentProcess, messages: readonly AgentMessage[], writeKind: "inbox_update" | "messages"): void {
+    for (const message of messages) {
+      const deliveryId = this.getDeliveryTraceContext(message).deliveryId;
+      if (!deliveryId) continue;
+      this.recordDaemonEvent("daemon.agent.delivery.written", {
+        agentId,
+        launchId: ap.launchId || undefined,
+        deliveryId,
+        delivery_correlation_id: deliveryId,
+        messageId: message.message_id,
+        delivery_write_kind: writeKind,
+        batch_count: messages.length,
+      });
+    }
+  }
+
   private recordInboxUpdateProjection(
     agentId: string,
     ap: AgentProcess,
@@ -9825,6 +10637,34 @@ export class AgentProcessManager {
     return projectionAttrs;
   }
 
+  /**
+   * Sender descriptions already shown in this model context are dropped from
+   * live stdin delivery (passive resource "sender", policy "once"); see
+   * senderLedger.ts. Call `settle` with the stdin write result. Startup
+   * prompts are not elided: a spawn is a new context anyway.
+   */
+  private elideSeenSenders(agentId: string, ap: AgentProcess, messages: AgentMessage[]): SenderElisionResult {
+    if (messages.length === 0 || !ap.passiveAx || !runtimeReportsCompaction(ap.config.runtime)) return NO_SENDER_ELISION(messages);
+    const record = readContextGeneration(ap.cliTransportDir);
+    if (!record || record.passiveAx !== true || !record.compactionReported) return NO_SENDER_ELISION(messages);
+    const dbPath = senderLedgerPath(this.slockHome, agentId);
+    const ledger = dbPath ? openSenderLedger(dbPath, record.contextId) : undefined;
+    if (!ledger) return NO_SENDER_ELISION(messages);
+    try {
+      const { messages: elided, claimed } = elideSeenSendersInMessages(messages, ledger.claim);
+      return {
+        messages: elided,
+        settle: (delivered) => {
+          if (!delivered) ledger.release(claimed);
+          ledger.close();
+        },
+      };
+    } catch {
+      ledger.close();
+      return NO_SENDER_ELISION(messages);
+    }
+  }
+
   private deliverInboxUpdateViaStdin(
     agentId: string,
     ap: AgentProcess,
@@ -9837,9 +10677,10 @@ export class AgentProcessManager {
     const renderedContextMessageSet = new Set(runtimeProjection.renderedContextMessages);
     const pendingNoticeMessages = messages.filter((message) => !renderedContextMessageSet.has(message));
     const rows = projectAgentInboxSnapshot(messages);
+    const senderElision = this.elideSeenSenders(agentId, ap, runtimeProjection.renderedContextMessages);
     const prompt = runtimeProjection.renderedContextMessages.length > 0
       ? formatConcreteMessagesRuntimeInput(
-        runtimeProjection.renderedContextMessages,
+        senderElision.messages,
         ap.driver,
         pendingNoticeMessages.length > 0
           ? formatInboxUpdateRuntimeInput(pendingNoticeMessages, ap.driver, ap.inbox.length)
@@ -9862,6 +10703,7 @@ export class AgentProcessManager {
       { mode, text: prompt, sessionId: ap.sessionId },
       source,
     );
+    senderElision.settle(sendResult.ok);
     if (!sendResult.ok) {
       const retryNotificationCount = mode === "idle" && ap.driver.supportsStdinNotification && ap.sessionId
         ? messages.length
@@ -9961,6 +10803,8 @@ export class AgentProcessManager {
       messages.at(-1)?.message_id ?? null,
       mode === "idle" ? "stdin_idle_delivery" : "stdin_turn_end_delivery",
     );
+    this.recordDeliveriesWritten(agentId, ap, messages, "inbox_update");
+    if (mode === "idle") this.watchTurnStart(agentId, ap, source);
     // Phase-6: first successful post-ready delivery closes the activation wait.
     this.closeActivationTransition(ap, "advanced", "stdin");
     return true;
@@ -10021,8 +10865,10 @@ export class AgentProcessManager {
     };
 
     const traceSource = options.transient ? `stdin_${mode}_transient_delivery` : `stdin_${mode}_delivery`;
-    const prompt = formatRuntimeProfileControlPrompt(runtimeProjection.messages)
-      ?? formatConcreteMessagesRuntimeInput(runtimeProjection.messages, ap.driver);
+    const controlPrompt = formatRuntimeProfileControlPrompt(runtimeProjection.messages);
+    // A control prompt renders no message lines, so it claims no senders.
+    const senderElision = controlPrompt ? NO_SENDER_ELISION(runtimeProjection.messages) : this.elideSeenSenders(agentId, ap, runtimeProjection.messages);
+    const prompt = controlPrompt ?? formatConcreteMessagesRuntimeInput(senderElision.messages, ap.driver);
     const inputTraceAttrs = buildRuntimeInputTraceAttrs({
       source: traceSource,
       prompt,
@@ -10038,6 +10884,7 @@ export class AgentProcessManager {
       { mode, text: prompt, sessionId: ap.sessionId },
       traceSource,
     );
+    senderElision.settle(sendResult.ok);
     if (!sendResult.ok) {
       // Preserve queued work if the runtime cannot encode the live delivery yet.
       // This is especially important for protocol-steering runtimes where the
@@ -10084,6 +10931,8 @@ export class AgentProcessManager {
       stdin_write_attempted: true,
       rendered_thread_context_count: runtimeProjection.renderedContextMessages.length,
     });
+    this.recordDeliveriesWritten(agentId, ap, messages, "messages");
+    if (mode === "idle") this.watchTurnStart(agentId, ap, traceSource);
     // Phase-6: first successful post-ready delivery closes the activation wait.
     this.closeActivationTransition(ap, "advanced", "stdin");
     return true;

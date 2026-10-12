@@ -3,10 +3,10 @@ import assert from "node:assert/strict";
 import {
   cliReadStatePathSegments,
   configuredCliReadStateBase,
-  configuredRaftHome,
   latestReadThreadFromCliReadState,
   parentTargetOfThread,
 } from "./latestReadThread";
+import { configuredRaftHome } from "./raftHome";
 
 test("the latest read thread follows local read order, not the message seq", () => {
   assert.deepEqual(

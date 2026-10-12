@@ -25,6 +25,7 @@ import { registerMachine } from "../services/machineService";
 import * as attestedSendService from "../services/attestedSendService";
 import { listRecentAgentTrajectory } from "../services/agentActivityLogService";
 import { createServer } from "../services/serverService";
+import { withChannelDelivery } from "../test/orchestratorStub";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 
@@ -920,7 +921,7 @@ test("attested send: held response is target-scoped and does not drain other-tar
   const fixture = await seedFixture(app.baseUrl);
   const sideChannel = await createJoinedChannel(fixture, "side-room");
   const acknowledged: Array<{ agentId: string; channelId: string; seqs: number[] }> = [];
-  app.app.set("agentOrchestrator", {
+  app.app.set("agentOrchestrator", withChannelDelivery({
     deliverMessage: async () => {},
     receiveMessages: async () => {
       throw new Error("send path must not drain the global inbox");
@@ -943,7 +944,7 @@ test("attested send: held response is target-scoped and does not drain other-tar
     evictCache: () => {},
     shutdown: () => {},
     setIO: () => {},
-  });
+  }));
 
   const baseline = await sendHumanMessage(app.baseUrl, fixture, "baseline");
   await markAgentLegacyRead(fixture.agentId, fixture.channelId, baseline.seq);
@@ -977,7 +978,7 @@ test("attested send: send-draft re-hold suppresses only target messages and leav
   const acknowledged: Array<{ agentId: string; channelId: string; seqs: number[] }> = [];
   const targetSeqs: number[] = [];
   const removedTargetSeqs = new Set<number>();
-  app.app.set("agentOrchestrator", {
+  app.app.set("agentOrchestrator", withChannelDelivery({
     deliverMessage: async () => {},
     receiveMessages: async () => {
       throw new Error("send path must not drain the global inbox");
@@ -1001,7 +1002,7 @@ test("attested send: send-draft re-hold suppresses only target messages and leav
     evictCache: () => {},
     shutdown: () => {},
     setIO: () => {},
-  });
+  }));
 
   const baseline = await sendHumanMessage(app.baseUrl, fixture, "baseline");
   await markAgentLegacyRead(fixture.agentId, fixture.channelId, baseline.seq);
@@ -1044,7 +1045,7 @@ test("attested send: send-draft re-hold suppresses only target messages and leav
 test("attested send: held response shows only the latest bounded context and suppresses only what it showed", async ({ app }) => {
   const fixture = await seedFixture(app.baseUrl);
   const acknowledged: Array<{ agentId: string; channelId: string; seqs: number[] }> = [];
-  app.app.set("agentOrchestrator", {
+  app.app.set("agentOrchestrator", withChannelDelivery({
     deliverMessage: async () => {},
     receiveMessages: async () => {
       throw new Error("send path must not drain the global inbox");
@@ -1066,7 +1067,7 @@ test("attested send: held response shows only the latest bounded context and sup
     evictCache: () => {},
     shutdown: () => {},
     setIO: () => {},
-  });
+  }));
 
   const baseline = await sendHumanMessage(app.baseUrl, fixture, "baseline");
   await markAgentLegacyRead(fixture.agentId, fixture.channelId, baseline.seq);

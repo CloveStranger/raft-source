@@ -211,6 +211,11 @@ export function formatRuntimeLoginRequiredMessage(runtimeId: string): string {
   if (runtimeId === "builtin") {
     return "Built-in provider authentication failed. Check this agent's provider API key and region/provider selection, then retry starting this agent.";
   }
+  // Pi talks to model providers with API keys (environment or Pi's auth file);
+  // a rejected request is almost always a bad or missing key, not a Pi login.
+  if (runtimeId === "pi") {
+    return "Pi's model provider rejected the API key, or no key is set for it on this machine. Check the API key for this agent's provider, then retry starting this agent.";
+  }
   const runtimeLabel = runtimeDisplayName(runtimeId);
   return `${runtimeLabel} is not logged in on this machine. Please log in to ${runtimeLabel} locally, then retry starting this agent.`;
 }
@@ -220,21 +225,32 @@ export function formatRuntimeStartTimeoutMessage(runtimeId: string): string {
   return `${runtimeLabel} did not finish starting on this machine. Check that ${runtimeLabel} is installed, logged in, and can run non-interactively, then retry starting this agent.`;
 }
 
-// Grok has no user-triggerable compaction, and Restart reloads the same
-// session (session/load). Name the control that actually starts a new session,
-// with its web labels ("Restart / Reset" → "Reset Session & Restart"; members
-// see "Reset Model"). Other runtimes keep the generic text until their recovery
-// paths are verified one by one.
-const GROK_INPUT_TOO_LARGE_MESSAGE =
-  "Grok Build reported input that is too large for the selected model. Restart keeps the existing session. "
-  + "To start a new session, someone who can manage this agent can open Restart / Reset and choose Reset Session & Restart "
-  + "(shown as Reset Model for members). This stops current work and clears the runtime conversation context, "
-  + "while keeping Raft messages and workspace files, including MEMORY.md. "
-  + "If the error persists in a new session, reduce the prompt or configured startup context.";
+// Raft offers no user-triggerable compaction, and Restart reloads the same
+// session (Grok session/load, Pi/Built-in session file). For these runtimes,
+// name the control that actually starts a new session, with its web labels
+// ("Restart / Reset" → "Reset Session & Restart"; members see "Reset Model").
+// Other runtimes keep the generic text until their recovery paths are verified
+// one by one.
+const RESET_GUIDED_INPUT_TOO_LARGE_RUNTIMES = new Set(["grok", "pi", "builtin"]);
+
+/** How to start a new session from the web, for runtimes whose Restart resumes the same session. */
+export function formatRuntimeResetSessionGuidance(): string {
+  return "To start a new session, someone who can manage this agent can open Restart / Reset and choose Reset Session & Restart "
+    + "(shown as Reset Model for members). This stops current work and clears the runtime conversation context, "
+    + "while keeping Raft messages and workspace files, including MEMORY.md.";
+}
+
+export function runtimeNeedsResetSessionGuidance(runtimeId: string): boolean {
+  return RESET_GUIDED_INPUT_TOO_LARGE_RUNTIMES.has(runtimeId);
+}
 
 export function formatRuntimeInputTooLargeMessage(runtimeId: string): string {
-  if (runtimeId === "grok") return GROK_INPUT_TOO_LARGE_MESSAGE;
   const runtimeLabel = runtimeDisplayName(runtimeId);
+  if (runtimeNeedsResetSessionGuidance(runtimeId)) {
+    return `${runtimeLabel} reported input that is too large for the selected model. Restart keeps the existing session. `
+      + `${formatRuntimeResetSessionGuidance()} `
+      + "If the error persists in a new session, reduce the prompt or configured startup context.";
+  }
   return `${runtimeLabel} reported input that is too large for the selected model. Reduce the current prompt or injected startup context. For a resumed session, compact it or start a new session before retrying.`;
 }
 

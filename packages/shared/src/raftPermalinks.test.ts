@@ -97,3 +97,37 @@ test("parseRaftPermalink rejects URLs without a message id", () => {
     null
   );
 });
+
+// A permalink typed straight into Chinese prose has no space before the next
+// word, so the autolinked URL swallows it. Only the leading id is the target.
+test("parseRaftPermalink keeps only the leading message id when CJK text follows it", () => {
+  const base = "https://app.slock.ai/s/botiverse/channel/89dce17f-1cd3-4db8-b08f-7b4141004b5a";
+  assert.equal(
+    parseRaftPermalink(`${base}?msg=7556f881-a5f8-4b0d-88dc-8b5af28e8f05这条你是不是没收到`)?.messageId,
+    "7556f881-a5f8-4b0d-88dc-8b5af28e8f05",
+  );
+  assert.equal(
+    parseRaftPermalink(`${base}?msg=7556f881-a5f8-4b0d-88dc-8b5af28e8f05，看一下`)?.messageId,
+    "7556f881-a5f8-4b0d-88dc-8b5af28e8f05",
+  );
+  assert.equal(parseRaftPermalink(`${base}?msg=7556f881这条`)?.messageId, "7556f881");
+  assert.deepEqual(
+    parseRaftPermalink(`${base}?thread=89dce17f-1cd3-4db8-b08f-7b4141004b5a%3A11111111-2222-3333-4444-555555555555这个`),
+    {
+      routeKind: "channel",
+      serverSlug: "botiverse",
+      channelId: "89dce17f-1cd3-4db8-b08f-7b4141004b5a",
+      messageId: "11111111-2222-3333-4444-555555555555",
+      threadParentMessageId: "11111111-2222-3333-4444-555555555555",
+    },
+  );
+});
+
+test("parseRaftPermalink rejects message ids that are not a UUID or short id", () => {
+  const base = "https://app.slock.ai/s/botiverse/channel/89dce17f-1cd3-4db8-b08f-7b4141004b5a";
+  assert.equal(parseRaftPermalink(`${base}?msg=not-a-message`), null);
+  assert.equal(parseRaftPermalink(`${base}?msg=这条`), null);
+  // An id that runs on into more id characters is not silently truncated.
+  assert.equal(parseRaftPermalink(`${base}?msg=7556f881-a5f8-4b0d-88dc-8b5af28e8f05abc`), null);
+  assert.equal(parseRaftPermalink(`${base}?msg=abc123456789`), null);
+});

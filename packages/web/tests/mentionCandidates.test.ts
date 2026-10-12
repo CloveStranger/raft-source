@@ -263,6 +263,31 @@ test("joint mention candidates preserve peer server labels", () => {
   );
 });
 
+test("joint mention candidates list every server a person takes part through", () => {
+  assert.equal(
+    getMentionCandidateServerLabel({
+      id: "dual-user",
+      serverName: null,
+      serverSlug: null,
+      serverLabels: ["Home", "Isolation"],
+      name: "dual",
+      displayName: "Dual",
+      type: "user",
+      avatarUrl: null,
+    }),
+    "Home, Isolation",
+  );
+  const entry = createMentionCandidateSearchEntries([{
+    id: "dual-user",
+    serverLabels: ["Home", "Isolation"],
+    name: "dual",
+    displayName: "Dual",
+    type: "user",
+    avatarUrl: null,
+  }])[0]!;
+  assert.ok(entry.fields.some((field) => field.raw === "Home, Isolation"), "every server label is searchable");
+});
+
 test("mention autocomplete scopes candidates only for private and joint channels", () => {
   assert.equal(isMemberScopedMentionChannel({ type: "private" }), true);
   assert.equal(isMemberScopedMentionChannel({ type: "joint" }), true);
@@ -278,4 +303,31 @@ test("MessageInput #channel autocomplete keeps CJK query text like @mentions", (
   assert.equal("hello @铁根".match(MENTION_TRIGGER)?.[1], "铁根");
   assert.equal("hello #项目".match(CHANNEL_TRIGGER)?.[1], "项目");
   assert.equal("hello #proj-uiux".match(CHANNEL_TRIGGER)?.[1], "proj-uiux");
+});
+
+test("external (Slack) candidates land in their own group and reach flat", () => {
+  const groups = buildMentionCandidateGroups({
+    candidates: [
+      ...candidates,
+      { id: "proj-august", name: "august", displayName: "august", type: "external", avatarUrl: null, description: "Slack" },
+      { id: "proj-huarong", name: "huarong-slack-sandbox", displayName: "huarong", type: "external", avatarUrl: null, description: "Slack" },
+    ],
+    query: "",
+    channelMemberIds: new Set(["member-idle", "member-recent"]),
+  });
+
+  // External projections are always channel-scoped (a binding member), so they
+  // are never "not in channel" — but they are not Raft actors either, so they
+  // don't join `inChannel`/`notInChannel` which drive member-vs-outsider
+  // rendering and `channelMemberIds` lookups.
+  assert.deepEqual(groups.externals.map((c) => c.id), ["proj-august", "proj-huarong"]);
+  assert.ok(groups.flat.some((c) => c.id === "proj-august"), "external must reach flat");
+  assert.ok(groups.flat.some((c) => c.id === "proj-huarong"), "external must reach flat");
+  // Order: inChannel, externals (in-channel group, Slack-tagged), notInChannel,
+  // computers, apps — externals slot between inChannel and notInChannel so the
+  // keyboard navigation order matches the visual "in this channel → Slack →
+  // not in this channel" layout.
+  const augIdx = groups.flat.findIndex((c) => c.id === "proj-august");
+  assert.ok(augIdx > groups.flat.findIndex((c) => c.id === "member-idle"), "external sorted after inChannel");
+  assert.ok(augIdx < groups.flat.findIndex((c) => c.id === "outsider-idle"), "external sorted before notInChannel");
 });

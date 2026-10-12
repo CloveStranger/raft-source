@@ -127,7 +127,7 @@ test("paused video comments expose an explicit add timestamp affordance when no 
   assert.match(messageSource, /getPendingAnchor=\{getPendingAnchor\}/);
   assert.match(panelSource, /onAnchorCleared\?: \(\) => void;/);
   assert.match(panelSource, /getPendingAnchor\?: \(\) => CommentAnchor \| null;/);
-  assert.match(panelSource, /const clearActiveAnchor = \(\) => \{/);
+  assert.match(panelSource, /const clearActiveAnchor = useCallback\(\(\) => \{/);
   assert.match(panelSource, /onAnchorCleared\?\.\(\);/);
   assert.match(panelSource, /const anchorForSend = getPendingAnchor \? getPendingAnchor\(\) : activeAnchor;/);
   assert.match(
@@ -152,7 +152,7 @@ test("audio attachments render custom inline players without the preview chip", 
   assert.match(messageSource, /data-message-affordance="inline-audio-preview"/);
   assert.match(messageSource, /const audioAttachments = message\.attachments\.filter\(\(att\) => isPreviewableAudioAttachment\(att\)\);/);
   assert.match(messageSource, /\.filter\(\(att\) => !isPreviewableVideoAttachment\(att\) && !isPreviewableAudioAttachment\(att\)\)/);
-  assert.match(messageSource, /<InlineAudioAttachmentCard[\s\S]{0,260}?attachment=\{att\}[\s\S]{0,260}?onDownload=\{handleDownload\}/);
+  assert.match(messageSource, /<InlineAudioAttachmentCard[\s\S]{0,260}?attachment=\{att\}[\s\S]{0,260}?onDownload=\{handleDownloadAttachment\}/);
   assert.match(messageSource, /isAudio=\{false\}/);
   assert.doesNotMatch(messageSource, /isAudio=\{isAudio\}/);
   assert.doesNotMatch(messageSource, /const isAudio = isPreviewableAudioAttachment\(att\);/);

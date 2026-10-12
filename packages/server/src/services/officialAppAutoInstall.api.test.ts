@@ -19,8 +19,11 @@ import {
   __setOfficialAppAutoInstallAttemptObserverForTests,
   __setBeforeOfficialAppAutoInstallWriteObserverForTests,
   getOfficialAppInstallationProvenance,
+  projectOfficialAppDiscovery,
+  projectOfficialAppDiscoveryMany,
   reconcileOfficialDefaultAppForExistingServers,
 } from "./officialAppAutoInstallService";
+import { listMarketplaceOAuthClients } from "./oauthService";
 
 const test = createApiTest({ onboardingOpenerFlagDefaultEnabled: false });
 const originalPublisherServerId = process.env.RAFT_OFFICIAL_PUBLISHER_SERVER_ID;
@@ -359,4 +362,46 @@ test("concurrent auto-install and explicit uninstall serialize to suppression wi
     eq(oauthClientInstalls.serverId, target.id),
     eq(oauthClientInstalls.clientId, client.id),
   ))).length, 0);
+});
+
+test("marketplace official-app discovery reads the registry once for the whole list, with the single-app answers", async ({ app: _app }) => {
+  type PgliteLike = { query: (...args: unknown[]) => Promise<unknown> };
+  const owner = await seedUser("official-discovery-batch");
+  const source = await createServer("Official Discovery", `official-discovery-${randomUUID()}`, owner.id);
+  const thirdParty = await createServer("Third Party", `third-party-${randomUUID()}`, owner.id);
+  const viewer = await createServer("Viewer", `viewer-${randomUUID()}`, owner.id);
+  process.env.RAFT_OFFICIAL_PUBLISHER_SERVER_ID = source.id;
+  const approved = await Promise.all(["one", "two", "three"].map(async (key) => {
+    const client = await seedPublishedApp({ sourceServerId: source.id, createdByUserId: owner.id, clientKey: `official-${key}-${randomUUID().slice(0, 6)}` });
+    await seedRegistry(client, { purpose: `Purpose ${key}` });
+    return client;
+  }));
+  const pending = await seedPublishedApp({ sourceServerId: source.id, createdByUserId: owner.id, clientKey: `official-pending-${randomUUID().slice(0, 6)}` });
+  await seedRegistry(pending, { status: "pending_review" });
+  const unregistered = await seedPublishedApp({ sourceServerId: source.id, createdByUserId: owner.id, clientKey: `official-none-${randomUUID().slice(0, 6)}` });
+  const selfAsserted = await seedPublishedApp({ sourceServerId: thirdParty.id, createdByUserId: owner.id, clientKey: `third-party-${randomUUID().slice(0, 6)}` });
+  await seedRegistry(selfAsserted);
+  const all = [...approved, pending, unregistered, selfAsserted];
+
+  const inputs = all.map((client) => ({ clientId: client.id, sourceServerId: client.serverId, clientKey: client.clientId }));
+  const batch = await projectOfficialAppDiscoveryMany(inputs);
+  for (const input of inputs) assert.deepEqual(batch.get(input.clientId), await projectOfficialAppDiscovery(input), input.clientKey);
+  assert.deepEqual(approved.map((client) => batch.get(client.id)?.official), [true, true, true]);
+  assert.deepEqual([pending, unregistered, selfAsserted].map((client) => batch.get(client.id)?.official), [false, false, false]);
+
+  const pg = (getDb() as unknown as { $client: PgliteLike }).$client;
+  const originalQuery = pg.query.bind(pg);
+  let registryReads = 0;
+  pg.query = ((...args: unknown[]) => {
+    if (typeof args[0] === "string" && /from "official_app_registry"/.test(args[0])) registryReads += 1;
+    return originalQuery(...args);
+  }) as PgliteLike["query"];
+  let listed: Awaited<ReturnType<typeof listMarketplaceOAuthClients>>;
+  try {
+    listed = await listMarketplaceOAuthClients(viewer.id);
+  } finally {
+    pg.query = originalQuery;
+  }
+  assert.ok(listed.filter((client) => all.some((seeded) => seeded.id === client.id)).length >= 5);
+  assert.equal(registryReads, 1, "one registry read for the whole marketplace list");
 });

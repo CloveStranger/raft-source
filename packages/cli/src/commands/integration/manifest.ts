@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 
 import type { AgentContext } from "../../auth/env";
+import { resolveRaftHome } from "../../state/raftHome";
 import {
   credentialFreeDiagnosticUrl,
   fetchWithCanonicalProxy,
@@ -494,10 +495,8 @@ function sanitizePathSegment(value: string): string {
   return segment || "service";
 }
 
-function resolveRaftHome(env: NodeJS.ProcessEnv, homeDir = os.homedir()): string {
-  const configured = env.RAFT_HOME?.trim() || env.SLOCK_HOME?.trim();
-  const raw = configured && configured.length > 0 ? configured : path.join(homeDir, ".slock");
-  return path.resolve(expandHome(raw, homeDir));
+function resolveExpandedRaftHome(env: NodeJS.ProcessEnv, homeDir = os.homedir()): string {
+  return path.resolve(expandHome(resolveRaftHome(env, homeDir), homeDir));
 }
 
 function expandHome(input: string, homeDir: string): string {
@@ -523,7 +522,7 @@ export function buildLocalCliProfileEnv(input: {
     throw new Error("manifest must set credential_boundary.forbid_user_home=true for local_cli isolation");
   }
 
-  const root = resolveRaftHome(input.env ?? process.env, input.homeDir);
+  const root = resolveExpandedRaftHome(input.env ?? process.env, input.homeDir);
   const profileHome = path.join(
     root,
     "integration-profiles",

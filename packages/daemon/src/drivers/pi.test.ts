@@ -385,6 +385,30 @@ test("createPiAgentSessionForContext persists an early startup failure without a
   }
 });
 
+test("a missing Pi model is reported for the pi runtime, not as Built-in", async () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "pi-missing-model-"));
+  const workingDirectory = path.join(root, "workspace");
+  mkdirSync(workingDirectory, { recursive: true });
+  try {
+    await assert.rejects(
+      createPiAgentSessionForContext(
+        makeSpawnContext({ runtime: "pi", model: "deepseek/deepseek-v4-flash" }, { workingDirectory, launchId: "pi-missing-model-launch" }),
+        "pi-missing-model",
+        { agentDir: path.join(root, "agent"), sessionDir: path.join(root, "sessions"), isolateHostProviderEnv: true },
+      ),
+      (error: unknown) => {
+        const typed = error as { code?: string; runtimeId?: string; model?: string };
+        assert.equal(typed.code, "model_not_found");
+        assert.equal(typed.runtimeId, "pi");
+        assert.equal(typed.model, "deepseek/deepseek-v4-flash");
+        return true;
+      },
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("Built-in gateway image-input override defaults closed and unions without replacing registry input", () => {
   assert.deepEqual(resolveBuiltInGatewayModelInput(undefined, undefined), ["text"]);
   assert.deepEqual(resolveBuiltInGatewayModelInput(undefined, false), ["text"]);
@@ -2567,7 +2591,7 @@ test("Pi library egress traverses both interception faces, and apiKey seeding pr
   } as never;
 
   try {
-    // --- POSITIVE CONTROL: real 1.0.2 OAuth flow, real fetch, pointed at loopback -------------
+    // --- POSITIVE CONTROL: real 1.1.0 OAuth flow, real fetch, pointed at loopback -------------
     process.env.KIMI_CODE_OAUTH_HOST = `http://127.0.0.1:${port}`;
     const { kimiCodingProvider } = await import("@earendil-works/pi-ai/providers/kimi-coding");
     const provider = kimiCodingProvider() as unknown as {
@@ -2670,10 +2694,15 @@ test("pi pin is the version this offline guarantee was verified against", () => 
   //   with `allowNetwork: false`. The other changes in model-runtime.js only add more
   //   `refresh({ allowNetwork: false })` calls (6 occurrences, up from 4); none of them enables the network.
   //
+  //   1.0.2 -> 1.1.0 was re-verified the same way: the whole model-runtime.js diff is 2 lines
+  //   (`classify` gains an `assertClassifierInputSupported(model, context)` guard), while
+  //   `synchronizeCredentialState` and `refreshProviderAvailability` are byte-identical and
+  //   `allowNetwork: false` still appears exactly 6 times in each. The seeding path is untouched.
+  //
   // Then update VERIFIED_AGAINST *and* the three sibling 0.8x.y labels below (the positive-control
   // comment, the "never triggers a remote model refresh (pi X)" test name, and its comment) --
   // otherwise they assert a version nobody re-checked.
-  const VERIFIED_AGAINST = "1.0.2";
+  const VERIFIED_AGAINST = "1.1.0";
   const pkg = JSON.parse(
     readFileSync(new URL("../../package.json", import.meta.url), "utf8"),
   ) as { dependencies: Record<string, string> };
@@ -2690,8 +2719,8 @@ test("pi pin is the version this offline guarantee was verified against", () => 
   }
 });
 
-test("Pi auth seeding never triggers a remote model refresh (pi 1.0.2)", async () => {
-  // Under 1.0.2 the offline guarantee lives inside the library: credential synchronization
+test("Pi auth seeding never triggers a remote model refresh (pi 1.1.0)", async () => {
+  // Under 1.1.0 the offline guarantee lives inside the library: credential synchronization
   // refreshes with allowNetwork:false and reconciles only local catalog/composition/availability.
   // Our side of the contract is that seeding issues NO refresh of its own — remote freshness is a
   // separate, deliberate caller decision. This counts refreshes rather than inspecting arguments,
@@ -4136,4 +4165,60 @@ test("a provider key that cannot go into an HTTP header is refused with a readab
     assert.throws(() => assertProviderApiKeyIsHeaderSafe(key, "K"), JSON.stringify(key));
   }
   assert.throws(() => assertProviderApiKeyIsHeaderSafe("  \u6d59sk", "K"), /position 3, code 27993/);
+});
+
+test("task #365: a launch that turns stale while the pi factory prepares never creates the SDK session", async () => {
+  const fixture = createPiExtensionModelFixture(onTestFinished);
+  let stale = false;
+  const refused = new Error("launch claimed against an earlier connection");
+  const ctx = {
+    ...makeSpawnContext({ model: fixture.modelId }, { launchId: "launch-stale" }),
+    assertLaunchCurrent: () => { if (stale) throw refused; },
+  };
+  await withPiExtensionEnv(fixture, async () => {
+    const pending = createPiAgentSessionForContext(ctx, "pi-stale-session");
+    stale = true; // the connection changes while the factory awaits its preparation
+    await assert.rejects(pending, (err) => err === refused);
+  });
+  // Positive control: the same context while current yields a session.
+  stale = false;
+  const session = await withPiExtensionEnv(fixture, () => createPiAgentSessionForContext(ctx, "pi-current-session"));
+  try {
+    assert.ok(session.sessionId);
+  } finally {
+    session.dispose();
+  }
+});
+
+test("task #365: a launch that turns stale while pi waits for the env-patch lock never creates the SDK session", async () => {
+  const fixture = createPiExtensionModelFixture(onTestFinished);
+  let stale = false;
+  const refused = new Error("launch claimed against an earlier connection");
+  // A non-empty env patch: the session create runs under the process-wide env lock.
+  const ctx = {
+    ...makeSpawnContext({ model: fixture.modelId, envVars: { TASK365_ENV_PATCH: "1" } }, { launchId: "launch-lock" }),
+    assertLaunchCurrent: () => { if (stale) throw refused; },
+  };
+  let holder: Promise<unknown> | null = null;
+  const info = console.info;
+  console.info = (...args: unknown[]) => {
+    // Right after the services are ready, another env-patch user takes the
+    // lock, so the session create below has to wait for it.
+    if (holder === null && String(args[0]).includes("create_session services_ready")) {
+      holder = withProcessEnvPatch({ TASK365_LOCK_HOLDER: "1" }, async () => {
+        await new Promise((resolve) => setTimeout(resolve, 300));
+        stale = true; // the connection changes while the create waits for the lock
+      });
+    }
+    return info.apply(console, args as []);
+  };
+  try {
+    await withPiExtensionEnv(fixture, async () => {
+      await assert.rejects(createPiAgentSessionForContext(ctx, "pi-lock-session"), (err) => err === refused);
+    });
+    assert.ok(holder, "the lock was held while the session create waited");
+    await holder;
+  } finally {
+    console.info = info;
+  }
 });

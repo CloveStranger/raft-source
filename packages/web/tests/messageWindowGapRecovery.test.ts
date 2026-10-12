@@ -2707,3 +2707,33 @@ test("[#3774] optimistic sent on first thread open (empty bucket) gets a server-
     harness.restore();
   }
 });
+
+// Reconnect catch-up regression (2026-10): `GET /messages/sync` served `seq`
+// as a STRING (raw int8 row) while every other path serves a number. The store
+// must coerce at ingest so a wire string never reaches `channelMessages`.
+test("thread catch-up sync and sync:resume coerce wire-string seqs to numbers at ingest", SERIAL, async () => {
+  const harness = createMessageWindowHarness();
+  const THREAD_ID = "thread-1";
+  try {
+    harness.primeWindow(CHANNEL_ID, [message(13)]);
+    useMessageStore.setState((state) => ({
+      channelMessages: { ...state.channelMessages, [THREAD_ID]: [messageInChannel(THREAD_ID, 12)] },
+    }));
+    // Global seqs interleave: thread 12,14,16 while the parent channel got 13,15.
+    const wire = (seq: number) => ({ ...messageInChannel(THREAD_ID, seq), seq: String(seq) }) as unknown as Message;
+    harness.enqueueSyncPages([wire(14), wire(16)]);
+
+    await useMessageStore.getState().syncGap(THREAD_ID, { sinceSeq: 12 });
+
+    const thread = harness.messages(THREAD_ID);
+    assert.deepEqual(thread.map((row) => row.id), ["m-12", "m-14", "m-16"]);
+    assert.deepEqual(thread.map((row) => typeof row.seq), ["number", "number", "number"]);
+
+    harness.batchMessages([({ ...messageInChannel(CHANNEL_ID, 15), seq: "15" }) as unknown as Message]);
+    const channel = harness.messages(CHANNEL_ID);
+    assert.deepEqual(channel.map((row) => row.seq), [13, 15]);
+    assert.equal(useMessageStore.getState().lastSeq, 16);
+  } finally {
+    harness.restore();
+  }
+});

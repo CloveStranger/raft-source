@@ -1,5 +1,6 @@
 import { RuntimeExecutableNotFoundError } from "../spawnFailureErrors";
-import { execFileSync, spawn } from "node:child_process";
+import { execFileSync } from "node:child_process";
+import { spawnRuntimeChild } from "./runtimeChild";
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { hydrateRuntimeConfig, runtimeConfigToLaunchFields, type AgentConfig , type AxSurfaceText } from "@botiverse/raft-shared";
@@ -198,7 +199,9 @@ export class GeminiDriver implements RuntimeDriver {
     const spawnEnv = await buildGeminiSpawnEnv(ctx, process.platform, managedMcpSettingsPath);
     const { command, args, env } = resolveGeminiSpawn(buildGeminiArgs(ctx.config), { env: spawnEnv });
 
-    const proc = spawn(command, args, {
+    // task #365: after the last await, right before the child exists.
+    ctx.assertLaunchCurrent?.();
+    const proc = spawnRuntimeChild(command, args, {
       cwd: ctx.workingDirectory,
       stdio: ["pipe", "pipe", "pipe"],
       env,

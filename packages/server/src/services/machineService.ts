@@ -169,6 +169,8 @@ export async function listMachines(
       hostname: machines.hostname,
       os: machines.os,
       daemonVersion: machines.daemonVersion,
+      computerVersion: machines.computerVersion,
+      computerVersionReportedAt: machines.computerVersionReportedAt,
       lastHeartbeat: machines.lastHeartbeat,
       createdAt: machines.createdAt,
     }).from(machines).where(eq(machines.serverId, serverId)).orderBy(asc(machines.createdAt)),

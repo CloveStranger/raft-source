@@ -201,7 +201,7 @@ test("mounted computer delete success closes locally without navigating", async 
     deleteMachine: async (id: string) => { deletedMachines.push(id); },
   } as never);
   render(wrap(
-    createElement(MachineDetailPanel, { machine, workspaceEmbedded: true }),
+    createElement(MachineDetailPanel, { machine, hideHeader: true }),
     "/s/server/settings/computers/machine-1",
   ));
   fireEvent.click(screen.getByRole("button", { name: "Delete Computer" }));

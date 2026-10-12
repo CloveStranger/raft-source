@@ -20,6 +20,13 @@ export interface ShutdownServiceDeps {
   isProcessAlive: (pid: number) => boolean;
   clearServicePidfile: () => Promise<void>;
   restartRequested: boolean;
+  /**
+   * Exit code once the children are gone. Default 0. A service handing
+   * itself to an external supervisor exits with
+   * SUPERVISED_RELAUNCH_EXIT_CODE so the supervisor's restart policy
+   * relaunches it (task #917).
+   */
+  exitCode?: number;
   now?: () => number;
   sleep?: (ms: number) => Promise<void>;
   writeWarning?: (message: string) => void;
@@ -32,6 +39,7 @@ export async function shutdownService({
   isProcessAlive,
   clearServicePidfile,
   restartRequested,
+  exitCode = 0,
   now = currentTimeMs,
   sleep = (ms) => new Promise<void>((resolve) => setClockTimeout(resolve, ms)),
   writeWarning = (message) => process.stderr.write(message),
@@ -79,5 +87,5 @@ export async function shutdownService({
   // The incumbent must not unlink that successor identity during its tail
   // shutdown. Operator stop has no successor and still clears normally.
   if (!restartRequested) await clearServicePidfile();
-  exit(0);
+  exit(exitCode);
 }

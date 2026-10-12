@@ -1,7 +1,7 @@
-import { useState } from "react";
-import type { FormEvent, ReactNode } from "react";
+import { useCallback, useState } from "react";
+import type { ChangeEvent, FormEvent, ReactNode } from "react";
 import { useIntl } from "react-intl";
-import { Button, Input } from "raft-ui";
+import { Button, Input, TextSans } from "raft-ui";
 import { CURRENT_LEGAL_ACCEPTANCE } from "@botiverse/raft-shared";
 import { useAuthStore } from "../../store/authStore";
 import type { AuthProvider, SocialAuthProviderId } from "../../hooks/useAuthProviders";
@@ -40,14 +40,28 @@ export default function RegisterPage({ onSwitchToLogin, previewProviders }: Regi
   const [fieldErrors, setFieldErrors] = useState<{ email?: string; password?: string }>({});
   const [showOpenInBrowserGuide, setShowOpenInBrowserGuide] = useState(false);
 
-  const handleSocialLogin = (providerId: SocialAuthProviderId) => {
+  const handleSocialLogin = useCallback((providerId: SocialAuthProviderId) => {
     if (previewProviders) return;
     if (isEmbeddedBrowser()) {
       setShowOpenInBrowserGuide(true);
       return;
     }
     window.location.href = buildSocialAuthStartUrl(providerId, getCurrentReturnTo());
-  };
+  }, [previewProviders]);
+
+  const handleCloseOpenInBrowserGuide = useCallback(() => {
+    setShowOpenInBrowserGuide(false);
+  }, []);
+
+  const handleEmailChange = useCallback((event: ChangeEvent<HTMLInputElement>) => {
+    setEmail(event.target.value);
+    if (fieldErrors.email) setFieldErrors((current) => ({ ...current, email: undefined }));
+  }, [fieldErrors.email]);
+
+  const handlePasswordChange = useCallback((event: ChangeEvent<HTMLInputElement>) => {
+    setPassword(event.target.value);
+    if (fieldErrors.password) setFieldErrors((current) => ({ ...current, password: undefined }));
+  }, [fieldErrors.password]);
 
   const handleSubmit = async (event: FormEvent) => {
     event.preventDefault();
@@ -83,7 +97,7 @@ export default function RegisterPage({ onSwitchToLogin, previewProviders }: Regi
     return (
       <OpenInBrowserSignInGuide
         loginUrl={getExternalBrowserLoginUrl()}
-        onBack={() => setShowOpenInBrowserGuide(false)}
+        onBack={handleCloseOpenInBrowserGuide}
       />
     );
   }
@@ -102,10 +116,7 @@ export default function RegisterPage({ onSwitchToLogin, previewProviders }: Regi
               name="email"
               type="email"
               value={email}
-              onChange={(event) => {
-                setEmail(event.target.value);
-                if (fieldErrors.email) setFieldErrors((current) => ({ ...current, email: undefined }));
-              }}
+              onChange={handleEmailChange}
               data-invalid={fieldErrors.email ? true : undefined}
               autoComplete="email"
               required
@@ -118,10 +129,7 @@ export default function RegisterPage({ onSwitchToLogin, previewProviders }: Regi
               name="new-password"
               type="password"
               value={password}
-              onChange={(event) => {
-                setPassword(event.target.value);
-                if (fieldErrors.password) setFieldErrors((current) => ({ ...current, password: undefined }));
-              }}
+              onChange={handlePasswordChange}
               data-invalid={fieldErrors.password ? true : undefined}
               placeholder={formatMessage({ id: "pages.register.passwordPlaceholder" })}
               autoComplete="new-password"
@@ -146,6 +154,20 @@ export default function RegisterPage({ onSwitchToLogin, previewProviders }: Regi
               ? formatMessage({ id: "pages.register.creatingAccount" })
               : formatMessage({ id: "pages.register.submit" })}
           </Button>
+
+          {/* task #724: a disabled Continue must say why. The reason is the
+              unchecked legal box, which is otherwise easy to miss; show a
+              persistent reason line (never hover-only — touch has no hover),
+              and only while the box is unchecked so it does not read as an
+              error next to the validation text. */}
+          {!acceptedLegal && !loading ? (
+            <p
+              className="text-center text-xs text-foreground-muted theme-brutal:text-black/50"
+              data-testid="register-legal-hint"
+            >
+              {formatMessage({ id: "auth.legalAcceptance.requiredHint" })}
+            </p>
+          ) : null}
         </form>
 
         {enabledProviders.length > 0 ? (
@@ -170,7 +192,7 @@ export default function RegisterPage({ onSwitchToLogin, previewProviders }: Regi
           </>
         ) : null}
 
-        <p className="mt-4 text-center text-sm">
+        <TextSans size="small" className="mt-4 text-center theme-brutal:text-black/60">
           {formatMessage(
             { id: "pages.register.haveAccountPrompt" },
             {
@@ -181,7 +203,7 @@ export default function RegisterPage({ onSwitchToLogin, previewProviders }: Regi
               ),
             },
           )}
-        </p>
+        </TextSans>
       </div>
     </AuthPageFrame>
   );

@@ -58,8 +58,6 @@ export interface SlackBridgeFullFlowPreflightInput {
     canonicalJointRows: number;
     localJointRows: number;
     externalBindingRows: number;
-    runtimeBuildFingerprint: string;
-    expectedRuntimeBuildFingerprint: string;
   };
   registration: {
     id: string;
@@ -236,9 +234,6 @@ export function runSlackBridgeFullFlowPreflight(input: SlackBridgeFullFlowPrefli
     || input.topology.canonicalJointRows !== 0
     || input.topology.localJointRows !== 0
     || input.topology.externalBindingRows !== 1
-    || !/^[0-9a-f]{64}$/.test(input.topology.runtimeBuildFingerprint)
-    || !/^[0-9a-f]{64}$/.test(input.topology.expectedRuntimeBuildFingerprint)
-    || input.topology.runtimeBuildFingerprint !== input.topology.expectedRuntimeBuildFingerprint
   ) fail("topology");
   if (
     !input.registration.id

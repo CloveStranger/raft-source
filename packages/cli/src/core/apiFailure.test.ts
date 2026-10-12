@@ -96,3 +96,10 @@ test("non-proxy 5xx gets no default next action", () => {
   assert.equal(err.code, "SERVER_5XX");
   assert.equal(err.suggestedNextAction, undefined);
 });
+
+test("post_response_local points at the local daemon, not the server (task #369)", () => {
+  const action = proxyFailureNextAction({ failureClass: "post_response_local" });
+  assert.notEqual(action, TRANSPORT_LOG_HINT);
+  assert.match(action, /local daemon fault, not a server or network failure/);
+  assert.doesNotMatch(action, /before attributing it to the server/);
+});

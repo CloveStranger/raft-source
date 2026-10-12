@@ -2,6 +2,8 @@ import type { ButtonHTMLAttributes, ReactNode } from "react";
 import SurfaceListItem from "./SurfaceListItem";
 import Tooltip from "./Tooltip";
 
+const NO_BUTTON_PROPS: ButtonHTMLAttributes<HTMLButtonElement> = {};
+
 /**
  * Canonical "card-style row with an avatar on the left" primitive — the
  * pattern visible as `AGENTS ON THIS COMPUTER` rows in MachineDetailPanel.
@@ -120,18 +122,18 @@ export default function AvatarListRow({
     <div className="min-w-0 flex-1">
       {align === "start" ? (
         <div className="flex min-w-0 flex-col gap-1">
-          <span className="truncate text-sm font-bold text-foreground-strong theme-brutal:text-black">{name}</span>
+          <span className="truncate text-sm font-semibold text-foreground-muted theme-brutal:font-bold theme-brutal:text-black">{name}</span>
           {subtitle != null && subtitle !== false && (
-            <span className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-xs font-mono text-foreground-muted theme-brutal:text-black/50">
+            <span className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-xs font-mono text-foreground-hint theme-brutal:text-black/50">
               {subtitle}
             </span>
           )}
         </div>
       ) : (
         <div className="flex min-w-0 flex-wrap items-baseline gap-x-2">
-          <span className="truncate text-sm font-bold text-foreground-strong theme-brutal:text-black">{name}</span>
+          <span className="truncate text-sm font-semibold text-foreground-muted theme-brutal:font-bold theme-brutal:text-black">{name}</span>
           {subtitle != null && subtitle !== false && (
-            <span className="text-xs font-mono text-foreground-muted theme-brutal:text-black/50">{subtitle}</span>
+            <span className="text-xs font-mono text-foreground-hint theme-brutal:text-black/50">{subtitle}</span>
           )}
         </div>
       )}
@@ -156,7 +158,7 @@ export default function AvatarListRow({
   const hasAction = actionContent != null && actionContent !== false;
   // Route buttonProps.title through the RUI Tooltip instead of the native
   // attribute (title= migration); all other buttonProps pass through.
-  const { title: buttonTitle, ...restButtonProps } = buttonProps ?? {};
+  const { title: buttonTitle, ...restButtonProps } = buttonProps ?? NO_BUTTON_PROPS;
   const rowButton = (
     <button
       {...restButtonProps}

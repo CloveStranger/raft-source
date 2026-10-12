@@ -44,6 +44,8 @@ export interface MessageServerTimelineDivergence {
   /** Timeline rows whose server, time or channel differs from the message's current values. */
   divergentRows: number;
   sampleIds: string[];
+  /** Messages the verify actually scanned: a 0/0 result is only meaningful when this covers the table. */
+  scannedRows: number;
 }
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setClockTimeout(resolve, ms));
@@ -105,8 +107,10 @@ export async function verifyMessageServerTimeline(
   options: { batchSize?: number; sampleLimit?: number } = {},
 ): Promise<MessageServerTimelineDivergence> {
   const batchSize = options.batchSize ?? 20_000;
+  // A 0-row slice scans nothing and would report a clean 0/0.
+  if (!Number.isInteger(batchSize) || batchSize < 1) throw new RangeError(`verify batchSize must be >= 1, got ${batchSize}`);
   const sampleLimit = options.sampleLimit ?? 20;
-  const divergence: MessageServerTimelineDivergence = { missingRows: 0, divergentRows: 0, sampleIds: [] };
+  const divergence: MessageServerTimelineDivergence = { missingRows: 0, divergentRows: 0, sampleIds: [], scannedRows: 0 };
   let lastId = MIN_UUID;
   for (;;) {
     const rows = await run(sql`
@@ -139,6 +143,7 @@ export async function verifyMessageServerTimeline(
     `);
     const row = rows[0] as { scanned: number; last_id: string | null; missing: number; divergent: number; sample_ids: string[] } | undefined;
     if (!row || row.scanned === 0 || !row.last_id) break;
+    divergence.scannedRows += row.scanned;
     divergence.missingRows += row.missing;
     divergence.divergentRows += row.divergent;
     for (const id of row.sample_ids) {

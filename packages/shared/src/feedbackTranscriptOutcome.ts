@@ -414,7 +414,7 @@ export function buildFeedbackTranscriptOutcome(input: Omit<FeedbackTranscriptOut
 // Consumer rule for report-ledger entries (Lens and any reader mirror this).
 // ---------------------------------------------------------------------------
 export interface FeedbackReportLedgerEntryClassification {
-  attachment: "transcript" | "machine_log_tail" | "machine_evidence" | "transcript_outcome" | "unknown";
+  attachment: "transcript" | "machine_log_tail" | "machine_evidence" | "transcript_outcome" | "agent_event_tail" | "unknown";
   /**
    * For transcripts: the signed content kind, or `source_unverified` when the
    * entry carries none (older daemon/server/worker; it MAY be a daemon
@@ -423,6 +423,8 @@ export interface FeedbackReportLedgerEntryClassification {
   source: FeedbackTranscriptUploadableContentKind | "source_unverified" | null;
   /** The request this entry belongs to, or `unknown` for entries written before request ids. */
   requestAssociation: string;
+  /** Only for `unknown`: the raw kind string (bounded), so a reader can show `unknown (kind=<raw>)`. */
+  rawKind?: string;
 }
 
 export function classifyFeedbackReportLedgerEntry(record: Record<string, unknown>): FeedbackReportLedgerEntryClassification {
@@ -436,8 +438,8 @@ export function classifyFeedbackReportLedgerEntry(record: Record<string, unknown
       requestAssociation,
     };
   }
-  if (kind === "machine_log_tail" || kind === "machine_evidence" || kind === "transcript_outcome") {
+  if (kind === "machine_log_tail" || kind === "machine_evidence" || kind === "transcript_outcome" || kind === "agent_event_tail") {
     return { attachment: kind, source: null, requestAssociation };
   }
-  return { attachment: "unknown", source: null, requestAssociation };
+  return { attachment: "unknown", source: null, requestAssociation, rawKind: typeof kind === "string" ? kind.slice(0, 128) : String(kind).slice(0, 128) };
 }

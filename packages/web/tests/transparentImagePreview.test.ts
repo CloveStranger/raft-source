@@ -43,20 +43,26 @@ test("image preview surfaces opt into the transparency background", () => {
 
 test("message gallery uses a quiet background instead of checkerboard", () => {
   const source = readSource("src/components/message/MessageItem.tsx");
+  // The gallery tile lives in its own file since task #709.
+  const gallerySource = readSource("src/components/message/GalleryImageItem.tsx");
   const css = readSource("src/index.css");
 
   assert.equal(imageGalleryBackgroundClass, "image-gallery-bg");
   // MessageItem's gallery no longer paints the quiet background itself: it
   // rides the shared raft-ui item layout (`[&_img]:bg-white`), so the local
-  // class must not come back here.
+  // class must not come back here or in the extracted gallery tile.
   assert.match(source, /layout=\{item\}/);
+  assert.match(gallerySource, /layout=\{layout\}/);
   assert.doesNotMatch(source, /imageGalleryBackgroundClass/);
+  assert.doesNotMatch(gallerySource, /imageGalleryBackgroundClass/);
   assert.doesNotMatch(source, /transparentImageBackgroundClass/);
-  assert.match(source, /bg-brutal-cream\/60/);
+  assert.doesNotMatch(gallerySource, /transparentImageBackgroundClass/);
+  assert.match(gallerySource, /bg-brutal-cream\/60/);
   assert.doesNotMatch(source, /border-2 border-black bg-transparent/);
-  // ChannelFilesPanel still paints the class on its own image surface.
+  assert.doesNotMatch(gallerySource, /border-2 border-black bg-transparent/);
+  // The channel files surface still paints the class on its own image.
   assert.match(
-    readSource("src/components/message/ChannelFilesPanel.tsx"),
+    readSource("src/components/message/ChannelFileVisual.tsx"),
     /imageGalleryBackgroundClass/,
   );
   assert.match(css, /\.image-gallery-bg\s*\{[\s\S]*?background:\s*#fff;/);

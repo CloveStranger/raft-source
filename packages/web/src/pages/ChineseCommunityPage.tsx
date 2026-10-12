@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useIntl } from "react-intl";
 import { trackEvent } from "../analytics/track";
 import {
@@ -26,6 +26,16 @@ function qrUnavailableMessageId(state: QrState, expired: boolean, imageLoadFaile
   return "pages.chineseCommunity.missingQr";
 }
 
+async function fetchConfig(url: string) {
+  try {
+    const response = await fetch(url, { cache: "no-store" });
+    if (!response.ok) return null;
+    return resolveChineseCommunityQrConfig(await response.json(), url);
+  } catch {
+    return null;
+  }
+}
+
 export default function ChineseCommunityPage() {
   const { formatMessage } = useIntl();
   const [state, setState] = useState<QrState>({ status: "loading" });
@@ -38,17 +48,7 @@ export default function ChineseCommunityPage() {
 
   useBrowserDocumentTitle(formatMessage({ id: "pages.chineseCommunity.title" }));
 
-  const fetchConfig = async (url: string) => {
-    try {
-      const response = await fetch(url, { cache: "no-store" });
-      if (!response.ok) return null;
-      return resolveChineseCommunityQrConfig(await response.json(), url);
-    } catch {
-      return null;
-    }
-  };
-
-  const loadFallbackConfig = async (missingReason: "config" | "image" = "config") => {
+  const loadFallbackConfig = useCallback(async (missingReason: "config" | "image" = "config") => {
     const fallback = await fetchConfig(CHINESE_COMMUNITY_QR_FALLBACK_CONFIG_PATH);
     setState(
       fallback
@@ -56,9 +56,9 @@ export default function ChineseCommunityPage() {
         : { status: "missing", reason: missingReason },
     );
     setFailedImageUrl(null);
-  };
+  }, []);
 
-  const loadConfig = async () => {
+  const loadConfig = useCallback(async () => {
     setState({ status: "loading" });
     setFailedImageUrl(null);
     const primary = await fetchConfig(configUrl);
@@ -67,14 +67,13 @@ export default function ChineseCommunityPage() {
       return;
     }
     await loadFallbackConfig();
-  };
+  }, [configUrl, loadFallbackConfig]);
 
+  // `loadConfig` only changes with the memoized config URL, so this runs once per mount.
   useEffect(() => {
     trackEvent("community_cn_qr_page_view", { from });
     void loadConfig();
-    // `loadConfig` intentionally reads the memoized config URL only.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [configUrl, from]);
+  }, [from, loadConfig]);
 
   const config = state.status === "ready" ? state.config : null;
   const expired = config ? isChineseCommunityQrExpired(config.expiresAt) : false;

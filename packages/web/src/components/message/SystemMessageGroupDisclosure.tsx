@@ -23,7 +23,14 @@ export default function ConnectedSystemMessageGroupDisclosure({
   children,
 }: SystemMessageGroupDisclosureWrapperProps) {
   return (
-    <SystemMessageGroup open={expanded} onOpenChange={onToggle} className="mb-1">
+    <SystemMessageGroup
+      open={expanded}
+      onOpenChange={onToggle}
+      // The group layer carries no margins of its own (Josh's table): the
+      // note rhythm owns both seams, and the inner rows re-assert their own
+      // leads (elegant 4, brutal 6) against the per-theme single-note values.
+      className="[&_[data-slot=system-message-item]]:pt-1 theme-brutal:[&_[data-slot=system-message-item]]:pt-1.5"
+    >
       <SystemMessageGroupHeader>
         <Tooltip content={summary}>
           <SystemMessageGroupDisclosure

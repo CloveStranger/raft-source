@@ -15,6 +15,12 @@ export type AgentStartQueueItem = {
   // RFC 071: the recovery grant of the admitted human start this start is
   // (bound to `launchId`); absent for every automatic start.
   recoveryGrant?: RecoveryGrant | null;
+  // task #365: the server connection epoch this start's launch was claimed
+  // against (an automatic start from a server with the spawn-error
+  // capability). Bound to `launchId` like the recovery grant. Null when the
+  // start carries none: an older server, a human start, or a daemon-internal
+  // restart; then there is no claim to check.
+  claimedConnectionEpochId?: string | null;
   // Trace parent of the request that asked for this start. The spawn span
   // is created under it, even when the start waits in the queue.
   traceParent?: TraceContext | null;

@@ -1,5 +1,5 @@
-import { useEffect, useState } from "react";
-import type { CSSProperties, Dispatch, ReactNode, SetStateAction } from "react";
+import { useCallback, useEffect, useState } from "react";
+import type { ChangeEvent, CSSProperties, Dispatch, ReactNode, SetStateAction } from "react";
 import { ArrowLeft, Check, Search, Undo2 } from "lucide-react";
 import { useIntl } from "react-intl";
 import { Field, FieldLabel, Input, Button } from "raft-ui";
@@ -79,6 +79,23 @@ export default function ForwardComposerMobile({
     { count: sourceMessages.length, source: sourceLabelText },
   );
 
+  const backToPreview = useCallback(() => setMobileStep("preview"), [setMobileStep]);
+  const backToTargets = useCallback(() => setMobileStep("targets"), [setMobileStep]);
+  const cancelMultiSelect = useCallback(() => {
+    setSelectedDestinations(new Map());
+    setMobileMultiSelect(false);
+  }, [setSelectedDestinations, setMobileMultiSelect]);
+  const startMultiSelect = useCallback(() => {
+    setSelectedDestinations(new Map());
+    setMobileMultiSelect(true);
+  }, [setSelectedDestinations, setMobileMultiSelect]);
+  const handleQueryChange = useCallback((event: ChangeEvent<HTMLInputElement>) => {
+    const value = event.target.value;
+    setQuery(value);
+    const trimmed = value.trim();
+    if (trimmed) search(trimmed); else resetSearch();
+  }, [setQuery, search, resetSearch]);
+
   useEffect(() => {
     const viewport = window.visualViewport;
     if (!viewport) return;
@@ -126,7 +143,7 @@ export default function ForwardComposerMobile({
       {mobileStep === "detail" ? (
         <>
           <header className="flex min-h-14 shrink-0 items-center gap-3 border-b border-line-hairline px-3 py-2 theme-brutal:border-b-2 theme-brutal:border-black">
-            <Button type="button" size="icon-sm" variant="outline" onClick={() => setMobileStep("preview")} aria-label={formatMessage({ id: "message.forwardComposer.backToPreview" })}>
+            <Button type="button" size="icon-sm" variant="outline" onClick={backToPreview} aria-label={formatMessage({ id: "message.forwardComposer.backToPreview" })}>
               <ArrowLeft size={18} />
             </Button>
             <div className="min-w-0">
@@ -141,7 +158,7 @@ export default function ForwardComposerMobile({
       ) : mobileStep === "preview" ? (
         <>
           <header className="flex min-h-14 shrink-0 items-center gap-3 border-b border-line-hairline px-3 py-2 theme-brutal:border-b-2 theme-brutal:border-black">
-            <Button type="button" size="icon-sm" variant="outline" onClick={() => setMobileStep("targets")} disabled={sending || joinInFlight} aria-label={formatMessage({ id: "message.forwardComposer.backToDestinations" })}>
+            <Button type="button" size="icon-sm" variant="outline" onClick={backToTargets} disabled={sending || joinInFlight} aria-label={formatMessage({ id: "message.forwardComposer.backToDestinations" })}>
               <ArrowLeft size={18} />
             </Button>
             <div className="min-w-0 flex-1">
@@ -174,7 +191,7 @@ export default function ForwardComposerMobile({
                   mentionChannelId={noteMentionChannelId}
                   mentionScopeChannelType={noteMentionScopeChannelType}
                   loadMentionMembers={Boolean(noteMentionChannelId)}
-                  onSendOverride={(note) => sendForwardNote(note)}
+                  onSendOverride={sendForwardNote}
                   allowEmptySubmit
                   submitDisabled={submitDisabled}
                   submitBusy={sending}
@@ -194,7 +211,7 @@ export default function ForwardComposerMobile({
         <>
           <header className="flex min-h-14 shrink-0 items-center gap-3 border-b border-line-hairline px-3 py-2 theme-brutal:border-b-2 theme-brutal:border-black">
             {mobileMultiSelect ? (
-              <Button type="button" size="icon-sm" variant="outline" onClick={() => { setSelectedDestinations(new Map()); setMobileMultiSelect(false); }} disabled={sending || joinInFlight} aria-label={formatMessage({ id: "common.confirm.cancel" })}>
+              <Button type="button" size="icon-sm" variant="outline" onClick={cancelMultiSelect} disabled={sending || joinInFlight} aria-label={formatMessage({ id: "common.confirm.cancel" })}>
                 <Undo2 size={14} />
               </Button>
             ) : (
@@ -211,7 +228,7 @@ export default function ForwardComposerMobile({
                 <Check size={14} />
               </Button>
             ) : (
-              <Button size="sm" type="button" variant="outline" onClick={() => { setSelectedDestinations(new Map()); setMobileMultiSelect(true); }} disabled={joinInFlight}>
+              <Button size="sm" type="button" variant="outline" onClick={startMultiSelect} disabled={joinInFlight}>
                 {formatMessage({ id: "message.forwardComposer.selectMultiple" })}
               </Button>
             )}
@@ -221,12 +238,7 @@ export default function ForwardComposerMobile({
               <Search size={14} className="pointer-events-none absolute left-3 top-1/2 z-10 -translate-y-1/2 text-foreground-muted" />
               <Input
                 value={query}
-                onChange={(event) => {
-                  const value = event.target.value;
-                  setQuery(value);
-                  const trimmed = value.trim();
-                  if (trimmed) search(trimmed); else resetSearch();
-                }}
+                onChange={handleQueryChange}
                 placeholder={formatMessage({ id: "message.forwardComposer.searchPlaceholder" })}
                 className="pl-9 placeholder:text-foreground-placeholder"
                 autoFocus

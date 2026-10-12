@@ -89,12 +89,13 @@ export interface AdaptStartInput extends LegacyLifecycleEventFactoryOptions {
   machineId: string;
   previousStatus?: string | null;
   serverId: string;
-  startCause: "manual" | "message" | "resume" | "app_inbox_wake";
+  /** `internal`: the task #365 spawn-error retry sweep re-serving a refused wake. */
+  startCause: "manual" | "message" | "resume" | "app_inbox_wake" | "internal";
 }
 
 export function adaptStartLifecycleEvent(input: AdaptStartInput): AdaptedLifecycleEvent {
   const reason: AgentLifecycleReason =
-    input.startCause === "message" || input.startCause === "app_inbox_wake" ? "lazy_wake"
+    input.startCause === "message" || input.startCause === "app_inbox_wake" || input.startCause === "internal" ? "lazy_wake"
       : input.startCause === "resume" ? "runtime_starting"
         : "manual_start";
 

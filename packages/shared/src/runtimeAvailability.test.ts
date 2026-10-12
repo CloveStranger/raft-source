@@ -4,6 +4,7 @@ import {
   getExistingAgentRuntimeOptions,
   getMachineRuntimeDisplayOptions,
   getSetupRuntimeOptions,
+  isRuntimeDeprecated,
   RUNTIMES,
   runtimeAvailabilitySuffix,
   type RuntimeInfo,
@@ -68,7 +69,7 @@ test("unsupported runtimes say '(coming soon)' regardless of binary/report", () 
 });
 
 test("deprecated runtimes stay known but are hidden from new/setup/display option helpers", () => {
-  assert.deepEqual(RUNTIMES.filter((runtime) => runtime.deprecated).map((runtime) => runtime.id), ["antigravity", "kimi", "gemini"]);
+  assert.deepEqual(RUNTIMES.filter((runtime) => runtime.deprecated).map((runtime) => runtime.id), ["antigravity", "kimi", "copilot", "gemini"]);
   assert.deepEqual(getCreatableRuntimeOptions().filter((runtime) => runtime.deprecated).map((runtime) => runtime.id), []);
   assert.deepEqual(getSetupRuntimeOptions().filter((runtime) => runtime.deprecated).map((runtime) => runtime.id), []);
   assert.deepEqual(getMachineRuntimeDisplayOptions().filter((runtime) => runtime.deprecated).map((runtime) => runtime.id), []);
@@ -77,9 +78,13 @@ test("deprecated runtimes stay known but are hidden from new/setup/display optio
   assert.equal(getExistingAgentRuntimeOptions("gemini").some((runtime) => runtime.id === "gemini"), true);
 });
 
-test("Antigravity remains available only to agents already using it", () => {
-  assert.equal(getCreatableRuntimeOptions().some((runtime) => runtime.id === "antigravity"), false);
-  assert.equal(getSetupRuntimeOptions().some((runtime) => runtime.id === "antigravity"), false);
-  assert.equal(getExistingAgentRuntimeOptions("claude").some((runtime) => runtime.id === "antigravity"), false);
-  assert.equal(getExistingAgentRuntimeOptions("antigravity").some((runtime) => runtime.id === "antigravity" && runtime.supported), true);
-});
+for (const runtimeId of ["antigravity", "copilot"]) {
+  test(`${runtimeId} remains available only to agents already using it`, () => {
+    assert.equal(isRuntimeDeprecated(runtimeId), true);
+    assert.equal(getCreatableRuntimeOptions().some((runtime) => runtime.id === runtimeId), false);
+    assert.equal(getSetupRuntimeOptions().some((runtime) => runtime.id === runtimeId), false);
+    assert.equal(getMachineRuntimeDisplayOptions().some((runtime) => runtime.id === runtimeId), false);
+    assert.equal(getExistingAgentRuntimeOptions("claude").some((runtime) => runtime.id === runtimeId), false);
+    assert.equal(getExistingAgentRuntimeOptions(runtimeId).some((runtime) => runtime.id === runtimeId && runtime.supported), true);
+  });
+}

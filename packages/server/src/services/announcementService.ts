@@ -1,3 +1,4 @@
+import { validateAnnouncementPresentation } from "@botiverse/raft-shared";
 import { and, asc, desc, eq, gt, inArray, isNull, lte, ne, or, sql } from "drizzle-orm";
 import {
   currentDate,
@@ -75,6 +76,7 @@ function validateContentEntry(content: AnnouncementContent): AnnouncementContent
     throw new Error("each locale must contain 1-20 pages");
   }
   return {
+    ...validateAnnouncementPresentation(content),
     title: content.title.trim(),
     pages: content.pages.map((page) => {
       if (
@@ -145,6 +147,7 @@ function validateWindow(startsAt: Date | null | undefined, endsAt: Date | null |
 function storedContent(row: AnnouncementRow): AnnouncementContentByLocale {
   const content: AnnouncementContentByLocale = { ...row.localizedContent };
   content[row.defaultLocale] = {
+    ...row.localizedContent?.[row.defaultLocale],
     title: row.title,
     pages: row.pages,
   };
@@ -172,6 +175,7 @@ function toAnnouncement(row: AnnouncementRow, preferredLocale?: string | null): 
   const startsAt = row.startsAt ?? row.publishedAt ?? row.createdAt;
   return {
     id: row.id,
+    ...validateAnnouncementPresentation(content),
     title: content.title,
     pages: content.pages,
     publishedAt: (row.publishedAt ?? startsAt).toISOString(),

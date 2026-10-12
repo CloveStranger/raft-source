@@ -164,9 +164,11 @@ export type AgentProxyVisibleMessage = {
   sender_type?: string;
   sender_name?: string;
   sender_description?: string | null;
+  sender_timezone?: string | null;
   senderType?: string;
   senderName?: string;
   senderDescription?: string | null;
+  senderTimezone?: string | null;
   content?: string;
   timestamp?: string;
   createdAt?: string;
@@ -262,6 +264,7 @@ export type AgentProxyFailure = {
 export type AgentProxyFailureClass =
   | "pre_response_transport"
   | "mid_response_transport"
+  | "post_response_local"
   | "upstream_http_response";
 
 export type AgentProxyTransportRouteFamily =
@@ -293,7 +296,7 @@ export type AgentProxyTransportRouteFamily =
   | "unknown";
 
 export type AgentProxyTransportNormalizedError = {
-  normalizedCode: "transport_failure" | "server_5xx" | "local_daemon_state_invalid";
+  normalizedCode: "transport_failure" | "server_5xx" | "local_daemon_state_invalid" | "local_post_response_failure";
   routeFamily: AgentProxyTransportRouteFamily;
   /**
    * Same byte meaning as daemon.proxy.failed: true after any upstream
@@ -1238,25 +1241,38 @@ function transportNormalizedErrorForError(
   );
   const responseStarted = phase.responseStarted ?? false;
   const responseComplete = phase.responseComplete ?? false;
-  const sourceFailureClass: AgentProxyFailureClass = responseStarted && !responseComplete
-    ? "mid_response_transport"
-    : "pre_response_transport";
+  // Task #369: once the upstream response has been read in full, nothing the
+  // network or server does can still fail this request. A throw from here on
+  // (consumeVisibleResponse, the visible-delivery ledger, writing downstream)
+  // is a local daemon fault and must not be reported as upstream transport.
+  const localPostResponse = responseComplete;
+  const local = localDaemonStateInvalid || localPostResponse;
+  const sourceFailureClass: AgentProxyFailureClass = localPostResponse
+    ? "post_response_local"
+    : responseStarted && !responseComplete
+      ? "mid_response_transport"
+      : "pre_response_transport";
   const failureClass = proxyFailureClassForPhase(sourceFailureClass);
   return {
-    normalizedCode: localDaemonStateInvalid ? "local_daemon_state_invalid" : "transport_failure",
+    normalizedCode: localDaemonStateInvalid
+      ? "local_daemon_state_invalid"
+      : localPostResponse ? "local_post_response_failure" : "transport_failure",
     routeFamily: routeFamilyForPath(target?.pathname ?? "unknown"),
     responseStarted,
     responseComplete,
     failureClass,
-    causeCode: scrubbedProxyCauseCode(err, localDaemonStateInvalid ? "LOCAL_DAEMON_STATE_INVALID" : undefined),
-    upstreamLayer: localDaemonStateInvalid ? "unknown" : target ? upstreamLayerForProxyError(err) : "unknown",
+    causeCode: scrubbedProxyCauseCode(
+      err,
+      localDaemonStateInvalid ? "LOCAL_DAEMON_STATE_INVALID" : localPostResponse ? "LOCAL_POST_RESPONSE_FAILURE" : undefined,
+    ),
+    upstreamLayer: local ? "unknown" : target ? upstreamLayerForProxyError(err) : "unknown",
     originalMessage: sanitizeTransportOriginalMessage(err instanceof Error ? err.message : String(err)),
     launchId,
-    targetHostClass: localDaemonStateInvalid ? "local_daemon" : target ? daemonUpstreamTargetHostClass(target) : "custom_server",
+    targetHostClass: local ? "local_daemon" : target ? daemonUpstreamTargetHostClass(target) : "custom_server",
     // Today the local credential proxy is only used by CLI wrappers. If runtime
     // or daemon-internal callers use it later, plumb the caller identity here.
     downstreamCaller: "cli",
-    upstream: localDaemonStateInvalid ? "local_daemon" : "server",
+    upstream: local ? "local_daemon" : "server",
   };
 }
 

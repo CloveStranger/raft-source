@@ -37,7 +37,7 @@ import {
 } from "@botiverse/raft-shared";
 import { getDb, type DatabaseExecutor } from "../db/index";
 import { agentCredentials, agentRuntimeProvisions, agents } from "../db/schema";
-import { DEFAULT_EXTERNAL_AGENT_CAPABILITIES, mintAgentCredential } from "./agentCredentialService";
+import { HOSTED_RUNTIME_AGENT_CAPABILITIES, mintAgentCredential } from "./agentCredentialService";
 import {
   AgentRuntimeProviderError,
   assertAgentRuntimeProviderSecretKeyConfigured,
@@ -102,7 +102,7 @@ export async function assertProviderProvisioningAvailable(serverId: string, kind
 
 /**
  * Called inside the Agent-create transaction: mint the Agent's credential with
- * the default external capabilities (the creator's authority applies; this
+ * the hosted-runtime capabilities (the creator's authority applies; this
  * replaces the device login a human would otherwise do) and record the
  * provisioning intent. Nothing reaches the provider until the create commits.
  */
@@ -113,7 +113,7 @@ export async function recordAgentProvisioning(tx: DatabaseExecutor, input: {
 }): Promise<void> {
   const minted = await mintAgentCredential({
     agentId: input.agent.id,
-    scopes: DEFAULT_EXTERNAL_AGENT_CAPABILITIES,
+    scopes: HOSTED_RUNTIME_AGENT_CAPABILITIES,
     name: `${input.provider} hosted runtime`,
     createdByUserId: input.createdByUserId,
     requireExternalRuntime: true,

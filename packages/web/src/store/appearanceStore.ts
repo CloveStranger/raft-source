@@ -108,6 +108,54 @@ export function getMessageBodyFontSizeClass(size: MessageBodyFontSize): string {
   return MESSAGE_BODY_FONT_SIZE_CLASSES[size];
 }
 
+/**
+ * Font-preference companions — 2026-10-11 (cindyz: the name, the name-line
+ * notes, and the reply preview scale with the reader's message size). The
+ * middle tier equals today's fixed sizes, so the default view is unchanged.
+ * Sizes are arbitrary values so the utilities never touch line-heights (the
+ * named text-* scale utilities carry their own leading and would displace
+ * the recipes' leading-none).
+ */
+const MESSAGE_NAME_SIZE_CLASSES: Record<MessageBodyFontSize, string> = {
+  sm: "text-[12px]",
+  md: "text-[14px]",
+  lg: "text-[16px]",
+};
+
+const MESSAGE_META_SIZE_CLASSES: Record<MessageBodyFontSize, string> = {
+  sm: "text-[11px]",
+  md: "text-[12px]",
+  lg: "text-[14px]",
+};
+
+const MESSAGE_PREVIEW_SIZE_CLASSES: Record<MessageBodyFontSize, string> = {
+  sm: "text-[11px]",
+  md: "text-[12.5px]",
+  lg: "text-[14px]",
+};
+
+const MESSAGE_PREVIEW_TIME_SIZE_CLASSES: Record<MessageBodyFontSize, string> = {
+  sm: "text-[11px]",
+  md: "text-[11.5px]",
+  lg: "text-[13px]",
+};
+
+export function getMessageNameSizeClass(size: MessageBodyFontSize): string {
+  return MESSAGE_NAME_SIZE_CLASSES[size];
+}
+
+export function getMessageMetaSizeClass(size: MessageBodyFontSize): string {
+  return MESSAGE_META_SIZE_CLASSES[size];
+}
+
+export function getMessagePreviewSizeClass(size: MessageBodyFontSize): string {
+  return MESSAGE_PREVIEW_SIZE_CLASSES[size];
+}
+
+export function getMessagePreviewTimeSizeClass(size: MessageBodyFontSize): string {
+  return MESSAGE_PREVIEW_TIME_SIZE_CLASSES[size];
+}
+
 export function getMessageBodyFontSizeStyle(size: MessageBodyFontSize): { fontSize: string } {
   return { fontSize: MESSAGE_BODY_FONT_SIZE_VALUES[size] };
 }

@@ -186,6 +186,7 @@ test("RW path equals the legacy path: replies, unread, task with an agent claima
   assert.equal(selected?.rw_regular_threads, 3);
   assert.equal(selected?.rw_non_regular_threads, 0);
   assert.equal(selected?.rw_missing_threads, 0);
+  assert.equal(selected?.rw_missing_thread_ids, undefined);
   const names = queryNames(events);
   assert.ok(!names.includes("channels.followed_threads_by_user"), "no per-thread Postgres list query");
   assert.ok(!names.includes("channels.read_state_by_channels"), "no LATERAL read-state query");
@@ -265,6 +266,11 @@ test("followed threads missing from RW (CDC lag) are left out and counted, not f
   const selected = eventAttrs(events, "followed_threads.source_selected");
   assert.equal(selected?.followed_threads_source, "rw_v5");
   assert.equal(selected?.rw_missing_threads, 2);
+  assert.deepEqual(
+    String(selected?.rw_missing_thread_ids).split(",").sort(),
+    [lagging.thread.id, parentLagging.thread.id].sort(),
+    "the missing thread ids are traced",
+  );
   assert.equal(selected?.rw_regular_threads, 1);
   assert.equal(events.find((event) => event.attrs?.query_name === "channels.followed_threads_by_user"), undefined, "no Postgres list query for the missing threads");
 });

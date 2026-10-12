@@ -1,4 +1,5 @@
 import "./helpers/domSetup";
+import { comboboxText, openCombobox } from "./helpers/combobox";
 
 import assert from "node:assert/strict";
 import type { ReactElement } from "react";
@@ -138,7 +139,7 @@ function seedStores() {
 
 function hasSelectedValue(value: string): boolean {
   return screen.getAllByRole("combobox")
-    .some((select) => select.textContent?.trim() === value);
+    .some((select) => comboboxText(select).trim() === value);
 }
 
 afterEach(() => {
@@ -208,15 +209,15 @@ test("regular Create Agent reopens with the last successful runtime and model", 
 
   const modelSelect = await waitFor(() => {
     const select = screen.getAllByRole("combobox")
-      .find((candidate) => candidate.textContent?.includes("Claude Opus"));
+      .find((candidate) => comboboxText(candidate).includes("Claude Opus"));
     assert.ok(select);
     return select;
   });
-  fireEvent.click(modelSelect);
+  openCombobox(modelSelect);
   const sonnetOption = await screen.findByRole("option", { name: "Claude Sonnet" });
   fireEvent.pointerDown(sonnetOption);
   fireEvent.click(sonnetOption);
-  await waitFor(() => assert.match(modelSelect.textContent ?? "", /Claude Sonnet/));
+  await waitFor(() => assert.match(comboboxText(modelSelect), /Claude Sonnet/));
   fireEvent.change(screen.getByPlaceholderText("e.g. Alice"), { target: { value: "Alice" } });
   fireEvent.click(screen.getByRole("button", { name: "Create Agent" }));
 
@@ -299,21 +300,21 @@ test("Claude's static model choice stays labeled while runtime admission is pend
 
   const modelSelect = await waitFor(() => {
     const select = screen.getAllByRole("combobox")
-      .find((candidate) => candidate.textContent?.includes("Claude Opus"));
+      .find((candidate) => comboboxText(candidate).includes("Claude Opus"));
     assert.ok(select, "the pending admission draft must render the static Claude label, not raw 'opus'");
     return select;
   });
-  fireEvent.click(modelSelect);
+  openCombobox(modelSelect);
   const fableOption = await screen.findByRole("option", { name: "Claude Fable" });
   fireEvent.pointerDown(fableOption);
   fireEvent.click(fableOption);
-  await waitFor(() => assert.match(modelSelect.textContent ?? "", /Claude Fable/));
+  await waitFor(() => assert.match(comboboxText(modelSelect), /Claude Fable/));
   fireEvent.change(screen.getByPlaceholderText("e.g. Alice"), { target: { value: "Alice" } });
 
   await act(async () => releaseRuntimeOptions());
   await waitFor(() => {
     assert.equal(hasSelectedValue("Claude Code"), true);
-    assert.match(modelSelect.textContent ?? "", /Claude Fable/);
+    assert.match(comboboxText(modelSelect), /Claude Fable/);
   });
   assert.equal(
     (screen.getByRole("button", { name: "Create Agent" }) as HTMLButtonElement).disabled,
@@ -323,7 +324,7 @@ test("Claude's static model choice stays labeled while runtime admission is pend
 
   await act(async () => releaseRuntimeModels());
   await waitFor(() => {
-    assert.match(modelSelect.textContent ?? "", /Claude Fable/);
+    assert.match(comboboxText(modelSelect), /Claude Fable/);
     assert.equal(
       (screen.getByRole("button", { name: "Create Agent" }) as HTMLButtonElement).disabled,
       false,
@@ -336,7 +337,7 @@ test("Create Agent hides deprecated runtimes even when the Computer reports them
   useMachineStore.setState((state) => ({
     machines: state.machines.map((machine) => ({
       ...machine,
-      runtimes: [...machine.runtimes, "gemini", "kimi", "antigravity"],
+      runtimes: [...machine.runtimes, "gemini", "kimi", "antigravity", "copilot"],
     })),
   }));
   stubCreateAgentGet({ models: [] });
@@ -350,6 +351,10 @@ test("Create Agent hides deprecated runtimes even when the Computer reports them
   const runtimeSelect = screen.getAllByRole("combobox")[1];
   fireEvent.click(runtimeSelect);
 
+  // Positive control: the open list renders the Computer's other runtimes, so
+  // an absent option below means filtered out, not "list not rendered yet".
+  assert.ok(await screen.findByRole("option", { name: "Claude Code" }));
+  assert.ok(screen.queryByRole("option", { name: "Copilot CLI" }) === null);
   assert.equal(screen.queryByRole("option", { name: "Antigravity CLI" }), null);
   assert.equal(screen.queryByRole("option", { name: /Gemini CLI/i }), null);
   assert.equal(screen.queryByRole("option", { name: /Kimi CLI/i }), null);
@@ -531,7 +536,7 @@ test("Kimi missing config keeps login recovery alongside unverified model option
   );
 
   await waitFor(() => {
-    const selectedValues = screen.getAllByRole("combobox").map((select) => select.textContent?.trim());
+    const selectedValues = screen.getAllByRole("combobox").map((select) => comboboxText(select).trim());
     assert.ok(selectedValues.includes("Kimi Code"), `selected values: ${JSON.stringify(selectedValues)}`);
   });
   assert.ok(await screen.findByText(/Kimi is not signed in on this Computer/));
@@ -540,7 +545,7 @@ test("Kimi missing config keeps login recovery alongside unverified model option
 
   const modelSelect = screen.getAllByRole("combobox")[2];
   assert.ok(modelSelect);
-  fireEvent.click(modelSelect);
+  openCombobox(modelSelect);
   assert.ok(screen.getByRole("option", { name: /Kimi for Coding/ }));
   fireEvent.keyDown(modelSelect, { key: "Escape" });
 
@@ -650,7 +655,7 @@ test("Cursor probe error offers remembered Auto as unverified and permits submis
 
   const modelSelect = screen.getAllByRole("combobox")[2];
   assert.ok(modelSelect);
-  fireEvent.click(modelSelect);
+  openCombobox(modelSelect);
   const option = screen.getByRole("option", { name: "Auto" });
   fireEvent.pointerDown(option);
   fireEvent.click(option);

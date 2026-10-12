@@ -38,7 +38,7 @@ import {
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 
-const REVISION_5_REQUIRED_BOT_SCOPES = [
+const REVISION_6_REQUIRED_BOT_SCOPES = [
   "channels:history",
   "channels:read",
   "chat:write",
@@ -49,13 +49,15 @@ const REVISION_5_REQUIRED_BOT_SCOPES = [
   "groups:read",
   "reactions:read",
   "reactions:write",
+  "usergroups:read",
+  "usergroups:write",
   "users:read",
 ] as const;
 
-test("Slack OAuth scope request is exact Revision 5 manifest parity", () => {
+test("Slack OAuth scope request is exact Revision 6 manifest parity", () => {
   assert.deepEqual(
     SLACK_BRIDGE_REQUIRED_BOT_SCOPES,
-    REVISION_5_REQUIRED_BOT_SCOPES,
+    REVISION_6_REQUIRED_BOT_SCOPES,
   );
 });
 
@@ -192,11 +194,17 @@ function runtime(input: {
         providerTeamId: "T_ROUTE_TEST",
         providerEnterpriseId: null,
         providerUserId: "U_ROUTE_OWNER",
-        installerIsWorkspaceAdmin: true,
         botUserId: "U_ROUTE_BOT",
         providerBotId: "B_ROUTE_BOT",
         workspaceName: "Route Test",
-        installedScopes: [...request.expectedScopes],
+        // Token carries usergroups:* beyond the required contract — the
+        // live staging app does this. Superset must still complete the
+        // install and issue the grant receipt.
+        installedScopes: [
+          ...request.expectedScopes,
+          "usergroups:read",
+          "usergroups:write",
+        ],
         sealedCredential: {
           encryptedMaterial: "sealed:route-test-token",
           envelopeKeyId: "route-test-envelope",
@@ -755,7 +763,7 @@ test("OAuth route fixes scopes, uses one-time state, leases managed handles, and
 
     const [install] = await getDb().select().from(externalAppInstalls);
     assert.equal(install.providerAuthorityId, "T_ROUTE_TEST");
-    assert.deepEqual(install.installedScopes, [...SLACK_BRIDGE_REQUIRED_BOT_SCOPES]);
+    assert.deepEqual([...install.installedScopes].sort(), [...SLACK_BRIDGE_REQUIRED_BOT_SCOPES].sort());
     const [identityLink] = await getDb().select().from(externalHumanIdentityLinks);
     assert.equal(identityLink.serverId, seeded.server.id);
     assert.equal(identityLink.installId, install.id);
@@ -949,13 +957,13 @@ test("outcome-unknown OAuth callback is terminal reconciliation, never a retry r
 
     const callbackUrl = `${app.baseUrl}/api/slack-bridge/oauth/callback`
       + `?state=${encodeURIComponent(state)}&code=provider-code`;
-    const callback = await fetch(callbackUrl);
-    assert.equal(callback.status, 202);
+    const callback = await fetch(callbackUrl, { redirect: "manual" });
+    assert.equal(callback.status, 302);
     assert.equal(callback.headers.has("retry-after"), false);
-    assert.deepEqual(await callback.json(), {
-      ok: false,
-      code: "slack_oauth_reconciliation_required",
-    });
+    assert.equal(
+      callback.headers.get("location"),
+      "https://app.raft.test/s/slack-route/settings/im-bridges?slack_oauth=error&code=slack_oauth_reconciliation_required",
+    );
     assert.equal(counters.leases, 1);
     assert.equal(counters.captures, 1);
     assert.equal(counters.exchanges, 1);
@@ -969,6 +977,101 @@ test("outcome-unknown OAuth callback is terminal reconciliation, never a retry r
     assert.equal(counters.exchanges, 1);
   } finally {
     await app.close();
+  }
+});
+
+test("deterministic OAuth rejection surfaces the provider error for diagnosis", async () => {
+  const counters = { leases: 0, captures: 0, exchanges: 0, ingress: 0 };
+  const app = await openTestApp("pglite://", 0, { humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false, slackBridge: runtime({
+      counters,
+      exchange: async () => ({
+        kind: "deterministic_failure",
+        reason: "provider_rejected",
+        providerError: "bad_client_secret",
+      }),
+    }) });
+  try {
+    const seeded = await seedControlPlane();
+    const start = await beginOAuth({
+      baseUrl: app.baseUrl,
+      token: signAccessToken(seeded.owner.id),
+      serverId: seeded.server.id,
+      registrationId: seeded.registration.id,
+      serverGrantId: seeded.grant.id,
+      grantEpoch: 1,
+    });
+    const state = new URL(
+      (await start.json() as { authorizationUrl: string }).authorizationUrl,
+    ).searchParams.get("state")!;
+
+    const callback = await fetch(
+      `${app.baseUrl}/api/slack-bridge/oauth/callback`
+      + `?state=${encodeURIComponent(state)}&code=provider-code`,
+      { redirect: "manual" },
+    );
+    // The installer lands back on the settings page, not on raw JSON. The
+    // provider's own refusal stays visible for diagnosis; without it every
+    // Slack rejection collapses to an undiagnosable slack_oauth_rejected.
+    assert.equal(callback.status, 302);
+    assert.equal(
+      callback.headers.get("location"),
+      "https://app.raft.test/s/slack-route/settings/im-bridges"
+        + "?slack_oauth=error&code=slack_oauth_rejected&reason=provider_rejected&provider_error=bad_client_secret",
+    );
+    assert.equal(counters.leases, 1);
+    assert.equal(counters.captures, 1);
+    assert.equal(counters.exchanges, 1);
+    assert.equal(
+      (await getDb().select().from(externalOAuthAttempts))[0].status,
+      "exchange_unknown",
+    );
+  } finally {
+    await app.close();
+  }
+});
+
+test("a Slack provider error reaches the settings page only when it is a plain identifier", async () => {
+  for (const [providerError, expectedSuffix] of [
+    ["invalid_team_for_non_distributed_app", "&provider_error=invalid_team_for_non_distributed_app"],
+    ["missing=usergroups:read", ""],
+  ] as const) {
+    const counters = { leases: 0, captures: 0, exchanges: 0, ingress: 0 };
+    const app = await openTestApp("pglite://", 0, { humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false, slackBridge: runtime({
+        counters,
+        exchange: async () => ({
+          kind: "deterministic_failure",
+          reason: "provider_rejected",
+          providerError,
+        }),
+      }) });
+    try {
+      const seeded = await seedControlPlane();
+      const start = await beginOAuth({
+        baseUrl: app.baseUrl,
+        token: signAccessToken(seeded.owner.id),
+        serverId: seeded.server.id,
+        registrationId: seeded.registration.id,
+        serverGrantId: seeded.grant.id,
+        grantEpoch: 1,
+      });
+      const state = new URL(
+        (await start.json() as { authorizationUrl: string }).authorizationUrl,
+      ).searchParams.get("state")!;
+
+      const callback = await fetch(
+        `${app.baseUrl}/api/slack-bridge/oauth/callback`
+        + `?state=${encodeURIComponent(state)}&code=provider-code`,
+        { redirect: "manual" },
+      );
+      assert.equal(callback.status, 302);
+      assert.equal(
+        callback.headers.get("location"),
+        "https://app.raft.test/s/slack-route/settings/im-bridges"
+          + "?slack_oauth=error&code=slack_oauth_rejected&reason=provider_rejected" + expectedSuffix,
+      );
+    } finally {
+      await app.close();
+    }
   }
 });
 

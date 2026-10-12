@@ -64,7 +64,9 @@ async function main(): Promise<void> {
       });
       console.log(`[MESSAGE_TIMELINE_BACKFILL_REPORT] ${JSON.stringify(result)}`);
     }
-    const divergence = await verifyMessageServerTimeline(run);
+    // --batch-size also sizes the verify slices: the default 20k-row slice on the
+    // read replica gets cancelled by hot-standby replay (conflict with recovery).
+    const divergence = await verifyMessageServerTimeline(run, { batchSize: intFlag("--batch-size", 20_000) });
     console.log(`[MESSAGE_TIMELINE_VERIFY] ${JSON.stringify(divergence)}`);
     if (divergence.missingRows !== 0 || divergence.divergentRows !== 0) process.exitCode = 2;
   } catch (err) {

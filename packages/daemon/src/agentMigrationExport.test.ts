@@ -212,6 +212,34 @@ test(".raftmigrateignore excludes listed paths with their size, but never MEMORY
   }
 });
 
+test(".raftmigrateignore never excludes .raft/activity, its parents, or anything inside it", async () => {
+  const root = tempRoot();
+  const slockHome = path.join(root, ".slock");
+  const workspace = path.join(slockHome, "agents", "agent-ignore-activity");
+  try {
+    mkdirSync(path.join(workspace, ".raft", "activity"), { recursive: true });
+    mkdirSync(path.join(workspace, ".raft", "scratch"), { recursive: true });
+    writeFileSync(path.join(workspace, ".raft", "activity", "1-1-s.jsonl"), "{}\n");
+    writeFileSync(path.join(workspace, ".raft", "scratch", "tmp.bin"), "x".repeat(10));
+    writeFileSync(path.join(workspace, ".raftmigrateignore"), [
+      ".raft",
+      "./.raft/activity/",
+      ".raft/activity/1-1-s.jsonl",
+      ".raft/scratch",
+      ".raft/activity-old",
+      "",
+    ].join("\n"));
+
+    const listing = await listWorkspace(workspace);
+    assert.deepEqual([...listing.listed].sort(), [".raft/activity/1-1-s.jsonl", ".raftmigrateignore"]);
+    assert.deepEqual(listing.excludedIgnored, [
+      { path: ".raft/scratch", reason: "raftmigrateignore", fileCount: 1, sizeBytes: 10 },
+    ]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("a summary without ignored paths omits excludedIgnored so older servers still accept it", async () => {
   const root = tempRoot();
   const slockHome = path.join(root, ".slock");

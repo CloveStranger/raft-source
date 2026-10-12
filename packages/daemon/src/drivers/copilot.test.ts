@@ -1,5 +1,9 @@
 import assert from "node:assert/strict";
+import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
+import { isRuntimeDeprecated } from "@botiverse/raft-shared";
+import { getDriver } from "./index";
 import {
   CopilotDriver,
   buildCopilotArgs,
@@ -333,4 +337,59 @@ test("parseLine: full turn lifecycle (matches real copilot output)", () => {
   assert.equal(all[5]!.kind, "session_init"); // from result
   assert.equal(all[5]!.sessionId, "full-copilot-test");
   assert.equal(all[6]!.kind, "turn_end"); // from result
+});
+
+// Copilot CLI is deprecated in the shared runtime catalog: hidden from every new
+// agent / setup / detection-display surface, but an EXISTING copilot agent must
+// keep launching through this driver. Counter-example guard: if the deprecation
+// ever turns into removal (driver unregistered, launch path changed), this goes red.
+test("deprecated Copilot: an existing agent still launches through the copilot CLI", async () => {
+  assert.equal(isRuntimeDeprecated("copilot"), true, "the catalog marks Copilot deprecated");
+  const driver = getDriver("copilot");
+  assert.ok(driver instanceof CopilotDriver);
+
+  const tmp = await mkdtemp(path.join(os.tmpdir(), "copilot-deprecated-launch-"));
+  const binDir = path.join(tmp, "bin");
+  const workDir = path.join(tmp, "work");
+  const oldPath = process.env.PATH;
+  const oldSlockHome = process.env.SLOCK_HOME;
+  try {
+    await mkdir(binDir, { recursive: true });
+    await mkdir(workDir, { recursive: true });
+    const fakeCopilot = path.join(binDir, "copilot");
+    // Echo argv back, one arg per line, so the test sees exactly what was launched.
+    await writeFile(fakeCopilot, "#!/bin/sh\nprintf '%s\\n' \"$@\"\n", "utf8");
+    await chmod(fakeCopilot, 0o755);
+    process.env.PATH = `${binDir}${path.delimiter}${oldPath ?? ""}`;
+    process.env.SLOCK_HOME = path.join(tmp, "home");
+
+    const ctx = makeSpawnContext({ EXTRA_FLAG: "1" });
+    ctx.workingDirectory = workDir;
+    ctx.config = {
+      ...ctx.config,
+      model: "gpt-5.4",
+      reasoningEffort: "high",
+      sessionId: "existing-session",
+    };
+    const { process: proc } = await driver.spawn(ctx);
+    let stdout = "";
+    proc.stdout?.setEncoding("utf8");
+    proc.stdout?.on("data", (chunk: string) => { stdout += chunk; });
+    const exitCode = await new Promise<number | null>((resolve, reject) => {
+      proc.once("error", reject);
+      proc.once("close", resolve);
+    });
+
+    assert.equal(exitCode, 0);
+    const argv = stdout.trim().split("\n");
+    assert.deepEqual(argv, buildCopilotArgs(ctx, null));
+    assert.ok(argv.includes("--resume=existing-session"), "existing session resumes");
+    assert.deepEqual(argv.slice(argv.indexOf("--model"), argv.indexOf("--model") + 2), ["--model", "gpt-5.4"]);
+  } finally {
+    if (oldPath === undefined) delete process.env.PATH;
+    else process.env.PATH = oldPath;
+    if (oldSlockHome === undefined) delete process.env.SLOCK_HOME;
+    else process.env.SLOCK_HOME = oldSlockHome;
+    await rm(tmp, { recursive: true, force: true });
+  }
 });

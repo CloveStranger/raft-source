@@ -1,6 +1,7 @@
 import { Badge, Spinner, Button } from "raft-ui";
 import CloseButton from "./ui/CloseButton";
 import { useEffect, useState, useCallback } from "react";
+import type { MouseEvent } from "react";
 import { useIntl } from "react-intl";
 import { X, ChevronLeft, ChevronRight, Download, ImageOff, MessageSquareMore } from "lucide-react";
 import { useImageLightboxStore } from "../store/imageLightboxStore";
@@ -16,6 +17,17 @@ const URL_CACHE_SAFETY_WINDOW_MS = 60_000;
 interface AttachmentUrlResponse {
   url: string;
   expiresAt: string | null;
+}
+
+function triggerDownload(href: string, filename: string) {
+  const a = document.createElement("a");
+  a.href = href;
+  a.download = filename;
+  a.rel = "noopener";
+  a.style.display = "none";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
 }
 
 export default function ImageLightbox() {
@@ -40,10 +52,10 @@ export default function ImageLightbox() {
   // entirely inside the hook (per-mount React state); not in
   // imageLightboxStore — transient interaction, not persistent gallery model.
   const zoom = useImageZoom({ resetKey: current?.id ?? null });
-  const toggleComments = () => {
+  const toggleComments = useCallback(() => {
     if (!commentsOpen) setPanelMounted(true);
     setCommentsOpen((open) => !open);
-  };
+  }, [commentsOpen]);
   const hasMultiple = images.length > 1;
   const isFirst = currentIndex === 0;
   const isLast = currentIndex === images.length - 1;
@@ -129,6 +141,35 @@ export default function ImageLightbox() {
     [prev, next, isFirst, isLast, zoom],
   );
 
+  const handlePrevClick = useCallback(
+    (e: MouseEvent) => {
+      e.stopPropagation();
+      if (!isFirst) prev();
+    },
+    [isFirst, prev],
+  );
+
+  const handleNextClick = useCallback(
+    (e: MouseEvent) => {
+      e.stopPropagation();
+      if (!isLast) next();
+    },
+    [isLast, next],
+  );
+
+  const handleDownload = useCallback(() => {
+    if (!current) return;
+    // directUrl images (e.g. avatars) have no attachment record — download the
+    // resolved URL directly instead of hitting the attachment presign endpoint.
+    if (current.directUrl) {
+      triggerDownload(current.directUrl, current.filename);
+      return;
+    }
+    api.get<AttachmentUrlResponse>(`/attachments/${current.id}/url?disposition=attachment`).then(({ data }) => {
+      triggerDownload(data.url, current.filename);
+    }).catch(() => {});
+  }, [current]);
+
   useEffect(() => {
     if (!isOpen) return;
     // keydown-global-exempt: arrow nav inside <Lightbox> wrapper which moves focus into the overlay on open
@@ -159,29 +200,6 @@ export default function ImageLightbox() {
       return;
     }
     setError(true);
-  };
-
-  const triggerDownload = (href: string) => {
-    const a = document.createElement("a");
-    a.href = href;
-    a.download = current.filename;
-    a.rel = "noopener";
-    a.style.display = "none";
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-  };
-
-  const handleDownload = () => {
-    // directUrl images (e.g. avatars) have no attachment record — download the
-    // resolved URL directly instead of hitting the attachment presign endpoint.
-    if (current.directUrl) {
-      triggerDownload(current.directUrl);
-      return;
-    }
-    api.get<AttachmentUrlResponse>(`/attachments/${current.id}/url?disposition=attachment`).then(({ data }) => {
-      triggerDownload(data.url);
-    }).catch(() => {});
   };
 
   return (
@@ -287,10 +305,7 @@ export default function ImageLightbox() {
               <Button size="icon-lg"
                 type="button"
                 disabled={isFirst}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  if (!isFirst) prev();
-                }}
+                onClick={handlePrevClick}
                 aria-label={formatMessage({ id: "common.lightbox.previousImage" })}
               >
                 <ChevronLeft size={24} />
@@ -309,10 +324,7 @@ export default function ImageLightbox() {
               <Button size="icon-lg"
                 type="button"
                 disabled={isLast}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  if (!isLast) next();
-                }}
+                onClick={handleNextClick}
                 aria-label={formatMessage({ id: "common.lightbox.nextImage" })}
               >
                 <ChevronRight size={24} />

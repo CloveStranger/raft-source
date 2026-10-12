@@ -159,6 +159,9 @@ export const AGENT_MIGRATION_IGNORE_FILE = ".raftmigrateignore";
 // file itself so the next migration applies the same list. Everything else is
 // the agent's call; the source keeps an archived copy for up to 30 days.
 const ALWAYS_MOVED_ROOT_PATHS = ["MEMORY.md", AGENT_MIGRATION_IGNORE_FILE];
+// Daemon-written activity detail (RFC 069 §5.5) moves with the workspace: an
+// entry naming this directory, anything inside it, or any parent is dropped.
+const ALWAYS_MOVED_DIRECTORIES = [".raft/activity"];
 const IGNORE_PATTERN_CHARS = /[*?[\]!]/;
 
 const WINDOWS_DRIVE_PATH_PATTERN = /^[A-Za-z]:/;
@@ -293,7 +296,11 @@ async function readAgentMigrationIgnoreFile(workspace: string): Promise<string[]
 }
 
 function isAlwaysMovedPath(relativePath: string): boolean {
-  return ALWAYS_MOVED_ROOT_PATHS.includes(relativePath);
+  if (ALWAYS_MOVED_ROOT_PATHS.includes(relativePath)) return true;
+  return ALWAYS_MOVED_DIRECTORIES.some((directory) =>
+    directory === relativePath
+    || directory.startsWith(`${relativePath}/`)
+    || relativePath.startsWith(`${directory}/`));
 }
 
 /**

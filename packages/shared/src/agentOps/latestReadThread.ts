@@ -28,23 +28,14 @@
 //
 //   <base>/<CLI_READ_STATE_NAMESPACE>/<agentId>/<CLI_READ_STATE_FILENAME>
 //   <base> = $SLOCK_CLI_CONSUMED_SEQ_STATE_DIR, else the Raft home
-//   Raft home = $RAFT_HOME, else $SLOCK_HOME, else ~/<RAFT_HOME_DEFAULT_DIRNAME>
+//   Raft home = see ./raftHome.ts
+import { configuredRaftHome } from "./raftHome";
+
 export const CLI_READ_STATE_NAMESPACE = "slock-cli-consumed-seq";
 export const CLI_READ_STATE_FILENAME = "consumed-seqs.json";
 export const CLI_READ_STATE_BASE_ENV = "SLOCK_CLI_CONSUMED_SEQ_STATE_DIR";
-export const RAFT_HOME_ENVS = ["RAFT_HOME", "SLOCK_HOME"] as const;
-export const RAFT_HOME_DEFAULT_DIRNAME = ".slock";
 
 type Env = Record<string, string | undefined>;
-
-/** The Raft home the environment configures, or undefined when the default (`~/.slock`) applies. */
-export function configuredRaftHome(env: Env): string | undefined {
-  for (const name of RAFT_HOME_ENVS) {
-    const value = env[name]?.trim();
-    if (value) return value;
-  }
-  return undefined;
-}
 
 /** The base directory the environment configures for the read record, or undefined when the default applies. */
 export function configuredCliReadStateBase(env: Env): string | undefined {

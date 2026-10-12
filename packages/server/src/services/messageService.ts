@@ -9,8 +9,9 @@ import { eq, asc, desc, gt, gte, lt, and, inArray, isNull, isNotNull, not, sql, 
 import { alias } from "drizzle-orm/pg-core";
 import { getDb, isDatabaseInitialized, registerDatabaseCloseHookForTests, withDbTraceAttributes, type DatabaseExecutor } from "../db/index";
 import { mapBounded } from "../lib/boundedConcurrency";
+import { createConcurrencyLimiter } from "../lib/mapWithConcurrency";
 import { withTransientTransactionRetry } from "../db/transientTransactionRetry";
-import { actionCards, messages, messageReactions, agents, users, channels, threadFollows, servers, serverMembers, serverMembershipDepartures, userChannelInboxStates, channelHumans, channelAgents, messageMentions, mentionDeliveryOccurrences, jointChannels, jointChannelServers, agentChannelReadCursors, attachmentCommentRefs, attachments, inboxNotificationFacts, inboxTargetMuteStates, tasks, externalReactionStates, externalActorProjections } from "../db/schema";
+import { actionCards, messages, messageReactions, agents, users, channels, threadFollows, servers, serverMembers, serverMembershipDepartures, userChannelInboxStates, channelHumans, channelAgents, messageMentions, mentionDeliveryOccurrences, jointChannels, jointChannelServers, agentChannelReadCursors, attachmentCommentRefs, attachments, inboxNotificationFacts, inboxTargetMuteStates, tasks, externalReactionStates, externalActorProjections, externalAddressabilityProjections, externalAppInstalls, externalBindingAudienceSnapshots, externalChannelBindings, externalMentionFacts } from "../db/schema";
 import type { Server as SocketServer } from "socket.io";
 import type {
   AgentMessageDeliveryResult,
@@ -27,6 +28,7 @@ import {
   extractRaftRefTargets,
   parseRaftRefTarget,
   replaceOutsideMarkdownCode,
+  resolveRaftMentionHandle,
   structuredRaftMentionStillAppears,
   failpoints,
   messageRef,
@@ -99,6 +101,12 @@ import {
 import { type RequiresCausalActorProducer } from "./systemMessageBornReadRegistry";
 import { isMessageUnreadEligibleForReceiver, messageUnreadEligibleForReceiverSql } from "./inboxUnreadEligibility";
 import {
+  TERMINAL_FAILURE_CATCHUP_MAX_CANDIDATES,
+  selectObligationCatchupCandidates,
+  type CatchupBatchBuildInput,
+  type CatchupObligation,
+} from "../terminalFailureBreaker";
+import {
   ATTACHMENT_COMMENTS_FEATURE_FLAG_KEY,
   COMPOSER_RESOURCE_REFERENCES_FEATURE_FLAG_KEY,
   evaluateFeatureFlag,
@@ -120,7 +128,7 @@ import {
   persistNativeNotificationIntents,
   resolveNotificationIntents,
 } from "./nativeNotificationService";
-import { loadExternalMessageAuthors } from "./externalProjectionService";
+import { insertExternalMentionFact, loadExternalMessageAuthors, resolveExternalMentionFromDurableAuthority } from "./externalProjectionService";
 import {
   classifyOrdinaryMessageExternalProjection,
   type OrdinaryMessageExternalProjectionDecision,
@@ -132,6 +140,7 @@ import {
   runSlackBridgeOutboundPipelineStage,
   type SlackBridgeOutboundPipelineTopology,
 } from "./externalDeliveryOutboxService";
+import { resolveSlackOutboundMessageSurface } from "./slackBridgeDatabaseOutboundRuntime";
 import { getComputerLinkedMachineIds } from "./computerCredentialService";
 import { getInstalledApp } from "./rapRegistryStore";
 import { isAppId, type AppId } from "./rapRegistry";
@@ -935,13 +944,13 @@ function withFrontendConversationContext<T extends Record<string, unknown>>(
 
 function projectFrontendMessagePayload<T extends Record<string, unknown>>(
   payload: T,
-): Omit<T, "agentSendKey" | "searchText" | "searchVector" | "senderHandle" | "serverId"> {
+): Omit<T, "agentSendKey" | "searchText" | "searchVector" | "senderHandle" | "serverId" | "senderTimezone"> {
   return projectRichMessageSocketPayload(payload);
 }
 
 function projectThreadLatestReplyPayload<T extends Record<string, unknown>>(
   payload: T,
-): Omit<T, "agentSendKey" | "searchText" | "searchVector" | "senderHandle" | "serverId"> & {
+): Omit<T, "agentSendKey" | "searchText" | "searchVector" | "senderHandle" | "serverId" | "senderTimezone"> & {
   senderDisplayName: string;
   senderAvatarUrl: string | null;
 } {
@@ -1180,7 +1189,13 @@ function emitNotificationPushProjectionTargets(
 // actors stays inert and is reported to the sender as unresolved, while the
 // ordinary message still succeeds. V1 retains its historical all-match behavior.
 export type StructuredMentionInput = {
-  type: "user" | "agent";
+  /**
+   * `user`/`agent` claim a Raft principal (`id` is the user/agent UUID).
+   * `external` claims a linked external projection (`id` is the
+   * `external_actor_projections.id` UUID) — never lands in `message_mentions`,
+   * only mints an `external_mention_facts` row for the outbound renderer.
+   */
+  type: "user" | "agent" | "external";
   id: string;
   name: string;
 };
@@ -1277,6 +1292,7 @@ function isMessageRouteDomainError(error: unknown): boolean {
 
 export type SystemMessageInboxFactProducer =
   | "agent.join_channel"
+  | "agent.server_role_changed"
   | "agent.migration_completed_receipt"
   | "agent.migration_canceled_receipt"
   | "agent.migration_failed_receipt"
@@ -1351,7 +1367,10 @@ export type PersistedMessageWithCausalActor = {
 };
 
 export type ResolvedMentionFact = {
-  type: "user" | "agent";
+  /** `external` = provider-side projection (e.g. Slack member). Rendered as
+   *  text-only on Raft; never produces a `message_mentions` row or inbox fact.
+   *  Consumers that filter on `=== "user"` / `=== "agent"` skip it for free. */
+  type: "user" | "agent" | "external";
   id: string;
   name: string;
 };
@@ -2113,7 +2132,7 @@ export async function createMessage(
   content: string,
   messageType: "chat" | "system" = "chat",
   taskFields?: { taskStatus: "todo"; taskNumber: number },
-  extraFields?: { threadId?: string | null; agentSendKey?: string | null; randomId?: string | null; actionMetadata?: unknown | null; causalActorType?: "user" | "agent" | null; causalActorId?: string | null; systemSubtype?: string | null },
+  extraFields?: { threadId?: string | null; agentSendKey?: string | null; randomId?: string | null; actionMetadata?: unknown | null; causalActorType?: "user" | "agent" | null; causalActorId?: string | null; systemSubtype?: string | null; senderTimezone?: string | null },
   executor?: DatabaseExecutor,
 ) {
   const persist = async (db: DatabaseExecutor) => {
@@ -2183,6 +2202,7 @@ export async function prepareSystemMessageForOrderedDelivery(
     senderId: "system",
     agentSendKey: null,
     randomId: eventId,
+    senderTimezone: null,
     messageType: "system",
     content,
     actionMetadata: null,
@@ -2383,7 +2403,7 @@ async function finalizeNewChatMessageInTransaction(opts: {
     }
   }
 
-  const targetVisibleMentions = mentionHandles && mentionHandles.length > 0
+  let targetVisibleMentions = mentionHandles && mentionHandles.length > 0
     ? (await getMentionFactsForMessagesWithExecutor(executor, [message.id])).get(message.id) ?? []
     : [];
 
@@ -2426,6 +2446,97 @@ async function finalizeNewChatMessageInTransaction(opts: {
       joint_thread_projection_present: opts.jointThreadProjection != null,
       persistence_state: "transaction_pending",
     });
+  }
+
+  // External (Slack-side) structured mentions: a picker-confirmed
+  // `@<slack-handle>` becomes an `external_mention_facts` row so the outbound
+  // renderer can swap the visible text for `<@U…>`. Never written into
+  // `message_mentions` — that table is "wake a Raft human/agent" and external
+  // projections are not Raft actors. Resolution is scoped to this channel's
+  // active binding's addressability (joint: the requested binding's own
+  // projection set, so a member of server A can't address a Slack user only
+  // visible on server B's binding).
+  const externalMentions = (opts.mentions ?? []).filter((m) => m.type === "external");
+  if (externalMentions.length > 0 && channel) {
+    // Bindings live on the authority channel — a thread resolves through its
+    // parent, a Joint projection through the local binding row.
+    const surface = await resolveSlackOutboundMessageSurface({
+      executor,
+      requestedChannelId,
+      messageChannelId: message.channelId,
+    }).catch((error: unknown) => {
+      console.warn(
+        "messageService external mention surface resolution failed",
+        { messageId: message.id, error: error instanceof Error ? error.name : "unknown" },
+      );
+      return null;
+    });
+    const bindings = surface ? await executor.select({
+      id: externalChannelBindings.id,
+      connectionEpoch: externalChannelBindings.connectionEpoch,
+      bindingEpoch: externalChannelBindings.bindingEpoch,
+      providerConversationId: externalChannelBindings.providerConversationId,
+      registrationId: externalChannelBindings.registrationId,
+      installId: externalChannelBindings.installId,
+    }).from(externalChannelBindings).where(and(
+      eq(externalChannelBindings.channelId, surface.bindingChannelId),
+      eq(externalChannelBindings.state, "active"),
+    )) : [];
+    for (const binding of bindings) {
+      const [install] = await executor.select({
+        providerAuthorityId: externalAppInstalls.providerAuthorityId,
+      }).from(externalAppInstalls).where(
+        eq(externalAppInstalls.id, binding.installId),
+      ).limit(1);
+      if (!install) continue;
+      const snapshots = await executor.select({
+        audienceRevision: externalBindingAudienceSnapshots.audienceRevision,
+      }).from(externalBindingAudienceSnapshots).where(and(
+        eq(externalBindingAudienceSnapshots.bindingId, binding.id),
+        eq(externalBindingAudienceSnapshots.bindingEpoch, binding.bindingEpoch),
+        eq(externalBindingAudienceSnapshots.status, "matched"),
+        gt(externalBindingAudienceSnapshots.expiresAt, new Date()),
+      )).orderBy(desc(externalBindingAudienceSnapshots.audienceRevision)).limit(1);
+      const revision = snapshots[0]?.audienceRevision;
+      if (revision === undefined || !Number.isSafeInteger(revision) || revision <= 0) continue;
+      for (const mention of externalMentions) {
+        const resolution = await resolveExternalMentionFromDurableAuthority({
+          executor,
+          rawHandle: mention.name.trim(),
+          explicitProjectionId: mention.id,
+          raftPrincipalCollision: false,
+          now: new Date(),
+          context: {
+            provider: "slack",
+            appRegistrationId: binding.registrationId,
+            installId: binding.installId,
+            workspaceId: install.providerAuthorityId,
+            connectionEpoch: binding.connectionEpoch,
+            bindingId: binding.id,
+            bindingEpoch: binding.bindingEpoch,
+            conversationId: binding.providerConversationId,
+            memberRevision: revision,
+            contextRevision: revision,
+          },
+        });
+        if (resolution.kind === "resolved") {
+          await insertExternalMentionFact({
+            executor,
+            messageId: message.id,
+            fact: resolution.fact,
+          });
+          // Surface the external mention in the message payload so the Raft
+          // side renders it as styled text (not a plain `@handle`). Not a
+          // `message_mentions` row — inbox/notify consumers filter by
+          // `type === "user"` / `"agent"` and never see this entry.
+          targetVisibleMentions.push({
+            type: "external",
+            id: resolution.fact.projectionId,
+            name: resolution.fact.handleAtSendTime,
+          });
+        }
+      }
+    }
   }
 
   const outboundDelivery = await maybeEnqueueOrdinaryMessageExternalDelivery({
@@ -2472,6 +2583,7 @@ async function createOrReplayUserRandomSend(opts: {
   authorName: string;
   content: string;
   randomId: string;
+  senderTimezone: string | null;
   attachmentIds?: string[];
   actionMetadata?: unknown | null;
   channel: typeof channels.$inferSelect | null | undefined;
@@ -2506,6 +2618,7 @@ async function createOrReplayUserRandomSend(opts: {
         senderType: "user",
         senderId: opts.senderId,
         randomId: opts.randomId,
+        senderTimezone: opts.senderTimezone,
         content: opts.content,
         messageType: "chat",
         searchText: buildSearchText(opts.content),
@@ -3288,7 +3401,10 @@ export async function broadcastSystemMessage(
 
   const channel = await deps.getChannel(channelId);
   if (!messageWasPersisted && channel && personalAttentionTargets.length > 0) {
-    await deps.insertMentionRows(personalAttentionTargets.map((target) => ({
+    // `ResolvedMentionFact` widened to include `"external"` for picker-
+    // confirmed provider mentions; those never become `message_mentions` rows
+    // (inbox semantics are Raft-actor-only), so filter them out here.
+    await deps.insertMentionRows(personalAttentionTargets.filter((t): t is ResolvedMentionFact & { type: "user" | "agent" } => t.type !== "external").map((target) => ({
       messageId: message.id,
       messageSeq: message.seq,
       serverId: channel.serverId,
@@ -3473,35 +3589,41 @@ export async function broadcastSystemMessage(
   const parentFields = channel.type === "thread"
     ? await resolveThreadParentFields(channel.id)
     : {};
-  const deliverToAgent = async (agent: typeof targetedAgents[number]) =>
-    agentOrchestrator.deliverMessage(agent.id, {
-      channel_id: channelId,
-      channel_type: toAgentVisibleChannelType(channel.type),
-      ...parentFields,
-      ...await resolveRecipientDeliveryNames(channel.serverId, agent.id, channel, parentFields),
-      sender_id: "system",
-      sender_name: "system",
-      sender_type: "system",
-      content: renderedContent,
-      timestamp: message.createdAt.toISOString(),
-      seq: message.seq,
-      message_id: message.id,
-      ...(piercedAgentIds.has(agent.id) && { mentioned: true }),
-    }, opts.agentDeliveryOptions);
+  if (opts.awaitAgentDelivery && targetedAgents.length === 0) {
+    throw new Error("SYSTEM_MESSAGE_AGENT_DELIVERY_TARGET_MISSING");
+  }
+  // Each recipient's payload (a DM resolves the agent-facing names, reads only
+  // for a DM), then one channel batch: agent rows and access read once.
+  const deliveries: Array<{ agentId: string; message: AgentMessage; options?: DeliverMessageOptions }> = [];
+  for (const agent of targetedAgents) {
+    deliveries.push({
+      agentId: agent.id,
+      message: {
+        channel_id: channelId,
+        channel_type: toAgentVisibleChannelType(channel.type),
+        ...parentFields,
+        ...await resolveRecipientDeliveryNames(channel.serverId, agent.id, channel, parentFields),
+        sender_id: "system",
+        sender_name: "system",
+        sender_type: "system",
+        content: renderedContent,
+        timestamp: message.createdAt.toISOString(),
+        seq: message.seq,
+        message_id: message.id,
+        ...(piercedAgentIds.has(agent.id) && { mentioned: true }),
+      },
+      options: opts.agentDeliveryOptions,
+    });
+  }
+  const sysResults = agentOrchestrator.deliverMessagesOnChannel(channelId, deliveries);
   if (opts.awaitAgentDelivery) {
-    if (targetedAgents.length === 0) {
-      throw new Error("SYSTEM_MESSAGE_AGENT_DELIVERY_TARGET_MISSING");
-    }
-    const results = await Promise.all(targetedAgents.map(deliverToAgent));
+    const results = await Promise.all(sysResults);
     const dropped = results.find((result) => result.status !== "queued");
     if (dropped) {
       throw new Error(`SYSTEM_MESSAGE_AGENT_DELIVERY_DROPPED:${dropped.reason}`);
     }
   } else {
-    const sysDeliveries = targetedAgents.map((agent) => deliverToAgent(agent).catch((err) => {
-      console.error(`[MessageService] Failed to deliver system message to agent ${agent.id}:`, serializeErrorForLog(err));
-    }));
-    Promise.all(sysDeliveries).catch(() => {});
+    void settleDeliveries(sysResults, deliveries.map((delivery) => delivery.agentId), "system message");
   }
 
   return enriched;
@@ -3840,6 +3962,7 @@ export async function deliverMessagesToAgents(
         sender_id: message.senderId,
         sender_name: message.externalAuthor?.displayName ?? senderIdentity.uniqueName,
         sender_description: senderIdentity.description,
+        sender_timezone: message.senderTimezone ?? null,
         sender_type: toAgentVisibleSenderType(message.senderType, message.messageType),
         ...toAgentVisibleExternalMessage(message),
         // A resolved mention fact on an external_projection message carries the
@@ -3867,52 +3990,62 @@ export async function deliverMessagesToAgents(
     }
   }
 
+  // Every message's mention occurrences in one write per message, BEFORE any delivery (durability
+  // has to precede delivery, as in broadcastAndDeliver). A record-keeping write must never suppress
+  // the thing it records, so a failed write degrades (typed trace) and we still deliver.
+  const occurrenceIdsByMessage = new Map<string, Map<string, string>>();
+  for (const message of messageBatch) {
+    const entries = [...payloadsByAgent].flatMap(([agentId, payloads]) =>
+      payloads.filter((payload) => payload.message_id === message.id).map((deliveryPayload) => ({ agentId, deliveryPayload })));
+    if (entries.length === 0) continue;
+    try {
+      occurrenceIdsByMessage.set(message.id, await ensureAgentMentionDeliveryOccurrencesForAgents(message.id, entries));
+    } catch (err) {
+      addTraceEvent("message_pipeline.mention_occurrence.persist_degraded", {
+        message_id: message.id,
+        intended_occurrence_count: entries.length,
+        delivered_without_occurrence: true,
+        recoverable: false,
+      });
+      console.error(
+        `[MessageService] mention delivery occurrences unavailable for message ${message.id}; delivering without them (these mentions are not recoverable):`,
+        err,
+      );
+    }
+  }
+
+  // Every recipient's agent row and channel access once for the batch (all messages share the
+  // channel); recipients then run in parallel, each recipient's messages in order.
+  const gates = payloadsByAgent.size > 1
+    ? await agentOrchestrator.loadDeliveryGates(channel.id, [...payloadsByAgent.keys()])
+    : null;
   await Promise.all([...payloadsByAgent].map(async ([agentId, payloads]) => {
     for (const payload of payloads) {
-      // THE BOOKKEEPING WRITE IS OUTSIDE THE DELIVERY TRY. This PR originally put it inside,
-      // ahead of deliverMessage, so an occurrence-write throw jumped straight to the catch and
-      // the message was NEVER DELIVERED — silently, because that catch swallows, and misreported,
-      // because its text says "Failed to deliver task message" when the fault was bookkeeping.
-      // Found by @Kabi; verified against base 0e9fb400, where this try contained only
-      // deliverMessage and the log text was therefore accurate.
-      // This is the THIRD mirror of the policy the file states twice in its own catches — "a
-      // record-keeping write must never suppress the thing it records, so we still deliver" — and
-      // it was the worst of the three: @Hipp's site propagated to the caller, this one vanished.
-      let mentionDeliveryOccurrenceId: string | undefined;
-      if (payload.message_id) {
-        try {
-          mentionDeliveryOccurrenceId = await ensureAgentMentionDeliveryOccurrence(
-            payload.message_id,
-            agentId,
-            payload,
-          );
-        } catch (err) {
-          // Same typed trace as the other two sites, so an accepted degradation stays observable.
-          // Its absence here was the tell: the mechanism this file uses to keep accepted
-          // degradations visible was missing at the one place the degradation was NOT accepted.
-          addTraceEvent("message_pipeline.mention_occurrence.persist_degraded", {
-            message_id: payload.message_id,
-            intended_occurrence_count: 1,
-            delivered_without_occurrence: true,
-            recoverable: false,
-          });
-          console.error(
-            `[MessageService] mention delivery occurrence unavailable for task message ${payload.message_id} agent ${agentId}; delivering without it (this mention is not recoverable):`,
-            err,
-          );
-        }
-      }
+      const mentionDeliveryOccurrenceId = payload.message_id
+        ? occurrenceIdsByMessage.get(payload.message_id)?.get(agentId)
+        : undefined;
       try {
         await agentOrchestrator.deliverMessage(agentId, payload, {
           ...deliveryOptions,
           ...(mentionDeliveryOccurrenceId && { mentionDeliveryOccurrenceId }),
-        });
+        }, gates);
       } catch (err) {
-        // Now once again reachable ONLY by a delivery failure, so the text is true again.
         console.error(`[MessageService] Failed to deliver task message to agent ${agentId}:`, serializeErrorForLog(err));
       }
     }
   }));
+}
+
+/** Waits for started deliveries, logging each failure; never rejects. */
+function settleDeliveries(
+  results: ReadonlyArray<Promise<AgentMessageDeliveryResult>>,
+  agentIds: readonly string[],
+  what: string,
+): Promise<void> {
+  // fanout-ok: attaches a handler to deliveries already started by deliverMessagesOnChannel; no I/O of its own.
+  return Promise.all(results.map((result, index) => result.catch((err) => {
+    console.error(`[MessageService] Failed to deliver ${what} to agent ${agentIds[index]}:`, serializeErrorForLog(err));
+  }))).then(() => undefined);
 }
 
 /** Storage names are not addresses. Resolve DM peers for this recipient,
@@ -3997,6 +4130,7 @@ export async function deliverMessageToAgent(
     requireQueueReceipt?: boolean;
     nonMemberMention?: boolean;
     reconcileNonMemberMention?: boolean;
+    deliveryChannelId?: string;
   } = {},
 ): Promise<AgentMessageDeliveryResult | {
   status: "dropped";
@@ -4021,9 +4155,28 @@ export async function deliverMessageToAgent(
   if (message.senderType === "external_projection" && !message.externalAuthor) {
     return { status: "dropped", reason: "message_unavailable" };
   }
+  const [durableAgentMention] = message.senderType === "external_projection"
+    ? await db.select({ id: messageMentions.id }).from(messageMentions).where(and(
+        eq(messageMentions.messageId, message.id),
+        eq(messageMentions.targetType, "agent"),
+        eq(messageMentions.targetId, agentId),
+        eq(messageMentions.notifiableAtSend, true),
+      )).limit(1)
+    : [];
 
-  const channel = await deps.getChannel(message.channelId);
-  if (!channel) return { status: "dropped", reason: "channel_unavailable" };
+  const messageChannel = await deps.getChannel(message.channelId);
+  if (!messageChannel) return { status: "dropped", reason: "channel_unavailable" };
+  const channel = options.deliveryChannelId
+    ? await deps.getChannel(options.deliveryChannelId)
+    : messageChannel;
+  if (
+    !channel
+    || channel.serverId !== messageChannel.serverId
+    || (options.deliveryChannelId && (
+      channel.type !== "thread"
+      || channel.parentMessageId !== message.id
+    ))
+  ) return { status: "dropped", reason: "channel_unavailable" };
 
   const renderedContent = await deps.renderAgentReadablePermalinks(message.content, channel.serverId);
   const senderIdentity = message.senderType === "external_projection"
@@ -4058,19 +4211,20 @@ export async function deliverMessageToAgent(
   }
 
   const deliveryPayload: AgentMessage = {
-      channel_id: message.channelId,
+      channel_id: channel.id,
       channel_type: toAgentVisibleChannelType(channel.type),
       sender_id: message.senderId,
       sender_name: senderName,
       sender_description: senderDescription,
+      sender_timezone: message.senderTimezone ?? null,
       sender_type: toAgentVisibleSenderType(message.senderType, message.messageType),
       ...toAgentVisibleExternalMessage(message),
       content: renderAgentVisibleMessageContent(message, renderedContent),
       timestamp: message.createdAt.toISOString(),
       seq: message.seq,
       message_id: message.id,
-      mentioned: true,
-      ...(options.nonMemberMention === true && { non_member_mention: true }),
+      mentioned: message.senderType === "external_projection" ? Boolean(durableAgentMention) : true,
+      ...(message.senderType !== "external_projection" && options.nonMemberMention === true && { non_member_mention: true }),
       ...parentFields,
       ...await resolveRecipientDeliveryNames(channel.serverId, agentId, channel, parentFields),
       ...(message.senderType !== "external_projection" && message.taskStatus != null && {
@@ -4203,21 +4357,65 @@ export async function deliverExternalInboundCommittedMessageToAgents(
     faceAgentIds.set(row.sourceChannelId, ids);
   }
   const deliveredAgentIds = new Set<string>();
+  // An "ordinary bound channel" is exactly one inbox face that IS the
+  // canonical channel (channel.type === "channel" alone is not enough — a
+  // joint canonical channel also has type "channel" but its faces live on
+  // other channels). Only that shape supports canonical-thread delivery:
+  // a Slack root Agent mention routes into the thread so the Agent's reply
+  // uses the linked Slack thread_ts. Joint commits keep face-channel
+  // delivery everywhere and never take the thread path.
+  const isOrdinaryBoundChannel = channel.type === "channel"
+    && faceAgentIds.size === 1
+    && faceAgentIds.has(channel.id);
+  const threadMentionedAgentIds = isOrdinaryBoundChannel
+    ? new Set(personalAttentionTargets.filter((t) => t.type === "agent").map((t) => t.id))
+    : new Set<string>();
   for (const [faceChannelId, agentIds] of faceAgentIds) {
-    await deliverMessagesToAgents(
-      agentOrchestrator,
-      [{ ...message, channelId: faceChannelId }],
-      "external user",
-      { personalAttentionTargets, recipientAgentIds: agentIds },
-    );
-    for (const id of agentIds) deliveredAgentIds.add(id);
+    const isOrdinaryBoundFace = isOrdinaryBoundChannel && faceChannelId === channel.id;
+    const threadAgents = isOrdinaryBoundFace
+      ? agentIds.filter((id) => threadMentionedAgentIds.has(id))
+      : [];
+    const channelAgents = agentIds.filter((id) => !threadAgents.includes(id));
+    if (channelAgents.length > 0) {
+      await deliverMessagesToAgents(
+        agentOrchestrator,
+        [{ ...message, channelId: faceChannelId }],
+        "external user",
+        { personalAttentionTargets, recipientAgentIds: channelAgents },
+      );
+      for (const id of channelAgents) deliveredAgentIds.add(id);
+    }
+    for (const agentId of threadAgents) {
+      const deliveryChannelId = (await channelService.getOrCreateThread(message.id, agentId, "agent")).id;
+      const deliveryChannel = await channelService.getChannel(deliveryChannelId);
+      if (!deliveryChannel) continue;
+      if (!await channelService.canAgentAccessChannel(deliveryChannel.id, agentId)) continue;
+      await deliverMessageToAgent(agentOrchestrator, messageId, agentId, {
+        requireQueueReceipt: true,
+        deliveryChannelId,
+      });
+      deliveredAgentIds.add(agentId);
+    }
   }
   for (const target of personalAttentionTargets) {
     if (target.type !== "agent" || deliveredAgentIds.has(target.id)) continue;
-    if (!await channelService.canAgentAccessChannel(channel.id, target.id)) continue;
+    // Same ordinary-bound-channel gate as above: a joint canonical channel
+    // has type "channel" too, but routing an outside-mention agent into a
+    // canonical thread would break face delivery, so joint messages keep
+    // the plain (non-thread) delivery path.
+    const deliveryChannelId = isOrdinaryBoundChannel
+      ? (await channelService.getOrCreateThread(message.id, target.id, "agent")).id
+      : undefined;
+    const deliveryChannel = deliveryChannelId
+      ? await channelService.getChannel(deliveryChannelId)
+      : channel;
+    if (!deliveryChannel) continue;
+    if (!await channelService.canAgentAccessChannel(deliveryChannel.id, target.id)) continue;
     await deliverMessageToAgent(agentOrchestrator, messageId, target.id, {
+      requireQueueReceipt: true,
       nonMemberMention: true,
       reconcileNonMemberMention: true,
+      deliveryChannelId,
     });
   }
 }
@@ -4238,6 +4436,11 @@ type ResumeCatchupCandidate = {
   firstUnreadSeq: number;
   latestUnreadSeq: number;
   latestPiercingSeq: number | null;
+  /**
+   * RFC 071 §6: the exclusive lower bound the rows are read from,
+   * max(read cursor, obligation cursor). Absent (no obligation): the read cursor.
+   */
+  lowerBoundSeq?: number;
 };
 
 function compareResumeCatchupCandidates(a: ResumeCatchupCandidate, b: ResumeCatchupCandidate) {
@@ -4264,6 +4467,15 @@ export interface AgentResumeCatchupResult {
   conversations: Array<{ channelId: string; truncated: boolean }>;
   candidateChannelCount: number;
   maxSeq: number | null;
+  /**
+   * RFC 071 §6: only when the caller passed a catch-up obligation. What the
+   * server needs to record the batch (`buildCatchupBatch`), except the
+   * rendered rows, which the caller knows (it may append a folded wake).
+   */
+  obligationBatch?: Omit<CatchupBatchBuildInput, "batchId" | "launchId" | "builtAtMs" | "rendered"> & {
+    /** The read cursor of EVERY owed conversation (RFC 6 "read cursor" settlement). */
+    owedReadCursors: Record<string, number>;
+  };
 }
 
 /**
@@ -4278,7 +4490,15 @@ export interface AgentResumeCatchupResult {
 export async function getAgentResumeCatchupMessages(
   agentId: string,
   historyCutoff: Date | undefined,
-  opts: { chain: channelService.AgentInboxChainRow[] },
+  opts: {
+    chain: channelService.AgentInboxChainRow[];
+    /**
+     * RFC 071 §6: the terminal-failure breaker's open catch-up obligation.
+     * Only the breaker's claimed start passes it (never while
+     * RUNTIME_OUTCOME_ACK_ENABLED is false); absent, nothing below changes.
+     */
+    obligation?: CatchupObligation | null;
+  },
 ): Promise<AgentResumeCatchupResult> {
   const deps = resolveMessageServiceDeps();
   const db = getDb();
@@ -4288,11 +4508,58 @@ export async function getAgentResumeCatchupMessages(
   // channel cap because a candidate can yield no rows once the per-row filters
   // apply (its unread predates the agent's join, or is its own), and such a
   // channel must not take the slot of one that has something to deliver.
-  const candidates = resumeCatchupCandidatesFromChain(opts.chain)
-    .sort(compareResumeCatchupCandidates)
-    .slice(0, RESUME_CATCHUP_MAX_CANDIDATES);
+  const ordered = resumeCatchupCandidatesFromChain(opts.chain).sort(compareResumeCatchupCandidates);
+  const obligation = opts.obligation ?? null;
+  if (!obligation) {
+    return (await buildResumeCatchupBatch(deps, db, agentId, historyCutoff, ordered.slice(0, RESUME_CATCHUP_MAX_CANDIDATES))).result;
+  }
 
-  return buildResumeCatchupBatch(deps, db, agentId, historyCutoff, candidates);
+  // RFC 071 §6 "no starvation": the lower bound max(read cursor, obligation
+  // cursor) is applied BEFORE the cut, owed conversations go first (oldest
+  // owed first), and the rest keep today's order.
+  const byConversation = new Map(ordered.map((candidate) => [candidate.channelId, candidate]));
+  const selection = selectObligationCatchupCandidates(
+    obligation,
+    ordered.map((candidate) => ({
+      conversationId: candidate.channelId,
+      lastReadSeq: candidate.lastReadSeq,
+      firstUnreadSeq: candidate.firstUnreadSeq,
+      latestUnreadSeq: candidate.latestUnreadSeq,
+    })),
+    Math.min(RESUME_CATCHUP_MAX_CANDIDATES, TERMINAL_FAILURE_CATCHUP_MAX_CANDIDATES),
+  );
+  const candidates = selection.candidates.map((selected) => ({
+    ...byConversation.get(selected.conversationId)!,
+    lowerBoundSeq: selected.lowerBoundSeq,
+  }));
+  const { result, batchConversations } = await buildResumeCatchupBatch(deps, db, agentId, historyCutoff, candidates);
+
+  // Every owed conversation's read cursor: one the cursor has passed is
+  // settled when the batch is recorded (RFC 6 "read cursor"). From the chain
+  // when it lists the conversation, else the durable cursor row.
+  const owedReadCursors: Record<string, number> = {};
+  const missing = Object.keys(obligation.owedCeilings).filter((id) => {
+    const fromChain = byConversation.get(id)?.lastReadSeq;
+    if (fromChain !== undefined) owedReadCursors[id] = fromChain;
+    return fromChain === undefined;
+  });
+  if (missing.length > 0) {
+    const durable = new Map((await channelService.getAgentLegacyReadCursors(agentId)).map((row) => [row.channelId, row.lastReadSeq]));
+    for (const conversationId of missing) {
+      owedReadCursors[conversationId] = durable.get(conversationId) ?? 0;
+    }
+  }
+  const unreadLatestSeqs: Record<string, number> = {};
+  for (const candidate of ordered) unreadLatestSeqs[candidate.channelId] = candidate.latestUnreadSeq;
+  return {
+    ...result,
+    obligationBatch: {
+      conversations: batchConversations,
+      owedReadCursors,
+      candidateCapHit: selection.candidateCapHit,
+      unreadLatestSeqs,
+    },
+  };
 }
 
 /**
@@ -4469,16 +4736,19 @@ async function buildResumeCatchupBatch(
   agentId: string,
   historyCutoff: Date | undefined,
   candidates: ResumeCatchupCandidate[],
-): Promise<AgentResumeCatchupResult> {
+): Promise<{ result: AgentResumeCatchupResult; batchConversations: CatchupBatchBuildInput["conversations"] }> {
   const output: AgentMessage[] = [];
   const sources: AgentResumeCatchupSource[] = [];
   const conversations: AgentResumeCatchupResult["conversations"] = [];
+  // RFC 071 §6: per conversation read, what the batch record's coverage needs.
+  const batchConversations: CatchupBatchBuildInput["conversations"] = [];
   let maxSeq: number | null = null;
   let contributingChannels = 0;
   for (const candidate of candidates) {
     if (output.length >= RESUME_CATCHUP_MAX_ROWS_TOTAL) break;
     if (contributingChannels >= RESUME_CATCHUP_MAX_CHANNELS) break;
     const outputBefore = output.length;
+    const lowerBoundSeq = candidate.lowerBoundSeq ?? candidate.lastReadSeq;
 
     const { storageChannelId, parentFields } = await resolveResumeCatchupTarget(deps, db, candidate);
 
@@ -4487,7 +4757,7 @@ async function buildResumeCatchupBatch(
 
     const rowConditions = [
       eq(messages.channelId, storageChannelId),
-      gt(messages.seq, candidate.lastReadSeq),
+      gt(messages.seq, lowerBoundSeq),
       // The chain's unread rule, so a pull returns exactly what the chain counts.
       messageUnreadEligibleForReceiverSql({ type: "agent", id: agentId }),
     ];
@@ -4508,7 +4778,11 @@ async function buildResumeCatchupBatch(
       .limit(rowLimit + 1);
     const conversation = { channelId: candidate.channelId, truncated: eligibleRows.length > rowLimit };
     conversations.push(conversation);
-    const rows = await enrichWithSenderNames(eligibleRows.slice(0, rowLimit));
+    // Every deliverable seq above the lower bound, ascending: rows the per-row
+    // filters drop are not deliverable by rule and are left out; rows never
+    // evaluated (the total cap) are kept, so they end the covered prefix.
+    const fetchedSeqs: number[] = [];
+    const rows = await enrichWithSenderNames(eligibleRows.slice(0, rowLimit), { includeSenderTimezone: true });
     // The same `mentioned` flag live delivery sets: the agent was @-mentioned in
     // the message (a notifiable mention row), so a recovered message reads the
     // same as the live one would have.
@@ -4522,12 +4796,15 @@ async function buildResumeCatchupBatch(
         or(eq(messageMentions.notifiableAtSend, true), isNotNull(messageMentions.notifiedAt)),
       ))).map((mention) => mention.messageId));
 
-    for (const row of rows) {
+    for (const [index, row] of rows.entries()) {
       if (output.length >= RESUME_CATCHUP_MAX_ROWS_TOTAL) {
         conversation.truncated = true;
+        for (const unevaluated of rows.slice(index)) {
+          if (typeof unevaluated.seq === "number" && unevaluated.seq > lowerBoundSeq) fetchedSeqs.push(unevaluated.seq);
+        }
         break;
       }
-      if (typeof row.seq !== "number" || row.seq <= candidate.lastReadSeq) continue;
+      if (typeof row.seq !== "number" || row.seq <= lowerBoundSeq) continue;
       if (!isMessageUnreadEligibleForReceiver(row, { type: "agent", id: agentId }, {
         personallyMentioned: mentionedMessageIds.has(row.id),
       })) continue;
@@ -4567,6 +4844,7 @@ async function buildResumeCatchupBatch(
         sender_id: row.senderId,
         sender_name: identity.uniqueName,
         sender_description: identity.description,
+        sender_timezone: row.senderTimezone ?? null,
         sender_type: toAgentVisibleSenderType(row.senderType, row.messageType),
         ...toAgentVisibleExternalMessage(row),
         ...(row.senderType === "external_projection"
@@ -4600,17 +4878,28 @@ async function buildResumeCatchupBatch(
         senderId: row.senderId,
         system: isSystemMessageIdentity(row.messageType, row.senderId),
       });
+      fetchedSeqs.push(row.seq);
       maxSeq = maxSeq == null ? row.seq : Math.max(maxSeq, row.seq);
     }
+    batchConversations.push({
+      conversationId: candidate.channelId,
+      fromSeqExclusive: lowerBoundSeq,
+      latestSeq: candidate.latestUnreadSeq,
+      truncated: conversation.truncated,
+      fetchedSeqs,
+    });
     if (output.length > outputBefore) contributingChannels += 1;
   }
 
   return {
-    messages: output,
-    sources,
-    conversations,
-    candidateChannelCount: contributingChannels,
-    maxSeq,
+    result: {
+      messages: output,
+      sources,
+      conversations,
+      candidateChannelCount: contributingChannels,
+      maxSeq,
+    },
+    batchConversations,
   };
 }
 
@@ -4939,6 +5228,12 @@ type MessageQueryTraceOptions = {
   forwardedBundleViewerUserId?: string | null;
   forwardedBundleViewerAgentId?: string | null;
   forwardedBundleViewerServerId?: string | null;
+  /**
+   * Keep `senderTimezone` on enriched rows. Set only by agent-facing reads:
+   * a human sender's browser zone is exposed to agents, never to other
+   * humans' clients, so every other read drops the key.
+   */
+  includeSenderTimezone?: boolean;
   excludeSender?: {
     senderType: "user" | "agent";
     senderId: string;
@@ -5009,6 +5304,17 @@ function stripForwardRequestDigest(actionMetadata: unknown): unknown {
   return projected;
 }
 
+/**
+ * Drops the agent-only `senderTimezone` from a row bound for a human client.
+ * The static type keeps the key (readers use `?? null`), like
+ * `projectForwardDestinationMessage` keeps the task keys it strips.
+ */
+export function omitSenderTimezone<T extends Record<string, unknown>>(message: T): T {
+  if (!("senderTimezone" in message)) return message;
+  const { senderTimezone: _senderTimezone, ...projected } = message;
+  return projected as unknown as T;
+}
+
 export function projectForwardDestinationMessage<T extends Record<string, unknown>>(message: T): T {
   if (!isRecord(message.actionMetadata) || message.actionMetadata.kind !== "forwarded-bundle") return message;
   const {
@@ -5059,6 +5365,67 @@ async function viewerCanReadForwardedSource(
     .limit(1);
   if (!membership) return false;
   return channelService.canUserAccessChannel(sourceTargetId, viewer.id, sourceServerId as ServerId);
+}
+
+/** Forwarded-source checks in flight at once while enriching one page (agent viewers). */
+const FORWARDED_SOURCE_CHECK_CONCURRENCY = 4;
+/** Enrichment reads (senders, reactions, attachments, ...) in flight at once for one page. */
+const ENRICHMENT_QUERY_CONCURRENCY = 3;
+
+type ForwardedBundleViewer = Parameters<typeof viewerCanReadForwardedSource>[2];
+
+function forwardedSourceKey(sourceTargetId: string, sourceServerId: string, viewer: ForwardedBundleViewer): string {
+  return `${viewer.type}:${viewer.id}:${viewer.serverId}:${sourceServerId}:${sourceTargetId}`;
+}
+
+/**
+ * viewerCanReadForwardedSource for one page of messages. For a human viewer
+ * every forwarded source on the page is answered up front in a fixed number of
+ * queries (one membership read, one filterUserAccessibleChannelIds). An agent
+ * viewer's rule (canAgentAccessChannel per source channel) has no list form, so
+ * its sources are checked once each, at most a few at a time.
+ */
+async function pageForwardedSourceCheck(
+  actionMetadatas: readonly unknown[],
+  viewer: ForwardedBundleViewer | null,
+): Promise<typeof viewerCanReadForwardedSource> {
+  const answers = new Map<string, Promise<boolean>>();
+  if (viewer?.type === "user") {
+    const targets = new Set<string>();
+    const otherServer: Array<{ sourceTargetId: string; sourceServerId: string }> = [];
+    for (const metadata of actionMetadatas) {
+      if (!isRecord(metadata) || metadata.kind !== "forwarded-bundle" || !Array.isArray(metadata.forwardedItems)) continue;
+      for (const item of metadata.forwardedItems) {
+        if (!isRecord(item) || typeof item.sourceTargetId !== "string" || typeof item.sourceServerId !== "string") continue;
+        if (item.sourceServerId === viewer.serverId) targets.add(item.sourceTargetId);
+        else otherServer.push({ sourceTargetId: item.sourceTargetId, sourceServerId: item.sourceServerId });
+      }
+    }
+    // Same rule as viewerCanReadForwardedSource: only sources in the viewer's
+    // server, only for a member of it, then channel access.
+    for (const source of otherServer) answers.set(forwardedSourceKey(source.sourceTargetId, source.sourceServerId, viewer), Promise.resolve(false));
+    if (targets.size > 0) {
+      const [membership] = await getDb()
+        .select({ userId: serverMembers.userId })
+        .from(serverMembers)
+        .where(and(eq(serverMembers.serverId, viewer.serverId), eq(serverMembers.userId, viewer.id)))
+        .limit(1);
+      const accessible = membership
+        ? await channelService.filterUserAccessibleChannelIds([...targets], viewer.id, viewer.serverId as ServerId)
+        : new Set<string>();
+      for (const target of targets) answers.set(forwardedSourceKey(target, viewer.serverId, viewer), Promise.resolve(accessible.has(target)));
+    }
+  }
+  const limit = createConcurrencyLimiter(FORWARDED_SOURCE_CHECK_CONCURRENCY);
+  return (sourceTargetId, sourceServerId, checkedViewer) => {
+    const key = forwardedSourceKey(sourceTargetId, sourceServerId, checkedViewer);
+    let answer = answers.get(key);
+    if (!answer) {
+      answer = limit(() => viewerCanReadForwardedSource(sourceTargetId, sourceServerId, checkedViewer));
+      answers.set(key, answer);
+    }
+    return answer;
+  };
 }
 
 async function scrubForwardedBundleMetadataForViewer(
@@ -5290,6 +5657,26 @@ async function getMentionFactsForMessages(
     });
     byMessage.set(row.messageId, facts);
   }
+
+  // Provider-side projections (Slack members) don't write `message_mentions`
+  // rows — they live in `external_mention_facts` keyed to the same message.
+  const externalRows = await traceQuery(
+    "messages.external_mention_facts_by_messages",
+    () => getDb()
+      .select({
+        messageId: externalMentionFacts.messageId,
+        projectionId: externalMentionFacts.projectionId,
+        handleAtSendTime: externalMentionFacts.handleAtSendTime,
+      })
+      .from(externalMentionFacts)
+      .where(inArray(externalMentionFacts.messageId, messageIds)),
+    () => ({ input_count: messageIds.length }),
+  );
+  for (const row of externalRows) {
+    const facts = byMessage.get(row.messageId) ?? [];
+    facts.push({ type: "external", id: row.projectionId, name: row.handleAtSendTime });
+    byMessage.set(row.messageId, facts);
+  }
   return byMessage;
 }
 
@@ -5319,6 +5706,28 @@ async function getMentionFactsForMessagesWithExecutor(
     facts.push({
       type: row.targetType,
       id: row.targetId,
+      name: row.handleAtSendTime,
+    });
+    byMessage.set(row.messageId, facts);
+  }
+
+  // Provider-side projections (Slack members) don't write `message_mentions`
+  // rows — they live in `external_mention_facts` keyed to the same message.
+  // Load them too so refresh/read paths render the mention with the same
+  // styled treatment as the initial send.
+  const externalRows = await executor
+    .select({
+      messageId: externalMentionFacts.messageId,
+      projectionId: externalMentionFacts.projectionId,
+      handleAtSendTime: externalMentionFacts.handleAtSendTime,
+    })
+    .from(externalMentionFacts)
+    .where(inArray(externalMentionFacts.messageId, messageIds));
+  for (const row of externalRows) {
+    const facts = byMessage.get(row.messageId) ?? [];
+    facts.push({
+      type: "external",
+      id: row.projectionId,
       name: row.handleAtSendTime,
     });
     byMessage.set(row.messageId, facts);
@@ -5433,26 +5842,69 @@ async function enrichWithSenderNames<T extends MessageRowForEnrichment>(
     const metadata = "actionMetadata" in row ? row.actionMetadata : null;
     return row.senderType !== "external_projection" && metadata !== null && typeof metadata === "object" && "kind" in metadata && metadata.kind === "action-card";
   }).map((row) => row.id);
-  const cardOrigins = new Map(cardIds.length === 0 ? [] : (await db
-    .select({ messageId: actionCards.messageId, serverId: actionCards.serverId })
-    .from(actionCards).where(inArray(actionCards.messageId, cardIds)))
-    .map((card) => [card.messageId, card.serverId] as const));
-
-
+  // The reads below are independent within each wave, so a wave runs them
+  // side by side instead of one round trip after another. At most
+  // ENRICHMENT_QUERY_CONCURRENCY run at once: each holds its own pool
+  // connection, and one page load must not take a large share of the pool.
+  const limit = createConcurrencyLimiter(ENRICHMENT_QUERY_CONCURRENCY);
+  // Task facts only add task fields, so the sender and channel of each row
+  // are known before they load.
+  const userMessageRows = inputRows.filter((m) => m.senderType === "user" && m.messageType !== "system");
+  const senderChannelIds = [...new Set(userMessageRows.map((m) => m.channelId))];
+  const allChannelIds = [...new Set(inputRows.map((m) => m.channelId))];
+  const [
+    cardOriginRows,
+    taskFacts,
+    reactionMap,
+    mentionMap,
+    externalAuthorMap,
+    attachmentMap,
+    gateRows,
+    channelRows,
+  ] = await Promise.all([
+    cardIds.length === 0 ? [] : limit(() => db
+      .select({ messageId: actionCards.messageId, serverId: actionCards.serverId })
+      .from(actionCards).where(inArray(actionCards.messageId, cardIds))),
+    limit(() => loadCanonicalTaskFactsByMessageId(messageIds, db)),
+    limit(() => getReactionsForMessages(messageIds, traceQuery)),
+    limit(() => getMentionFactsForMessages(messageIds, traceQuery)),
+    limit(() => loadExternalMessageAuthors(messageIds, db)),
+    // Batch-fetch attachments for all messages
+    limit(() => traceQuery(
+      "messages.attachments_by_messages",
+      () => getAttachmentsForMessages(messageIds),
+      (result) => ({
+        input_count: inputRows.length,
+        attachments_count: [...result.values()].reduce((sum, list) => sum + list.length, 0),
+      }),
+    )),
+    // Attachment-comment gate: each batch channel's server (see below).
+    limit(() => traceQuery(
+      "messages.attachment_comment_gate",
+      () => db
+        .select({ channelId: channels.id, serverId: servers.id })
+        .from(channels)
+        .innerJoin(servers, eq(servers.id, channels.serverId))
+        .where(inArray(channels.id, allChannelIds)),
+      () => ({ input_count: allChannelIds.length }),
+    )),
+    senderChannelIds.length === 0 ? [] : limit(() => traceQuery(
+      "messages.senders.channels_by_messages",
+      () => db
+        .select({ id: channels.id, serverId: channels.serverId, type: channels.type })
+        .from(channels)
+        .where(inArray(channels.id, senderChannelIds)),
+      () => ({ input_count: senderChannelIds.length }),
+    )),
+  ]);
+  const cardOrigins = new Map(cardOriginRows.map((card) => [card.messageId, card.serverId] as const));
 
   // v1.4: task facts live in `tasks`, but the message-shaped task fields are a
   // published interface (CLI `[task #N status=...]` suffix, socket payloads,
   // assignee mute-piercing). Project them back on here — the single chokepoint
   // every message-history read path already funnels through — so no read
   // surface has to learn about the storage move.
-  const rows = projectTaskFactsOntoRows(
-    inputRows,
-    await loadCanonicalTaskFactsByMessageId(messageIds, db),
-  );
-
-  const reactionMap = await getReactionsForMessages(messageIds, traceQuery);
-  const mentionMap = await getMentionFactsForMessages(messageIds, traceQuery);
-  const externalAuthorMap = await loadExternalMessageAuthors(messageIds, db);
+  const rows = projectTaskFactsOntoRows(inputRows, taskFacts);
   const missingExternalAuthor = rows.find(
     (row) => row.senderType === "external_projection" && !externalAuthorMap.has(row.id),
   );
@@ -5489,184 +5941,165 @@ async function enrichWithSenderNames<T extends MessageRowForEnrichment>(
   const activeJointMemberKeys = new Set<string>();
   const jointMembershipChannelIds = new Set<string>();
 
-  const userMessageRows = rows.filter((m) => m.senderType === "user" && m.messageType !== "system");
-
-  if (userIds.length > 0) {
-    const userRows = await traceQuery(
+  for (const channel of channelRows) {
+    channelServerMap.set(channel.id, channel.serverId);
+    channelTypeMap.set(channel.id, channel.type);
+  }
+  const serverIds = [...new Set(channelRows.map((channel) => channel.serverId))];
+  const jointChannelIds = channelRows.filter((channel) => channel.type !== "thread").map((channel) => channel.id);
+  const threadChannelIds = channelRows.filter((channel) => channel.type === "thread").map((channel) => channel.id);
+  const hasSenderMembership = userMessageRows.length > 0 && userIds.length > 0;
+  const canonicalThreadChannels = alias(channels, "canonical_thread_channels");
+  const parentMessages = alias(messages, "joint_thread_parent_messages");
+  const parentJointChannels = alias(jointChannels, "parent_joint_channels");
+  const parentJointChannelServers = alias(jointChannelServers, "parent_joint_channel_servers");
+  // Feature flag gate for attachment comments (see the comment-count block
+  // below): one evaluation per server of the batch.
+  const gateServerIds = [...new Set(gateRows.map((row) => row.serverId))];
+  const [
+    userRows,
+    agentRows,
+    membershipRows,
+    departureRows,
+    jointMemberRows,
+    jointThreadMemberRows,
+    commentFlagEvaluations,
+  ] = await Promise.all([
+    userIds.length === 0 ? [] : limit(() => traceQuery(
       "messages.senders.user_profiles",
       () => db
         .select({ id: users.id, name: users.name, displayName: users.displayName, description: users.description })
         .from(users)
         .where(inArray(users.id, userIds)),
       () => ({ input_count: userIds.length }),
-    );
-    for (const u of userRows) {
-      nameMap.set(u.id, u.displayName || u.name || "User");
-      handleMap.set(u.id, u.name || "User");
-      descriptionMap.set(u.id, u.description || null);
-    }
-  }
-
-  if (userMessageRows.length > 0) {
-    const channelIds = [...new Set(userMessageRows.map((m) => m.channelId))];
-    const channelRows = await traceQuery(
-      "messages.senders.channels_by_messages",
-      () => db
-        .select({ id: channels.id, serverId: channels.serverId, type: channels.type })
-        .from(channels)
-        .where(inArray(channels.id, channelIds)),
-      () => ({ input_count: channelIds.length }),
-    );
-    for (const channel of channelRows) {
-      channelServerMap.set(channel.id, channel.serverId);
-      channelTypeMap.set(channel.id, channel.type);
-    }
-
-    const serverIds = [...new Set(channelRows.map((channel) => channel.serverId))];
-    if (serverIds.length > 0 && userIds.length > 0) {
-      const membershipRows = await traceQuery(
-        "messages.senders.server_members",
-        () => db
-          .select({ serverId: serverMembers.serverId, userId: serverMembers.userId })
-          .from(serverMembers)
-          .where(and(
-            inArray(serverMembers.serverId, serverIds),
-            inArray(serverMembers.userId, userIds),
-          )),
-        () => ({ input_count: userIds.length, server_count: serverIds.length }),
-      );
-      for (const membership of membershipRows) {
-        activeMemberKeys.add(`${membership.serverId}:${membership.userId}`);
-      }
-
-      const departureRows = await traceQuery(
-        "messages.senders.server_membership_departures",
-        () => db
-          .select({
-            serverId: serverMembershipDepartures.serverId,
-            userId: serverMembershipDepartures.userId,
-            reason: serverMembershipDepartures.reason,
-          })
-          .from(serverMembershipDepartures)
-          .where(and(
-            inArray(serverMembershipDepartures.serverId, serverIds),
-            inArray(serverMembershipDepartures.userId, userIds),
-          )),
-        () => ({ input_count: userIds.length, server_count: serverIds.length }),
-      );
-      for (const departure of departureRows) {
-        departureReasonByMemberKey.set(
-          `${departure.serverId}:${departure.userId}`,
-          departure.reason,
-        );
-      }
-    }
-
-    const jointChannelIds = channelRows.filter((channel) => channel.type !== "thread").map((channel) => channel.id);
-    if (jointChannelIds.length > 0 && userIds.length > 0) {
-      const jointMemberRows = await traceQuery(
-        "messages.senders.joint_channel_members",
-        () => db
-          .select({
-            canonicalChannelId: jointChannels.canonicalChannelId,
-            localChannelId: jointChannelServers.localChannelId,
-            userId: channelHumans.userId,
-          })
-          .from(jointChannels)
-          .innerJoin(jointChannelServers, and(
-            eq(jointChannelServers.jointChannelId, jointChannels.id),
-            eq(jointChannelServers.status, "active"),
-          ))
-          .innerJoin(channelHumans, and(
-            eq(channelHumans.channelId, jointChannelServers.localChannelId),
-            inArray(channelHumans.userId, userIds),
-          ))
-          .where(and(
-            inArray(jointChannels.canonicalChannelId, jointChannelIds),
-            eq(jointChannels.status, "active"),
-          )),
-        () => ({ input_count: userIds.length, joint_channel_count: jointChannelIds.length }),
-      );
-      for (const membership of jointMemberRows) {
-        jointMembershipChannelIds.add(membership.canonicalChannelId);
-        jointMembershipChannelIds.add(membership.localChannelId);
-        activeJointMemberKeys.add(`${membership.canonicalChannelId}:${membership.userId}`);
-        activeJointMemberKeys.add(`${membership.localChannelId}:${membership.userId}`);
-      }
-    }
-
-    const threadChannelIds = channelRows.filter((channel) => channel.type === "thread").map((channel) => channel.id);
-    if (threadChannelIds.length > 0 && userIds.length > 0) {
-      const canonicalThreadChannels = alias(channels, "canonical_thread_channels");
-      const parentMessages = alias(messages, "joint_thread_parent_messages");
-      const parentJointChannels = alias(jointChannels, "parent_joint_channels");
-      const parentJointChannelServers = alias(jointChannelServers, "parent_joint_channel_servers");
-      const jointThreadMemberRows = await traceQuery(
-        "messages.senders.joint_thread_parent_members",
-        () => db
-          .select({
-            canonicalThreadChannelId: jointChannels.canonicalChannelId,
-            localParentChannelId: parentJointChannelServers.localChannelId,
-            userId: channelHumans.userId,
-          })
-          .from(jointChannels)
-          .innerJoin(canonicalThreadChannels, and(
-            eq(canonicalThreadChannels.id, jointChannels.canonicalChannelId),
-            eq(canonicalThreadChannels.type, "thread"),
-            isNull(canonicalThreadChannels.deletedAt),
-          ))
-          .innerJoin(parentMessages, eq(parentMessages.id, canonicalThreadChannels.parentMessageId))
-          .innerJoin(parentJointChannels, and(
-            eq(parentJointChannels.canonicalChannelId, parentMessages.channelId),
-            eq(parentJointChannels.status, "active"),
-          ))
-          .innerJoin(parentJointChannelServers, and(
-            eq(parentJointChannelServers.jointChannelId, parentJointChannels.id),
-            eq(parentJointChannelServers.status, "active"),
-          ))
-          .innerJoin(channelHumans, and(
-            eq(channelHumans.channelId, parentJointChannelServers.localChannelId),
-            inArray(channelHumans.userId, userIds),
-          ))
-          .where(and(
-            inArray(jointChannels.canonicalChannelId, threadChannelIds),
-            eq(jointChannels.status, "active"),
-          )),
-        () => ({ input_count: userIds.length, thread_channel_count: threadChannelIds.length }),
-      );
-      for (const membership of jointThreadMemberRows) {
-        jointMembershipChannelIds.add(membership.canonicalThreadChannelId);
-        activeJointMemberKeys.add(`${membership.canonicalThreadChannelId}:${membership.userId}`);
-        activeJointMemberKeys.add(`${membership.localParentChannelId}:${membership.userId}`);
-      }
-    }
-  }
-
-  if (agentIds.length > 0) {
-    const agentRows = await traceQuery(
+    )),
+    agentIds.length === 0 ? [] : limit(() => traceQuery(
       "messages.senders.agent_profiles",
       () => db
         .select({ id: agents.id, name: agents.name, displayName: agents.displayName, description: agents.description })
         .from(agents)
         .where(inArray(agents.id, agentIds)),
       () => ({ input_count: agentIds.length }),
-    );
-    for (const a of agentRows) {
-      nameMap.set(a.id, a.displayName || a.name);
-      handleMap.set(a.id, a.name);
-      descriptionMap.set(a.id, a.description || null);
-    }
+    )),
+    !hasSenderMembership || serverIds.length === 0 ? [] : limit(() => traceQuery(
+      "messages.senders.server_members",
+      () => db
+        .select({ serverId: serverMembers.serverId, userId: serverMembers.userId })
+        .from(serverMembers)
+        .where(and(
+          inArray(serverMembers.serverId, serverIds),
+          inArray(serverMembers.userId, userIds),
+        )),
+      () => ({ input_count: userIds.length, server_count: serverIds.length }),
+    )),
+    !hasSenderMembership || serverIds.length === 0 ? [] : limit(() => traceQuery(
+      "messages.senders.server_membership_departures",
+      () => db
+        .select({
+          serverId: serverMembershipDepartures.serverId,
+          userId: serverMembershipDepartures.userId,
+          reason: serverMembershipDepartures.reason,
+        })
+        .from(serverMembershipDepartures)
+        .where(and(
+          inArray(serverMembershipDepartures.serverId, serverIds),
+          inArray(serverMembershipDepartures.userId, userIds),
+        )),
+      () => ({ input_count: userIds.length, server_count: serverIds.length }),
+    )),
+    !hasSenderMembership || jointChannelIds.length === 0 ? [] : limit(() => traceQuery(
+      "messages.senders.joint_channel_members",
+      () => db
+        .select({
+          canonicalChannelId: jointChannels.canonicalChannelId,
+          localChannelId: jointChannelServers.localChannelId,
+          userId: channelHumans.userId,
+        })
+        .from(jointChannels)
+        .innerJoin(jointChannelServers, and(
+          eq(jointChannelServers.jointChannelId, jointChannels.id),
+          eq(jointChannelServers.status, "active"),
+        ))
+        .innerJoin(channelHumans, and(
+          eq(channelHumans.channelId, jointChannelServers.localChannelId),
+          inArray(channelHumans.userId, userIds),
+        ))
+        .where(and(
+          inArray(jointChannels.canonicalChannelId, jointChannelIds),
+          eq(jointChannels.status, "active"),
+        )),
+      () => ({ input_count: userIds.length, joint_channel_count: jointChannelIds.length }),
+    )),
+    !hasSenderMembership || threadChannelIds.length === 0 ? [] : limit(() => traceQuery(
+      "messages.senders.joint_thread_parent_members",
+      () => db
+        .select({
+          canonicalThreadChannelId: jointChannels.canonicalChannelId,
+          localParentChannelId: parentJointChannelServers.localChannelId,
+          userId: channelHumans.userId,
+        })
+        .from(jointChannels)
+        .innerJoin(canonicalThreadChannels, and(
+          eq(canonicalThreadChannels.id, jointChannels.canonicalChannelId),
+          eq(canonicalThreadChannels.type, "thread"),
+          isNull(canonicalThreadChannels.deletedAt),
+        ))
+        .innerJoin(parentMessages, eq(parentMessages.id, canonicalThreadChannels.parentMessageId))
+        .innerJoin(parentJointChannels, and(
+          eq(parentJointChannels.canonicalChannelId, parentMessages.channelId),
+          eq(parentJointChannels.status, "active"),
+        ))
+        .innerJoin(parentJointChannelServers, and(
+          eq(parentJointChannelServers.jointChannelId, parentJointChannels.id),
+          eq(parentJointChannelServers.status, "active"),
+        ))
+        .innerJoin(channelHumans, and(
+          eq(channelHumans.channelId, parentJointChannelServers.localChannelId),
+          inArray(channelHumans.userId, userIds),
+        ))
+        .where(and(
+          inArray(jointChannels.canonicalChannelId, threadChannelIds),
+          eq(jointChannels.status, "active"),
+        )),
+      () => ({ input_count: userIds.length, thread_channel_count: threadChannelIds.length }),
+    )),
+    // fanout-ok: each evaluation goes through the page's shared limit (at most ENRICHMENT_QUERY_CONCURRENCY at once).
+    Promise.all(gateServerIds.map((serverId) => limit(() => evaluateFeatureFlag({
+      key: ATTACHMENT_COMMENTS_FEATURE_FLAG_KEY,
+      serverId,
+      userId: opts.attachmentCommentViewerUserId ?? undefined,
+    })))),
+  ]);
+  for (const u of userRows) {
+    nameMap.set(u.id, u.displayName || u.name || "User");
+    handleMap.set(u.id, u.name || "User");
+    descriptionMap.set(u.id, u.description || null);
   }
-
-  // Batch-fetch attachments for all messages
-  const attachmentMap = await traceQuery(
-    "messages.attachments_by_messages",
-    () => getAttachmentsForMessages(messageIds),
-    (result) => ({
-      input_count: rows.length,
-      attachments_count: [...result.values()].reduce((sum, list) => sum + list.length, 0),
-    }),
-  );
+  for (const a of agentRows) {
+    nameMap.set(a.id, a.displayName || a.name);
+    handleMap.set(a.id, a.name);
+    descriptionMap.set(a.id, a.description || null);
+  }
+  for (const membership of membershipRows) {
+    activeMemberKeys.add(`${membership.serverId}:${membership.userId}`);
+  }
+  for (const departure of departureRows) {
+    departureReasonByMemberKey.set(
+      `${departure.serverId}:${departure.userId}`,
+      departure.reason,
+    );
+  }
+  for (const membership of jointMemberRows) {
+    jointMembershipChannelIds.add(membership.canonicalChannelId);
+    jointMembershipChannelIds.add(membership.localChannelId);
+    activeJointMemberKeys.add(`${membership.canonicalChannelId}:${membership.userId}`);
+    activeJointMemberKeys.add(`${membership.localChannelId}:${membership.userId}`);
+  }
+  for (const membership of jointThreadMemberRows) {
+    jointMembershipChannelIds.add(membership.canonicalThreadChannelId);
+    activeJointMemberKeys.add(`${membership.canonicalThreadChannelId}:${membership.userId}`);
+    activeJointMemberKeys.add(`${membership.localParentChannelId}:${membership.userId}`);
+  }
 
   // Attachment-comment enrichment (attachment-comments MVP spec §5): per-
   // Attachment comment counts power the chip badges, and a per-message ref
@@ -5681,25 +6114,9 @@ async function enrichWithSenderNames<T extends MessageRowForEnrichment>(
   // Messages on non-enabled (or unresolvable — fail closed) servers are
   // excluded from both queries, so their attachments keep commentCount 0 and
   // their messages commentRef null.
-  const allChannelIds = [...new Set(rows.map((m) => m.channelId))];
-  const gateRows = await traceQuery(
-    "messages.attachment_comment_gate",
-    () => db
-      .select({ channelId: channels.id, serverId: servers.id })
-      .from(channels)
-      .innerJoin(servers, eq(servers.id, channels.serverId))
-      .where(inArray(channels.id, allChannelIds)),
-    () => ({ input_count: allChannelIds.length }),
+  const commentEnabledServerIds = new Set(
+    gateServerIds.filter((_serverId, index) => commentFlagEvaluations[index]!.enabled),
   );
-  const commentEnabledServerIds = new Set<string>();
-  for (const serverId of [...new Set(gateRows.map((row) => row.serverId))]) {
-    const evaluation = await evaluateFeatureFlag({
-      key: ATTACHMENT_COMMENTS_FEATURE_FLAG_KEY,
-      serverId,
-      userId: opts.attachmentCommentViewerUserId ?? undefined,
-    });
-    if (evaluation.enabled) commentEnabledServerIds.add(serverId);
-  }
   const commentEnabledChannelIds = new Set(
     gateRows
       .filter((row) => commentEnabledServerIds.has(row.serverId))
@@ -5713,21 +6130,21 @@ async function enrichWithSenderNames<T extends MessageRowForEnrichment>(
     .filter(([messageId]) => commentEnabledMessageIds.has(messageId))
     .flatMap(([, list]) => list.map((a) => a.id));
   const commentCountMap = new Map<string, number>();
-  if (allAttachmentIds.length > 0) {
-    const countRows = await traceQuery(
-      "messages.attachment_comment_counts",
-      () => db
-        .select({
-          attachmentId: attachmentCommentRefs.attachmentId,
-          count: sql<number>`count(*)::int`,
-        })
-        .from(attachmentCommentRefs)
-        .where(inArray(attachmentCommentRefs.attachmentId, allAttachmentIds))
-        .groupBy(attachmentCommentRefs.attachmentId),
-      (result) => ({ input_count: allAttachmentIds.length, counted: result.length }),
-    );
-    for (const row of countRows) commentCountMap.set(row.attachmentId, row.count);
-  }
+  const commentRefMessageIds = messageIds.filter((messageId) => commentEnabledMessageIds.has(messageId));
+  // The last wave: comment counts, comment refs and the forwarded-source
+  // check are independent of each other and run together.
+  const countRowsPending = allAttachmentIds.length === 0 ? null : limit(() => traceQuery(
+    "messages.attachment_comment_counts",
+    () => db
+      .select({
+        attachmentId: attachmentCommentRefs.attachmentId,
+        count: sql<number>`count(*)::int`,
+      })
+      .from(attachmentCommentRefs)
+      .where(inArray(attachmentCommentRefs.attachmentId, allAttachmentIds))
+      .groupBy(attachmentCommentRefs.attachmentId),
+    (result) => ({ input_count: allAttachmentIds.length, counted: result.length }),
+  ));
   // Host coordinates for the re: chip's jump-to-message (cindyz 6/11; shape
   // per Dozy #wg-comment:e1d63fee): hostSource.channelId is ALWAYS the route
   // channel — for thread-hosted attachments that is the PARENT channel (the
@@ -5761,98 +6178,107 @@ async function enrichWithSenderNames<T extends MessageRowForEnrichment>(
       anchorQuote: string | null;
     }
   >();
-  const commentRefMessageIds = messageIds.filter((messageId) => commentEnabledMessageIds.has(messageId));
-  if (commentRefMessageIds.length > 0) {
-    const hostChannels = alias(channels, "comment_ref_host_channels");
-    const hostParentMessages = alias(messages, "comment_ref_host_parent_messages");
-    const hostParentChannels = alias(channels, "comment_ref_host_parent_channels");
-    // The active thread that hangs off the host message itself, if any — i.e.
-    // the host top-level message IS a thread root (cindyz #32). At most one row
-    // per host: idx_channels_active_thread_parent is unique on parent_message_id
-    // where type='thread' and not deleted, so this leftJoin cannot fan out.
-    const hostChildThreadChannels = alias(channels, "comment_ref_host_child_thread_channels");
-    const refRows = await traceQuery(
-      "messages.attachment_comment_refs",
-      () => db
-        .select({
-          commentMessageId: attachmentCommentRefs.commentMessageId,
-          attachmentId: attachmentCommentRefs.attachmentId,
-          anchorType: attachmentCommentRefs.anchorType,
-          anchorData: attachmentCommentRefs.anchorData,
-          filename: attachments.filename,
-          hostMessageId: attachments.messageId,
-          hostChannelId: attachments.channelId,
-          hostChannelType: hostChannels.type,
-          hostParentMessageId: hostChannels.parentMessageId,
-          hostParentChannelId: hostParentMessages.channelId,
-          hostParentChannelType: hostParentChannels.type,
-          hostChildThreadChannelId: hostChildThreadChannels.id,
-        })
-        .from(attachmentCommentRefs)
-        .innerJoin(attachments, eq(attachments.id, attachmentCommentRefs.attachmentId))
-        .innerJoin(hostChannels, eq(hostChannels.id, attachments.channelId))
-        .leftJoin(hostParentMessages, eq(hostParentMessages.id, hostChannels.parentMessageId))
-        .leftJoin(hostParentChannels, eq(hostParentChannels.id, hostParentMessages.channelId))
-        .leftJoin(hostChildThreadChannels, and(
-          eq(hostChildThreadChannels.parentMessageId, attachments.messageId),
-          eq(hostChildThreadChannels.type, "thread"),
-          isNull(hostChildThreadChannels.deletedAt),
-        ))
-        .where(inArray(attachmentCommentRefs.commentMessageId, commentRefMessageIds)),
-      (result) => ({ input_count: commentRefMessageIds.length, refs: result.length }),
-    );
-    for (const row of refRows) {
-      const isThreadHosted = row.hostChannelType === "thread";
-      let hostSource: CommentRefHostSource | null;
-      if (isThreadHosted) {
-        // Route through the parent channel; missing parent rows (shouldn't
-        // happen for live threads) degrade to no jump rather than a wrong one.
-        hostSource = row.hostParentChannelId && row.hostParentMessageId
-          ? {
-              type: "thread",
-              routeKind: row.hostParentChannelType === "dm" ? "dm" : "channel",
-              channelId: row.hostParentChannelId,
-              parentMessageId: row.hostParentMessageId,
-              threadChannelId: row.hostChannelId,
-            }
-          : null;
-      } else {
-        hostSource = {
-          type: "channel",
-          routeKind: row.hostChannelType === "dm" ? "dm" : "channel",
-          channelId: row.hostChannelId,
-          // Host top-level message is itself a thread root → re: chip opens the
-          // thread expanded instead of locating the closed-state message (#32).
-          ...(row.hostChildThreadChannelId ? { rootThreadChannelId: row.hostChildThreadChannelId } : {}),
-        };
-      }
-      const filename = normalizeAttachmentFilename(row.filename);
-      const agentScope = projectAgentCommentScope(filename, row.anchorType, row.anchorData);
-      commentRefMap.set(row.commentMessageId, {
-        attachmentId: row.attachmentId,
-        filename,
-        hostMessageId: row.hostMessageId,
-        hostSource,
-        // Human API reads retain the Web card's compact quote preview. Agent
-        // enrichment has no user identity and projects location only because
-        // the complete quotation immediately follows as a blockquote.
-        anchorLabel: opts.attachmentCommentViewerUserId
-          ? renderAnchorLabel(row.anchorType, row.anchorData)
-          : agentScope.anchorLabel,
-        anchorQuote: agentScope.anchorQuote,
-      });
+  const hostChannels = alias(channels, "comment_ref_host_channels");
+  const hostParentMessages = alias(messages, "comment_ref_host_parent_messages");
+  const hostParentChannels = alias(channels, "comment_ref_host_parent_channels");
+  // The active thread that hangs off the host message itself, if any — i.e.
+  // the host top-level message IS a thread root (cindyz #32). At most one row
+  // per host: idx_channels_active_thread_parent is unique on parent_message_id
+  // where type='thread' and not deleted, so this leftJoin cannot fan out.
+  const hostChildThreadChannels = alias(channels, "comment_ref_host_child_thread_channels");
+  const refRowsPending = commentRefMessageIds.length === 0 ? null : limit(() => traceQuery(
+    "messages.attachment_comment_refs",
+    () => db
+      .select({
+        commentMessageId: attachmentCommentRefs.commentMessageId,
+        attachmentId: attachmentCommentRefs.attachmentId,
+        anchorType: attachmentCommentRefs.anchorType,
+        anchorData: attachmentCommentRefs.anchorData,
+        filename: attachments.filename,
+        hostMessageId: attachments.messageId,
+        hostChannelId: attachments.channelId,
+        hostChannelType: hostChannels.type,
+        hostParentMessageId: hostChannels.parentMessageId,
+        hostParentChannelId: hostParentMessages.channelId,
+        hostParentChannelType: hostParentChannels.type,
+        hostChildThreadChannelId: hostChildThreadChannels.id,
+      })
+      .from(attachmentCommentRefs)
+      .innerJoin(attachments, eq(attachments.id, attachmentCommentRefs.attachmentId))
+      .innerJoin(hostChannels, eq(hostChannels.id, attachments.channelId))
+      .leftJoin(hostParentMessages, eq(hostParentMessages.id, hostChannels.parentMessageId))
+      .leftJoin(hostParentChannels, eq(hostParentChannels.id, hostParentMessages.channelId))
+      .leftJoin(hostChildThreadChannels, and(
+        eq(hostChildThreadChannels.parentMessageId, attachments.messageId),
+        eq(hostChildThreadChannels.type, "thread"),
+        isNull(hostChildThreadChannels.deletedAt),
+      ))
+      .where(inArray(attachmentCommentRefs.commentMessageId, commentRefMessageIds)),
+    (result) => ({ input_count: commentRefMessageIds.length, refs: result.length }),
+  ));
+  const canReadForwardedSourcePending = pageForwardedSourceCheck(
+    rows.map((msg) => ("actionMetadata" in msg ? msg.actionMetadata : undefined)),
+    resolveForwardedBundleViewer(opts),
+  );
+  const [countRows, refRows, canReadForwardedSource] = await Promise.all([
+    countRowsPending ?? [],
+    refRowsPending ?? [],
+    canReadForwardedSourcePending,
+  ]);
+  for (const row of countRows) commentCountMap.set(row.attachmentId, row.count);
+  for (const row of refRows) {
+    const isThreadHosted = row.hostChannelType === "thread";
+    let hostSource: CommentRefHostSource | null;
+    if (isThreadHosted) {
+      // Route through the parent channel; missing parent rows (shouldn't
+      // happen for live threads) degrade to no jump rather than a wrong one.
+      hostSource = row.hostParentChannelId && row.hostParentMessageId
+        ? {
+            type: "thread",
+            routeKind: row.hostParentChannelType === "dm" ? "dm" : "channel",
+            channelId: row.hostParentChannelId,
+            parentMessageId: row.hostParentMessageId,
+            threadChannelId: row.hostChannelId,
+          }
+        : null;
+    } else {
+      hostSource = {
+        type: "channel",
+        routeKind: row.hostChannelType === "dm" ? "dm" : "channel",
+        channelId: row.hostChannelId,
+        // Host top-level message is itself a thread root → re: chip opens the
+        // thread expanded instead of locating the closed-state message (#32).
+        ...(row.hostChildThreadChannelId ? { rootThreadChannelId: row.hostChildThreadChannelId } : {}),
+      };
     }
+    const filename = normalizeAttachmentFilename(row.filename);
+    const agentScope = projectAgentCommentScope(filename, row.anchorType, row.anchorData);
+    commentRefMap.set(row.commentMessageId, {
+      attachmentId: row.attachmentId,
+      filename,
+      hostMessageId: row.hostMessageId,
+      hostSource,
+      // Human API reads retain the Web card's compact quote preview. Agent
+      // enrichment has no user identity and projects location only because
+      // the complete quotation immediately follows as a blockquote.
+      anchorLabel: opts.attachmentCommentViewerUserId
+        ? renderAnchorLabel(row.anchorType, row.anchorData)
+        : agentScope.anchorLabel,
+      anchorQuote: agentScope.anchorQuote,
+    });
   }
 
   return Promise.all(rows.map(async msg => {
     const externalAuthor = externalAuthorMap.get(msg.id) ?? null;
+    const visibleRow = opts.includeSenderTimezone ? msg : omitSenderTimezone(msg);
     return projectForwardDestinationMessage({
-    ...msg,
+    ...visibleRow,
     actionMetadata: await scrubForwardedBundleMetadataForViewer(
       cardIds.includes(msg.id) && "actionMetadata" in msg && msg.actionMetadata !== null && typeof msg.actionMetadata === "object"
         ? { ...msg.actionMetadata, sourceServerId: cardOrigins.get(msg.id) ?? null }
         : "actionMetadata" in msg ? msg.actionMetadata : undefined,
       resolveForwardedBundleViewer(opts),
+      canReadForwardedSource,
     ),
     commentRef: commentRefMap.get(msg.id) ?? null,
     senderName: externalAuthor?.displayName ?? nameMap.get(msg.senderId) ?? "Unknown",
@@ -5948,6 +6374,8 @@ export async function emitExternalProjectionMessageToFrontend(
     },
   });
 }
+
+
 
 /**
  * Publishes a durable provider-origin reaction change as a merge-only update.
@@ -6077,6 +6505,7 @@ function toThreadContextMessage(message: EnrichedMessageRow): AgentThreadContext
     message_id: message.id,
     sender_name: message.senderHandle ?? message.senderName,
     sender_description: message.senderDescription || null,
+    sender_timezone: message.senderTimezone ?? null,
     sender_type: toAgentVisibleSenderType(message.senderType, message.messageType),
     ...toAgentVisibleExternalMessage(message),
     content: renderAgentVisibleMessageContent(message, scopedContent),
@@ -6092,7 +6521,7 @@ async function buildThreadJoinContextBase(
 ): Promise<ThreadJoinContextBase | undefined> {
   // First-time thread entrants miss the semantic anchor completely if we only
   // deliver the triggering @mention, so we always include the parent/root message.
-  const parentContext = await getMessageContext(parentMessageId, 0, 0);
+  const parentContext = await getMessageContext(parentMessageId, 0, 0, undefined, { includeSenderTimezone: true });
   const parentMessage = parentContext?.messages[0];
   if (!parentMessage) return undefined;
 
@@ -6102,6 +6531,9 @@ async function buildThreadJoinContextBase(
     threadChannelId,
     THREAD_JOIN_CONTEXT_WINDOW + 1,
     beforeSeq,
+    undefined,
+    undefined,
+    { includeSenderTimezone: true },
   );
   const historyTruncated = recentWindow.length > THREAD_JOIN_CONTEXT_WINDOW;
   const recentMessages = historyTruncated
@@ -6737,38 +7169,48 @@ export async function listMessagesWithCoverage(
       )!));
     }
 
-    const rows = await traceQuery(
-        "messages.channel.loaded_page",
-        () => tx
-          .select(messageReadColumns)
-          .from(messages)
-          .where(and(...conditions))
-          .orderBy(afterSeq !== undefined ? messages.seq : desc(messages.seq))
-          .limit(limit),
-        () => ({
-          limit,
-          direction,
-          history_cutoff_present: Boolean(historyCutoff),
-        }),
-      );
-    const chronologicalRows = afterSeq !== undefined ? rows : [...rows].reverse();
-    const firstReturnedSeq = chronologicalRows[0]?.seq;
-    const bounds = await traceQuery(
-      "messages.channel.coverage_bound",
+    // The page and its coverage bounds in one statement: the bounds need the
+    // page's first seq, which the statement reads from the page itself.
+    const page = tx.$with("message_page").as(tx
+      .select(messageReadColumns)
+      .from(messages)
+      .where(and(...conditions))
+      .orderBy(afterSeq !== undefined ? messages.seq : desc(messages.seq))
+      .limit(limit));
+    const pageFirstSeq = sql`(select min(${page.seq}) from ${page})`;
+    // Each bound is its own max() subquery so Postgres answers it from the
+    // (channel_id, seq) index with one backward probe. A single max() with a
+    // FILTER clause cannot use that rewrite and reads the channel's whole
+    // index (10k+ buffers on the largest channels).
+    const bounds = tx.$with("message_page_bounds").as(tx
+      .select({
+        remoteHighWaterSeq: sql<number>`coalesce((select max(${messages.seq}) from ${messages} where ${readChannelPredicate()}), 0)`
+          .mapWith(Number)
+          .as("remote_high_water_seq"),
+        // Below the page's first message; with no page, the high-water mark.
+        coveredAfterSeq: sql<number>`coalesce((select max(${messages.seq}) from ${messages} where ${readChannelPredicate()} and ${messages.seq} < coalesce(${pageFirstSeq}, 9223372036854775807)), 0)`
+          .mapWith(Number)
+          .as("covered_after_seq"),
+      })
+      .from(sql`(values (1)) as message_page_bounds_row(one)`));
+    const joined = await traceQuery(
+      "messages.channel.loaded_page",
       () => tx
-        .select({
-          remoteHighWaterSeq: sql<number>`coalesce(max(${messages.seq}), 0)`.mapWith(Number),
-          coveredAfterSeq: firstReturnedSeq == null
-            ? sql<number>`coalesce(max(${messages.seq}), 0)`.mapWith(Number)
-            : sql<number>`coalesce(max(${messages.seq}) filter (where ${messages.seq} < ${firstReturnedSeq}), 0)`.mapWith(Number),
-        })
-        .from(messages)
-        .where(readChannelPredicate()),
-      () => ({ direction }),
+        .with(page, bounds)
+        .select()
+        .from(bounds)
+        .leftJoin(page, sql`true`)
+        .orderBy(afterSeq !== undefined ? page.seq : desc(page.seq)),
+      () => ({
+        limit,
+        direction,
+        history_cutoff_present: Boolean(historyCutoff),
+      }),
     );
+    const rows = joined.flatMap((row) => (row.message_page ? [row.message_page] : []));
     return {
-      remoteHighWaterSeq: bounds[0]?.remoteHighWaterSeq ?? 0,
-      coveredAfterSeq: bounds[0]?.coveredAfterSeq ?? 0,
+      remoteHighWaterSeq: joined[0]?.message_page_bounds.remoteHighWaterSeq ?? 0,
+      coveredAfterSeq: joined[0]?.message_page_bounds.coveredAfterSeq ?? 0,
       rows,
     };
   }, {
@@ -6925,6 +7367,17 @@ export async function hasOlderMessages(
 }
 
 /**
+ * Raw `db.execute` rows skip Drizzle's `bigserial({ mode: "number" })` mapping,
+ * so node-postgres returns `messages.seq` (int8) as a string. Coerce it back so
+ * every syncMessages outlet (`GET /messages/sync`, socket `sync:resume`) emits
+ * the same numeric seq as the channel/context/socket paths.
+ */
+function normalizeRawSyncMessageRow<T extends { seq?: unknown }>(row: T): T {
+  if (typeof row.seq !== "string") return row;
+  return { ...row, seq: Number(row.seq) };
+}
+
+/**
  * Sync messages: get messages with seq > sinceSeq for a channel (or all channels in server).
  * Used for gap sync after reconnection.
  */
@@ -7063,7 +7516,10 @@ export async function syncMessages(
       LIMIT ${limit}
     `);
 
-    return enrichWithSenderNames(rows.rows as any[], enrichOptions);
+    return enrichWithSenderNames(
+      (rows.rows as any[]).map(normalizeRawSyncMessageRow),
+      enrichOptions,
+    );
   }
 
   const rows = await db
@@ -7655,6 +8111,8 @@ async function handleJointThreadPostBroadcastSideEffects(input: {
     const deliveryOptions = await getAgentDeliveryOptionsForSender(deps, projection.localServerId, senderType, senderId);
     const parentChannelType = parentChannel.type as "joint";
     const threadShortId = getMessageShortId(canonicalParentMessageId);
+    // Each agent's payload, then one channel batch for this projection's thread.
+    const threadDeliveries: Array<{ agentId: string; message: AgentMessage; options?: DeliverMessageOptions }> = [];
     for (const agent of deliveryAgents.values()) {
       if (senderType === "agent" && agent.id === senderId) continue;
 
@@ -7670,14 +8128,17 @@ async function handleJointThreadPostBroadcastSideEffects(input: {
         };
       }
 
-      deliveryPromises.push(
-        agentOrchestrator.deliverMessage(agent.id, {
+      threadDeliveries.push({
+        agentId: agent.id,
+        options: deliveryOptions,
+        message: {
           channel_id: projection.localThreadChannelId,
           channel_name: projection.threadChannel.name,
           channel_type: "thread",
           sender_id: senderId,
           sender_name: senderUniqueName,
           sender_description: senderDescription,
+          sender_timezone: message.senderTimezone ?? null,
           sender_type: toAgentVisibleSenderType(senderType, message.messageType),
           content: renderedContent,
           timestamp: message.createdAt.toISOString(),
@@ -7706,11 +8167,14 @@ async function handleJointThreadPostBroadcastSideEffects(input: {
           ...(reactivatedThreadAgentIds.has(agent.id) && {
             thread_follow_reactivation: { thread_target: formatThreadTarget(parentChannelType, parentChannel.name, threadShortId) },
           }),
-        }, deliveryOptions).catch((err) => {
-          console.error(`[MessageService] Failed to deliver joint thread message to agent ${agent.id}:`, serializeErrorForLog(err));
-        })
-      );
+        },
+      });
     }
+    deliveryPromises.push(settleDeliveries(
+      agentOrchestrator.deliverMessagesOnChannel(projection.localThreadChannelId, threadDeliveries),
+      threadDeliveries.map((delivery) => delivery.agentId),
+      "joint thread message",
+    ));
 
     const [serverRow] = await db
       .select({ slug: servers.slug, name: servers.name })
@@ -8025,10 +8489,10 @@ function findUnresolvedMentionHandles(
   const resolvedHandles = new Set(resolvedMentions.map((mention) => mention.name));
   const structuredHandles = new Set((structuredMentions ?? []).map((mention) => mention.name.trim()));
   return Array.from(new Set(
-    mentionHandles.filter((handle) => {
-      const name = handle.slice(1);
-      return !resolvedHandles.has(name) && !structuredHandles.has(name);
-    }),
+    mentionHandles.filter((handle) => !resolveRaftMentionHandle(
+      handle.slice(1),
+      (name) => resolvedHandles.has(name) || structuredHandles.has(name),
+    )),
   ));
 }
 
@@ -8433,6 +8897,12 @@ async function resolveMentionTargets(
     structuredHandleKeys.add(requestedHandle);
     if (!UUID_RE.test(mention.id) || !requestedHandle) continue;
 
+    // External (Slack-side) projections never enter `message_mentions` — the
+    // table's readers treat every row as a Raft human/agent to wake. The
+    // structured id still claims the handle so a stale projection id can't
+    // silently fall through to a same-named Raft user/agent.
+    if (mention.type === "external") continue;
+
     const bindStructuredTarget = () => {
       const targetKey = `${mention.type}:${mention.id}`;
       const existingTargetKey = structuredTargetByHandle.get(requestedHandle);
@@ -8459,8 +8929,18 @@ async function resolveMentionTargets(
     addRow("user", candidate.userId, rawHandle, candidate.avatarUrl ?? null);
   }
 
-  for (const [handle, rawHandle] of rawByHandle) {
-    if (structuredHandleKeys.has(handle)) continue;
+  const knownHandles = new Set([
+    ...candidateHumans.map((candidate) => candidate.name),
+    ...candidateAgents.map((candidate) => candidate.name),
+  ]);
+  for (const token of rawByHandle.keys()) {
+    if (structuredHandleKeys.has(token)) continue;
+    // `@ops的` / `@ops와` mention `ops`; the CJK remainder stays body text.
+    const resolvedHandle = resolveRaftMentionHandle(token, (name) => knownHandles.has(name));
+    if (!resolvedHandle || structuredHandleKeys.has(resolvedHandle.handle)) continue;
+    const handle = resolvedHandle.handle;
+    // handleAtSendTime records the matched name, not the glued token.
+    const rawHandle = handle;
     const exactMatches = [
       ...candidateHumans
         .filter((candidate) => candidate.name === handle)
@@ -8697,6 +9177,12 @@ export async function broadcastAndDeliver(
      * the stored message, the socket broadcast, or push bodies.
      */
     agentContentPrefix?: string;
+    /**
+     * IANA zone the human sender's browser reported (web sends only, already
+     * validated by the route). Stored on the message and exposed to agents
+     * only. Ignored (stored as null) for any non-human sender.
+     */
+    senderTimezone?: string | null;
   }
 ) {
   const deps = resolveMessageServiceDeps();
@@ -8707,6 +9193,7 @@ export async function broadcastAndDeliver(
   const useAtomicMessageTransaction = !messageServiceDepsOverride?.createMessage;
   const { channelId, senderType, senderId, senderName, content, mentions, attachmentIds, agentSendKey, randomId, actionMetadata, asTask } = opts;
   const mentionContract = opts.mentionContract ?? "v1";
+  const senderTimezone = senderType === "user" ? opts.senderTimezone ?? null : null;
   const ordinaryExternalProjectionDecision = classifyOrdinaryMessageExternalProjection({
     senderType,
     messageType: "chat",
@@ -9031,6 +9518,7 @@ export async function broadcastAndDeliver(
         authorName: senderName,
         content,
         randomId,
+        senderTimezone,
         attachmentIds,
         actionMetadata: actionMetadata ?? null,
         channel,
@@ -9069,7 +9557,11 @@ export async function broadcastAndDeliver(
         "chat",
         // v1.4: never a task-message — the task fact is created separately.
         undefined,
-        { actionMetadata: actionMetadata ?? null, randomId: randomId ?? null },
+        {
+          actionMetadata: actionMetadata ?? null,
+          randomId: randomId ?? null,
+          ...(senderTimezone ? { senderTimezone } : {}),
+        },
         executor,
       );
       const linked = executor && attachmentIds && attachmentIds.length > 0
@@ -9266,8 +9758,10 @@ export async function broadcastAndDeliver(
   };
   await recordInboxFactsForSend();
 
+  // The sender response and frontend broadcast are human-facing: keep the
+  // agent-only sender zone off them (agent payloads read it from `message`).
   const enriched = {
-    ...message,
+    ...omitSenderTimezone(message),
     channelId: jointThreadProjection?.localThreadChannelId
       ?? jointProjection?.localChannelId
       ?? message.channelId,
@@ -9425,8 +9919,10 @@ export async function broadcastAndDeliver(
         messageSeq: message.seq,
         piercedAgentIds,
       });
-      await Promise.all(projectionAgents.map(async (agent) => {
-        if ((senderType === "agent" && agent.id === senderId) || mutedAgentIds.has(agent.id)) return;
+      // Each agent's payload (its forwarded-bundle view), then one channel batch per projection.
+      const projectionDeliveries: Array<{ agentId: string; message: AgentMessage; options?: DeliverMessageOptions }> = [];
+      for (const agent of projectionAgents) {
+        if ((senderType === "agent" && agent.id === senderId) || mutedAgentIds.has(agent.id)) continue;
         const recipientForwardedSnapshot = formatForwardedBundleForAgent(
           await scrubForwardedBundleMetadataForViewer(actionMetadata, {
             type: "agent",
@@ -9434,24 +9930,31 @@ export async function broadcastAndDeliver(
             serverId: projection.serverId,
           }, deps.canViewerReadForwardedSource),
         );
-        const renderedContent = appendAgentForwardedSnapshot(renderedBaseContent, recipientForwardedSnapshot);
-        await agentOrchestrator.deliverMessage(agent.id, {
-          channel_id: projection.localChannelId,
-          channel_name: projection.channel.name,
-          channel_type: "channel",
-          sender_id: senderId,
-          sender_name: senderUniqueName,
-          sender_type: toAgentVisibleSenderType(senderType),
-          sender_description: senderDescription,
-          content: renderedContent,
-          timestamp: message.createdAt.toISOString(),
-          seq: message.seq,
-          message_id: message.id,
-          ...(targetVisibleMentionedAgentIds.has(agent.id) && { mentioned: true }),
-        }, agentDeliveryOptions).catch((err) => {
-          console.error(`[MessageService] Failed to deliver joint message to agent ${agent.id}:`, serializeErrorForLog(err));
+        projectionDeliveries.push({
+          agentId: agent.id,
+          message: {
+            channel_id: projection.localChannelId,
+            channel_name: projection.channel.name,
+            channel_type: "channel",
+            sender_id: senderId,
+            sender_name: senderUniqueName,
+            sender_type: toAgentVisibleSenderType(senderType),
+            sender_description: senderDescription,
+            sender_timezone: message.senderTimezone ?? null,
+            content: appendAgentForwardedSnapshot(renderedBaseContent, recipientForwardedSnapshot),
+            timestamp: message.createdAt.toISOString(),
+            seq: message.seq,
+            message_id: message.id,
+            ...(targetVisibleMentionedAgentIds.has(agent.id) && { mentioned: true }),
+          },
+          options: agentDeliveryOptions,
         });
-      }));
+      }
+      await settleDeliveries(
+        agentOrchestrator.deliverMessagesOnChannel(projection.localChannelId, projectionDeliveries),
+        projectionDeliveries.map((delivery) => delivery.agentId),
+        "joint message",
+      );
       const [serverRow] = await db
         .select({ slug: servers.slug, name: servers.name })
         .from(servers)
@@ -9764,6 +10267,7 @@ export async function broadcastAndDeliver(
         sender_id: senderId,
         sender_name: senderUniqueName,
         sender_description: senderDescription,
+        sender_timezone: message.senderTimezone ?? null,
         sender_type: toAgentVisibleSenderType(senderType, message.messageType),
         content: renderedContent,
         timestamp: message.createdAt.toISOString(),
@@ -9831,19 +10335,26 @@ export async function broadcastAndDeliver(
   }
 
   // Invoked synchronously here, as before this spine existed, so delivery is initiated before
-  // broadcastAndDeliver returns.
-  for (const { agentId, deliveryPayload } of preparedDeliveries) {
+  // broadcastAndDeliver returns. One channel batch: every recipient's agent row and channel
+  // access are read in a fixed number of queries, not several per agent. Orchestrator
+  // stand-ins without the batch entry deliver one by one.
+  const deliveries = preparedDeliveries.map(({ agentId, deliveryPayload }) => {
     const mentionDeliveryOccurrenceId = mentionDeliveryOccurrenceIds.get(agentId);
+    return {
+      agentId,
+      message: deliveryPayload,
+      options: { ...deliveryOptions, ...(mentionDeliveryOccurrenceId && { mentionDeliveryOccurrenceId }) },
+    };
+  });
+  const deliveryResults = agentOrchestrator.deliverMessagesOnChannel(channelId, deliveries);
+  deliveries.forEach(({ agentId }, index) => {
     deliveryOutcomePromises.push(
-      agentOrchestrator.deliverMessage(agentId, deliveryPayload, {
-        ...deliveryOptions,
-        ...(mentionDeliveryOccurrenceId && { mentionDeliveryOccurrenceId }),
-      }).then((result) => ({ agentId, result })).catch((err) => {
+      deliveryResults[index]!.then((result) => ({ agentId, result })).catch((err) => {
         console.error(`[MessageService] Failed to deliver to agent ${agentId}:`, serializeErrorForLog(err));
         return { agentId, result: null };
       }),
     );
-  }
+  });
   // These delivery promises now carry real DB work, so the aggregate joins this file's existing
   // drainable lifecycle instead of staying an unregistered fire-and-forget. Registration is
   // synchronous, so it is visible before we return. Direct DMs also sample typed receipts with a

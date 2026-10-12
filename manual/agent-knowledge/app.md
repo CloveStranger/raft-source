@@ -9,10 +9,11 @@ Verified against:
 - packages/cli/src/commands/app/config.ts (view, set, unset, and atomic updates)
 - packages/server/src/apps/cleaner/definition.ts (built-in app registration and config fields)
 - packages/shared/src/apps/cleaner/configProtocol.ts (canonical defaults, bounds, and disk threshold)
-- packages/daemon/src/apps/cleaner/runtime.ts (memory and disk checks, memory hint with daily rewake cooldown, disk is trace-only)
-- packages/daemon/src/apps/cleaner/definition.ts (memory threshold action and disk cleanup guidance action)
+- packages/daemon/src/apps/cleaner/runtime.ts (memory and disk checks, hints presented only at Working → Idle, memory hint with daily rewake cooldown, workspace tip weekly or once per low-disk episode)
+- packages/daemon/src/apps/cleaner/definition.ts (memory threshold action and the guidance action on the workspace tip)
+- packages/daemon/src/agentProcessManager.ts (Working → Idle signal; notices that must not interrupt a turn)
 - manual/agent-knowledge/inbox.md (linked inbox guide)
-@ verified 2026-10-01 against repository sources; no live runner verification in this update
+@ verified 2026-10-11 against repository sources; no live runner verification in this update
 */}
 
 ## Built-in apps
@@ -21,9 +22,10 @@ Built-in apps deliver reminders and cleanup hints to your agent's [inbox](/agent
 Use `raft inbox check` to read them.
 
 - **`system.reminder`** delivers due reminders.
-- **`system.cleaner`** reminds you to tidy up when `MEMORY.md` exceeds its size threshold. It
-  also checks whether the disk holding agent data has less than 10% (and under 20 GiB) available space, but low disk
-  space is a machine-wide condition, so it is not sent to agents.
+- **`system.cleaner`** reminds you to tidy up when `MEMORY.md` exceeds its size threshold, and
+  occasionally to tidy your workspace files. It also checks whether the disk holding agent data has
+  less than 10% (and under 20 GiB) available space. Low disk space is a machine-wide condition, so
+  there is no disk warning for agents; it can only prompt one extra workspace tip.
 
 ## Respond to a memory hint
 
@@ -33,16 +35,24 @@ Use `raft inbox check` to read them.
   environment details. Check against current sources; old information may still be valid.
 - Keep an index in memory and move supporting details or history into notes.
 
-At most once a week the hint also suggests deleting workspace files you know are unused, such as
-stale worktrees, old build outputs, or temporary downloads. Cleaner does not scan your workspace;
-delete only what you are sure you no longer need, or nothing.
-
 Cleaner provides a reminder; you decide what to keep and what to remove. After `MEMORY.md` falls
 within the size threshold, the hint clears on the next check.
 
-The hint is advisory. It wakes a running agent at most once a day while `MEMORY.md` stays over the
-threshold, or sooner if the file grows by a quarter or more since the last hint. It never starts a
-stopped agent; the hint waits in the inbox until the agent wakes for another reason.
+The hint is advisory. Cleaner only delivers it right after you finish a piece of work (when you go
+from Working to Idle), so it never interrupts a turn. It comes at most once a day while `MEMORY.md`
+stays over the threshold, or sooner if the file grows by a quarter or more since the last hint. It
+never starts a stopped agent or wakes an agent that has not been working.
+
+## Respond to a workspace tip
+
+At most once a week the memory hint comes with a separate workspace tip, and low disk space can
+add one more. Cleaner does not scan your workspace. When you have time:
+
+- Delete workspace files you are sure you no longer need, such as stale worktrees, old build
+  outputs, or temporary downloads.
+- List the files you are unsure about and ask your owner or creator before deleting them. Ask only
+  when the list has files you have not asked about before.
+- Keep [`.raftmigrateignore`](/agent-knowledge/agent) up to date.
 
 The hint's suggested command raises the size threshold, usually by doubling it. Use that when the
 larger memory file is intentional; otherwise, trim the file first.

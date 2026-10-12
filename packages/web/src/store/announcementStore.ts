@@ -89,9 +89,8 @@ export const useAnnouncementStore = create<AnnouncementState>((set, get) => ({
     return request;
   },
 
-  // Records an explicit confirmation. Navigation and rendering never call this:
-  // otherwise one tab could persist account-level dismissal while another tab
-  // is still presenting the same row.
+  // Records explicit confirmation, closing, or CTA activation. Rendering
+  // alone never records dismissal; already-open copies keep their local state.
   markRead: async (id) => {
     if (get().markedReadIds.includes(id)) return;
     set((state) => ({ markedReadIds: [...state.markedReadIds, id] }));
@@ -113,8 +112,8 @@ export const useAnnouncementStore = create<AnnouncementState>((set, get) => ({
     set((state) => ({ pending: state.pending.filter((a) => a.id !== id) }));
   },
 
-  // Explicit confirmation + hide, i.e. clicking OK on the last page. Kept as
-  // one call for the user action and the slockdev auto-dismiss.
+  // Account dismissal + local hide, shared by every explicit dismissal action
+  // and the slockdev auto-dismiss.
   dismiss: async (id) => {
     get().close(id);
     await get().markRead(id);

@@ -1,6 +1,6 @@
-import { useState } from "react";
-import { Input, Button } from "raft-ui";
-import type { FormEvent, ReactNode } from "react";
+import { useState, useCallback } from "react";
+import { Input, Button, TextSans } from "raft-ui";
+import type { ChangeEvent, FormEvent, ReactNode } from "react";
 import { useIntl } from "react-intl";
 import { CURRENT_LEGAL_ACCEPTANCE } from "@botiverse/raft-shared";
 import { useAuthStore } from "../../store/authStore";
@@ -31,13 +31,27 @@ export default function LoginPage({ onSwitchToRegister, onForgotPassword }: Logi
   const [fieldErrors, setFieldErrors] = useState<{ email?: string; password?: string }>({});
   const [showOpenInBrowserGuide, setShowOpenInBrowserGuide] = useState(false);
 
-  const handleSocialLogin = (providerId: SocialAuthProviderId) => {
+  const handleSocialLogin = useCallback((providerId: SocialAuthProviderId) => {
     if (isEmbeddedBrowser()) {
       setShowOpenInBrowserGuide(true);
       return;
     }
     window.location.href = buildSocialAuthStartUrl(providerId, getCurrentReturnTo());
-  };
+  }, []);
+
+  const handleBackFromGuide = useCallback(() => {
+    setShowOpenInBrowserGuide(false);
+  }, []);
+
+  const handleEmailChange = useCallback((e: ChangeEvent<HTMLInputElement>) => {
+    setEmail(e.target.value);
+    if (fieldErrors.email) setFieldErrors((current) => ({ ...current, email: undefined }));
+  }, [fieldErrors.email]);
+
+  const handlePasswordChange = useCallback((e: ChangeEvent<HTMLInputElement>) => {
+    setPassword(e.target.value);
+    if (fieldErrors.password) setFieldErrors((current) => ({ ...current, password: undefined }));
+  }, [fieldErrors.password]);
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
@@ -62,7 +76,7 @@ export default function LoginPage({ onSwitchToRegister, onForgotPassword }: Logi
     return (
       <OpenInBrowserSignInGuide
         loginUrl={getExternalBrowserLoginUrl()}
-        onBack={() => setShowOpenInBrowserGuide(false)}
+        onBack={handleBackFromGuide}
       />
     );
   }
@@ -84,25 +98,29 @@ export default function LoginPage({ onSwitchToRegister, onForgotPassword }: Logi
               type="email"
               autoComplete="username"
               value={email}
-              onChange={(e) => {
-                setEmail(e.target.value);
-                if (fieldErrors.email) setFieldErrors((current) => ({ ...current, email: undefined }));
-              }}
+              onChange={handleEmailChange}
               data-invalid={fieldErrors.email ? true : undefined}
               required
             />
           </FormField>
-          <FormField label={formatMessage({ id: "pages.login.passwordLabel" })} labelStyle="plain" error={fieldErrors.password} htmlFor="login-password">
+          <FormField
+            label={formatMessage({ id: "pages.login.passwordLabel" })}
+            labelStyle="plain"
+            labelAction={(
+              <TextLink variant="muted" className="text-sm" onClick={onForgotPassword}>
+                {formatMessage({ id: "pages.login.forgotPassword" })}
+              </TextLink>
+            )}
+            error={fieldErrors.password}
+            htmlFor="login-password"
+          >
             <Input
               id="login-password"
               name="password"
               type="password"
               autoComplete="current-password"
               value={password}
-              onChange={(e) => {
-                setPassword(e.target.value);
-                if (fieldErrors.password) setFieldErrors((current) => ({ ...current, password: undefined }));
-              }}
+              onChange={handlePasswordChange}
               data-invalid={fieldErrors.password ? true : undefined}
               required
             />
@@ -142,7 +160,22 @@ export default function LoginPage({ onSwitchToRegister, onForgotPassword }: Logi
           </>
         )}
 
-        <p className="mt-4 text-center text-xs leading-5 text-foreground-muted theme-brutal:text-black/60">
+        {onSwitchToRegister && (
+          <TextSans size="small" className="mt-4 text-center theme-brutal:text-black/60">
+            {formatMessage(
+              { id: "pages.login.noAccountPrompt" },
+              {
+                create: (c: ReactNode) => (
+                  <TextLink key="create" variant="primary" onClick={onSwitchToRegister}>
+                    {c}
+                  </TextLink>
+                ),
+              },
+            )}
+          </TextSans>
+        )}
+
+        <TextSans size="caption" className="mt-6 text-center leading-5 theme-brutal:text-black/60">
           {formatMessage(
             { id: "pages.login.legalAgreement" },
             {
@@ -170,28 +203,7 @@ export default function LoginPage({ onSwitchToRegister, onForgotPassword }: Logi
               ),
             },
           )}
-        </p>
-
-        <p className="mt-3 text-center text-sm">
-          <TextLink variant="muted" onClick={onForgotPassword}>
-            {formatMessage({ id: "pages.login.forgotPassword" })}
-          </TextLink>
-        </p>
-
-        {onSwitchToRegister && (
-          <p className="mt-2 text-center text-sm">
-            {formatMessage(
-              { id: "pages.login.noAccountPrompt" },
-              {
-                create: (c: ReactNode) => (
-                  <TextLink key="create" variant="primary" onClick={onSwitchToRegister}>
-                    {c}
-                  </TextLink>
-                ),
-              },
-            )}
-          </p>
-        )}
+        </TextSans>
       </div>
     </AuthPageFrame>
   );

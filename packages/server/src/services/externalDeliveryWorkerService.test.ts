@@ -190,6 +190,7 @@ function dependencies(input: {
   runtime?: ActiveExternalDeliveryRuntime | null;
   credential?: boolean;
   providerResult?: ExternalDeliveryProviderResult;
+  providerRequestBodies?: unknown[];
   throwProvider?: boolean;
   calls?: { runtime: number; credential: number; provider: number };
   now?: Date;
@@ -220,8 +221,9 @@ function dependencies(input: {
         bindingEpoch: auth.bindingEpoch,
       };
     },
-    async dispatchProvider() {
+    async dispatchProvider(providerInput) {
       calls.provider += 1;
+      input.providerRequestBodies?.push(providerInput);
       if (input.throwProvider) throw new Error("secret-shaped raw provider failure");
       return input.providerResult ?? {
         kind: "accepted",
@@ -954,6 +956,61 @@ test("frozen render snapshot parser rejects unknown provider fields before autho
   });
   assert.deepEqual(calls, { runtime: 0, credential: 0, provider: 0 });
   assert.equal((await fixture.db.select().from(externalDeliveryAttempts)).length, 0);
+});
+
+test("frozen render snapshot accepts lh3.googleusercontent.com avatar and passes icon_url to Slack", async () => {
+  const fixture = await seedFixture();
+  const snapshot = fixture.deliveries[0].renderSnapshot as unknown as SlackBridgeRenderSnapshot;
+  const googleUrl = "https://lh3.googleusercontent.com/a/ACg8ocLW_-Y_0CjmhrgN-Lj2tdT1-sR3Oh8AKTZ_vc-3gH935ZgjNQ=s96-c";
+  snapshot.authorPresentation.avatar = {
+    publicUrl: googleUrl,
+    contentDigest: createHash("sha256").update(googleUrl).digest("hex").slice(0, 32),
+  };
+  await fixture.db.update(externalOutboundDeliveries).set({
+    renderSnapshot: snapshot as unknown as Record<string, unknown>,
+    renderSnapshotDigest: digestSlackBridgeRenderSnapshot(snapshot),
+  }).where(eq(externalOutboundDeliveries.id, fixture.deliveries[0].id));
+  const calls = { runtime: 0, credential: 0, provider: 0 };
+  const providerRequestBodies: unknown[] = [];
+  const result = await processExternalDeliveryPartitionHead(workerInput(fixture, dependencies({
+    runtime: activeRuntime(fixture),
+    calls,
+    providerRequestBodies,
+  })));
+  assert.equal(result.kind, "attempted");
+  if (result.kind === "attempted") assert.equal(result.outcome, "accepted");
+  assert.deepEqual(calls, { runtime: 1, credential: 1, provider: 1 });
+  const lastRequest = providerRequestBodies[providerRequestBodies.length - 1] as {
+    frozenSnapshot: SlackBridgeRenderSnapshot;
+  };
+  assert.equal(
+    lastRequest.frozenSnapshot.authorPresentation.avatar?.publicUrl,
+    googleUrl,
+  );
+});
+
+test("frozen render snapshot rejects non-allowlisted external avatar hosts", async () => {
+  const fixture = await seedFixture();
+  const snapshot = fixture.deliveries[0].renderSnapshot as unknown as SlackBridgeRenderSnapshot;
+  snapshot.authorPresentation.avatar = {
+    publicUrl: "https://evil.example.com/avatar.png",
+    contentDigest: "e".repeat(32),
+  };
+  await fixture.db.update(externalOutboundDeliveries).set({
+    renderSnapshot: snapshot as unknown as Record<string, unknown>,
+    renderSnapshotDigest: digestSlackBridgeRenderSnapshot(snapshot),
+  }).where(eq(externalOutboundDeliveries.id, fixture.deliveries[0].id));
+  const calls = { runtime: 0, credential: 0, provider: 0 };
+  const result = await processExternalDeliveryPartitionHead(workerInput(fixture, dependencies({
+    runtime: activeRuntime(fixture),
+    calls,
+  })));
+  assert.deepEqual(result, {
+    kind: "blocked",
+    reason: "invalid_frozen_snapshot",
+    deliveryId: fixture.deliveries[0].id,
+  });
+  assert.deepEqual(calls, { runtime: 0, credential: 0, provider: 0 });
 });
 
 test("frozen render snapshot rejects non-HTTPS or non-content-addressed avatars", async () => {

@@ -136,6 +136,8 @@ export interface SlackBridgeProvisioningControlPlane {
   }): Promise<SlackBridgeProvisioningResponse>;
   runPreflight(input: SlackBridgeProvisioningRequestAuthority): Promise<SlackBridgeProvisioningResponse>;
   enable(input: SlackBridgeProvisioningRequestAuthority): Promise<SlackBridgeProvisioningResponse>;
+  /** Re-activates this server's bindings paused by a re-authorization; null when none were paused. */
+  resumeAfterReauthorization?(input: SlackBridgeProvisioningRequestAuthority): Promise<SlackBridgeProvisioningResponse | null>;
 }
 
 export interface SlackBridgeRouteDependencies {
@@ -453,29 +455,45 @@ function validCodeHandle(handle: SlackOAuthCodeHandle, now: Date): boolean {
   );
 }
 
-function sendOAuthOutcome(
+const SLACK_PROVIDER_ERROR_PATTERN = /^[a-z0-9_]{1,64}$/;
+
+/**
+ * The callback is a browser navigation back from Slack, so every failure
+ * returns the installer to the IM bridges settings page with a short code the
+ * page can explain, instead of a raw JSON body. Only allowlisted codes and a
+ * Slack-style error identifier ever reach the URL.
+ */
+function redirectOAuthOutcome(
   outcome: Exclude<SlackOAuthExchangeOutcome, { kind: "authorized" }>,
   res: Response,
+  completionRedirectUri: string,
 ): void {
-  noStore(res);
+  const redirect = new URL(completionRedirectUri);
+  redirect.searchParams.set("slack_oauth", "error");
   if (outcome.kind === "rate_limited" || outcome.kind === "transient_failure") {
-    res.setHeader("Retry-After", String(Math.max(1, Math.ceil(outcome.retryAfterMs / 1_000))));
-    res.status(503).json({ ok: false, code: "slack_oauth_retryable" });
-    return;
+    redirect.searchParams.set("code", "slack_oauth_retryable");
+  } else if (outcome.kind === "outcome_unknown") {
+    redirect.searchParams.set("code", "slack_oauth_reconciliation_required");
+  } else if (outcome.kind === "identity_conflict") {
+    redirect.searchParams.set("code", "slack_oauth_identity_conflict");
+    redirect.searchParams.set("reason", outcome.reason);
+  } else if (outcome.kind === "deterministic_failure") {
+    const providerError = outcome.providerError;
+    console.warn(
+      "[slackBridge] oauth deterministic_failure",
+      { reason: outcome.reason, providerError },
+    );
+    redirect.searchParams.set("code", "slack_oauth_rejected");
+    redirect.searchParams.set("reason", outcome.reason);
+    // The provider's own refusal stays visible for diagnosis.
+    if (providerError && SLACK_PROVIDER_ERROR_PATTERN.test(providerError)) {
+      redirect.searchParams.set("provider_error", providerError);
+    }
+  } else {
+    redirect.searchParams.set("code", "slack_oauth_preflight_rejected");
   }
-  if (outcome.kind === "outcome_unknown") {
-    res.status(202).json({ ok: false, code: "slack_oauth_reconciliation_required" });
-    return;
-  }
-  if (outcome.kind === "identity_conflict") {
-    res.status(409).json({ ok: false, code: "slack_oauth_identity_conflict" });
-    return;
-  }
-  if (outcome.kind === "deterministic_failure") {
-    res.status(400).json({ ok: false, code: "slack_oauth_rejected" });
-    return;
-  }
-  res.status(503).json({ ok: false, code: "slack_oauth_preflight_rejected" });
+  noStore(res);
+  res.redirect(302, redirect.toString());
 }
 
 function redirectOAuthProviderRejection(
@@ -775,8 +793,18 @@ export function createSlackBridgeRouteHandlers(
     }
     if (outcome.kind !== "authorized") {
       await fenceUnknown(claimed.attemptId);
-      sendOAuthOutcome(outcome, res);
+      redirectOAuthOutcome(outcome, res, completionRedirectUri);
       return;
+    }
+
+    const extraScopes = outcome.installedScopes.filter(
+      (s) => !(SLACK_BRIDGE_REQUIRED_BOT_SCOPES as readonly string[]).includes(s),
+    );
+    if (extraScopes.length) {
+      console.warn(
+        "[slackBridge] oauth authorized with extra scopes beyond contract",
+        { extraScopes, serverId: claimed.serverId },
+      );
     }
 
     try {
@@ -786,15 +814,12 @@ export function createSlackBridgeRouteHandlers(
         providerTeamId: outcome.providerTeamId,
         providerEnterpriseId: outcome.providerEnterpriseId,
         providerUserId: outcome.providerUserId,
-        providerInstallerIsWorkspaceAdmin: outcome.installerIsWorkspaceAdmin,
         botUserId: outcome.botUserId,
         providerBotId: outcome.providerBotId,
         workspaceName: outcome.workspaceName,
         installedScopes: outcome.installedScopes,
         sealedCredential: outcome.sealedCredential,
       });
-      noStore(res);
-      res.redirect(302, completionRedirectUri);
     } catch (error) {
       await fenceUnknown(claimed.attemptId);
       if (error instanceof ExternalAppControlPlaneError) {
@@ -802,7 +827,28 @@ export function createSlackBridgeRouteHandlers(
         return;
       }
       unavailable(res);
+      return;
     }
+    // Re-authorizing a connected workspace pauses its bindings. Resume this
+    // server's pairs before redirecting; a failure leaves them paused for the
+    // setup wizard and must not turn a completed OAuth exchange into an error.
+    const resumeAt = safeNow(dependencies);
+    if (resumeAt && dependencies.provisioning?.resumeAfterReauthorization) {
+      try {
+        await dependencies.provisioning.resumeAfterReauthorization({
+          serverId: claimed.serverId,
+          requestingUserId: claimed.requestingUserId,
+          now: resumeAt,
+        });
+      } catch (error) {
+        console.warn("[slackBridge] bindings stay paused after re-authorization", {
+          serverId: claimed.serverId,
+          code: error instanceof ExternalAppControlPlaneError ? error.code : "unknown",
+        });
+      }
+    }
+    noStore(res);
+    res.redirect(302, completionRedirectUri);
   };
 
   const eventsAdapter = runtimeReady(dependencies)

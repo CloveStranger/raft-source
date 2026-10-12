@@ -14,6 +14,7 @@ import {
 } from "lucide-react";
 import { useIntl } from "react-intl";
 import ReactMarkdown from "react-markdown";
+import type { Components, Options } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import api from "../../api/client";
 import SectionEyebrow from "../ui/SectionEyebrow";
@@ -69,6 +70,92 @@ function TruncationHint({ truncation, indent }: { truncation: DirTruncation; ind
 function workspaceViewPreferenceKey(agentId: string) {
   return `slock:agentWorkspace:${agentId}:showHidden`;
 }
+
+// Stable plugin list / component map for the workspace markdown preview —
+// passing fresh literals would re-mount ReactMarkdown's AST on every render.
+const WORKSPACE_MARKDOWN_REMARK_PLUGINS: NonNullable<Options["remarkPlugins"]> = [remarkGfm];
+const WORKSPACE_MARKDOWN_COMPONENTS: Components = {
+  pre: ({ children }) => (
+    <CodeBlock className="overflow-x-auto border theme-brutal:border-2 border-line-muted theme-brutal:border-black bg-code-surface rounded-md theme-brutal:rounded-none p-3 pr-12 text-sm text-code-foreground font-mono [&>code]:border-0 [&>code]:bg-transparent [&>code]:p-0">
+      {children}
+    </CodeBlock>
+  ),
+  code: ({ children, className }) => {
+    if (!className) {
+      return (
+        <InlineCode className="rounded-none border-0 bg-fill-muted px-1 py-0 [font-size:0.875em] font-mono font-normal leading-[1.3em] text-foreground-strong [overflow-wrap:break-word]">
+          {children}
+        </InlineCode>
+      );
+    }
+    return <code className={className}>{children}</code>;
+  },
+  a: ({ href, children }) => (
+    <a
+      href={href}
+      target="_blank"
+      rel="noopener noreferrer"
+      className="text-blue-700 dark:text-blue-300 underline decoration-2 underline-offset-2 hover:text-accent-strong theme-brutal:hover:text-brutal-pink"
+    >
+      {children}
+    </a>
+  ),
+  p: ({ children }) => <p className="mb-2 last:mb-0">{children}</p>,
+  ul: ({ children, className, ...props }) => (
+    <ul
+      {...props}
+      className={[className, "mb-2 pl-5 list-disc"].filter(Boolean).join(" ")}
+    >
+      {children}
+    </ul>
+  ),
+  ol: ({ children, className, ...props }) => (
+    <ol
+      {...props}
+      className={[className, "mb-2 pl-5 list-decimal"].filter(Boolean).join(" ")}
+    >
+      {children}
+    </ol>
+  ),
+  li: ({ children, className, ...props }) => (
+    <li
+      {...props}
+      className={[className, "mb-0.5"].filter(Boolean).join(" ")}
+    >
+      {children}
+    </li>
+  ),
+  blockquote: ({ children }) => (
+    <blockquote className={`${MARKDOWN_BLOCKQUOTE_BASE_CLASS} my-2`}>
+      {children}
+    </blockquote>
+  ),
+  table: ({ children }) => (
+    <div className="my-2 overflow-x-auto">
+      <table className="border-collapse border theme-brutal:border-2 border-line-muted theme-brutal:border-black text-sm">
+        {children}
+      </table>
+    </div>
+  ),
+  th: ({ children }) => (
+    <th className="border theme-brutal:border-2 border-line-muted theme-brutal:border-black bg-info-soft theme-brutal:bg-brutal-cyan px-2 py-1 text-left font-bold whitespace-nowrap">
+      {children}
+    </th>
+  ),
+  td: ({ children }) => (
+    <td className="border border-line-muted theme-brutal:border-black px-2 py-1">{children}</td>
+  ),
+  h1: ({ children }) => <h1 className="text-xl font-bold mt-4 mb-2">{children}</h1>,
+  h2: ({ children }) => <h2 className="text-lg font-bold mt-3 mb-1.5">{children}</h2>,
+  h3: ({ children }) => <h3 className="text-base font-bold mt-2 mb-1">{children}</h3>,
+  h4: ({ children }) => <h4 className="text-sm font-bold mt-2 mb-1">{children}</h4>,
+  h5: ({ children }) => <h5 className="text-sm font-bold mt-1.5 mb-0.5">{children}</h5>,
+  h6: ({ children }) => <h6 className="text-sm font-bold mt-1.5 mb-0.5 text-foreground-muted theme-brutal:text-black/70">{children}</h6>,
+  hr: () => <hr className="my-3 border-t theme-brutal:border-t-2 border-line-muted theme-brutal:border-black" />,
+  img: ({ src, alt }) => (
+    <img src={src} alt={alt || ""} className={`my-2 max-w-full border theme-brutal:border-2 border-line-muted theme-brutal:border-black ${transparentImageBackgroundClass}`} />
+  ),
+};
 
 // --- File tree node component ---
 
@@ -624,89 +711,8 @@ export default function AgentWorkspace({ agentId, compact, hosted }: { agentId: 
               ) : fileContent.path.endsWith(".md") && viewMode === "preview" ? (
                 <div className="text-sm text-foreground-strong theme-brutal:text-black break-words">
                   <ReactMarkdown
-                    remarkPlugins={[remarkGfm]}
-                    components={{
-                      pre: ({ children }) => (
-                        <CodeBlock className="overflow-x-auto border theme-brutal:border-2 border-line-muted theme-brutal:border-black bg-code-surface rounded-md theme-brutal:rounded-none p-3 pr-12 text-sm text-code-foreground font-mono [&>code]:border-0 [&>code]:bg-transparent [&>code]:p-0">
-                          {children}
-                        </CodeBlock>
-                      ),
-                      code: ({ children, className }) => {
-                        if (!className) {
-                          return (
-                            <InlineCode className="rounded-none border-0 bg-fill-muted px-1 py-0 [font-size:0.875em] font-mono font-normal leading-[1.3em] text-foreground-strong [overflow-wrap:break-word]">
-                              {children}
-                            </InlineCode>
-                          );
-                        }
-                        return <code className={className}>{children}</code>;
-                      },
-                      a: ({ href, children }) => (
-                        <a
-                          href={href}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="text-blue-700 dark:text-blue-300 underline decoration-2 underline-offset-2 hover:text-accent-strong theme-brutal:hover:text-brutal-pink"
-                        >
-                          {children}
-                        </a>
-                      ),
-                      p: ({ children }) => <p className="mb-2 last:mb-0">{children}</p>,
-                      ul: ({ children, className, ...props }) => (
-                        <ul
-                          {...props}
-                          className={[className, "mb-2 pl-5 list-disc"].filter(Boolean).join(" ")}
-                        >
-                          {children}
-                        </ul>
-                      ),
-                      ol: ({ children, className, ...props }) => (
-                        <ol
-                          {...props}
-                          className={[className, "mb-2 pl-5 list-decimal"].filter(Boolean).join(" ")}
-                        >
-                          {children}
-                        </ol>
-                      ),
-                      li: ({ children, className, ...props }) => (
-                        <li
-                          {...props}
-                          className={[className, "mb-0.5"].filter(Boolean).join(" ")}
-                        >
-                          {children}
-                        </li>
-                      ),
-                      blockquote: ({ children }) => (
-                        <blockquote className={`${MARKDOWN_BLOCKQUOTE_BASE_CLASS} my-2`}>
-                          {children}
-                        </blockquote>
-                      ),
-                      table: ({ children }) => (
-                        <div className="my-2 overflow-x-auto">
-                          <table className="border-collapse border theme-brutal:border-2 border-line-muted theme-brutal:border-black text-sm">
-                            {children}
-                          </table>
-                        </div>
-                      ),
-                      th: ({ children }) => (
-                        <th className="border theme-brutal:border-2 border-line-muted theme-brutal:border-black bg-info-soft theme-brutal:bg-brutal-cyan px-2 py-1 text-left font-bold whitespace-nowrap">
-                          {children}
-                        </th>
-                      ),
-                      td: ({ children }) => (
-                        <td className="border border-line-muted theme-brutal:border-black px-2 py-1">{children}</td>
-                      ),
-                      h1: ({ children }) => <h1 className="text-xl font-bold mt-4 mb-2">{children}</h1>,
-                      h2: ({ children }) => <h2 className="text-lg font-bold mt-3 mb-1.5">{children}</h2>,
-                      h3: ({ children }) => <h3 className="text-base font-bold mt-2 mb-1">{children}</h3>,
-                      h4: ({ children }) => <h4 className="text-sm font-bold mt-2 mb-1">{children}</h4>,
-                      h5: ({ children }) => <h5 className="text-sm font-bold mt-1.5 mb-0.5">{children}</h5>,
-                      h6: ({ children }) => <h6 className="text-sm font-bold mt-1.5 mb-0.5 text-foreground-muted theme-brutal:text-black/70">{children}</h6>,
-                      hr: () => <hr className="my-3 border-t theme-brutal:border-t-2 border-line-muted theme-brutal:border-black" />,
-                      img: ({ src, alt }) => (
-                        <img src={src} alt={alt || ""} className={`my-2 max-w-full border theme-brutal:border-2 border-line-muted theme-brutal:border-black ${transparentImageBackgroundClass}`} />
-                      ),
-                    }}
+                    remarkPlugins={WORKSPACE_MARKDOWN_REMARK_PLUGINS}
+                    components={WORKSPACE_MARKDOWN_COMPONENTS}
                   >
                     {fileContent.content || ""}
                   </ReactMarkdown>

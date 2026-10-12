@@ -38,6 +38,14 @@ function communityJoinErrorMessage(
     || formatMessage({ id: "server.communityAgreement.failedToJoin" });
 }
 
+function closeReservedTab(tab: Window | null) {
+  try {
+    if (tab && !tab.closed) tab.close();
+  } catch {
+    // Best effort only. Browsers can refuse script-close for some windows.
+  }
+}
+
 export function useJoinCommunityFlow({
   onJoined,
   onError,
@@ -57,14 +65,6 @@ export function useJoinCommunityFlow({
     if (tab) tab.opener = null;
     return tab;
   }, [joinedServerNavigation]);
-
-  const closeReservedTab = (tab: Window | null) => {
-    try {
-      if (tab && !tab.closed) tab.close();
-    } catch {
-      // Best effort only. Browsers can refuse script-close for some windows.
-    }
-  };
 
   const completeJoin = useCallback(
     (server: Server, slug: CommunityServerSlug, reservedTab?: Window | null) => {
@@ -112,31 +112,39 @@ export function useJoinCommunityFlow({
     [completeJoin, formatMessage, joinCommunityServer, onError, reserveJoinedServerTab],
   );
 
+  const handleAgree = useCallback(
+    async (agreementId: string) => {
+      if (!pendingCommunitySlug) return;
+      setJoiningCommunitySlug(pendingCommunitySlug);
+      const reservedTab = reserveJoinedServerTab();
+      try {
+        const joined = await joinCommunityServer({ agreementId, slug: pendingCommunitySlug });
+        const joinedSlug = pendingCommunitySlug;
+        setPendingAgreement(null);
+        setPendingCommunitySlug(null);
+        completeJoin(joined, joinedSlug, reservedTab);
+      } catch (error: unknown) {
+        closeReservedTab(reservedTab);
+        const message = communityJoinErrorMessage(error, formatMessage);
+        onError?.(error, pendingCommunitySlug, message);
+        throw error;
+      } finally {
+        setJoiningCommunitySlug(null);
+      }
+    },
+    [completeJoin, formatMessage, joinCommunityServer, onError, pendingCommunitySlug, reserveJoinedServerTab],
+  );
+
+  const handleCloseAgreement = useCallback(() => {
+    setPendingAgreement(null);
+    setPendingCommunitySlug(null);
+  }, []);
+
   const agreementDialog = pendingAgreement && pendingCommunitySlug ? (
     <CommunityAgreementDialog
       agreement={pendingAgreement}
-      onAgree={async (agreementId) => {
-        setJoiningCommunitySlug(pendingCommunitySlug);
-        const reservedTab = reserveJoinedServerTab();
-        try {
-          const joined = await joinCommunityServer({ agreementId, slug: pendingCommunitySlug });
-          const joinedSlug = pendingCommunitySlug;
-          setPendingAgreement(null);
-          setPendingCommunitySlug(null);
-          completeJoin(joined, joinedSlug, reservedTab);
-        } catch (error: unknown) {
-          closeReservedTab(reservedTab);
-          const message = communityJoinErrorMessage(error, formatMessage);
-          onError?.(error, pendingCommunitySlug, message);
-          throw error;
-        } finally {
-          setJoiningCommunitySlug(null);
-        }
-      }}
-      onClose={() => {
-        setPendingAgreement(null);
-        setPendingCommunitySlug(null);
-      }}
+      onAgree={handleAgree}
+      onClose={handleCloseAgreement}
     />
   ) : null;
 

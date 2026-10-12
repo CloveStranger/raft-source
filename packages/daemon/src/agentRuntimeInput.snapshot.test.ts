@@ -49,7 +49,7 @@ test("inbox notices carry reading guidance across runtime delivery modes", () =>
   expect(formatInboxUpdateRuntimeInput([exampleMessage], restartDriver, 1)).toBe(notice);
   expect(notice).toMatchInlineSnapshot(`
     "[Raft inbox notice:
-    Inbox update: 1 unread message total; 1 changed target
+    Inbox update: 1 message pending your read across all conversations; 1 changed target
     #general  pending: 1 message · first msg=00000000 · latest sender @richard · latest msg=00000000
     ]
     These messages have not been read. Choose when to read them: \`raft message read --target <target> --unread\` reads one conversation's unread messages; \`raft message check\` reads all of them. Deferring them does not establish that there is no work."

@@ -175,6 +175,8 @@ export interface UseSelectionShareHandlersOptions {
   channelMessages?: readonly Message[];
   threadReplyMessages?: readonly Message[];
   threadParentMessageRef?: RefObject<Message | null>;
+  /** Panel whose rows the image is captured from (see CaptureOptions.scope). */
+  captureScopeRef?: RefObject<HTMLElement | null>;
   onUnresolvedSelection?: (unresolvedCount: number) => void;
 }
 
@@ -190,6 +192,7 @@ export function useSelectionShareHandlers(
   const threadReplyMessages = opts.threadReplyMessages;
   const threadParentMessageRef = opts.threadParentMessageRef;
   const onUnresolvedSelection = opts.onUnresolvedSelection;
+  const captureScopeRef = opts.captureScopeRef;
 
   const captureSharePreview = useCallback(async () => {
     const { messages, unresolvedCount } = gatherSelectedMessagesWithMeta({ channelMessages, threadReplyMessages, threadParentMessageRef });
@@ -201,8 +204,9 @@ export function useSelectionShareHandlers(
     return await captureSelectedMessages(messages.map((m) => m.id), {
       maxWidth: SHARE_PREVIEW_MAX_WIDTH,
       threadChildIds: new Set(messages.filter((m) => m.isThreadChild).map((m) => m.id)),
+      scope: captureScopeRef?.current,
     });
-  }, [channelMessages, onUnresolvedSelection, threadParentMessageRef, threadReplyMessages]);
+  }, [captureScopeRef, channelMessages, onUnresolvedSelection, threadParentMessageRef, threadReplyMessages]);
 
   const createShareArtifactAndNavigateToX = useCallback(async (dataUrl: string) => {
     const selectionChannelId = useSelectionStore.getState().channelId;

@@ -22,7 +22,6 @@ import type {
   RuntimeModeConfig,
 } from "@botiverse/raft-shared";
 
-export const CUSTOM_MODEL_SELECT_VALUE = "__custom__";
 export type RuntimeProviderMode = "default" | "custom";
 
 /** Stable codes for UI localization; `message` remains English for logs/tests. */

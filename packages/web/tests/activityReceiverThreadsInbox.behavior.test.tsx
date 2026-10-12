@@ -313,7 +313,6 @@ async function seedCore(
 function renderInbox(options: {
   post?: typeof api.post;
   compactActivitySidebar?: boolean;
-  onOpenItem?: (item: InboxItem) => void;
   locale?: "en" | "zh-cn";
 } = {}) {
   const slug = useServerStore.getState().current?.slug ?? "s2";
@@ -333,7 +332,6 @@ function renderInbox(options: {
       <MemoryRouter initialEntries={[`/s/${slug}/activity`]}>
         <ThreadsInbox
           compactActivitySidebar={options.compactActivitySidebar}
-          onOpenItem={options.onOpenItem}
         />
       </MemoryRouter>
     </TestIntlProvider>,
@@ -704,18 +702,12 @@ test("Activity done actions stay quiet until their row is active, focused, or ho
   });
   useSearchContentStore.setState({ slot: { kind: "thread", id: activeItem.threadChannelId } });
   const keyboardDoneCalls: string[] = [];
-  const rowOpenCalls: string[] = [];
   useInboxStore.setState({
     markDone: async (item) => {
       keyboardDoneCalls.push(item.kind === "thread" ? item.latestActivityMessageId : item.lastMessageId);
     },
   });
-  renderInbox({
-    compactActivitySidebar: true,
-    onOpenItem: (item) => {
-      rowOpenCalls.push(item.kind === "thread" ? item.threadChannelId : item.channelId);
-    },
-  });
+  renderInbox({ compactActivitySidebar: true });
 
   const rows = screen.getAllByTestId("inbox-row");
   const inactiveContent = within(rows[0]).getByTestId("conversation-card-content");
@@ -738,7 +730,10 @@ test("Activity done actions stay quiet until their row is active, focused, or ho
   fireEvent.keyDown(inactiveDone, { key: "Enter" });
   fireEvent.keyDown(inactiveDone, { key: " " });
   assert.deepEqual(keyboardDoneCalls, [inactiveItem.lastMessageId, inactiveItem.lastMessageId]);
-  assert.deepEqual(rowOpenCalls, []);
+  // Keyboard Done must not bubble into the row's open activation (which opens
+  // after a 220ms single-click window).
+  await new Promise((resolve) => setTimeout(resolve, 260));
+  assert.deepEqual(useSearchContentStore.getState().slot, { kind: "thread", id: activeItem.threadChannelId });
 
   const activeDone = within(rows[1]).getByTestId("inbox-row-done");
   const activeTimestamp = within(rows[1]).getByTestId("conversation-card-timestamp");
@@ -964,6 +959,105 @@ test("Activity sidebar exposes protocol Saved and Done views", async () => {
   });
   await waitFor(() => assert.deepEqual(restoredPayload, { threadChannelId: "thread-done-protocol" }));
   await waitFor(() => assert.ok(inboxRefreshCalls > inboxRefreshCallsBeforeRestore));
+});
+
+test("Activity sidebar DMs view sits between Saved and Done and lists only scope=dms Activity", async () => {
+  setDesktopViewport();
+  resetServerFeatureFlagsForTests();
+  const { serverId } = seedStores("dms-view", { legacyHasMore: false });
+  publishActivitySidebarInboxFlag(serverId, true);
+  setActivityGateForTests("off");
+  const channelRow = channelItem("dms-view-room", { lastMessagePreview: "dms-view room message" });
+  const dmRow = channelItem("dms-view-peer", {
+    kind: "dm",
+    channelType: "dm",
+    lastMessagePreview: "dms-view direct message",
+  });
+  const dmThreadRow = threadItem("dms-view-dm-thread", {
+    parentChannelType: "dm",
+    parentMessagePreview: "dms-view thread under a DM",
+  });
+  useInboxStore.setState({
+    items: [channelRow],
+    groups: [],
+    hasMore: false,
+    totalCount: 1,
+    totalUnreadCount: 17,
+    searchQuery: "",
+    sortDirection: "desc",
+  });
+  const dmRequests: Record<string, unknown>[] = [];
+  api.get = (async (url: string, config?: { params?: Record<string, unknown> }) => {
+    if (url === "/channels/inbox" && config?.params?.scope === "dms") {
+      dmRequests.push(config.params);
+      return {
+        data: {
+          items: [dmRow, dmThreadRow],
+          groups: [],
+          hasMore: false,
+          totalCount: 2,
+          totalUnreadCount: 34,
+          activeUnreadCount: 34,
+        },
+      };
+    }
+    if (url === "/channels/inbox") {
+      return {
+        data: {
+          items: [channelRow],
+          groups: [],
+          hasMore: false,
+          totalCount: 1,
+          totalUnreadCount: 17,
+          activeUnreadCount: 17,
+        },
+      };
+    }
+    if (url === "/channels/saved") {
+      return { data: { saved: [], hasMore: false, total: 0, globalTotal: 0 } };
+    }
+    throw new Error(`Unexpected GET ${url}`);
+  }) as typeof api.get;
+
+  renderInbox();
+  await waitFor(() => assert.ok(hasAnyTextContent("dms-view room message")));
+
+  const navOrder = Array.from(document.querySelectorAll("[data-testid^='activity-nav-']"))
+    .map((node) => node.getAttribute("data-testid"));
+  assert.deepEqual(
+    navOrder.slice(navOrder.indexOf("activity-nav-saved"), navOrder.indexOf("activity-nav-done") + 1),
+    ["activity-nav-saved", "activity-nav-dms", "activity-nav-done"],
+    "DMs sits directly below Saved and above Done",
+  );
+  assert.equal(dmRequests.length, 0, "the DMs page is not fetched until it is opened");
+
+  await act(async () => {
+    fireEvent.click(screen.getByTestId("activity-nav-dms"));
+  });
+  await waitFor(() => assert.ok(hasAnyTextContent("dms-view direct message")));
+  assert.ok(hasAnyTextContent("dms-view thread under a DM"));
+  assert.equal(screen.queryAllByText(hasTextContent("dms-view room message")).length, 0, "channel rows are not part of the DMs view");
+  assert.equal(dmRequests[0]?.filter, "all");
+  assert.equal(dmRequests[0]?.sort, "desc");
+  assert.ok(screen.queryByTestId("inbox-mark-all-read") === null, "mark-all-read would act on all of Activity");
+  await waitFor(() => assert.ok(within(screen.getByTestId("activity-nav-dms")).queryByText("2") !== null));
+
+  // A burst of active-window updates re-reads the DMs page once, in the background.
+  const requestsBeforeBurst = dmRequests.length;
+  for (const preview of ["burst one", "burst two", "burst three"]) {
+    act(() => {
+      useInboxStore.setState({ items: [channelItem("dms-view-room", { lastMessagePreview: preview })] });
+    });
+  }
+  await waitFor(() => assert.equal(dmRequests.length, requestsBeforeBurst + 1));
+  await new Promise((resolve) => setTimeout(resolve, 700));
+  assert.equal(dmRequests.length, requestsBeforeBurst + 1, "debounced: one scoped re-read per burst");
+  assert.ok(hasAnyTextContent("dms-view direct message"), "no loading skeleton replaces the rows during a background re-read");
+
+  await act(async () => {
+    fireEvent.click(screen.getByTestId("activity-nav-all"));
+  });
+  await waitFor(() => assert.ok(hasAnyTextContent("burst three")));
 });
 
 test("Activity search stays hidden until the local find shortcut opens it", async () => {

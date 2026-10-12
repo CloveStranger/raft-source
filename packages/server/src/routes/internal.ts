@@ -92,11 +92,14 @@ import {
   type FeedbackTraceBundleTranscriptResultMetadataKey,
   asMachineId,
   FEEDBACK_MACHINE_EVIDENCE_MAX_UPLOAD_BYTES,
+  FEEDBACK_AGENT_EVENT_TAIL_MAX_UPLOAD_BYTES,
+  FEEDBACK_AGENT_EVENT_TAIL_OBJECT_KEY_PREFIX,
   FEEDBACK_MACHINE_EVIDENCE_SECTIONS,
   isFeedbackAttachmentKind,
   type FeedbackTraceBundleTranscriptMetadataKey,
   AGENT_API_MESSAGE_SEARCH_DEFAULT_LIMIT,
-  AGENT_API_MESSAGE_SEARCH_MAX_LIMIT
+  AGENT_API_MESSAGE_SEARCH_MAX_LIMIT,
+  type ServerRole,
 } from "@botiverse/raft-shared";
 import type { AgentOrchestrator } from "../services/agentOrchestrator";
 import type { Server as SocketServer } from "socket.io";
@@ -156,7 +159,7 @@ import {
 } from "../services/avatarService";
 import { handleAgentKnowledgeGet, handleAgentKnowledgeSearch } from "./agentKnowledge";
 import { AttachmentLinkError } from "../services/attachmentLinkingService";
-import { getActorServerRoleInServer } from "../lib/actorPermissions";
+import { getActorServerRoleInServer, getAgentServerRolesInServer } from "../lib/actorPermissions";
 import { bindRequestAbortSignal } from "./requestAbortSignal";
 import { broadcastAgentUpdated } from "./agentUpdatedBroadcast";
 import { createChannelForAgent } from "./agentChannelCreate";
@@ -308,6 +311,14 @@ async function buildServerInfoAgentSummary(
     ? await agentOrchestrator.getActivity(a.id, { parent: getCurrentTraceContext() })
     : null;
   const resolvedRole = await getActorServerRoleInServer(serverId, "agent", a.id);
+  return toServerInfoAgentSummary(a, visibleActivity, resolvedRole);
+}
+
+function toServerInfoAgentSummary(
+  a: Awaited<ReturnType<typeof agentService.listAgents>>[number],
+  visibleActivity: { activity: string | null; activityDetail: string } | null,
+  resolvedRole: ServerRole | null,
+) {
   return {
     name: a.name,
     description: a.description,
@@ -323,7 +334,13 @@ export async function buildServerInfoAgentSummaries(
   agentOrchestrator?: AgentOrchestrator,
 ) {
   const allAgentsList = await agentService.listAgents(serverId);
-  return Promise.all(allAgentsList.map((a) => buildServerInfoAgentSummary(serverId, a, agentOrchestrator)));
+  // Every agent's activity and role as two batches, not two reads per agent
+  // under Promise.all (one connection each on a server with hundreds).
+  const [activities, roles] = await Promise.all([
+    agentOrchestrator ? agentOrchestrator.getActivities(allAgentsList, { parent: getCurrentTraceContext() }) : null,
+    getAgentServerRolesInServer(serverId, allAgentsList.map((a) => a.id)),
+  ]);
+  return allAgentsList.map((a, index) => toServerInfoAgentSummary(a, activities?.[index] ?? null, roles.get(a.id) ?? null));
 }
 
 /**
@@ -484,6 +501,7 @@ export async function buildAgentResolvedMessagePayload(
     sender_type: message.messageType === "system" ? "system" : toAgentFacingActorType(message.senderType),
     sender_name: sender?.name ?? "unknown",
     sender_description: sender?.description ?? null,
+    sender_timezone: external ? null : message.senderTimezone ?? null,
     ...messageService.toAgentVisibleExternalMessage(message),
     content: messageService.appendAgentFacingForwardedSnapshot(
       messageService.renderAgentVisibleMessageContent(message, renderedContent),
@@ -539,6 +557,7 @@ export async function resolveAgentVisibleMessagePayload(
     const [viewerScopedMessage] = await messageService.listMessagesByIds([message.id], {
       forwardedBundleViewerAgentId: requestingAgentId,
       forwardedBundleViewerServerId: serverId,
+      includeSenderTimezone: true,
     });
     if (!viewerScopedMessage) return null;
     return buildAgentResolvedMessagePayload(
@@ -555,6 +574,7 @@ export async function resolveAgentVisibleMessagePayload(
   const [viewerScopedMessage] = await messageService.listMessagesByIds([message.id], {
     forwardedBundleViewerAgentId: requestingAgentId,
     forwardedBundleViewerServerId: serverId,
+    includeSenderTimezone: true,
   });
   if (!viewerScopedMessage) return null;
   return buildAgentResolvedMessagePayload(viewerScopedMessage, storageChannel, serverId, requestingAgentId);
@@ -1176,6 +1196,24 @@ function deriveDaemonTraceBundleMetadata(
     result.bundleContentType = "application/json";
     result.bundleContentEncoding = "gzip";
   }
+  // agent_event_tail (task #1230): one bounded gzipped JSON object bound to a
+  // report, an agent and a request; filed outside trace-bundles/ and never
+  // ingested as traces. Only bounded ids are signed (the events, counts and
+  // scan facts travel in the PUT body only). The agent binding to THIS machine
+  // is checked in the route.
+  if (result.feedbackAttachmentKind === "agent_event_tail") {
+    if (!result.feedbackReportId) throw new Error("metadata.feedbackReportId is required for agent_event_tail");
+    if (!result.agentId) throw new Error("metadata.agentId is required for agent_event_tail");
+    if (!result.feedbackTranscriptRequestId) throw new Error("metadata.feedbackTranscriptRequestId is required for agent_event_tail");
+    if (bundleSizeBytes > FEEDBACK_AGENT_EVENT_TAIL_MAX_UPLOAD_BYTES) {
+      throw new Error("metadata.bundleSizeBytes exceeds the agent_event_tail limit");
+    }
+    for (const key of ["feedbackTranscriptContent", "feedbackTranscriptSourceBytes", "feedbackTranscriptBytes"] as const) delete result[key];
+    result.objectKey = `${FEEDBACK_AGENT_EVENT_TAIL_OBJECT_KEY_PREFIX}${ctx.serverId}/${ctx.machineId}/${uploadId}.json.gz`;
+    result.maxBytes = FEEDBACK_AGENT_EVENT_TAIL_MAX_UPLOAD_BYTES;
+    result.bundleContentType = "application/json";
+    result.bundleContentEncoding = "gzip";
+  }
   if (result.feedbackAttachmentKind === "machine_log_tail") {
     for (const key of [
       "feedbackMachineLogTailLineCount",
@@ -1397,28 +1435,24 @@ internalRouter.get("/machine/agents", async (req, res) => {
 
     const agentOrchestrator = req.app.get("agentOrchestrator") as AgentOrchestrator;
     const agents = await agentService.getAgentsForMachine(machineId);
-    const enriched = await Promise.all(
-      agents
-        .filter((agent) => agent.serverId === serverId)
-        .map(async (agent) => {
-          const { activity, activityDetail } = await agentOrchestrator.getActivity(agent.id, {
-            parent: getCurrentTraceContext(),
-          });
-          return {
-            id: agent.id,
-            name: agent.name,
-            displayName: agent.displayName,
-            avatarUrl: agent.avatarUrl,
-            description: agent.description,
-            status: agent.status,
-            activity,
-            activityDetail,
-            model: agent.model,
-            runtime: agent.runtime,
-            executionMode: agent.executionMode,
-          };
-        }),
-    );
+    const serverAgents = agents.filter((agent) => agent.serverId === serverId);
+    const activities = await agentOrchestrator.getActivities(serverAgents, { parent: getCurrentTraceContext() });
+    const enriched = serverAgents.map((agent, index) => {
+      const { activity, activityDetail } = activities[index]!;
+      return {
+        id: agent.id,
+        name: agent.name,
+        displayName: agent.displayName,
+        avatarUrl: agent.avatarUrl,
+        description: agent.description,
+        status: agent.status,
+        activity,
+        activityDetail,
+        model: agent.model,
+        runtime: agent.runtime,
+        executionMode: agent.executionMode,
+      };
+    });
 
     res.json(enriched);
   } catch {
@@ -1895,7 +1929,9 @@ internalRouter.post("/machine/scope-attestation", async (req, res) => {
     // machine_evidence binds an agent; it must be an agent of THIS server
     // that runs on THIS (credential-derived) machine.
     if (
-      (metadata?.feedbackAttachmentKind === "machine_evidence" || metadata?.feedbackAttachmentKind === "transcript_outcome")
+      (metadata?.feedbackAttachmentKind === "machine_evidence"
+        || metadata?.feedbackAttachmentKind === "transcript_outcome"
+        || metadata?.feedbackAttachmentKind === "agent_event_tail")
       && !(await isAgentBoundToMachine(String(metadata.agentId), { serverId: server.id, machineId: machine.id }))
     ) {
       addTraceEvent("response.ready", { status_code: 403, surface: "machine", scope, reason: "machine_evidence_agent_not_bound" });
@@ -2065,6 +2101,7 @@ async function listRecentFreshnessMessagesAfterSeq(
     {
       forwardedBundleViewerAgentId: agentId,
       forwardedBundleViewerServerId: agentServerId,
+      includeSenderTimezone: true,
     },
   );
   if (recentMessages.length === 0) return [];
@@ -2751,6 +2788,7 @@ internalRouter.post("/agent/:id/messages/:messageId/reactions", requireAgentScop
     const context = await messageService.getMessageContext(message.id, 0, 0, undefined, {
       forwardedBundleViewerAgentId: agent.id,
       forwardedBundleViewerServerId: agent.serverId,
+      includeSenderTimezone: true,
     });
     const enriched = context?.messages[0];
     if (!enriched) {
@@ -2829,6 +2867,7 @@ internalRouter.delete("/agent/:id/messages/:messageId/reactions", requireAgentSc
     const context = await messageService.getMessageContext(message.id, 0, 0, undefined, {
       forwardedBundleViewerAgentId: agent.id,
       forwardedBundleViewerServerId: agent.serverId,
+      includeSenderTimezone: true,
     });
     const enriched = context?.messages[0];
     if (!enriched) {
@@ -3222,6 +3261,7 @@ internalRouter.get("/agent/:id/history", requireAgentScope("message:read"), asyn
         {
           forwardedBundleViewerAgentId: agent.id,
           forwardedBundleViewerServerId: agent.serverId,
+          includeSenderTimezone: true,
         },
       );
       if (!context || context.channelId !== storageChannelId) {
@@ -3236,6 +3276,7 @@ internalRouter.get("/agent/:id/history", requireAgentScope("message:read"), asyn
       msgs = await messageService.listMessages(storageChannelId, limit + 1, beforeSeq, afterSeq, historyCutoff, {
         forwardedBundleViewerAgentId: agent.id,
         forwardedBundleViewerServerId: agent.serverId,
+        includeSenderTimezone: true,
       });
     }
 
@@ -3866,11 +3907,12 @@ internalRouter.get("/agent/:id/channel-members", requireAgentScope("channel:read
     }
 
     const members = await channelService.getChannelMembers(ctx.channelId);
-    const visibleAgents = await Promise.all(members.agents.map(async (a) => ({
+    const agentRoles = await getAgentServerRolesInServer(ctx.agent.serverId, members.agents.map((a) => a.id));
+    const visibleAgents = members.agents.map((a) => ({
       name: a.name,
       status: a.status,
-      role: await getActorServerRoleInServer(ctx.agent.serverId, "agent", a.id),
-    })));
+      role: agentRoles.get(a.id) ?? null,
+    }));
     const visibleHumans = await filterAgentVisibleHumansForHiddenDirectory(
       ctx.agent.serverId,
       ctx.agent.id,
@@ -3879,7 +3921,10 @@ internalRouter.get("/agent/:id/channel-members", requireAgentScope("channel:read
     res.json({
       channel: { ref: channelRef, type: ctx.channelType },
       agents: visibleAgents,
-      humans: visibleHumans.map((u) => ({ name: u.name, description: u.description, role: u.role })),
+      humans: visibleHumans.map((u) => {
+        const servers = channelService.agentVisibleMemberServers(u, ctx.agent.serverId);
+        return { name: u.name, description: u.description, role: u.role, ...(servers ? { servers } : {}) };
+      }),
     });
   } catch (err) {
     sendJsonServerError(req, res, {

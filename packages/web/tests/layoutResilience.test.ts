@@ -13,20 +13,30 @@ test("agent detail diagnostic text cannot squeeze identity or actions", () => {
   assert.match(source, /<Tooltip content=\{activityText\}><span className="min-w-0 truncate text-sm text-foreground-muted theme-brutal:text-black\/60 font-mono">/);
   // The description lives only in the Profile tab body; the top bar never repeats it.
   assert.doesNotMatch(source, /subtitle=\{[^}]*agent\.description/);
-  assert.match(source, /titleClickProps=\{\{ title: agent\.displayName \|\| agent\.name \}\}/);
+  assert.match(source, /const headerTitle = agent\.displayName \|\| agent\.name;/);
+  assert.match(source, /const titleClickProps = useMemo\(\(\) => \(\{ title: headerTitle \}\), \[headerTitle\]\);/);
+  assert.match(source, /titleClickProps=\{titleClickProps\}/);
   assert.match(source, /titleSuffix=\{\s*isDeleted \? \(/);
   assert.match(source, /<Tooltip content=\{startError\}><span className="min-w-0 flex-1 truncate text-sm font-bold text-foreground-strong theme-brutal:text-black">/);
   assert.match(source, /const hasRuntimeError = activityState\?\.activity === "error" \|\| Boolean\(agent\.lastRuntimeError\);/);
-  assert.match(source, /const activityErrorText = runtimeErrorKind\s*\?\s*formatMessage\(\{ id: RUNTIME_ERROR_LABEL_ID\[runtimeErrorKind\] \}\)\s*:\s*hasRuntimeError\s*\?\s*formatActivityText\(formatMessage, "error", rawRuntimeError\)\s*:\s*formatMessage\(\{ id: "activity\.status\.agentErrorFallback" \}\)/);
+  // task #735: the error text deliberately gained a lookup-reason arm in front of
+  // the catalog/fallback chain (only a confirmed miss keeps the install copy);
+  // this pin tracks the new shape — update it consciously, never silently.
+  assert.match(source, /const activityErrorText = startLookupDisplay && startLookupDisplay !== "confirmed_missing"\s*\?\s*formatMessage\(\s*\{ id: RUNTIME_LOOKUP_DISPLAY_MESSAGE_ID\[startLookupDisplay\] \},\s*\{ runtimeName: getRuntimeDisplayName\(agent\.runtime\) \},\s*\)\s*:\s*runtimeErrorKind\s*\?\s*formatMessage\(\{ id: RUNTIME_ERROR_LABEL_ID\[runtimeErrorKind\] \}\)\s*:\s*hasRuntimeError\s*\?\s*formatActivityText\(formatMessage, "error", rawRuntimeError\)\s*:\s*formatMessage\(\{ id: "activity\.status\.agentErrorFallback" \}\)/);
   assert.match(source, /const diagnosticErrorMessage = hasRuntimeError && canViewPrivateAgentSurfaces/);
   assert.match(source, /<Tooltip content=\{canViewPrivateAgentSurfaces \? activityErrorText : activityFallbackErrorText\}><span className="min-w-0 flex-1 line-clamp-2 break-words text-sm font-bold leading-snug text-foreground-strong theme-brutal:text-black">/);
   assert.match(source, /<div className="flex shrink-0 flex-wrap items-center justify-end gap-x-3 gap-y-1">/);
   // Header identity: the name row holds only the name (and its edit pencil); live
   // activity has its own line under the handle, so it can never squeeze the name.
-  assert.match(source, /<div className="min-w-0 flex-1">\s*<div className="flex min-w-0 items-center gap-2">\s*<AgentHeaderName\s+agent=\{agent\}\s+onEdit=\{canManageAgent && !agent\.deletedAt \? \(\) => setEditField\("displayName"\) : undefined\}\s*\/>\s*<\/div>/);
-  assert.match(source, /<div className="min-w-0 truncate text-lg font-bold leading-tight text-foreground-strong">\{agent\.displayName \|\| agent\.name\}<\/div>/);
+  assert.match(source, /<div className="min-w-0 flex-1">\s*<div className="flex min-w-0 items-center gap-2">\s*<AgentHeaderName\s+agent=\{agent\}\s+onEdit=\{canManageAgent && !agent\.deletedAt \? editDisplayName : undefined\}\s*\/>\s*<\/div>/);
+  assert.match(source, /const editDisplayName = useCallback\(\(\) => setEditField\("displayName"\), \[\]\);/);
+  // #737 (cindyz/gzj): the identity name renders through PanelTitle — one spec
+  // source with the header title; update this pin consciously if it moves again.
+  assert.match(source, /<PanelTitle className="min-w-0 text-foreground-muted theme-brutal:text-black theme-brutal:text-lg">\{agent\.displayName \|\| agent\.name\}<\/PanelTitle>/);
   assert.match(source, /title=\{`@\$\{agent\.name\}`\}>@\{agent\.name\}<\/div>\s*\{\/\* Live activity has its own line under the handle, so it never squeezes the name\. \*\/\}\s*\{!agent\.deletedAt && \(\s*<div className="mt-1 min-w-0">\s*<AgentStatusBadge agentId=\{agent\.id\}/);
-  assert.match(source, /<div className="truncate text-sm text-foreground-muted font-mono" title=\{`@\$\{agent\.name\}`\}>@\{agent\.name\}<\/div>/);
+  // #737: the body handle carries the shared size tier (PROFILE_HANDLE_SIZE_CLASS).
+  assert.match(source, /className=\{`truncate text-sm \$\{PROFILE_HANDLE_SIZE_CLASS\} text-foreground-placeholder theme-brutal:text-foreground-muted font-mono`\}/);
+  assert.match(source, /title=\{`@\$\{agent\.name\}`\}>@\{agent\.name\}<\/div>/);
 });
 
 test("activity log status rows contain long error details inside a shrinkable lane", () => {
@@ -46,11 +56,26 @@ test("activity log status rows contain long error details inside a shrinkable la
 
 test("adjacent identity headers keep names shrinkable and status/action affordances fixed", () => {
   const chatPanel = read("src/components/message/ChatPanel.tsx");
-  const machinePanel = read("src/components/machine/MachineDetailPanel.tsx");
-  const humanPanel = read("src/components/member/HumanDetailPanel.tsx");
+  const machinePanel = [
+    read("src/components/machine/MachineDetailPanel.tsx"),
+    read("src/components/machine/CommandCopyRoot.tsx"),
+    read("src/components/machine/WorkspaceDeleteButton.tsx"),
+    read("src/components/machine/BulkResetOptionCard.tsx"),
+    read("src/components/machine/MachineAgentRow.tsx"),
+  ].join("\n");
+  const humanPanel = [
+    read("src/components/member/HumanDetailPanel.tsx"),
+    read("src/components/member/CreatedAgentRow.tsx"),
+  ].join("\n");
 
-  assert.match(chatPanel, /<Tooltip content=\{activityText\}>\s*<span\s+className="min-w-0 truncate text-sm text-foreground-muted font-mono"\s*>/);
-  assert.match(chatPanel, /<Tooltip content=\{displayName\}><span className="min-w-0 (?:flex-1 )?truncate font-bold text-foreground-strong text-base leading-tight">\{displayName\}<\/span><\/Tooltip>/);
+  // task #743: the activity text starts at zero width and grows only up to its
+  // content (flex-1 max-w-fit), so it yields before the name without the
+  // name sharing a proportional shrink — and the status dot stays in the row.
+  assert.match(chatPanel, /<Tooltip content=\{activityText\}>\s*<span\s+className="min-w-0 flex-1 max-w-fit truncate text-sm text-foreground-muted font-mono"\s*>/);
+  // #737 follow-up (cindyz/gzj 2026-10-10): DM titles use PanelTitle like the
+  // channel / thread / profile headers — the same name must read the same in
+  // every surface. Update this pin consciously if the markup moves again.
+  assert.match(chatPanel, /<Tooltip content=\{displayName\}><PanelTitle render=\{<span className="min-w-0 (?:flex-1 )?truncate" \/>\}>\{displayName\}<\/PanelTitle><\/Tooltip>/);
   assert.match(chatPanel, /title=\{isRegularChannel \? channel\.name : undefined\}/);
   assert.match(
     chatPanel,
@@ -58,12 +83,16 @@ test("adjacent identity headers keep names shrinkable and status/action affordan
   );
   assert.match(chatPanel, /subtitle=\{channelSubtitle\}/);
 
-  assert.match(machinePanel, /<div className="min-w-0 truncate text-lg font-bold leading-tight text-foreground-strong theme-brutal:text-black">\{machine\.name\}<\/div>/);
+  // #737 colour pass: the computer profile name renders through PanelTitle
+  // (muted + 600 on the 17 line); brutal keeps 18/700 via the guard.
+  assert.match(machinePanel, /<PanelTitle className="min-w-0 text-foreground-muted theme-brutal:text-black theme-brutal:text-lg">\{machine\.name\}<\/PanelTitle>/);
   assert.match(machinePanel, /<div className="truncate text-sm text-foreground-muted theme-brutal:text-black\/50 font-mono">\{machine\.hostname\}<\/div>/);
   assert.match(machinePanel, /<Tooltip content=\{activityText\}><span\s+className="hidden max-w-\[min\(32rem,42vw\)\] truncate align-middle text-xs font-mono text-foreground-muted theme-brutal:text-black\/50 sm:inline-block"\s*>/);
 
+  // #737: human profile name renders through PanelTitle (same spec source as the
+  // header title); update consciously.
   const humanNameHeaderIdx = humanPanel.search(
-    /<div\s+className="min-w-0 truncate text-lg font-bold leading-tight text-foreground-strong theme-brutal:text-black"\s*>\s*\{human\.displayName \|\| human\.name\}\s*<\/div>/,
+    /<PanelTitle className="min-w-0 text-foreground-muted theme-brutal:text-black theme-brutal:text-lg">\{human\.displayName \|\| human\.name\}<\/PanelTitle>/,
   );
   assert.ok(humanNameHeaderIdx >= 0, "human profile shrinkable name header anchor not found");
   assert.match(humanPanel, /className="inline-flex shrink-0 items-center px-1\.5 py-0\.5 text-\[10px\] font-bold uppercase border border-line-muted theme-brutal:border-black bg-gray-300 text-foreground-muted theme-brutal:text-black\/60"/);

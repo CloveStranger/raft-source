@@ -90,19 +90,15 @@ test("applyCapturedEnv omission cannot resurrect protected keys the parent never
   assert.equal(target.SLOCK_HOME, "/home");
 });
 
-test("protected key set is the explicit seven-key closed set (review H2)", () => {
+test("protected key set is the explicit six-key closed set (review H2)", () => {
   assert.deepEqual([...SHELL_ENV_PROTECTED_KEYS].sort(), [
     "RAFT_COMPUTER_CLI_PATH",
-    "RAFT_COMPUTER_OS_SUPERVISOR_KIND",
     "RAFT_COMPUTER_PARENT_MUTATION_LOCK_HELD",
     "RAFT_COMPUTER_SOURCE_SERVICE_PID",
     "RAFT_COMPUTER_SUPERVISOR_OWNER",
     "RAFT_HOME",
     "SLOCK_HOME",
   ]);
-  // S1: the protected kind key is THE canonical lifecycle key, byte-equal —
-  // pinning a phantom name here is exactly the bypass Sora caught.
-  assert.ok(SHELL_ENV_PROTECTED_KEYS.includes("RAFT_COMPUTER_OS_SUPERVISOR_KIND" as never));
 });
 
 // ---------------------------------------------------------------------------
@@ -330,6 +326,33 @@ test("bootstrapThenRun: double-forwarded name is stripped before the CLI parses"
   assert.deepEqual(argvAtCliRun, ["/exec", slot, "restart"]);
 });
 
+test("bootstrapThenRun: `__cli` runs only the bundled agent CLI, never the Computer CLI graph or env capture", async () => {
+  const argv = ["/exec", "/slots/stable/artifact.bin", "__cli", "task", "list"];
+  let cliGraphImported = false;
+  let captured = false;
+  let bundledArgv: string[] | null = null;
+  await bootstrapThenRun(
+    argv,
+    {},
+    async () => {
+      captured = true;
+      return { kind: "inherited" } as never;
+    },
+    async () => {
+      cliGraphImported = true;
+      return { runCliAsMain: () => {} };
+    },
+    () => {},
+    () => false,
+    async (cliArgv) => { bundledArgv = cliArgv; },
+  );
+  assert.deepEqual(bundledArgv, ["task", "list"]);
+  // The whole point: an agent `raft` call must not pay for the Computer CLI
+  // graph (and through it the daemon core) — that doubled its memory.
+  assert.equal(cliGraphImported, false);
+  assert.equal(captured, false);
+});
+
 test("bootstrapThenRun: foreground path never captures and the CLI graph sees inherited env", async () => {
   const probePath = await freshCliProbe();
   const before = process.env.B1_ORDER_SENTINEL;
@@ -471,8 +494,8 @@ test("bootstrapThenRun: hostile ambient manager env cannot swallow foreground or
       assert.equal(importCalls, 1, `${kind} ${argv.join(" ")} must reach CLI import`);
       assert.equal(runCalls, 1, `${kind} ${argv.join(" ")} must run the normal CLI path`);
       assert.equal(diagnostics.length, 0, "ambient env must not emit retired-entry diagnostics");
-      if (!argv.includes("__service") || kind === "windows-task")
-        assert.equal(captureCalls, 0);
+      // A stale supervisor kind is ignored: only the argv decides.
+      if (!argv.includes("__service")) assert.equal(captureCalls, 0);
     }
   }
 });
@@ -630,7 +653,7 @@ test("non-POSIX platform is a typed failure before any spawn", async () => {
 // Bootstrap gate (review H1) + outcome recording (review B3, softened gate).
 // ---------------------------------------------------------------------------
 
-test("bootstrap captures for supervised and unsupervised POSIX service argv only", async () => {
+test("bootstrap captures for login-carrier and detached POSIX service argv only", async () => {
   let captureCalls = 0;
   const capture = async () => {
     captureCalls += 1;
@@ -639,21 +662,12 @@ test("bootstrap captures for supervised and unsupervised POSIX service argv only
   // Not a service boot → skipped, env untouched (foreground H1 cell).
   const fg: NodeJS.ProcessEnv = { KEEP: "1" };
   assert.equal(await bootstrapServiceEnv(["node", "x", "start", "--foreground"], fg, capture, "linux"), "skipped");
-  // Windows task kind → skipped.
-  const win: NodeJS.ProcessEnv = { RAFT_COMPUTER_OS_SUPERVISOR_KIND: "windows-task" };
-  assert.equal(await bootstrapServiceEnv(["node", "x", "__service"], win, capture, "win32"), "skipped");
   // Unsupervised (CLI-detached) service on Windows → skipped, not unavailable.
   const winDetached: NodeJS.ProcessEnv = { KEEP: "1" };
   assert.equal(await bootstrapServiceEnv(["node", "x", "__service"], winDetached, capture, "win32"), "skipped");
   // Unsupervised service with the explicit opt-out → skipped.
   const optOut: NodeJS.ProcessEnv = { KEEP: "1", RAFT_COMPUTER_SHELL_ENV_IMPORT: "0" };
   assert.equal(await bootstrapServiceEnv(["node", "x", "__service"], optOut, capture, "linux"), "skipped");
-  // An unknown supervisor kind is not treated as unsupervised.
-  const unknownKind: NodeJS.ProcessEnv = { KEEP: "1" };
-  assert.equal(
-    await bootstrapServiceEnv(["node", "x", "__service", "--os-supervised", "invalid-test-kind"], unknownKind, capture, "linux"),
-    "skipped",
-  );
   assert.equal(captureCalls, 0);
   assert.equal(fg.KEEP, "1");
   assert.equal(winDetached.KEEP, "1");
@@ -669,7 +683,10 @@ test("bootstrap captures for supervised and unsupervised POSIX service argv only
     assert.equal(detached.KEEP, undefined, "replace-not-merge applies to unsupervised boots too");
     assert.equal(detached.RAFT_COMPUTER_SHELL_ENV_STATE, "inherited");
   }
-  assert.equal(captureCalls, 2);
+  // The deprecated supervisor kind no longer gates capture either way.
+  const staleKind: NodeJS.ProcessEnv = { RAFT_COMPUTER_OS_SUPERVISOR_KIND: "windows-task" };
+  assert.equal(await bootstrapServiceEnv(["node", "x", "__service"], staleKind, capture, "linux"), "inherited");
+  assert.equal(captureCalls, 3);
 });
 
 test("unsupervised capture keeps the detached-spawn control keys the parent set", async () => {

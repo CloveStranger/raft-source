@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useIntl } from "react-intl";
 import { Button } from "raft-ui";
 import api from "../api/client";
@@ -66,12 +66,12 @@ export default function AppLoginPage() {
     return () => { cancelled = true; };
   }, [requestId]);
 
-  function returnToApp(redirectUrl: string) {
+  const returnToApp = useCallback((redirectUrl: string) => {
     setState({ kind: "returned", redirectUrl });
     appLoginRedirect.assign(redirectUrl);
-  }
+  }, []);
 
-  async function resolve(action: "approve" | "deny") {
+  const resolve = useCallback(async (action: "approve" | "deny") => {
     setSubmitting(true);
     try {
       const { data } = await api.post(`/auth/app-login/requests/${encodeURIComponent(requestId)}/${action}`);
@@ -81,7 +81,22 @@ export default function AppLoginPage() {
     } finally {
       setSubmitting(false);
     }
-  }
+  }, [requestId, returnToApp]);
+
+  const redirectUrl = state.kind === "returned" || state.kind === "unusable" ? state.redirectUrl : undefined;
+  const openApp = useCallback(() => {
+    if (redirectUrl) appLoginRedirect.assign(redirectUrl);
+  }, [redirectUrl]);
+  const backToApp = useCallback(() => {
+    if (redirectUrl) returnToApp(redirectUrl);
+  }, [redirectUrl, returnToApp]);
+  const approve = useCallback(() => {
+    void resolve("approve");
+  }, [resolve]);
+  const deny = useCallback(() => {
+    void resolve("deny");
+  }, [resolve]);
+  const handleUseAnotherAccount = useCallback(() => logout(), [logout]);
 
   if (state.kind === "returned") {
     return (
@@ -95,7 +110,7 @@ export default function AppLoginPage() {
               runs after an async request; a tap here is a fresh user gesture. */}
           <Button
             type="button"
-            onClick={() => appLoginRedirect.assign(state.redirectUrl)}
+            onClick={openApp}
             size="md"
             variant="accent"
             className="w-full"
@@ -109,14 +124,13 @@ export default function AppLoginPage() {
   }
 
   if (state.kind === "unusable") {
-    const redirectUrl = state.redirectUrl;
     return (
       <AuthPageFrame>
         <div className="w-full" data-testid="app-login-unusable">
           <AuthPageIntro title={formatMessage({ id: "pages.appLogin.title" })} />
           <Banner intent="warning" className="mb-4 font-bold">{formatMessage({ id: state.messageId })}</Banner>
           {redirectUrl ? (
-            <Button type="button" onClick={() => returnToApp(redirectUrl)} size="md" variant="outline" className="w-full">
+            <Button type="button" onClick={backToApp} size="md" variant="outline" className="w-full">
               {formatMessage({ id: "pages.appLogin.backToApp" })}
             </Button>
           ) : null}
@@ -134,7 +148,7 @@ export default function AppLoginPage() {
         />
         <Button
           type="button"
-          onClick={() => void resolve("approve")}
+          onClick={approve}
           disabled={state.kind !== "ready" || submitting}
           size="md"
           variant="accent"
@@ -145,7 +159,7 @@ export default function AppLoginPage() {
         </Button>
         <Button
           type="button"
-          onClick={() => logout()}
+          onClick={handleUseAnotherAccount}
           disabled={submitting}
           size="md"
           variant="outline"
@@ -155,7 +169,7 @@ export default function AppLoginPage() {
         </Button>
         <Button
           type="button"
-          onClick={() => void resolve("deny")}
+          onClick={deny}
           disabled={state.kind !== "ready" || submitting}
           size="md"
           variant="ghost"

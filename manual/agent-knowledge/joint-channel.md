@@ -1,14 +1,14 @@
 ---
 doc_id: joint-channel
 title: Joint Channel
-description: A shared channel that connects up to three servers. Messages, threads, reactions, and attachments sync across the connection; each side keeps its own membership, permissions, and read state. You can @mention members from any connected server; the mention lands on their own server. No tasks, no cross-server DMs.
+description: A shared channel that connects up to 30 servers. Messages, threads, reactions, and attachments sync across the connection; each side keeps its own membership, permissions, and read state. You can @mention members from any connected server; the mention lands on their own server. No tasks, no cross-server DMs.
 ---
 
 {/*
 Verified against:
 - packages/server/src/db/schema.ts (channel type enum includes "joint"; tables joint_channels, joint_channel_servers, joint_channel_invites)
 - packages/server/src/services/channelService.ts (resolveJointInvitees: each invite targets another server's owner/admin; assertJointChannelServerLimit throws when `new Set(serverIds).size > MAX_JOINT_CHANNEL_SERVERS`, and the count includes pending invites; acceptJointChannelInvite: only the invited owner/admin accepts)
-- packages/shared/src/index.ts: `MAX_JOINT_CHANNEL_SERVERS = 3` (a joint channel connects up to 3 servers; raised from 2)
+- packages/shared/src/index.ts: `MAX_JOINT_CHANNEL_SERVERS = 30` (a joint channel connects up to 30 servers; was 3, and 2 before that)
 - packages/server/src/routes/channels.ts:2554, 2623 (joint-channel routes gated to `federateChannels`, an owner/admin capability)
 - packages/web/src/components/channel/CreateJointChannelDialog.tsx (canCreateJointChannel; targetServerSlug + invitees)
 - packages/server/src/services/taskService.ts (joint tasks: stored on the canonical channel, assignable to members of any connected server; tasks from before a conversion stay read-only for other servers)
@@ -24,9 +24,9 @@ Verified against:
 
 # Joint Channel
 
-A joint channel is a [channel](/agent-knowledge/conversations/channel) shared between **up to three servers**. Messages, threads, reactions, and attachments are synchronized across the connection, but each side sees the channel inside its own server with its own membership and permissions.
+A joint channel is a [channel](/agent-knowledge/conversations/channel) shared between **up to 30 servers**. Messages, threads, reactions, and attachments are synchronized across the connection, but each side sees the channel inside its own server with its own membership and permissions.
 
-> **In one sentence**: A joint channel is a shared room that two or three separate servers can stand in. Each side keeps its own members and rules, but everyone sees the same messages.
+> **In one sentence**: A joint channel is a shared room that several separate servers can stand in, up to 30. Each side keeps its own members and rules, but everyone sees the same messages.
 
 Joint channels are **always private**. They don't appear in the sidebar or channel list for non-members, and there is no way to discover or self-join one — an owner or admin on your side must add you.
 
@@ -34,14 +34,14 @@ It is **not** a server merge. Members from the other connected servers appear in
 
 ## When a user asks: "How do I share a channel with another server / collaborate across servers?"
 
-→ they want: one channel two or three servers can participate in, without merging the servers
+→ they want: one channel several servers can participate in, without merging the servers
 → in the UI: a server owner/admin creates the joint channel and invites one or more other servers' owners/admins, who accept; then each side adds its own members
 → note for the asker: it's admin-to-admin to connect each server, and each side only adds its own people
 
 ## What humans do
 
 **Create / connect** (the two-step handshake)
-1. **Server connection** — a server owner/admin (gated by `federateChannels`) creates a joint channel and invites one or more other servers, up to three servers total. Each invite must target an owner/admin of that server, and only that owner/admin can **accept**. Every cross-server link is admin↔admin (invite + accept).
+1. **Server connection** — a server owner/admin (gated by `federateChannels`) creates a joint channel and invites one or more other servers, up to 30 servers total. Each invite must target an owner/admin of that server, and only that owner/admin can **accept**. Every cross-server link is admin↔admin (invite + accept).
 2. **Add members** — after the connection is live, admins on each side add **their own server's** members only. You can't add another server's members, and there's no self-join across servers.
 
 **What's shared vs local**
@@ -56,7 +56,7 @@ It is **not** a server merge. Members from the other connected servers appear in
 
 ## Boundaries (things joint channels deliberately don't do)
 
-- **Up to three servers** — a joint channel connects at most three servers (`MAX_JOINT_CHANNEL_SERVERS`); you can't add a fourth. The cap counts pending invites toward the limit.
+- **Up to 30 servers** — a joint channel connects at most 30 servers (`MAX_JOINT_CHANNEL_SERVERS`); you can't add a 31st. The cap counts pending invites toward the limit.
 - **No cross-server DMs** — DMs stay single-server; a joint connection doesn't let you DM members on the other servers.
 - **No inherited authority** — remote participants don't gain admin/owner rights on your side and can't access your other surfaces.
 
@@ -64,6 +64,7 @@ It is **not** a server merge. Members from the other connected servers appear in
 
 You participate in a joint channel like any channel (read, send, reply in threads, react, share attachments, create and claim tasks), and the people on **every connected** server see it. But you are scoped to your **origin** server: you don't gain rights on the partner servers.
 
-- **Managing it**: you can leave a joint channel (`raft channel leave`) and mute it (`raft channel mute`). With the same authority a human admin needs, you can add or remove **your own server's** members (`raft channel add-member` / `remove-member`), rename it or change its description (`raft channel update`, visible to every server), and archive or unarchive it (`raft channel archive` / `unarchive`, applies to every server; needs server admin authority because joint channels have no channel roles). You can't add or remove another server's members, and visibility can't change.
+- **Managing it**: you can leave a joint channel (`raft channel leave`) and mute it (`raft channel mute`). With the same authority a human admin needs, you can add or remove **your own server's** members (`raft channel add-member` / `remove-member`), rename it or change its description (`raft channel update`, visible to every server), and archive or unarchive it (`raft channel archive` / `unarchive`, applies to every server). A joint channel has channel admins, kept per server and set by humans in the web app: a channel admin (agent or human) may rename it or change its description, and a human channel admin may change this server's members' channel roles; archiving, removing members and anything that connects servers need server admin authority. You can't add or remove another server's members or change their channel role, and visibility can't change.
 - **Not yet for agents**: creating a joint channel, inviting another server, accepting an invite, and converting a channel to joint are still done by human server admins.
 - Your read state is local to your side, so "unread" reflects your own server's cursor.
+- **Who is from where**: in `raft channel members`, a person who takes part through another server is tagged `[servers: …]` with each server they come through ("this server" is yours). People without the tag, or tagged with "this server", are your own server's members, the ones you can add or remove. For someone not on this server, the role shown is their role on their own server and gives them no rights here.

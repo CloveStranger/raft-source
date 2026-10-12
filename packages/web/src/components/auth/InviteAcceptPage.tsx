@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useCallback, useState, useEffect } from "react";
 import { useIntl } from "react-intl";
 import type { IntlShape } from "react-intl";
 import type { MessageId } from "../../i18n/messages";
@@ -127,7 +127,7 @@ export default function InviteAcceptPage({
     loadInfo();
   }, [token]);
 
-  const handleAccept = async (agreementId?: string | null) => {
+  const handleAccept = useCallback(async (agreementId?: string | null) => {
     setAccepting(true);
     setError("");
     setErrorId(null);
@@ -168,9 +168,9 @@ export default function InviteAcceptPage({
     } finally {
       setAccepting(false);
     }
-  };
+  }, [token, acceptInvite, loadServers, setCurrent, navigate, onInviteConsumed]);
 
-  const handleContinue = () => {
+  const handleContinue = useCallback(() => {
     const joinedServer = useServerStore.getState().servers.find((server) => server.id === acceptedServerId);
     if (joinedServer) {
       setCurrent(joinedServer);
@@ -178,7 +178,29 @@ export default function InviteAcceptPage({
       return;
     }
     window.location.reload();
-  };
+  }, [acceptedServerId, setCurrent, navigate]);
+
+  const handleJoin = useCallback(() => {
+    void handleAccept(inviteInfo?.agreement?.id);
+  }, [inviteInfo, handleAccept]);
+
+  const handleSignIn = useCallback(() => {
+    // Store invite token for after login, then clear URL and switch view
+    storePendingInvite(token);
+    clearInviteUrl();
+    onSwitchToLogin();
+  }, [token, onSwitchToLogin]);
+
+  const handleCreateAccount = useCallback(() => {
+    storePendingInvite(token);
+    clearInviteUrl();
+    onSwitchToRegister();
+  }, [token, onSwitchToRegister]);
+
+  const handleReload = useCallback(() => {
+    clearInviteUrl();
+    window.location.reload();
+  }, []);
 
   if (loadingInfo) {
     return (
@@ -283,7 +305,7 @@ export default function InviteAcceptPage({
 
         {user && inviteInfo && !errorText && !humanSeatLimitReached && (
           <Button
-            onClick={() => void handleAccept(inviteInfo.agreement?.id)}
+            onClick={handleJoin}
             disabled={accepting}
             size="lg"
             variant="accent"
@@ -301,12 +323,7 @@ export default function InviteAcceptPage({
               {formatMessage({ id: "pages.invite.signInPrompt" })}
             </p>
             <Button
-              onClick={() => {
-                // Store invite token for after login, then clear URL and switch view
-                storePendingInvite(token);
-                clearInviteUrl();
-                onSwitchToLogin();
-              }}
+              onClick={handleSignIn}
               size="lg"
               variant="accent"
               className="w-full"
@@ -317,11 +334,7 @@ export default function InviteAcceptPage({
             <Button size="sm"
               variant="outline"
               className="w-full"
-              onClick={() => {
-                storePendingInvite(token);
-                clearInviteUrl();
-                onSwitchToRegister();
-              }}
+              onClick={handleCreateAccount}
             >
               <UserPlus size={14} />
               {formatMessage({ id: "pages.invite.createAccount" })}
@@ -333,10 +346,7 @@ export default function InviteAcceptPage({
           <Button size="sm"
             variant="outline"
             className="w-full"
-            onClick={() => {
-              clearInviteUrl();
-              window.location.reload();
-            }}
+            onClick={handleReload}
           >
             <ArrowLeft size={16} />
             {formatMessage({ id: "pages.invite.goToRaft" })}

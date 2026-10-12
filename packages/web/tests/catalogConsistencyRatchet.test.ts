@@ -66,7 +66,9 @@ const zh = zhMessages as Record<string, string>;
  * completion. @AngLee reviewed that evidence and ruled the two must stay
  * distinct, so the value went back to 已完善 and the row was added HERE. The
  * ratchet was never silenced to make the build green; it went red, a copy owner
- * ruled, and the ruling is what opened the table.
+ * ruled, and the ruling is what opened the table. The row left again on
+ * 2026-10-09 when the migration panel dropped its Complete badge and retired
+ * `agent.detail.migrationComplete`, so the drift no longer exists.
  */
 const KNOWN_DRIFT: ReadonlyArray<readonly [string, readonly string[]]> = [
   ["Back", ["上一步", "返回"]],
@@ -81,7 +83,6 @@ const KNOWN_DRIFT: ReadonlyArray<readonly [string, readonly string[]]> = [
   ["Restart", ["重启", "重新启动"]],
   ["Full Reset & Restart", ["完全重置并重启", "完整重置并重启"]],
   ["Clear All", ["清空选择", "清除筛选"]],
-  ["Complete", ["已完善", "已完成"]],
   ["From", ["发送者", "来自"]],
   // @Cat 2026-09-24, #proj-uiux:9c7fb599 bfe8f8b0: externalIdentity.kind.human
   // is a participant TYPE (人类), not a server member. composer.actorType.human

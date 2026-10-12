@@ -154,7 +154,7 @@ export default function NotificationActivationBanner({
     });
   }, [permission, visible]);
 
-  const handleEnable = async () => {
+  const handleEnable = useCallback(async () => {
     const permissionBefore = getPushPermissionState();
     setBusy(true);
     setErrorId(null);
@@ -194,13 +194,13 @@ export default function NotificationActivationBanner({
 
     setPermission(permissionAfter);
     setBusy(false);
-  };
+  }, []);
 
-  const handleDismiss = () => {
+  const handleDismiss = useCallback(() => {
     rememberDismissalForSession();
     setErrorId(null);
     setConfirmingDismissal(true);
-  };
+  }, []);
 
   if (!visible) return null;
 
@@ -250,7 +250,7 @@ export default function NotificationActivationBanner({
         size="sm"
         variant="accent"
         disabled={busy}
-        onClick={() => void handleEnable()}
+        onClick={handleEnable}
       >
         {formatMessage({ id: busy ? "message.notificationActivation.enabling" : "message.notificationActivation.enable" })}
       </Button>

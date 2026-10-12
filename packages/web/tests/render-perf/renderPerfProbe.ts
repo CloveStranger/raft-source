@@ -28,7 +28,6 @@ import {
   didFiberRender,
 } from "bippy";
 import type { Fiber, FiberRoot } from "bippy";
-import { hasDebugSource } from "bippy/source";
 
 declare global {
   interface Window {
@@ -122,15 +121,14 @@ function pushRawEvent(kind: string, data?: Record<string, unknown>): void {
 function fiberSource(fiber: Fiber): ComponentRenderRecord["source"] {
   // _debugSource is dev-only on React, but React 19 sometimes also populates
   // _debugStack — we don't try the heavier owner-stack path in v0 for cost.
-  if (hasDebugSource(fiber)) {
-    const s = fiber._debugSource;
-    if (s && typeof s.fileName === "string" && s.fileName) {
-      return {
-        fileName: s.fileName,
-        lineNumber: typeof s.lineNumber === "number" ? s.lineNumber : undefined,
-        columnNumber: typeof s.columnNumber === "number" ? s.columnNumber : undefined,
-      };
-    }
+  // bippy 0.7 dropped `hasDebugSource`; read the dev-only field directly.
+  const s = (fiber as { _debugSource?: { fileName?: unknown; lineNumber?: unknown; columnNumber?: unknown } | null })._debugSource;
+  if (s && typeof s.fileName === "string" && s.fileName) {
+    return {
+      fileName: s.fileName,
+      lineNumber: typeof s.lineNumber === "number" ? s.lineNumber : undefined,
+      columnNumber: typeof s.columnNumber === "number" ? s.columnNumber : undefined,
+    };
   }
   return null;
 }

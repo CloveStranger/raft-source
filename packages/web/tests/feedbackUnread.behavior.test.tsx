@@ -13,13 +13,10 @@ import { handsFeedbackTransport } from "../src/feedback/handsFeedbackTransport";
 import { LeftRail } from "../src/components/layout/LeftRail";
 import { MobileTabBar } from "../src/components/layout/MainLayout";
 import SettingsSidebarList from "../src/components/settings/SettingsSidebarList";
-import SettingsNavList from "../src/components/settings/SettingsNavList";
-import { useWorkspaceGridNavigationStore } from "../src/components/workspace/workspaceGridNavigationStore";
 import NotificationTrigger from "../src/components/layout/NotificationTrigger";
 import { TestIntlProvider } from "./helpers/intl";
 
 const originalMatchMedia = window.matchMedia;
-const originalWorkspace = useWorkspaceGridNavigationStore.getState();
 const originalGet = api.get;
 const originalUser = useAuthStore.getState().user;
 const originalServer = useServerStore.getState().current;
@@ -33,7 +30,6 @@ afterEach(() => {
   cleanup();
   window.matchMedia = originalMatchMedia;
   api.get = originalGet;
-  useWorkspaceGridNavigationStore.setState(originalWorkspace, true);
   useAuthStore.setState({ user: originalUser });
   useServerStore.setState({ current: originalServer });
 });
@@ -158,57 +154,52 @@ for (const flavor of ["rail-bottom", "mobile-navbar"] as const) {
   });
 }
 
-for (const workspace of [false, true]) {
-  test(`settings (${workspace ? "workspace" : "classic"}): entrances and feedback rows share unread until detail is read`, async () => {
-    user("alice");
-    useServerStore.setState({ current: { id: "server", slug: "botiverse", role: "member", plan: "free" } as Server });
-    useWorkspaceGridNavigationStore.setState({ active: workspace, enabled: workspace });
-    window.matchMedia = ((media: string) => ({
-      matches: false, media, onchange: null,
-      addListener() {}, removeListener() {}, addEventListener() {}, removeEventListener() {}, dispatchEvent() { return true; },
-    })) as typeof window.matchMedia;
-    let listCalls = 0;
-    let detailCalls = 0;
-    api.get = (async (url) => {
-      if (url === "/product-feedback/tickets") {
-        listCalls += 1;
-        return { data: { unread_total: 2 } };
-      }
-      if (String(url).startsWith("/product-feedback/tickets/")) {
-        detailCalls += 1;
-        return { data: {
-          ticket: { id: "ticket", kind: "feedback", status: "open", unread: false, unread_count: 0 },
-          comments: [], attachments: [], next_comment_cursor: null, unread_total: 0,
-        } };
-      }
-      return new Promise(() => {});
-    }) as typeof api.get;
-    let selected = "";
-    render(<MemoryRouter initialEntries={["/s/botiverse/"]}><TestIntlProvider>
-      <LeftRail side="left" />
-      <MobileTabBar />
-      <SettingsSidebarList activeId="account" groups={[{ label: "Settings", items: [
-        { id: "feedback", label: "Feedback", icon: null, testId: "feedback-row", onClick: () => { selected = "feedback"; } },
-        { id: "account", label: "Account", icon: null },
-      ] }]} />
-      <SettingsNavList activeTab="account" onSelect={(id) => { selected = id; }} />
-    </TestIntlProvider></MemoryRouter>);
-    const rail = screen.getByTestId(workspace ? "workspace-settings-trigger" : "left-rail-settings");
-    const indicator = () => rail.querySelector('[data-slot="app-rail-item-indicator"]');
-    await waitFor(() => assert.ok(indicator()));
-    assert.equal(screen.getAllByTestId("feedback-unread-dot").length, 3, "mobile tab + classic feedback row + workspace feedback row");
-    assert.equal(listCalls, 1, "settings and Bell retain one polling session");
-    fireEvent.click(screen.getByTestId("feedback-row"));
-    fireEvent.click(screen.getByTestId("workspace-settings-nav-feedback"));
-    assert.equal(selected, "feedback");
-    assert.equal(detailCalls, 0, "navigation alone never advances the read cursor");
-    assert.ok(indicator());
-    await act(async () => { await handsFeedbackTransport.getTicket({ ticketId: "ticket", commentLimit: 50 }); });
-    assert.ok(!indicator());
-    assert.equal(screen.queryAllByTestId("feedback-unread-dot").length, 0);
-    assert.equal(screen.getByTestId("notification-trigger-rail").getAttribute("data-has-unread"), "false");
-  });
-}
+test("settings: entrances and feedback rows share unread until detail is read", async () => {
+  user("alice");
+  useServerStore.setState({ current: { id: "server", slug: "botiverse", role: "member", plan: "free" } as Server });
+  window.matchMedia = ((media: string) => ({
+    matches: false, media, onchange: null,
+    addListener() {}, removeListener() {}, addEventListener() {}, removeEventListener() {}, dispatchEvent() { return true; },
+  })) as typeof window.matchMedia;
+  let listCalls = 0;
+  let detailCalls = 0;
+  api.get = (async (url) => {
+    if (url === "/product-feedback/tickets") {
+      listCalls += 1;
+      return { data: { unread_total: 2 } };
+    }
+    if (String(url).startsWith("/product-feedback/tickets/")) {
+      detailCalls += 1;
+      return { data: {
+        ticket: { id: "ticket", kind: "feedback", status: "open", unread: false, unread_count: 0 },
+        comments: [], attachments: [], next_comment_cursor: null, unread_total: 0,
+      } };
+    }
+    return new Promise(() => {});
+  }) as typeof api.get;
+  let selected = "";
+  render(<MemoryRouter initialEntries={["/s/botiverse/"]}><TestIntlProvider>
+    <LeftRail />
+    <MobileTabBar />
+    <SettingsSidebarList activeId="account" groups={[{ label: "Settings", items: [
+      { id: "feedback", label: "Feedback", icon: null, testId: "feedback-row", onClick: () => { selected = "feedback"; } },
+      { id: "account", label: "Account", icon: null },
+    ] }]} />
+  </TestIntlProvider></MemoryRouter>);
+  const rail = screen.getByTestId("left-rail-settings");
+  const indicator = () => rail.querySelector('[data-slot="app-rail-item-indicator"]');
+  await waitFor(() => assert.ok(indicator()));
+  assert.equal(screen.getAllByTestId("feedback-unread-dot").length, 2, "mobile tab + settings feedback row");
+  assert.equal(listCalls, 1, "settings and Bell retain one polling session");
+  fireEvent.click(screen.getByTestId("feedback-row"));
+  assert.equal(selected, "feedback");
+  assert.equal(detailCalls, 0, "navigation alone never advances the read cursor");
+  assert.ok(indicator());
+  await act(async () => { await handsFeedbackTransport.getTicket({ ticketId: "ticket", commentLimit: 50 }); });
+  assert.ok(!indicator());
+  assert.equal(screen.queryAllByTestId("feedback-unread-dot").length, 0);
+  assert.equal(screen.getByTestId("notification-trigger-rail").getAttribute("data-has-unread"), "false");
+});
 
 test("disabled feedback consumer does not fetch or expose another host's unread", async () => {
   user("alice");

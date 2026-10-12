@@ -1,9 +1,11 @@
+import { useRuntimeFormV2 } from "../src/hooks/useRuntimeFormV2";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, renderHook, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 
 import "./helpers/domSetup";
+import { openCombobox } from "./helpers/combobox";
 import { TestIntlProvider } from "./helpers/intl";
 import AgentDetailPanel from "../src/components/agent/AgentDetailPanel";
 import api from "../src/api/client";
@@ -343,7 +345,7 @@ test("Kimi edit preserves an incompatible value as read-only and cannot write ef
   const saveButton = screen.getByRole("button", { name: "Save runtime config" }) as HTMLButtonElement;
   assert.equal(saveButton.disabled, true, "an incompatible persisted effort is display-only");
 
-  fireEvent.click(modelSelect);
+  openCombobox(modelSelect);
   const k2Option = await screen.findByRole("option", { name: "Kimi K2" });
   fireEvent.pointerDown(k2Option);
   fireEvent.click(k2Option);
@@ -442,7 +444,7 @@ test("Kimi edit without a schema ref preserves open effort ownership across safe
   assert.equal(screen.queryByTestId("kimi-reasoning-upgrade-required"), null);
 
   const modelSelect = screen.getByRole("combobox", { name: "Model" });
-  fireEvent.click(modelSelect);
+  openCombobox(modelSelect);
   const k2Option = await screen.findByRole("option", { name: "Kimi K2" });
   fireEvent.pointerDown(k2Option);
   fireEvent.click(k2Option);
@@ -450,7 +452,7 @@ test("Kimi edit without a schema ref preserves open effort ownership across safe
   const saveButton = screen.getByRole("button", { name: "Save runtime config" }) as HTMLButtonElement;
   assert.equal(saveButton.disabled, true, "a no-schema client cannot reselect a model carrying an open effort");
 
-  fireEvent.click(modelSelect);
+  openCombobox(modelSelect);
   const k3Option = await screen.findByRole("option", { name: "Kimi K3" });
   fireEvent.pointerDown(k3Option);
   fireEvent.click(k3Option);
@@ -899,10 +901,10 @@ async function openCodexV2Edit(sourceFixture: string) {
 
 test("codex v2 edit: a stored custom model shows as a typed value and is saved unchanged with the other fields", async () => {
   const patches = await openCodexV2Edit("codex.option-source.live.json");
-  const typed = await screen.findByTestId("runtime-form-v2-model-custom") as HTMLInputElement;
-  assert.equal(typed.value, "my-org/codex-custom", "shown as typed, not as an invalid choice");
+  const model = await screen.findByTestId("runtime-form-v2-model") as HTMLInputElement;
+  assert.equal(model.value, "my-org/codex-custom", "shown as the field's value, not as an invalid choice");
   assert.ok(screen.queryByText("Choose one of the available options.") === null);
-  assert.equal(screen.getByTestId("runtime-form-v2-model").textContent?.includes("Custom"), true);
+  screen.getByTestId("runtime-form-v2-model-unlisted");
   assert.equal(screen.getByTestId("runtime-form-v2-fastMode").getAttribute("aria-checked"), "true");
   // Change one thing (fast mode off) and save: the typed model and stored effort go back unchanged.
   fireEvent.click(screen.getByTestId("runtime-form-v2-fastMode"));
@@ -927,7 +929,8 @@ test("codex v2 edit: while the required model source is unavailable, save stays 
 
 // Batch 3b: Claude v2 edit, from the server's shared fixtures. The stored
 // custom-provider key is not in claude.edit.json's values.
-test("claude v2 edit: the API key field starts blank, says blank keeps the saved key, and a save sends it blank", async () => {
+/** Opens the Claude v2 edit form for a Custom-provider agent; returns the PATCH bodies. */
+async function openClaudeV2Edit(): Promise<unknown[]> {
   const fixture = (name: string) => JSON.parse(readFileSync(new URL(`../../runtime-form/fixtures/${name}`, import.meta.url), "utf8")) as Record<string, unknown>;
   const agent = {
     ...codexAgent(),
@@ -980,6 +983,11 @@ test("claude v2 edit: the API key field starts blank, says blank keeps the saved
   });
   fireEvent.click(opener);
 
+  return patches;
+}
+
+test("claude v2 edit: the API key field starts blank, says blank keeps the saved key, and a save sends it blank", async () => {
+  const patches = await openClaudeV2Edit();
   const apiKey = await screen.findByTestId("runtime-form-v2-apiKey") as HTMLInputElement;
   assert.equal(apiKey.value, "", "the v2 form never shows the stored key");
   screen.getByText("Leave blank to keep the saved value.");
@@ -1001,6 +1009,42 @@ test("claude v2 edit: the API key field starts blank, says blank keeps the saved
     command: "/usr/local/bin/claude",
     envVars: { EXAMPLE_FLAG: "1" },
   });
+});
+
+// writeOnlyKeepRequiresUnchanged (claude.edit.json binds /apiKey to /provider
+// and /apiUrl): the stored key only survives a blank field while the endpoint
+// is the same, so the form asks for a new key up front instead of a 400.
+test("claude v2 edit: a changed API URL with a blank key blocks save and asks for a new key; restoring the URL, a trailing slash or a typed key unblocks", async () => {
+  const patches = await openClaudeV2Edit();
+  const apiUrl = await screen.findByTestId("runtime-form-v2-apiUrl") as HTMLInputElement;
+  const save = () => screen.getByRole("button", { name: "Save runtime config" }) as HTMLButtonElement;
+  const message = "The API key is tied to the saved settings you changed. Enter a new one.";
+
+  fireEvent.change(apiUrl, { target: { value: "https://other.example.test" } });
+  await waitFor(() => assert.equal(save().disabled, true));
+  screen.getByText(message);
+  assert.ok(screen.queryByText("Leave blank to keep the saved value.") === null, "the keep hint no longer applies");
+  fireEvent.click(save());
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(patches.length, 0);
+
+  // Back to the saved endpoint, only with a trailing slash: the stored key still applies.
+  fireEvent.change(apiUrl, { target: { value: "https://gateway.example.test/" } });
+  await waitFor(() => assert.equal(save().disabled, false));
+  assert.ok(screen.queryByText(message) === null);
+  screen.getByText("Leave blank to keep the saved value.");
+
+  // A new endpoint with a typed key is fine.
+  fireEvent.change(apiUrl, { target: { value: "https://other.example.test" } });
+  await waitFor(() => assert.equal(save().disabled, true));
+  fireEvent.change(screen.getByTestId("runtime-form-v2-apiKey"), { target: { value: "sk-new" } });
+  await waitFor(() => assert.equal(save().disabled, false));
+  assert.ok(screen.queryByText(message) === null);
+  fireEvent.click(save());
+  await waitFor(() => assert.equal(patches.length, 1));
+  const body = patches[0] as { formValues: Record<string, unknown> };
+  assert.equal(body.formValues.apiUrl, "https://other.example.test");
+  assert.equal(body.formValues.apiKey, "sk-new");
 });
 
 // Batch 4: Pi v2 edit, from the server's shared fixtures. The stored DeepSeek
@@ -1067,7 +1111,8 @@ test("pi v2 edit: the DeepSeek key field starts blank, says blank keeps the save
   assert.ok(screen.queryByTestId("runtime-form-v2-model") === null, "the Configured model field is hidden for DeepSeek");
   // Change the model in the provider's own list, leave the key blank.
   const providerModel = screen.getByTestId("runtime-form-v2-providerModel");
-  fireEvent.click(providerModel);
+  fireEvent.focus(providerModel);
+  fireEvent.keyDown(providerModel, { key: "ArrowDown" });
   const flash = await screen.findByRole("option", { name: "DeepSeek V4.1 Flash" });
   fireEvent.pointerDown(flash);
   fireEvent.click(flash);
@@ -1085,4 +1130,456 @@ test("pi v2 edit: the DeepSeek key field starts blank, says blank keeps the save
     providerReasoningEffort: null,
     envVars: { EXAMPLE_FLAG: "1" },
   });
+});
+
+// ── v2 saved provider connections (capability provider.saved_connection, task #46) ──
+
+const CONN_FORM_REVISION = "rev-test";
+const savedConnectionFormFixture = () => {
+  const form = toRuntimeFormV2(releasedRuntimeFormDefinition("builtin-pi.create.v3")!) as Record<string, unknown> & {
+    dataSchema: { properties: Record<string, Record<string, unknown>> };
+  };
+  form.requiredClientCapabilities = ["provider.saved_connection"];
+  form.revision = CONN_FORM_REVISION;
+  for (const key of ["apiKey", "baseUrl", "supportsImageInput"]) {
+    form.dataSchema.properties[key]!["x-connectionOwned"] = true;
+  }
+  return form;
+};
+
+/**
+ * Drives the builtin v2 EDIT form with saved-connection semantics: the agent
+ * starts unbound (a bound agent keeps the v1 path), the form declares the
+ * capability + revision, and the sources answer only revisioned requests.
+ */
+async function openV2SavedConnectionEditor(options: {
+  formValues?: Record<string, unknown>;
+  boundUnavailable?: boolean;
+  staleFirstForm?: boolean;
+} = {}) {
+  const agent = connectedAgent(false);
+  agent.status = "inactive";
+  seed(agent);
+  setServerFeatureFlagForTests("server-1", RUNTIME_FORM_V2_WEB_FLAG_KEY, true);
+  const builtinRef = { protocolVersion: 1, runtimeId: "builtin", schemaVersion: "builtin-pi.create.v3" };
+  const requested: string[] = [];
+  let formCalls = 0;
+  const fallbackGet = api.get;
+  const connectionOption = (overrides: Record<string, unknown> = {}) => ({
+    value: `connection:${CONNECTION_ID}`,
+    label: "DeepSeek · ds official api",
+    providerKind: "preset",
+    connectionId: CONNECTION_ID,
+    underlyingProviderId: "deepseek",
+    group: "saved",
+    ...overrides,
+  });
+  api.get = (async (url: string, ...rest: unknown[]) => {
+    requested.push(url);
+    if (url.endsWith("/runtime-options")) {
+      return {
+        data: {
+          context: "existing_agent",
+          machineId: "machine-1",
+          options: [{
+            runtimeId: "builtin", capabilityStatus: "available", admissionStatus: "available_for_new",
+            admissionReason: null, current: true, availableForNew: true, manageableForCurrentAgent: true,
+            canSelectInThisContext: true, formDefinitionRef: builtinRef, runtimeFormV2: { protocolVersion: 2 },
+          }],
+        },
+      } as never;
+    }
+    if (url === "/agents/agent-1/runtime-form") {
+      formCalls += 1;
+      const form = savedConnectionFormFixture();
+      if (options.staleFirstForm && formCalls === 1) form.revision = "rev-old";
+      return {
+        data: {
+          ...form,
+          values: options.formValues ?? { providerId: "deepseek", model: "deepseek-v4-pro", loadLocalPlugins: false, envVars: {} },
+        },
+      } as never;
+    }
+    if (url.includes("/runtime-forms/v2/builtin/option-sources/provider")) {
+      if (options.staleFirstForm && url.includes("formRevision=rev-old")) {
+        throw Object.assign(new Error("stale"), {
+          response: { data: { error: "Runtime form has changed; refetch it before loading options", code: "form_revision_stale", recovery: "refetch_form" } },
+        });
+      }
+      if (options.staleFirstForm && !url.includes(`formRevision=${CONN_FORM_REVISION}`)) {
+        throw new Error(`provider source must echo the current revision: ${url}`);
+      }
+      return {
+        data: {
+          sourceId: "provider", kind: "select", pointer: "/providerId",
+          options: [
+            options.boundUnavailable
+              ? connectionOption({ unavailable: true, unavailableReason: "disabled" })
+              : connectionOption(),
+            { value: "deepseek", label: "DeepSeek", providerKind: "preset", group: "direct" },
+            { value: "openai-compatible", label: "OpenAI compatible", providerKind: "gateway", group: "direct" },
+          ],
+          defaultValue: "deepseek",
+        },
+      } as never;
+    }
+    if (url.includes("/runtime-forms/v2/builtin/option-sources/model")) {
+      return {
+        data: {
+          sourceId: "model", kind: "dependent_select", pointer: "/model", dependsOn: "/providerId",
+          optionsByValue: {
+            [`connection:${CONNECTION_ID}`]: [{ value: "deepseek-v4-pro", label: "V4 Pro" }],
+            deepseek: [{ value: "deepseek-v4-pro", label: "V4 Pro" }],
+            "openai-compatible": [],
+          },
+          defaultValueByValue: { [`connection:${CONNECTION_ID}`]: "deepseek-v4-pro", deepseek: "deepseek-v4-pro" },
+          customValueAllowedByValue: { [`connection:${CONNECTION_ID}`]: false, deepseek: false, "openai-compatible": true },
+        },
+      } as never;
+    }
+    return fallbackGet(url, ...(rest as []));
+  }) as never;
+  const patches: Array<Record<string, unknown>> = [];
+  api.patch = (async (_url: string, body: unknown) => {
+    patches.push(body as Record<string, unknown>);
+    return { data: { ...agent } };
+  }) as never;
+  render(
+    <MemoryRouter>
+      <TestIntlProvider locale="en">
+        <AgentDetailPanel agent={agent as never} />
+      </TestIntlProvider>
+    </MemoryRouter>,
+  );
+  const opener = await waitFor(() => {
+    const el = document.querySelector('[aria-label="Edit runtime config"]');
+    assert.ok(el, "runtime-config edit control not found");
+    return el as HTMLElement;
+  });
+  fireEvent.click(opener);
+  return { requested, patches, formCalls: () => formCalls };
+}
+
+test("v2 saved connection: the provider select groups saved connections and echoes the form revision", async () => {
+  const { requested } = await openV2SavedConnectionEditor();
+  openCombobox(await screen.findByTestId("runtime-form-v2-providerId"));
+  assert.ok(await screen.findByText("Saved providers"), "saved connections lead as their own group");
+  assert.ok(screen.getByText("Direct setup"), "direct options stay grouped as before");
+  const saved = screen.getByRole("option", { name: "DeepSeek · ds official api" });
+  fireEvent.pointerDown(saved);
+  fireEvent.click(saved);
+  assert.ok(
+    requested.filter((url) => url.includes("option-sources")).every((url) => url.includes(`formRevision=${CONN_FORM_REVISION}`)),
+    "every source request echoes the form revision",
+  );
+});
+
+test("v2 saved connection: selecting one disables the owned fields with a safe placeholder", async () => {
+  await openV2SavedConnectionEditor();
+  openCombobox(await screen.findByTestId("runtime-form-v2-providerId"));
+  const saved = await screen.findByRole("option", { name: "DeepSeek · ds official api" });
+  fireEvent.click(saved);
+  const apiKey = await screen.findByTestId("runtime-form-v2-apiKey");
+  assert.equal(apiKey.hasAttribute("disabled"), true, "the connection owns the credential field");
+  assert.equal((apiKey as HTMLInputElement).value, "");
+  assert.match(apiKey.getAttribute("placeholder") ?? "", /Provided by/, "a safe placeholder, never the stored value");
+  assert.ok(screen.queryAllByText(/needs an API key/i).length === 0, "an owned field is not the user's to fill");
+});
+
+test("v2 saved connection: the authorized pencil opens the shared connection editor", async () => {
+  await openV2SavedConnectionEditor();
+  openCombobox(await screen.findByTestId("runtime-form-v2-providerId"));
+  const saved = await screen.findByRole("option", { name: "DeepSeek · ds official api" });
+  fireEvent.click(saved);
+  const pencil = await screen.findByTestId("runtime-form-v2-edit-provider-connection-providerId");
+  fireEvent.click(pencil);
+  const dialog = await screen.findByTestId("provider-connection-edit-dialog");
+  const secret = dialog.querySelector<HTMLInputElement>('input[type="password"]');
+  assert.ok(secret, "the shared editor opens from the v2 form too");
+  assert.equal(secret.value, "", "the stored credential never reaches the browser");
+});
+
+test("v2 saved connection: submit sends only the connection reference — owned fields never enter formValues", async () => {
+  const { patches } = await openV2SavedConnectionEditor();
+  openCombobox(await screen.findByTestId("runtime-form-v2-providerId"));
+  const saved = await screen.findByRole("option", { name: "DeepSeek · ds official api" });
+  fireEvent.click(saved);
+  fireEvent.click(screen.getByRole("button", { name: "Save runtime config" }));
+  await waitFor(() => assert.equal(patches.length, 1));
+  const body = patches[0] as { formDefinitionRef: unknown; formValues: Record<string, unknown>; runtimeConfig?: unknown };
+  assert.deepEqual(body.formDefinitionRef, { protocolVersion: 2, runtimeId: "builtin" });
+  assert.equal(body.runtimeConfig, undefined);
+  assert.equal(body.formValues.providerId, `connection:${CONNECTION_ID}`);
+  assert.equal(body.formValues.model, "deepseek-v4-pro", "the model follows the connection's own list");
+  assert.equal("apiKey" in body.formValues, false, "not even an empty string");
+  assert.equal("baseUrl" in body.formValues, false);
+  assert.equal("supportsImageInput" in body.formValues, false);
+});
+
+test("v2 saved connection: switching back to direct restores the schema's own rules", async () => {
+  const { patches } = await openV2SavedConnectionEditor({
+    formValues: { providerId: `connection:${CONNECTION_ID}`, model: "deepseek-v4-pro", loadLocalPlugins: false, envVars: {} },
+  });
+  // Bound-in-the-form agent (values say connection) — the field is inert.
+  const apiKey = await screen.findByTestId("runtime-form-v2-apiKey");
+  assert.equal(apiKey.hasAttribute("disabled"), true);
+  openCombobox(await screen.findByTestId("runtime-form-v2-providerId"));
+  const direct = await screen.findByRole("option", { name: "DeepSeek", exact: true });
+  fireEvent.click(direct);
+  assert.equal((await screen.findByTestId("runtime-form-v2-apiKey")).hasAttribute("disabled"), false);
+  // Edit semantics: a blank secret is allowed client-side ("keep the stored
+  // one"), but the provider changed — the server's writeOnly keepsIdentity
+  // rule fails that closed (registry-tested). The client submits the field
+  // again as its own, which is the observable half here.
+  fireEvent.click(screen.getByRole("button", { name: "Save runtime config" }));
+  await waitFor(() => assert.equal(patches.length, 1));
+  const body = patches[0] as { formValues: Record<string, unknown> };
+  assert.equal(body.formValues.providerId, "deepseek", "the direct selection submits as itself");
+  assert.equal("apiKey" in body.formValues, true, "the owned-field exclusion ended with the connection");
+});
+
+test("v2 saved connection: an unavailable binding stays visible and blocks the save", async () => {
+  await openV2SavedConnectionEditor({
+    formValues: { providerId: `connection:${CONNECTION_ID}`, model: "deepseek-v4-pro", loadLocalPlugins: false, envVars: {} },
+    boundUnavailable: true,
+  });
+  assert.ok(await screen.findByText("This saved provider is unavailable. Select another provider."));
+  assert.equal(screen.getByRole("button", { name: "Save runtime config" }).hasAttribute("disabled"), true);
+});
+
+test("v2 saved connection: a stale revision refetches the whole form once and never merges options", async () => {
+  const { formCalls, requested } = await openV2SavedConnectionEditor({ staleFirstForm: true });
+  // The form rendered from the SECOND fetch (the stale one 409'd on sources).
+  assert.ok(await screen.findByTestId("runtime-form-v2-providerId"));
+  assert.equal(formCalls(), 2, "the whole form is refetched exactly once");
+  assert.ok(
+    requested.some((url) => url.includes("formRevision=rev-old")),
+    "the first attempt used the stale revision",
+  );
+});
+
+// Independent review regression: stale during retry must replace the entire form.
+test("review: source retry stale revision refetches the entire form", async () => {
+  seed(connectedAgent(false));
+  let forms = 0;
+  api.get = (async (url: string) => {
+    if (url.endsWith("/runtime-forms/v2/builtin")) {
+      forms++;
+      return { data: { ...savedConnectionFormFixture(), requiredClientCapabilities: ["provider.saved_connection", "option_source.status"], revision: forms === 1 ? "rev-first" : "rev-second" } };
+    }
+    if (url.includes("refresh=1")) throw Object.assign(new Error("stale"), {
+      response: { status: 409, data: { code: "form_revision_stale", recovery: "refetch_form" } },
+    });
+    return { data: url.includes("/provider")
+      ? { sourceId: "provider", kind: "select", pointer: "/providerId", options: [], status: "unavailable", reason: "machine_offline", retryable: true }
+      : { sourceId: "model", kind: "dependent_select", pointer: "/model", dependsOn: "/providerId", optionsByValue: {} } };
+  }) as never;
+  const { result } = renderHook(() => useRuntimeFormV2("machine-1", "builtin"));
+  await waitFor(() => assert.equal(result.current.status, "ready"));
+  await act(async () => { if (result.current.status === "ready") result.current.retrySource?.("provider"); });
+  await waitFor(() => assert.equal(forms, 2, "stale retry must fetch the whole form"));
+  assert.equal(result.current.status === "ready" && result.current.form.revision, "rev-second");
+});
+
+test("review: an in-flight retry from a stale generation never merges into the refetched form", async () => {
+  seed(connectedAgent(false));
+  let forms = 0;
+  let releaseModelRetry: (value: unknown) => void = () => undefined;
+  const modelRetryGate = new Promise((resolve) => { releaseModelRetry = resolve; });
+  const stale409 = () => Object.assign(new Error("stale"), {
+    response: { status: 409, data: { code: "form_revision_stale", recovery: "refetch_form" } },
+  });
+  const providerSource = {
+    sourceId: "provider", kind: "select", pointer: "/providerId",
+    options: [], status: "unavailable", reason: "machine_offline", retryable: true,
+  };
+  const modelSource = {
+    sourceId: "model", kind: "dependent_select", pointer: "/model", dependsOn: "/providerId",
+    optionsByValue: { deepseek: [{ value: "deepseek-v4-pro", label: "V4 Pro" }] },
+  };
+  api.get = (async (url: string) => {
+    if (url.endsWith("/runtime-forms/v2/builtin")) {
+      forms++;
+      return {
+        data: {
+          ...savedConnectionFormFixture(),
+          requiredClientCapabilities: ["provider.saved_connection", "option_source.status"],
+          revision: forms === 1 ? "rev-1" : "rev-2",
+        },
+      };
+    }
+    const isProvider = url.includes("option-sources/provider");
+    if (url.includes("refresh=1")) {
+      if (isProvider) throw stale409();
+      // The model retry stays in flight across the whole-form refetch and
+      // resolves afterwards with data from the STALE generation.
+      await modelRetryGate;
+      return {
+        data: {
+          sourceId: "model", kind: "dependent_select", pointer: "/model", dependsOn: "/providerId",
+          optionsByValue: { poisoned: [{ value: "poisoned", label: "stale generation" }] },
+        },
+      };
+    }
+    return { data: isProvider ? providerSource : modelSource };
+  }) as never;
+
+  const { result } = renderHook(() => useRuntimeFormV2("machine-1", "builtin"));
+  await waitFor(() => assert.equal(result.current.status, "ready"));
+  // Start the slow model retry, then the provider retry that goes stale and
+  // triggers the bounded whole-form refetch (rev-2).
+  act(() => { if (result.current.status === "ready") result.current.retrySource?.("model"); });
+  act(() => { if (result.current.status === "ready") result.current.retrySource?.("provider"); });
+  await waitFor(() => assert.equal(result.current.status === "ready" && result.current.form.revision, "rev-2"));
+  // The stale retry resolves now; its data belongs to rev-1 and must be dropped.
+  await act(async () => { releaseModelRetry(undefined); });
+  await waitFor(() => {
+    const state = result.current;
+    assert.equal(state.status, "ready");
+    const model = state.sources.model as { optionsByValue?: Record<string, unknown> };
+    assert.equal("poisoned" in (model.optionsByValue ?? {}), false, "a stale-generation source response must never merge into the refetched form");
+    assert.ok(model.optionsByValue?.deepseek, "the refetched generation's own model source stays");
+  });
+});
+
+// Review follow-up: an old in-flight source must not mutate a replacement form.
+test("review: late old-revision retry cannot overwrite refetched sources", async () => {
+  seed(connectedAgent(false));
+  let forms = 0;
+  let finishOldModel!: (value: unknown) => void;
+  const model = (value: string) => ({ sourceId: "model", kind: "dependent_select", pointer: "/model", dependsOn: "/providerId", optionsByValue: { deepseek: [{ value, label: value }] }, ...(value === "initial" ? { status: "unavailable", reason: "machine_offline", retryable: true } : {}) });
+  api.get = (async (url: string) => {
+    if (url.endsWith("/runtime-forms/v2/builtin")) {
+      forms++;
+      return { data: { ...savedConnectionFormFixture(), requiredClientCapabilities: ["provider.saved_connection", "option_source.status"], revision: forms === 1 ? "old" : "new" } };
+    }
+    if (url.includes("refresh=1") && url.includes("/model")) return new Promise(resolve => { finishOldModel = resolve; });
+    if (url.includes("refresh=1") && url.includes("/provider")) throw Object.assign(new Error("stale"), { response: { status: 409, data: { code: "form_revision_stale" } } });
+    return { data: url.includes("/provider")
+      ? { sourceId: "provider", kind: "select", pointer: "/providerId", options: [], status: "unavailable", reason: "machine_offline", retryable: true }
+      : model(forms === 1 ? "initial" : "new-model") };
+  }) as never;
+  const { result } = renderHook(() => useRuntimeFormV2("machine-1", "builtin"));
+  await waitFor(() => assert.equal(result.current.status, "ready"));
+  await act(async () => { if (result.current.status === "ready") { result.current.retrySource?.("model"); result.current.retrySource?.("provider"); } });
+  await waitFor(() => assert.equal(result.current.status === "ready" && result.current.form.revision, "new"));
+  await act(async () => finishOldModel({ data: model("OLD-RETRY") }));
+  assert.equal(result.current.status === "ready" && result.current.sources.model.optionsByValue!.deepseek[0].value, "new-model");
+});
+
+test("review: exhausted stale recovery exits the editable state instead of merging a stale source", async () => {
+  seed(connectedAgent(false));
+  let forms = 0;
+  const stale409 = () => Object.assign(new Error("stale"), {
+    response: { status: 409, data: { code: "form_revision_stale", recovery: "refetch_form" } },
+  });
+  api.get = (async (url: string) => {
+    if (url.endsWith("/runtime-forms/v2/builtin")) {
+      forms++;
+      return {
+        data: {
+          ...savedConnectionFormFixture(),
+          requiredClientCapabilities: ["provider.saved_connection", "option_source.status"],
+          revision: `rev-${forms}`,
+        },
+      };
+    }
+    const isProvider = url.includes("option-sources/provider");
+    if (url.includes("refresh=1") && isProvider) throw stale409();
+    return { data: isProvider
+      ? { sourceId: "provider", kind: "select", pointer: "/providerId", options: [], status: "unavailable", reason: "machine_offline", retryable: true }
+      : { sourceId: "model", kind: "dependent_select", pointer: "/model", dependsOn: "/providerId", optionsByValue: {} } };
+  }) as never;
+  const { result } = renderHook(() => useRuntimeFormV2("machine-1", "builtin"));
+  await waitFor(() => assert.equal(result.current.status, "ready"));
+  // First stale retry: bounded whole-form recovery (rev-2 installs).
+  await act(async () => { if (result.current.status === "ready") result.current.retrySource?.("provider"); });
+  await waitFor(() => assert.equal(result.current.status === "ready" && result.current.form.revision, "rev-2"));
+  // Second stale retry: the budget is exhausted — the known-stale form must
+  // leave the editable state entirely, not degrade one source and stay ready.
+  await act(async () => { if (result.current.status === "ready") result.current.retrySource?.("provider"); });
+  await waitFor(() => assert.equal(result.current.status, "error"));
+  assert.equal(result.current.status === "error" && result.current.errorCode, "form_revision_stale");
+});
+
+// A bounded retry must fail the whole known-stale form once recovery is exhausted.
+test("review: a second stale source cannot leave an editable ready form", async () => {
+  seed(connectedAgent(false));
+  let forms = 0;
+  api.get = (async (url: string) => {
+    if (url.endsWith("/runtime-forms/v2/builtin")) {
+      forms++;
+      return { data: { ...savedConnectionFormFixture(), requiredClientCapabilities: ["provider.saved_connection", "option_source.status"], revision: `rev-${forms}` } };
+    }
+    if (url.includes("refresh=1")) throw Object.assign(new Error("stale"), { response: { status: 409, data: { code: "form_revision_stale", recovery: "refetch_form" } } });
+    return { data: url.includes("/provider")
+      ? { sourceId: "provider", kind: "select", pointer: "/providerId", options: [], status: "unavailable", reason: "machine_offline", retryable: true }
+      : { sourceId: "model", kind: "dependent_select", pointer: "/model", dependsOn: "/providerId", optionsByValue: {} } };
+  }) as never;
+  const { result } = renderHook(() => useRuntimeFormV2("machine-1", "builtin"));
+  await waitFor(() => assert.equal(result.current.status, "ready"));
+  await act(async () => { if (result.current.status === "ready") result.current.retrySource?.("provider"); });
+  await waitFor(() => assert.equal(result.current.status === "ready" && result.current.form.revision, "rev-2"));
+  await act(async () => { if (result.current.status === "ready") result.current.retrySource?.("provider"); });
+  assert.equal(forms, 2, "recovery remains bounded");
+  assert.notEqual(result.current.status, "ready", "known-stale form must leave ready after its one recovery is spent");
+});
+
+// The failure path must be retired by generation just like the success path.
+test("review: a late stale rejection cannot invalidate the replacement form", async () => {
+  seed(connectedAgent(false));
+  let forms = 0;
+  let rejectOldModel!: (error: unknown) => void;
+  const stale = () => Object.assign(new Error("stale"), { response: { status: 409, data: { code: "form_revision_stale" } } });
+  api.get = (async (url: string) => {
+    if (url.endsWith("/runtime-forms/v2/builtin")) {
+      forms++;
+      return { data: { ...savedConnectionFormFixture(), requiredClientCapabilities: ["provider.saved_connection", "option_source.status"], revision: `rev-${forms}` } };
+    }
+    if (url.includes("refresh=1") && url.includes("/model")) return new Promise((_resolve, reject) => { rejectOldModel = reject; });
+    if (url.includes("refresh=1")) throw stale();
+    return { data: url.includes("/provider")
+      ? { sourceId: "provider", kind: "select", pointer: "/providerId", options: [], status: "unavailable", reason: "machine_offline", retryable: true }
+      : { sourceId: "model", kind: "dependent_select", pointer: "/model", dependsOn: "/providerId", optionsByValue: {}, status: "unavailable", reason: "machine_offline", retryable: true } };
+  }) as never;
+  const { result } = renderHook(() => useRuntimeFormV2("machine-1", "builtin"));
+  await waitFor(() => assert.equal(result.current.status, "ready"));
+  await act(async () => { if (result.current.status === "ready") { result.current.retrySource?.("model"); result.current.retrySource?.("provider"); } });
+  await waitFor(() => assert.equal(result.current.status === "ready" && result.current.form.revision, "rev-2"));
+  await act(async () => rejectOldModel(stale()));
+  assert.equal(result.current.status, "ready", "a retired rejection must not set the current form to error");
+  assert.equal(result.current.status === "ready" && result.current.form.revision, "rev-2");
+  assert.equal(forms, 2);
+});
+
+// The failure path must be retired by generation just like the success path.
+test("review: a retired rejection cannot interrupt a replacement form that is still loading", async () => {
+  seed(connectedAgent(false));
+  let forms = 0;
+  let releaseForm!: () => void;
+  let rejectOldModel!: (error: unknown) => void;
+  const stale = () => Object.assign(new Error("stale"), { response: { status: 409, data: { code: "form_revision_stale" } } });
+  api.get = (async (url: string) => {
+    if (url.endsWith("/runtime-forms/v2/builtin")) {
+      forms++;
+      const data = { ...savedConnectionFormFixture(), requiredClientCapabilities: ["provider.saved_connection", "option_source.status"], revision: `rev-${forms}` };
+      if (forms === 2) return new Promise(resolve => { releaseForm = () => resolve({ data }); });
+      return { data };
+    }
+    if (url.includes("refresh=1") && url.includes("/model")) return new Promise((_resolve, reject) => { rejectOldModel = reject; });
+    if (url.includes("refresh=1")) throw stale();
+    return { data: url.includes("/provider")
+      ? { sourceId: "provider", kind: "select", pointer: "/providerId", options: [], status: "unavailable", reason: "machine_offline", retryable: true }
+      : { sourceId: "model", kind: "dependent_select", pointer: "/model", dependsOn: "/providerId", optionsByValue: {}, status: "unavailable", reason: "machine_offline", retryable: true } };
+  }) as never;
+  const { result } = renderHook(() => useRuntimeFormV2("machine-1", "builtin"));
+  await waitFor(() => assert.equal(result.current.status, "ready"));
+  await act(async () => { if (result.current.status === "ready") { result.current.retrySource?.("model"); result.current.retrySource?.("provider"); } });
+  await waitFor(() => assert.equal(result.current.status, "loading"));
+  await act(async () => rejectOldModel(stale()));
+  assert.equal(result.current.status, "loading", "retire callbacks as soon as recovery starts");
+  await act(async () => releaseForm());
+  await waitFor(() => assert.equal(result.current.status, "ready"));
+  assert.equal(result.current.status === "ready" && result.current.form.revision, "rev-2");
+  assert.equal(forms, 2);
 });

@@ -3,12 +3,13 @@ import { seedAgentMessages } from "../../fixtures/agentMessage";
 import { loginViaApi } from "../../fixtures/auth";
 import { waitForSeedState } from "../../fixtures/seedState";
 import { dismissOwnerOnboarding } from "../../fixtures/session";
+import { withProfileOpenEvidence } from "../../fixtures/profileOpenEvidence";
 
 test.describe("thread view-in-channel profile close", () => {
   test("closing a profile after View in channel does not pollute thread replies with channel context", async ({
     page,
     request,
-  }) => {
+  }, testInfo) => {
     const seedState = await waitForSeedState();
     const login = await loginViaApi(request, seedState);
     await dismissOwnerOnboarding(request, seedState, login.accessToken);
@@ -141,25 +142,32 @@ test.describe("thread view-in-channel profile close", () => {
     const channelAgentBody = page.getByTestId("thread-main-column").locator('[data-message-id]', { hasText: channelAgentReply }).first();
     await channelAgentBody.scrollIntoViewIfNeeded();
     await expect(channelAgentBody).toBeVisible();
-    await channelAgentBody.locator('button[data-avatar-kind="agent"]').click();
     const channelProfile = page.getByTestId("profile-panel");
-    await expect(channelProfile).toBeVisible();
-    const channelProfileLayout = await page.getByTestId("thread-layout-container").evaluate((container) => {
-      const channel = container.firstElementChild as HTMLElement | null;
-      const thread = container.querySelector<HTMLElement>('[data-testid="thread-side-column"]');
-      const profile = container.querySelector<HTMLElement>('[data-testid="profile-panel"]');
-      if (!channel || !thread || !profile) throw new Error("Channel, Thread, and Profile must all be mounted");
-      const profileRect = profile.getBoundingClientRect();
-      return {
-        channelDisplay: getComputedStyle(channel).display,
-        threadDisplay: getComputedStyle(thread).display,
-        profileSource: container.querySelector<HTMLElement>('[data-testid="thread-profile-side-column"]')?.dataset.collapseChannel,
-        profilePosition: getComputedStyle(profile).position,
-        profileX: Math.round(profileRect.x),
-        profileRight: Math.round(profileRect.right),
-        viewportWidth: document.documentElement.clientWidth,
-      };
-    });
+    const channelProfileLayout = await withProfileOpenEvidence(
+      page,
+      testInfo,
+      "channel-avatar",
+      async () => {
+        await channelAgentBody.locator('button[data-avatar-kind="agent"]').click();
+        await expect(channelProfile).toBeVisible();
+        return page.getByTestId("thread-layout-container").evaluate((container) => {
+          const channel = container.firstElementChild as HTMLElement | null;
+          const thread = container.querySelector<HTMLElement>('[data-testid="thread-side-column"]');
+          const profile = container.querySelector<HTMLElement>('[data-testid="profile-panel"]');
+          if (!channel || !thread || !profile) throw new Error("Channel, Thread, and Profile must all be mounted");
+          const profileRect = profile.getBoundingClientRect();
+          return {
+            channelDisplay: getComputedStyle(channel).display,
+            threadDisplay: getComputedStyle(thread).display,
+            profileSource: container.querySelector<HTMLElement>('[data-testid="thread-profile-side-column"]')?.dataset.collapseChannel,
+            profilePosition: getComputedStyle(profile).position,
+            profileX: Math.round(profileRect.x),
+            profileRight: Math.round(profileRect.right),
+            viewportWidth: document.documentElement.clientWidth,
+          };
+        });
+      },
+    );
     expect(channelProfileLayout.channelDisplay).toBe("flex");
     expect(channelProfileLayout.threadDisplay).toBe("none");
     expect(channelProfileLayout.profilePosition).toBe("relative");
@@ -179,10 +187,11 @@ test.describe("thread view-in-channel profile close", () => {
     await expect(agentReplyBody).toBeVisible();
     const agentAvatar = threadPanel.locator('button[data-avatar-kind="agent"]');
     await expect(agentAvatar).toHaveCount(1);
-    await agentAvatar.click();
-
     const profilePanel = page.getByTestId("profile-panel");
-    await expect(profilePanel).toBeVisible();
+    await withProfileOpenEvidence(page, testInfo, "thread-avatar", async () => {
+      await agentAvatar.click();
+      await expect(profilePanel).toBeVisible();
+    });
 
     // Preserve the actual Thread DOM node and its scroll position through the
     // reversible Profile overlay.  The node identity is assigned in-page so a
@@ -326,8 +335,10 @@ test.describe("thread view-in-channel profile close", () => {
     // Profile surface must close and the ordinary Channel + Thread shell must
     // be restored for the newly selected parent.
     await channelAgentBody.scrollIntoViewIfNeeded();
-    await channelAgentBody.locator('button[data-avatar-kind="agent"]').click();
-    await expect(page.getByTestId("profile-panel")).toBeVisible();
+    await withProfileOpenEvidence(page, testInfo, "channel-avatar-retarget", async () => {
+      await channelAgentBody.locator('button[data-avatar-kind="agent"]').click();
+      await expect(page.getByTestId("profile-panel")).toBeVisible();
+    });
     const secondParentCard = page.locator(`#message-${secondParentMessage.id}`).first();
     await secondParentCard.scrollIntoViewIfNeeded();
     await secondParentCard.hover();

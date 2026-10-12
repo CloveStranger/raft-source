@@ -169,6 +169,12 @@ export function AttachmentChip({
     </MessageAttachmentAction>
   ) : null;
 
+  const handleSecondaryDownload = useCallback((event: React.MouseEvent) => {
+    event.preventDefault();
+    event.stopPropagation();
+    secondaryDownload?.onClick();
+  }, [secondaryDownload]);
+
   return (
     <MessageAttachmentCard
       render={disabled ? <div /> : <button type="button" />}
@@ -233,11 +239,7 @@ export function AttachmentChip({
                 <MessageAttachmentAction
                   data-message-affordance={secondaryDownload.affordanceName ?? "file-download"}
                   aria-label={secondaryDownload.label}
-                  onClick={(event) => {
-                    event.preventDefault();
-                    event.stopPropagation();
-                    secondaryDownload.onClick();
-                  }}
+                  onClick={handleSecondaryDownload}
                 >
                   <Download size={12} />
                 </MessageAttachmentAction>

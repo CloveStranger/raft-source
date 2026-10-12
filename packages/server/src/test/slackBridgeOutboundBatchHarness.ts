@@ -71,6 +71,7 @@ import {
   SlackBridgeFullFlowPreflightError,
   type SlackBridgeFullFlowPreflightInput,
 } from "./slackBridgeFullFlowPreflight";
+import { withChannelDelivery } from "./orchestratorStub";
 
 export type SlackBridgeBatchTopology = "ordinary_channel" | "joint_channel" | "ordinary_thread";
 export type SlackBridgeBatchSendMode = "first" | "same_random_replay";
@@ -114,9 +115,9 @@ export interface SlackBridgeExecutableBatchHooks {
 type BroadcastIo = Parameters<typeof broadcastAndDeliver>[0];
 type BroadcastOrchestrator = Parameters<typeof broadcastAndDeliver>[1];
 
-const noopOrchestrator = {
+const noopOrchestrator = withChannelDelivery({
   deliverMessage: async () => undefined,
-} as unknown as BroadcastOrchestrator;
+}) as unknown as BroadcastOrchestrator;
 
 function healthyIo() {
   return {
@@ -434,7 +435,6 @@ function workerDependencies(
 
 async function expiredPreflightInput(
   fixture: Awaited<ReturnType<typeof seedBaseFixture>>,
-  runtimeFingerprint: string,
 ): Promise<SlackBridgeFullFlowPreflightInput> {
   const db = getDb();
   const expiredAt = fixture.manifest.expiresAt.toISOString();
@@ -494,8 +494,6 @@ async function expiredPreflightInput(
       canonicalJointRows: canonicalJointRows?.count ?? -1,
       localJointRows: localJointRows?.count ?? -1,
       externalBindingRows: externalBindingRows?.count ?? -1,
-      runtimeBuildFingerprint: runtimeFingerprint,
-      expectedRuntimeBuildFingerprint: runtimeFingerprint,
     },
     registration: {
       id: fixture.registration.id,
@@ -616,7 +614,6 @@ async function readCardinality(storedChannelId: string, providerWrites: number):
 
 export async function runSlackBridgeExecutableBatchCase(
   entry: SlackBridgeExecutableBatchCase,
-  runtimeFingerprint: string,
   hooks: SlackBridgeExecutableBatchHooks = {},
 ): Promise<SlackBridgeExecutableBatchReceipt> {
   await openTestDatabase("pglite://");
@@ -642,7 +639,7 @@ export async function runSlackBridgeExecutableBatchCase(
       }
       let failure: unknown;
       try {
-        runSlackBridgeFullFlowPreflight(await expiredPreflightInput(fixture, runtimeFingerprint));
+        runSlackBridgeFullFlowPreflight(await expiredPreflightInput(fixture));
       } catch (error) {
         failure = error;
       }

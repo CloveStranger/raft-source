@@ -1,5 +1,5 @@
 import { Card, Button, PreviewCard, PreviewCardContent, PreviewCardTrigger } from "raft-ui";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useEffectEvent, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { useIntl } from "react-intl";
 import { select } from "d3-selection";
@@ -67,6 +67,8 @@ type GraphResponse = {
   channels: GraphChannel[];
   edges: GraphEdge[];
 };
+
+const EMPTY_GRAPH: GraphResponse = { humans: [], agents: [], channels: [], edges: [] };
 
 type Point = { x: number; y: number };
 type GraphViewBox = { x: number; y: number; width: number; height: number };
@@ -566,10 +568,13 @@ function MemberGraphCanvas({ data }: { data: GraphResponse }) {
     };
   }, [dimensions.height, dimensions.width, transform]);
 
-  const screenPosition = (point: Point) => ({
-    left: transform.x + (point.x / VIEWBOX_WIDTH) * dimensions.width * transform.k,
-    top: transform.y + (point.y / VIEWBOX_HEIGHT) * dimensions.height * transform.k,
-  });
+  const screenPosition = useCallback(
+    (point: Point) => ({
+      left: transform.x + (point.x / VIEWBOX_WIDTH) * dimensions.width * transform.k,
+      top: transform.y + (point.y / VIEWBOX_HEIGHT) * dimensions.height * transform.k,
+    }),
+    [dimensions.height, dimensions.width, transform],
+  );
 
   if (members.length === 0 && channels.length === 0) {
     return (
@@ -660,29 +665,30 @@ export default function MemberGraphSection({
   // omits it would silently render English in zh. Same shape as the
   // SelectionPopover primitive defaults (#5716).
   const resolvedSectionLabel = sectionLabel ?? formatMessage({ id: "settings.memberGraph.sectionLabel" });
-  const current = useServerStore((s) => s.current);
+  const currentServerId = useServerStore((s) => s.current?.id);
   const [data, setData] = useState<GraphResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
-  const loadGraph = async () => {
-    if (!current) return;
+  const loadGraph = useCallback(async () => {
+    if (!currentServerId) return;
     setLoading(true);
     setError("");
     try {
-      const { data: next } = await api.get(`/servers/${current.id}/member-graph`);
+      const { data: next } = await api.get(`/servers/${currentServerId}/member-graph`);
       setData(next);
     } catch (err: any) {
       setError(err.response?.data?.error || formatMessage({ id: "settings.memberGraph.loadFailed" }));
     } finally {
       setLoading(false);
     }
-  };
+  }, [currentServerId, formatMessage]);
 
+  // Load once per active server; a locale switch only re-renders, it does not refetch.
+  const loadGraphForServer = useEffectEvent(loadGraph);
   useEffect(() => {
-    void loadGraph();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [current?.id]);
+    void loadGraphForServer();
+  }, [currentServerId]);
 
   const members = useMemo<GraphMember[]>(
     () => data ? [...data.humans, ...data.agents] : [],
@@ -727,7 +733,7 @@ export default function MemberGraphSection({
       {error && <Banner intent="warning" density="sm" className="font-bold">{error}</Banner>}
 
       <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_280px]">
-        <MemberGraphCanvas data={data ?? { humans: [], agents: [], channels: [], edges: [] }} />
+        <MemberGraphCanvas data={data ?? EMPTY_GRAPH} />
 
         <div className="space-y-3">
           <div className="grid grid-cols-3 gap-2">

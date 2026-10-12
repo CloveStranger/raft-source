@@ -6,7 +6,7 @@ const ACTIVITY_FILE_ENV = "SLOCKDEV_LAST_ACTIVITY_FILE";
 
 export function shouldRecordRaftdevActivity(method: string, path: string): boolean {
   if (method.toUpperCase() === "OPTIONS") return false;
-  if (path === "/health" || path === "/metrics") return false;
+  if (path === "/health" || path === "/livez" || path === "/metrics") return false;
   if (path === "/internal" || path.startsWith("/internal/")) return false;
   return true;
 }

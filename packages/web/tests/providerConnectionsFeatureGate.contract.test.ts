@@ -6,7 +6,6 @@ function readSource(path: string): string {
 }
 
 test("provider connection settings and Agent selectors stay behind the server feature gate", () => {
-  const settingsModal = readSource("components/settings/WorkspaceSettingsModal.tsx");
   const settingsPanel = readSource("components/settings/SettingsPanel.tsx");
   const providerSettings = readSource("components/settings/ProviderConnectionsSettings.tsx");
   const sidebar = readSource("components/layout/Sidebar.tsx");
@@ -14,7 +13,6 @@ test("provider connection settings and Agent selectors stay behind the server fe
   const agentDetail = readSource("components/agent/AgentDetailPanel.tsx");
   const providerConnectionsHook = readSource("hooks/useProviderConnections.ts");
 
-  assert.match(settingsModal, /if \(!providerConnectionsEnabled \|\| !capabilities\.manageExternalAuth\) hidden\.add\("providers"\)/);
   assert.match(settingsPanel, /requestedSettingsTab === "providers" && \(!providerConnectionsEnabled \|\| !capabilities\.manageExternalAuth\)/);
   assert.match(providerSettings, /if \(!featureEnabled\) return null/);
   assert.match(sidebar, /\.\.\.\(providerConnectionsEnabled && canManageExternalAuth\s*\? \[\{ id: "providers"/);

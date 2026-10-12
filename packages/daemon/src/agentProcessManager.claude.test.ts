@@ -4293,7 +4293,7 @@ test("task #1114 B: three app-inbox idle notices with no runtime event are obser
     const observations = consumptionObservations(sink);
     assert.equal(observations.length, 3);
     assert.equal(observations.at(-1)!.attrs!.unconsumed_deliveries, 3);
-    assert.equal(observations.at(-1)!.attrs!.delivery_path, "app_inbox_notice");
+    assert.equal(observations.at(-1)!.attrs!.delivery_write_kind, "app_inbox_notice");
   }, { tracer, appInboxForAgent: () => store });
 });
 
@@ -5038,4 +5038,77 @@ test("task #353: dropped_on_exit keeps its exit reason through the real local tr
     sinkClosed = true;
     await rm(machineDir, { recursive: true, force: true });
   }
+});
+
+// task #268: live stdin delivery shows a sender's description once per model
+// context, through the CLI's agent ledger (senderLedger.ts).
+test("Claude live delivery: a sender's description is shown once per context, again after compaction", async () => {
+  await withManager(async ({ driver, manager, dataDir }) => {
+    await manager.startAgent("agent-1", { ...makeConfig({ sessionId: "session-1" }), passiveAx: true } as AgentConfig);
+    const ap = getProcess(manager, "agent-1");
+    (manager as any).slockHome = dataDir;
+    ap.cliTransportDir = path.join(dataDir, "cli-transport");
+    await mkdir(ap.cliTransportDir, { recursive: true });
+    writeContextGeneration(ap.cliTransportDir, { reason: "spawn", runtime: "claude", passiveAx: true });
+    // The ledger exists because the agent's CLI created it.
+    const dbDir = path.join(dataDir, "agent-state", "agent-1");
+    await mkdir(dbDir, { recursive: true });
+    const { DatabaseSync } = await import("node:sqlite");
+    const db = new DatabaseSync(path.join(dbDir, "state.db"));
+    db.exec("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL); INSERT INTO meta VALUES ('version', '1');");
+    db.exec("CREATE TABLE observations (type TEXT NOT NULL, id TEXT NOT NULL, rev TEXT NOT NULL, context_id TEXT NOT NULL, seen_at INTEGER NOT NULL, PRIMARY KEY (type, id))");
+    db.close();
+
+    driver.parsedLines.set("turn-end", [{ kind: "turn_end", sessionId: "session-1" }]);
+    driver.parsedLines.set("compact-start", [{ kind: "compaction_started" }]);
+    const deliverIdle = async (content: string) => {
+      driver.processes[0].stdout.emit("data", Buffer.from("turn-end\n"));
+      await flush();
+      manager.deliverMessage("agent-1", makeMessage(content, { sender_description: "Founder of Raft" }), { transient: true });
+      await flush();
+      return driver.encodedCalls.at(-1)?.text ?? "";
+    };
+
+    assert.match(await deliverIdle("first"), /@richard — Founder of Raft: first/);
+    const second = await deliverIdle("second");
+    assert.match(second, /@richard: second/);
+    assert.doesNotMatch(second, /Founder of Raft/);
+
+    driver.processes[0].stdout.emit("data", Buffer.from("compact-start\n"));
+    await flush();
+    assert.match(await deliverIdle("third"), /@richard — Founder of Raft: third/);
+  });
+});
+
+test("Claude live delivery: a ledger write lock held by the CLI never delays delivery; the description is shown in full", async () => {
+  await withManager(async ({ driver, manager, dataDir }) => {
+    await manager.startAgent("agent-1", { ...makeConfig({ sessionId: "session-1" }), passiveAx: true } as AgentConfig);
+    const ap = getProcess(manager, "agent-1");
+    (manager as any).slockHome = dataDir;
+    ap.cliTransportDir = path.join(dataDir, "cli-transport");
+    await mkdir(ap.cliTransportDir, { recursive: true });
+    writeContextGeneration(ap.cliTransportDir, { reason: "spawn", runtime: "claude", passiveAx: true });
+    const dbDir = path.join(dataDir, "agent-state", "agent-1");
+    await mkdir(dbDir, { recursive: true });
+    const { DatabaseSync } = await import("node:sqlite");
+    const cli = new DatabaseSync(path.join(dbDir, "state.db"));
+    cli.exec("PRAGMA journal_mode = WAL; CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL); INSERT INTO meta VALUES ('version', '1');");
+    cli.exec("CREATE TABLE observations (type TEXT NOT NULL, id TEXT NOT NULL, rev TEXT NOT NULL, context_id TEXT NOT NULL, seen_at INTEGER NOT NULL, PRIMARY KEY (type, id))");
+    driver.parsedLines.set("turn-end", [{ kind: "turn_end", sessionId: "session-1" }]);
+    cli.exec("BEGIN IMMEDIATE");
+    try {
+      for (const content of ["first", "second"]) {
+        driver.processes[0].stdout.emit("data", Buffer.from("turn-end\n"));
+        await flush();
+        const started = performance.now();
+        manager.deliverMessage("agent-1", makeMessage(content, { sender_description: "Founder of Raft" }), { transient: true });
+        assert.ok(performance.now() - started < 200, "delivery must not wait on the ledger lock");
+        await flush();
+        assert.match(driver.encodedCalls.at(-1)?.text ?? "", new RegExp(`@richard — Founder of Raft: ${content}`));
+      }
+    } finally {
+      cli.exec("ROLLBACK");
+      cli.close();
+    }
+  });
 });

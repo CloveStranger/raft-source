@@ -38,7 +38,10 @@ test("Slack Bridge master gate hides every setup entry and suppresses channel pr
 
 test("channel member hook keeps external projections separate from Raft principals", () => {
   const hook = source("hooks/useChannelMembers.ts");
-  const members = source("components/agent/ChannelMembers.tsx");
+  const members = [
+    source("components/agent/ChannelMembers.tsx"),
+    source("components/agent/MemberRoleActions.tsx"),
+  ].join("\n");
 
   assert.match(hook, /export interface ChannelExternalMember[\s\S]*provider:\s*"slack"/);
   assert.match(hook, /agents:\s*\(data\.agents \?\? \[\]\) as ChannelAgent\[\]/);

@@ -1257,6 +1257,18 @@ export async function deleteAgent(agentId: string, options: { executor?: Databas
       })));
     }
 
+    // Receipt DMs are identity-immutable (#5983). Tombstoning them or
+    // deleting their channel_agents row raises, so a migrated agent cannot
+    // be deleted. Skip those surfaces; they stay as historical records on
+    // the soft-deleted agent. RESTRICT on receipt_channels.agent_id is
+    // unused here because this path never hard-deletes the agents row.
+    const notReceiptChannel = sql`${channels.id} NOT IN (
+      SELECT channel_id FROM agent_migration_receipt_channels WHERE agent_id = ${agentId}
+    )`;
+    const notReceiptMembership = sql`${channelAgents.channelId} NOT IN (
+      SELECT channel_id FROM agent_migration_receipt_channels WHERE agent_id = ${agentId}
+    )`;
+
     const dmChannelIds = await tx
       .select({ id: channels.id })
       .from(channels)
@@ -1265,6 +1277,7 @@ export async function deleteAgent(agentId: string, options: { executor?: Databas
         eq(channelAgents.agentId, agentId),
         eq(channels.type, "dm"),
         isNull(channels.deletedAt),
+        notReceiptChannel,
       ));
 
     // Preserve provenance before mutable memberships are removed. The schema
@@ -1311,7 +1324,10 @@ export async function deleteAgent(agentId: string, options: { executor?: Databas
     }
 
     await tx.delete(channelAgents)
-      .where(eq(channelAgents.agentId, agentId));
+      .where(and(
+        eq(channelAgents.agentId, agentId),
+        notReceiptMembership,
+      ));
   });
 }
 
@@ -1363,6 +1379,17 @@ export async function getAgentPlacements(agentIds: string[]) {
     .select({ id: agents.id, machineId: agents.machineId, deletedAt: agents.deletedAt })
     .from(agents)
     .where(inArray(agents.id, agentIds));
+}
+
+/** getAgent for several ids in one query; missing or deleted ids are absent. */
+export async function getAgentsByIds(agentIds: readonly string[]) {
+  const ids = [...new Set(agentIds)];
+  if (ids.length === 0) return [];
+  const db = getDb();
+  return db
+    .select()
+    .from(agents)
+    .where(and(inArray(agents.id, ids), isNull(agents.deletedAt)));
 }
 
 export async function getAgentsForMachine(machineId: string) {

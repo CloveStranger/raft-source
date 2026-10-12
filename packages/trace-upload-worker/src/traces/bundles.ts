@@ -32,6 +32,7 @@ import {
 } from "../shared/http";
 import { validateMachineEvidenceObject } from "./machineEvidence";
 import { validateTranscriptOutcomeObject } from "./transcriptOutcome";
+import { validateAgentEventTailObject } from "./agentEventTail";
 import { ingestTraceBundleObject } from "./otlp";
 import type { TraceProjectionSkipReasonClass } from "./traceEventProjector";
 import { initialV2ProjectorStatus, type V2ProjectorStatus } from "./v2Projection";
@@ -143,6 +144,19 @@ export async function createTraceBundleUpload(request: Request, env: TraceUpload
       throw new HttpError(400, "machine_evidence must be gzipped application/json");
     }
   }
+  if (feedbackAttachmentKind === "agent_event_tail") {
+    // task #1230: one bounded JSON object bound to a report, an agent and a
+    // request; its PUT is parsed strictly. It carries no transcript label.
+    if (!feedbackReportId || !agentId || !transcriptResultClaims.requestId) {
+      throw new HttpError(400, "agent_event_tail requires feedbackReportId, agentId and feedbackTranscriptRequestId");
+    }
+    if (contentType !== "application/json" || contentEncoding !== "gzip") {
+      throw new HttpError(400, "agent_event_tail must be gzipped application/json");
+    }
+    delete transcriptResultClaims.transcriptContent;
+    delete transcriptResultClaims.transcriptSourceBytes;
+    delete transcriptResultClaims.transcriptBytes;
+  }
   if (feedbackAttachmentKind === "transcript_outcome") {
     // One small JSON object bound to a report, an agent and a request; its PUT
     // is parsed strictly. It carries no transcript label.
@@ -235,10 +249,12 @@ export async function putTraceBundleObject(
   if (actualSha256 !== claims.bundleSha256) throw new HttpError(400, "bundleSha256 mismatch");
   const isMachineEvidence = claims.feedbackAttachmentKind === "machine_evidence";
   const isTranscriptOutcome = claims.feedbackAttachmentKind === "transcript_outcome";
-  // Neither object is trace JSONL: filed in the ledgers, never OTLP-ingested.
-  const isNotTraces = isMachineEvidence || isTranscriptOutcome;
+  const isAgentEventTail = claims.feedbackAttachmentKind === "agent_event_tail";
+  // None of these objects is trace JSONL: filed in the ledgers, never OTLP-ingested.
+  const isNotTraces = isMachineEvidence || isTranscriptOutcome || isAgentEventTail;
   if (isMachineEvidence) await validateMachineEvidenceObject(body, claims);
   if (isTranscriptOutcome) await validateTranscriptOutcomeObject(body, claims);
+  if (isAgentEventTail) await validateAgentEventTailObject(body, claims);
 
   const result = await env.TRACE_BUNDLES.put(claims.objectKey, body, {
     httpMetadata: {

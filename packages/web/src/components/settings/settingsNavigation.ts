@@ -62,52 +62,21 @@ export function canOpenSettingsTab(
   return true;
 }
 
-// `labelId` (not `label`) so the group headers localize; `key` stays a stable
-// non-display identifier so React keys don't change with the display locale.
-export const SETTINGS_GROUPS: ReadonlyArray<{
-  key: string;
-  labelId: MessageId;
-  items: ReadonlyArray<typeof SETTINGS_TABS[number]>;
-}> = [
-  { key: "personal", labelId: "settings.tabs.groupPersonal", items: SETTINGS_TABS.slice(0, 4) },
-  { key: "workspace", labelId: "settings.tabs.groupWorkspace", items: SETTINGS_TABS.slice(4, 12) },
-  { key: "about", labelId: "settings.tabs.groupAbout", items: SETTINGS_TABS.slice(12) },
-];
-
 export const SETTINGS_LABEL_BY_ID: Record<SettingsTabId, string> = Object.fromEntries(
   SETTINGS_TABS.map((tab) => [tab.id, tab.title]),
 ) as Record<SettingsTabId, string>;
 
-// react-intl message ids for the settings NAV labels (sidebar) and the panel
-// HEADER titles. Pure id mapping over the `settings.tabs.*` catalog — the copy
-// itself lives in `i18n/messages/{en,zh-cn}.ts` (source #3874 b41c72b4f).
+// react-intl message ids for the settings panel HEADER titles. Pure id mapping
+// over the `settings.tabs.*` catalog — the copy itself lives in
+// `i18n/messages/{en,zh-cn}.ts` (source #3874 b41c72b4f).
 //
 // Total, not Partial. A Partial map here sat behind a silent `?:` fallback to
 // the English `label` field, so a tab with no id compiled and rendered English
 // with nothing going red — the defect @Wug blocked in #5858, and it had already
-// happened: `about` was missing from the title map below, so zh users saw 关于 in
-// the sidebar and "About" in the panel header. Making both maps total moves that
-// from "nobody noticed" to "does not compile".
-export const SETTINGS_TAB_NAV_LABEL_ID: Record<SettingsTabId, MessageId> = {
-  about: "settings.tabs.about",
-  account: "settings.tabs.account",
-  "language-region": "settings.tabs.languageRegion",
-  appearance: "settings.tabs.appearance",
-  notifications: "settings.tabs.notifications",
-  server: "settings.tabs.server",
-  mcp: "settings.tabs.mcp",
-  providers: "settings.tabs.providers",
-  labs: "settings.tabs.labs",
-  billing: "settings.tabs.billing",
-  administration: "settings.tabs.administration",
-  "im-bridges": "settings.tabs.imBridges",
-  integrations: "settings.tabs.integrations",
-  feedback: "settings.about.feedbackTitle",
-};
-
-// Panel header title id map. Differs from the nav map only for `billing`, whose
-// header reads "Plan & Billing" (billingHeader) while its sidebar label is
-// "Billing". Total for the same reason as the nav map above.
+// happened: `about` was missing from this map, so zh users saw 关于 in the
+// sidebar and "About" in the panel header. Making the map total moves that
+// from "nobody noticed" to "does not compile". `billing`'s header reads
+// "Plan & Billing" (billingHeader) while its sidebar label is "Billing".
 export const SETTINGS_TAB_TITLE_ID: Record<SettingsTabId, MessageId> = {
   about: "settings.tabs.about",
   account: "settings.tabs.account",

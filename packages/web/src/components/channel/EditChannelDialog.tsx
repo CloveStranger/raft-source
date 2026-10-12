@@ -13,7 +13,7 @@ import {
 } from "raft-ui";
 import { reportConversionFailure } from "../../utils/conversionDiagnostics";
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { FormEvent, ReactNode } from "react";
+import type { ChangeEvent, ComponentProps, FormEvent, ReactNode } from "react";
 import { useIntl } from "react-intl";
 import { formatNameValidationError } from "../../i18n/nameValidation";
 import { Archive, ArchiveRestore, Check, Eye, EyeOff, Hash, Info, Lock, LogOut, Mail, Trash2, Unplug, X } from "lucide-react";
@@ -61,6 +61,23 @@ function ChannelSettingsSheet({
   onClose: () => void;
 }) {
   const [open, setOpen] = useState(true);
+  const handleOpenChange = useCallback<NonNullable<ComponentProps<typeof Drawer>["onOpenChange"]>>(
+    (nextOpen, eventDetails) => {
+      if (
+        !nextOpen &&
+        isDirty &&
+        (eventDetails.reason === "outside-press" || eventDetails.reason === "swipe")
+      ) {
+        eventDetails.cancel();
+        return;
+      }
+      setOpen(nextOpen);
+    },
+    [isDirty],
+  );
+  const handleOpenChangeComplete = useCallback((nextOpen: boolean) => {
+    if (!nextOpen) onClose();
+  }, [onClose]);
 
   return (
     <Drawer
@@ -68,20 +85,8 @@ function ChannelSettingsSheet({
       modal
       swipeDirection="right"
       disablePointerDismissal={isDirty}
-      onOpenChange={(nextOpen, eventDetails) => {
-        if (
-          !nextOpen &&
-          isDirty &&
-          (eventDetails.reason === "outside-press" || eventDetails.reason === "swipe")
-        ) {
-          eventDetails.cancel();
-          return;
-        }
-        setOpen(nextOpen);
-      }}
-      onOpenChangeComplete={(nextOpen) => {
-        if (!nextOpen) onClose();
-      }}
+      onOpenChange={handleOpenChange}
+      onOpenChangeComplete={handleOpenChangeComplete}
     >
       <DrawerContent
         data-testid="channel-settings-sheet"
@@ -498,22 +503,22 @@ export default function EditChannelDialog({
     if (saveAndCloseAvailableRef) saveAndCloseAvailableRef.current = !hasInviteDraft;
   }, [hasInviteDraft, saveAndCloseAvailableRef]);
 
-  const clearSaveStatus = () => {
+  const clearSaveStatus = useCallback(() => {
     if (saveStatusTimeoutRef.current !== null) {
       clearClockTimeout(saveStatusTimeoutRef.current);
       saveStatusTimeoutRef.current = null;
     }
     setSaveStatus("");
-  };
+  }, []);
 
-  const showSaveSuccess = () => {
+  const showSaveSuccess = useCallback(() => {
     clearSaveStatus();
     setSaveStatus(formatMessage({ id: "channel.edit.saveSuccess" }));
     saveStatusTimeoutRef.current = setClockTimeout(() => {
       saveStatusTimeoutRef.current = null;
       setSaveStatus("");
     }, 1500);
-  };
+  }, [clearSaveStatus, formatMessage]);
 
   useEffect(() => () => {
     if (saveStatusTimeoutRef.current !== null) {
@@ -524,15 +529,15 @@ export default function EditChannelDialog({
     }
   }, []);
 
-  const clearResendStatus = () => {
+  const clearResendStatus = useCallback(() => {
     if (resendStatusTimeoutRef.current !== null) {
       clearClockTimeout(resendStatusTimeoutRef.current);
       resendStatusTimeoutRef.current = null;
     }
     setResendStatus("");
-  };
+  }, []);
 
-  const showResendSuccess = (count: number) => {
+  const showResendSuccess = useCallback((count: number) => {
     clearResendStatus();
     setResendStatus(formatMessage(
       { id: "channel.edit.inviteResentCount" },
@@ -542,19 +547,19 @@ export default function EditChannelDialog({
       resendStatusTimeoutRef.current = null;
       setResendStatus("");
     }, 1500);
-  };
+  }, [clearResendStatus, formatMessage]);
 
   // Reset the name/description draft back to the last-saved values
   // (final6 in-section Cancel).
   const isNameDescDirty = name !== initialName || description !== initialDescription;
   const hasSavableDraft = isNameDescDirty || isBridgeDirty;
-  const resetDraft = () => {
+  const resetDraft = useCallback(() => {
     setName(initialName);
     setDescription(initialDescription);
     bridgeEditor.setSelectedSlackChannelId(currentBridgeSelection);
     setError("");
     clearSaveStatus();
-  };
+  }, [initialName, initialDescription, bridgeEditor, currentBridgeSelection, clearSaveStatus]);
 
   // Expose the save to the host's unsaved-changes prompt. The ref is
   // re-published after every commit so it always closes over the latest
@@ -569,14 +574,14 @@ export default function EditChannelDialog({
     };
   });
 
-  const getFallbackChannel = () =>
+  const getFallbackChannel = useCallback(() =>
     channels.find((candidate) => candidate.id !== channelId && candidate.name === "all") ||
-    channels.find((candidate) => candidate.id !== channelId);
+    channels.find((candidate) => candidate.id !== channelId), [channels, channelId]);
 
   /** Persist name/description. Returns true when the draft is clean
    *  afterwards (saved or nothing to save), false on validation/API
    *  failure. Does NOT close — callers decide what happens next. */
-  const saveChanges = async (): Promise<boolean> => {
+  const saveChanges = useCallback(async (): Promise<boolean> => {
     setError("");
     clearSaveStatus();
 
@@ -628,7 +633,21 @@ export default function EditChannelDialog({
     } finally {
       setSaving(false);
     }
-  };
+  }, [
+    clearSaveStatus,
+    canEditChannel,
+    isAllChannel,
+    name,
+    description,
+    initialName,
+    initialDescription,
+    formatMessage,
+    updateChannel,
+    channelId,
+    bridgeEditor,
+    showSaveSuccess,
+  ]);
+  const handleSaveInline = useCallback(() => void saveChanges(), [saveChanges]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -637,7 +656,7 @@ export default function EditChannelDialog({
     }
   };
 
-  const handleVisibilityChange = async () => {
+  const handleVisibilityChange = useCallback(async () => {
     setError("");
     setVisibilityBusy(true);
     try {
@@ -667,9 +686,20 @@ export default function EditChannelDialog({
     } finally {
       setVisibilityBusy(false);
     }
-  };
+  }, [
+    isAllChannel,
+    nextVisibility,
+    hideAllChannel,
+    restoreAllChannel,
+    updateChannel,
+    channelId,
+    onClose,
+    getFallbackChannel,
+    nav,
+    formatMessage,
+  ]);
 
-  const updateGuestPolicy = async (updates: { guestVisible?: boolean; guestJoinable?: boolean }) => {
+  const updateGuestPolicy = useCallback(async (updates: { guestVisible?: boolean; guestJoinable?: boolean }) => {
     setError("");
     setGuestPolicyBusy(true);
     try {
@@ -687,9 +717,15 @@ export default function EditChannelDialog({
     } finally {
       setGuestPolicyBusy(false);
     }
-  };
+  }, [updateChannel, channelId, guestJoinableLimit, formatMessage]);
+  const handleGuestVisibleChange = useCallback((checked: boolean) => void updateGuestPolicy(checked
+    ? { guestVisible: true }
+    : { guestVisible: false, guestJoinable: false }), [updateGuestPolicy]);
+  const handleGuestJoinableChange = useCallback((checked: boolean) => void updateGuestPolicy(checked
+    ? { guestVisible: true, guestJoinable: true }
+    : { guestJoinable: false }), [updateGuestPolicy]);
 
-  const handleConvertToJoint = async () => {
+  const handleConvertToJoint = useCallback(async () => {
     const runId = ++conversionRunRef.current;
     conversionAttemptBaselineRef.current = conversionReceiptRef.current;
     if (!observationScope || pendingCommand) return;
@@ -763,9 +799,20 @@ export default function EditChannelDialog({
     } finally {
       setConvertBusy(false);
     }
-  };
+  }, [
+    observationScope,
+    pendingCommand,
+    serverCommand?.id,
+    setConversionConnectionWarning,
+    setConversionRequestPending,
+    retryChannelConversionJob,
+    convertChannelToJoint,
+    channelId,
+    finishObservation,
+    formatMessage,
+  ]);
 
-  const handleCancelConversion = async () => {
+  const handleCancelConversion = useCallback(async () => {
     if (!conversionReceipt) return;
     const cancelingJobId = conversionReceipt.id;
     if (!observationScope || conversionCancelObservationId) return;
@@ -816,9 +863,21 @@ export default function EditChannelDialog({
     } finally {
       if (conversionRunRef.current === runId) setConversionCancelBusy(false);
     }
-  };
+  }, [
+    conversionReceipt,
+    observationScope,
+    conversionCancelObservationId,
+    serverCommand?.id,
+    setConversionConnectionWarning,
+    cancelChannelConversionJob,
+    finishCanceledConversion,
+    formatMessage,
+    channelId,
+    getChannelConversionJob,
+    finishObservation,
+  ]);
 
-  const handleUnarchive = async () => {
+  const handleUnarchive = useCallback(async () => {
     setError("");
     setArchiveBusy(true);
     try {
@@ -833,9 +892,9 @@ export default function EditChannelDialog({
     } finally {
       setArchiveBusy(false);
     }
-  };
+  }, [unarchiveChannel, channelId, guestJoinableLimit, channel?.guestJoinable, formatMessage, onClose]);
 
-  const handleResendJointInvite = async () => {
+  const handleResendJointInvite = useCallback(async () => {
     clearResendStatus();
     setResendError("");
     setResendBusy(true);
@@ -848,7 +907,7 @@ export default function EditChannelDialog({
     } finally {
       setResendBusy(false);
     }
-  };
+  }, [clearResendStatus, resendJointChannelInvite, channelId, showResendSuccess, formatMessage]);
 
   const handleInviteJointServer = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -898,7 +957,7 @@ export default function EditChannelDialog({
     }
   };
 
-  const handleDisconnectJointChannel = async () => {
+  const handleDisconnectJointChannel = useCallback(async () => {
     await disconnectJointChannel(channelId);
     const fallbackChannel = getFallbackChannel();
     onClose();
@@ -907,7 +966,123 @@ export default function EditChannelDialog({
     } else {
       nav.toSettings("server");
     }
-  };
+  }, [disconnectJointChannel, channelId, getFallbackChannel, onClose, nav]);
+
+  const handleDeleteConfirm = useCallback(async () => {
+    if (showCompletedJointSettings) {
+      await handleDisconnectJointChannel();
+      return;
+    }
+    await deleteChannel(channelId);
+    const fallbackChannel = getFallbackChannel();
+    onClose();
+    if (fallbackChannel) {
+      nav.toChannel(fallbackChannel.id);
+    } else {
+      nav.toSettings("server");
+    }
+  }, [showCompletedJointSettings, handleDisconnectJointChannel, deleteChannel, channelId, getFallbackChannel, onClose, nav]);
+
+  const handleArchiveConfirm = useCallback(async () => {
+    try {
+      await archiveChannel(channelId);
+      setShowArchiveConfirm(false);
+      onClose();
+    } catch (err: unknown) {
+      const axiosErr = err as { response?: { data?: { error?: string } } };
+      setError(axiosErr.response?.data?.error || formatMessage({ id: "channel.edit.failedArchive" }));
+      setShowArchiveConfirm(false);
+    }
+  }, [archiveChannel, channelId, onClose, formatMessage]);
+
+  const handleLeaveConfirm = useCallback(async () => {
+    await onLeaveChannel?.();
+    onClose();
+  }, [onLeaveChannel, onClose]);
+
+  const openLeaveConfirm = useCallback(() => setShowLeaveConfirm(true), []);
+  const closeLeaveConfirm = useCallback(() => setShowLeaveConfirm(false), []);
+  const openVisibilityConfirm = useCallback(() => setShowVisibilityConfirm(true), []);
+  const closeVisibilityConfirm = useCallback(() => setShowVisibilityConfirm(false), []);
+  const openArchiveConfirm = useCallback(() => setShowArchiveConfirm(true), []);
+  const closeArchiveConfirm = useCallback(() => setShowArchiveConfirm(false), []);
+  const openDeleteConfirm = useCallback(() => setShowDeleteConfirm(true), []);
+  const closeDeleteConfirm = useCallback(() => setShowDeleteConfirm(false), []);
+  const closeConvertConfirm = useCallback(() => setShowConvertConfirm(false), []);
+
+  const requestConversionStatusCheck = useCallback(() => setConversionObservationRefresh((n) => n + 1), []);
+  const dismissConversionProgress = useCallback(() => setConversionProgressDismissed(true), []);
+  const retryConversion = useCallback(() => {
+    void handleConvertToJoint().catch(() => undefined);
+  }, [handleConvertToJoint]);
+  const cancelConversion = useCallback(() => {
+    void handleCancelConversion();
+  }, [handleCancelConversion]);
+  const conversionReceiptFailed = conversionReceipt?.status === "failed";
+  const startConversion = useCallback(() => {
+    setConvertError("");
+    setConvertSucceeded(false);
+    // Keep a failed job mounted while its archived source is being
+    // retried; clearing it here would re-trigger the archive hide gate
+    // before the retry request returns its replacement job.
+    if (!conversionReceiptFailed) setConversionJob(null);
+    setConversionProgressDismissed(false);
+    setShowConvertConfirm(true);
+  }, [conversionReceiptFailed]);
+  const cancelAttachmentUpload = useCallback((uploadId: string) => {
+    void cancelActiveAttachmentUpload(uploadId)
+      .then((remaining) => {
+        setConversionJob((current) => {
+          const base = current ?? conversionReceipt;
+          return base
+            ? {
+                ...base,
+                error: remaining.length === 0 ? null : base.error,
+                progress: remaining.length === 0
+                  ? Object.fromEntries(
+                      Object.entries(base.progress ?? {}).filter(([key]) => (
+                        key !== "errorCode" && key !== "uploadCount" && key !== "uploadScope"
+                      )),
+                    )
+                  : { ...(base.progress ?? {}), uploadCount: remaining.length },
+              }
+            : current;
+        });
+        if (remaining.length === 0) setConvertError("");
+      })
+      .catch(() => undefined);
+  }, [cancelActiveAttachmentUpload, conversionReceipt]);
+
+  const handleInviteServerSlugChange = useCallback((e: ChangeEvent<HTMLInputElement>) => {
+    setInviteServerSlug(e.target.value);
+    setInviteServerSlugServerError("");
+    setInviteSubmitError("");
+    setInviteStatus("");
+  }, []);
+  const handleInviteServerSlugBlur = useCallback(
+    () => setInviteTouched((current) => ({ ...current, serverSlug: true })),
+    [],
+  );
+  const handleInvitePeopleChange = useCallback((e: ChangeEvent<HTMLTextAreaElement>) => {
+    setInvitePeopleText(e.target.value);
+    setInvitePeopleServerError("");
+    setInviteSubmitError("");
+    setInviteStatus("");
+  }, []);
+  const handleInvitePeopleBlur = useCallback(
+    () => setInviteTouched((current) => ({ ...current, people: true })),
+    [],
+  );
+  const handleNameChange = useCallback((e: ChangeEvent<HTMLInputElement>) => {
+    setName(e.target.value);
+    setError("");
+    clearSaveStatus();
+  }, [clearSaveStatus]);
+  const handleDescriptionChange = useCallback((e: ChangeEvent<HTMLTextAreaElement>) => {
+    setDescription(e.target.value);
+    setError("");
+    clearSaveStatus();
+  }, [clearSaveStatus]);
 
   const isPanel = presentation === "panel";
 
@@ -919,7 +1094,7 @@ export default function EditChannelDialog({
     <Button size="sm"
       variant="warning"
       type="button"
-      onClick={() => setShowLeaveConfirm(true)}
+      onClick={openLeaveConfirm}
       className="flex w-full items-center justify-center gap-1.5 px-4 py-2 text-sm"
     >
       <LogOut size={14} />
@@ -930,7 +1105,7 @@ export default function EditChannelDialog({
     <Button size="sm"
       variant="warning"
       type="button"
-      onClick={() => setShowVisibilityConfirm(true)}
+      onClick={openVisibilityConfirm}
       disabled={isArchived || visibilityBusy}
       className="flex w-full items-center justify-center gap-1.5 px-4 py-2 text-sm disabled:opacity-50 disabled:cursor-not-allowed"
     >
@@ -965,7 +1140,7 @@ export default function EditChannelDialog({
         <Button size="sm"
           variant="warning"
           type="button"
-          onClick={() => setShowArchiveConfirm(true)}
+          onClick={openArchiveConfirm}
           className="flex w-full items-center justify-center gap-1.5 px-4 py-2 text-sm"
         >
           <Archive size={14} />
@@ -976,7 +1151,7 @@ export default function EditChannelDialog({
         <Button size="sm"
           variant="danger"
           type="button"
-          onClick={() => setShowDeleteConfirm(true)}
+          onClick={openDeleteConfirm}
           className="flex w-full items-center justify-center gap-1.5 px-4 py-2 text-sm"
         >
           <Unplug size={14} />
@@ -986,7 +1161,7 @@ export default function EditChannelDialog({
         <Button size="sm"
           variant="danger"
           type="button"
-          onClick={() => setShowDeleteConfirm(true)}
+          onClick={openDeleteConfirm}
           className="flex w-full items-center justify-center gap-1.5 px-4 py-2 text-sm"
         >
           <Trash2 size={14} />
@@ -1017,7 +1192,7 @@ export default function EditChannelDialog({
               ? formatMessage({ id: "channel.edit.makePublic" })
               : formatMessage({ id: "channel.edit.makePrivate" })
       }
-      onClick={() => setShowVisibilityConfirm(true)}
+      onClick={openVisibilityConfirm}
       disabled={isArchived || visibilityBusy}
       testId="channel-settings-visibility-action"
     />
@@ -1027,7 +1202,7 @@ export default function EditChannelDialog({
       <OverflowActionRow
         icon={<ArchiveRestore size={14} />}
         label={archiveBusy ? formatMessage({ id: "channel.edit.unarchiving" }) : formatMessage({ id: "channel.edit.unarchiveChannel" })}
-        onClick={() => void handleUnarchive()}
+        onClick={handleUnarchive}
         disabled={archiveBusy}
         testId="channel-settings-archive-action"
       />
@@ -1035,7 +1210,7 @@ export default function EditChannelDialog({
       <OverflowActionRow
         icon={<Archive size={14} />}
         label={formatMessage({ id: "channel.edit.archiveChannel" })}
-        onClick={() => setShowArchiveConfirm(true)}
+        onClick={openArchiveConfirm}
         testId="channel-settings-archive-action"
       />
     )
@@ -1049,7 +1224,7 @@ export default function EditChannelDialog({
       <OverflowActionRow
         icon={<Unplug size={14} />}
         label={formatMessage({ id: "channel.edit.disconnectChannel" })}
-        onClick={() => setShowDeleteConfirm(true)}
+        onClick={openDeleteConfirm}
         danger
         className="[&_[data-slot=button-content]]:justify-center"
         testId="channel-settings-delete-action"
@@ -1058,7 +1233,7 @@ export default function EditChannelDialog({
       <OverflowActionRow
         icon={<Trash2 size={14} />}
         label={formatMessage({ id: "channel.edit.deleteChannel" })}
-        onClick={() => setShowDeleteConfirm(true)}
+        onClick={openDeleteConfirm}
         danger
         className="[&_[data-slot=button-content]]:justify-center"
         testId="channel-settings-delete-action"
@@ -1107,9 +1282,7 @@ export default function EditChannelDialog({
             size="md"
             checked={channel?.guestVisible === true}
             disabled={guestPolicyBusy}
-            onCheckedChange={(checked) => void updateGuestPolicy(checked
-              ? { guestVisible: true }
-              : { guestVisible: false, guestJoinable: false })}
+            onCheckedChange={handleGuestVisibleChange}
             aria-labelledby="channel-settings-guest-visible-label"
             data-testid="channel-settings-guest-visible-switch"
           />
@@ -1127,9 +1300,7 @@ export default function EditChannelDialog({
             size="md"
             checked={channel?.guestJoinable === true}
             disabled={guestPolicyBusy}
-            onCheckedChange={(checked) => void updateGuestPolicy(checked
-              ? { guestVisible: true, guestJoinable: true }
-              : { guestJoinable: false })}
+            onCheckedChange={handleGuestJoinableChange}
             aria-labelledby="channel-settings-guest-joinable-label"
             data-testid="channel-settings-guest-joinable-switch"
           />
@@ -1147,7 +1318,7 @@ export default function EditChannelDialog({
     <OverflowActionRow
       icon={<LogOut size={14} />}
       label={formatMessage({ id: "channel.edit.leaveChannel" })}
-      onClick={() => setShowLeaveConfirm(true)}
+      onClick={openLeaveConfirm}
       testId="channel-overflow-leave"
     />
   );
@@ -1160,26 +1331,17 @@ export default function EditChannelDialog({
       error={conversionConnectionWarning || conversionRequestPending ? undefined : convertError || conversionReceipt?.error || undefined}
       admissionPending={conversionRequestPending}
       connectionWarning={conversionConnectionWarning ? formatMessage({ id: conversionObservationSettled ? "channel.edit.conversionOutcomeUnknown" : "channel.edit.conversionStatusUnavailable" }) : undefined}
-      onCheckStatus={conversionConnectionWarning ? () => setConversionObservationRefresh((n) => n + 1) : undefined}
+      onCheckStatus={conversionConnectionWarning ? requestConversionStatusCheck : undefined}
       conversionJob={conversionReceipt}
       succeeded={convertSucceeded}
       progressDismissed={conversionProgressDismissed}
-      onDismissProgress={() => setConversionProgressDismissed(true)}
-      onRetry={conversionCancelObservationId || (conversionAwaitingReceipt && !convertBusy) ? undefined : () => { void handleConvertToJoint().catch(() => undefined); }}
-      onCancel={conversionCancelObservationId ? undefined : () => { void handleCancelConversion(); }}
+      onDismissProgress={dismissConversionProgress}
+      onRetry={conversionCancelObservationId || (conversionAwaitingReceipt && !convertBusy) ? undefined : retryConversion}
+      onCancel={conversionCancelObservationId ? undefined : cancelConversion}
       onOpenChannel={onClose}
       cancelBusy={conversionCancelBusy}
       headingClassName="text-base font-bold text-foreground-strong theme-brutal:text-black"
-      onStart={() => {
-        setConvertError("");
-        setConvertSucceeded(false);
-        // Keep a failed job mounted while its archived source is being
-        // retried; clearing it here would re-trigger the archive hide gate
-        // before the retry request returns its replacement job.
-        if (conversionReceipt?.status !== "failed") setConversionJob(null);
-        setConversionProgressDismissed(false);
-        setShowConvertConfirm(true);
-      }}
+      onStart={startConversion}
     />
   );
   const jointAttachmentUploadSection = (showCompletedJointSettings || conversionInProgress) && (
@@ -1187,29 +1349,7 @@ export default function EditChannelDialog({
       uploads={activeAttachmentUploads}
       cancelBusyId={activeAttachmentUploadCancelBusyId}
       onOpenChannel={onClose}
-      onCancel={(uploadId) => {
-        void cancelActiveAttachmentUpload(uploadId)
-          .then((remaining) => {
-            setConversionJob((current) => {
-              const base = current ?? conversionReceipt;
-              return base
-                ? {
-                    ...base,
-                    error: remaining.length === 0 ? null : base.error,
-                    progress: remaining.length === 0
-                      ? Object.fromEntries(
-                          Object.entries(base.progress ?? {}).filter(([key]) => (
-                            key !== "errorCode" && key !== "uploadCount" && key !== "uploadScope"
-                          )),
-                        )
-                      : { ...(base.progress ?? {}), uploadCount: remaining.length },
-                  }
-                : current;
-            });
-            if (remaining.length === 0) setConvertError("");
-          })
-          .catch(() => undefined);
-      }}
+      onCancel={cancelAttachmentUpload}
     />
   );
   // Shared body: the standalone sheet and the overflow-drawer panel
@@ -1291,10 +1431,10 @@ export default function EditChannelDialog({
               ) : (
                 <form className="space-y-3" data-testid="channel-settings-joint-invite-form" onSubmit={handleInviteJointServer} noValidate>
                   <FormField label={formatMessage({ id: "channel.edit.serverSlugLabel" })} labelStyle="plain" required htmlFor="channel-settings-joint-server-slug" error={inviteServerSlugError}>
-                    <SlugInput id="channel-settings-joint-server-slug" name="targetServerSlug" type="text" value={inviteServerSlug} onChange={(e) => { setInviteServerSlug(e.target.value); setInviteServerSlugServerError(""); setInviteSubmitError(""); setInviteStatus(""); }} onBlur={() => setInviteTouched((current) => ({ ...current, serverSlug: true }))} placeholder={formatMessage({ id: "channel.edit.serverSlugPlaceholder" })} required autoCapitalize="none" autoCorrect="off" spellCheck={false} aria-invalid={inviteServerSlugError ? "true" : undefined} disabled={inviteBusy} />
+                    <SlugInput id="channel-settings-joint-server-slug" name="targetServerSlug" type="text" value={inviteServerSlug} onChange={handleInviteServerSlugChange} onBlur={handleInviteServerSlugBlur} placeholder={formatMessage({ id: "channel.edit.serverSlugPlaceholder" })} required autoCapitalize="none" autoCorrect="off" spellCheck={false} aria-invalid={inviteServerSlugError ? "true" : undefined} disabled={inviteBusy} />
                   </FormField>
                   <FormField label={formatMessage({ id: "channel.edit.invitedPeopleLabel" })} labelStyle="plain" required hint={formatMessage({ id: "channel.edit.invitedPeopleHint" })} htmlFor="channel-settings-joint-invited-people" error={invitePeopleError}>
-                    <Textarea id="channel-settings-joint-invited-people" name="invitedPeople" value={invitePeopleText} onChange={(e) => { setInvitePeopleText(e.target.value); setInvitePeopleServerError(""); setInviteSubmitError(""); setInviteStatus(""); }} onBlur={() => setInviteTouched((current) => ({ ...current, people: true }))} className="w-full" placeholder={formatMessage({ id: "channel.edit.invitedPeoplePlaceholder" })} rows={2} required data-invalid={Boolean(invitePeopleError)} disabled={inviteBusy} />
+                    <Textarea id="channel-settings-joint-invited-people" name="invitedPeople" value={invitePeopleText} onChange={handleInvitePeopleChange} onBlur={handleInvitePeopleBlur} className="w-full" placeholder={formatMessage({ id: "channel.edit.invitedPeoplePlaceholder" })} rows={2} required data-invalid={Boolean(invitePeopleError)} disabled={inviteBusy} />
                   </FormField>
                   <div className="flex justify-end" data-testid="channel-settings-joint-send-invite-row">
                     <Button type="submit" disabled={inviteBusy || !inviteFormValid} size="sm" variant="accent" className="disabled:cursor-not-allowed disabled:opacity-50" data-testid="channel-settings-joint-send-invite"><Mail size={14} />{inviteBusy ? formatMessage({ id: "channel.edit.inviting" }) : formatMessage({ id: "channel.edit.sendInvite" })}</Button>
@@ -1361,11 +1501,7 @@ export default function EditChannelDialog({
                       id="channel-settings-name"
                       type="text"
                       value={name}
-                      onChange={(e) => {
-                        setName(e.target.value);
-                        setError("");
-                        clearSaveStatus();
-                      }}
+                      onChange={handleNameChange}
                       className="w-full"
                       placeholder={formatMessage({ id: "channel.edit.namePlaceholder" })}
                       required
@@ -1383,11 +1519,7 @@ export default function EditChannelDialog({
                     <Textarea
                       id="channel-settings-description"
                       value={description}
-                      onChange={(e) => {
-                        setDescription(e.target.value);
-                        setError("");
-                        clearSaveStatus();
-                      }}
+                      onChange={handleDescriptionChange}
                       className="w-full"
                       placeholder={formatMessage({ id: "channel.edit.descriptionPlaceholder" })}
                       rows={2}
@@ -1413,7 +1545,7 @@ export default function EditChannelDialog({
                         </Button>
                         <Button
                           type="button"
-                          onClick={() => void saveChanges()}
+                          onClick={handleSaveInline}
                           disabled={!hasSavableDraft || saving || isArchived}
                           size="sm"
                           variant={saveStatus ? "success" : "accent"}
@@ -1584,18 +1716,8 @@ export default function EditChannelDialog({
           loadingLabel={formatMessage({ id: "channel.edit.archiving" })}
           confirmColor="bg-brutal-orange"
           layer={1}
-          onConfirm={async () => {
-            try {
-              await archiveChannel(channelId);
-              setShowArchiveConfirm(false);
-              onClose();
-            } catch (err: unknown) {
-              const axiosErr = err as { response?: { data?: { error?: string } } };
-              setError(axiosErr.response?.data?.error || formatMessage({ id: "channel.edit.failedArchive" }));
-              setShowArchiveConfirm(false);
-            }
-          }}
-          onClose={() => setShowArchiveConfirm(false)}
+          onConfirm={handleArchiveConfirm}
+          onClose={closeArchiveConfirm}
         />
       )}
 
@@ -1625,7 +1747,7 @@ export default function EditChannelDialog({
           confirmColor="bg-brutal-orange"
           layer={1}
           onConfirm={handleVisibilityChange}
-          onClose={() => setShowVisibilityConfirm(false)}
+          onClose={closeVisibilityConfirm}
         />
       )}
 
@@ -1639,11 +1761,8 @@ export default function EditChannelDialog({
           confirmColor="bg-brutal-orange"
           confirmTestId={isPanel ? "channel-overflow-leave-confirm" : undefined}
           layer={1}
-          onConfirm={async () => {
-            await onLeaveChannel?.();
-            onClose();
-          }}
-          onClose={() => setShowLeaveConfirm(false)}
+          onConfirm={handleLeaveConfirm}
+          onClose={closeLeaveConfirm}
         />
       )}
 
@@ -1653,7 +1772,7 @@ export default function EditChannelDialog({
         error={convertError}
         channelName={initialName}
         onConfirm={handleConvertToJoint}
-        onClose={() => setShowConvertConfirm(false)}
+        onClose={closeConvertConfirm}
       />
 
       {showDeleteConfirm && (
@@ -1666,21 +1785,8 @@ export default function EditChannelDialog({
           confirmLabel={showCompletedJointSettings ? formatMessage({ id: "channel.edit.disconnectAction" }) : formatMessage({ id: "channel.edit.deleteAction" })}
           loadingLabel={showCompletedJointSettings ? formatMessage({ id: "channel.edit.disconnecting" }) : formatMessage({ id: "channel.edit.deleting" })}
           layer={1}
-          onConfirm={async () => {
-            if (showCompletedJointSettings) {
-              await handleDisconnectJointChannel();
-              return;
-            }
-            await deleteChannel(channelId);
-            const fallbackChannel = getFallbackChannel();
-            onClose();
-            if (fallbackChannel) {
-              nav.toChannel(fallbackChannel.id);
-            } else {
-              nav.toSettings("server");
-            }
-          }}
-          onClose={() => setShowDeleteConfirm(false)}
+          onConfirm={handleDeleteConfirm}
+          onClose={closeDeleteConfirm}
         />
       )}
     </>

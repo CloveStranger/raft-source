@@ -1561,3 +1561,64 @@ test("disconnected activity send logs as queued for replay, not as dropped", asy
     unsubscribe();
   }
 });
+
+// Task #374: the server closes the older of two connections using one machine
+// key (reason duplicate_machine_connection) and refuses new ones while the
+// winner is alive (reason duplicate_machine_connection_held).
+async function reconnectDelayAfterCloses(closes: Array<[number, string]>): Promise<{
+  delays: unknown[];
+  duplicateEvents: Array<Record<string, unknown> | undefined>;
+}> {
+  const traceEvents: Array<{ name: string; attrs?: Record<string, unknown> }> = [];
+  const clock = new FakeClock();
+  const { conn, getWs } = makeConnection({
+    onTraceEvent: (name, attrs) => traceEvents.push({ name, attrs }),
+    minReconnectDelayMs: 1000,
+    clock,
+    autoOpen: false,
+  });
+  conn.connect();
+  for (const [code, reason] of closes) {
+    getWs().emit("open");
+    getWs().close(code, reason);
+    const scheduled = traceEvents.filter((event) => event.name === "daemon.connection.reconnect_scheduled").at(-1);
+    // Let the scheduled reconnect fire, which opens the next socket.
+    clock.advanceBy(Number(scheduled?.attrs?.delay_ms ?? 0));
+  }
+  conn.disconnect();
+  return {
+    delays: traceEvents.filter((event) => event.name === "daemon.connection.reconnect_scheduled").map((event) => event.attrs?.delay_ms),
+    duplicateEvents: traceEvents.filter((event) => event.name === "daemon.connection.duplicate_machine_close").map((event) => event.attrs),
+  };
+}
+
+test("task #374: closed as the duplicate, the daemon waits five minutes before reconnecting", async () => {
+  const { delays, duplicateEvents } = await reconnectDelayAfterCloses([[4003, "duplicate_machine_connection"]]);
+  assert.deepEqual(delays, [DaemonConnection.DUPLICATE_RECONNECT_DELAY_MS]);
+  assert.deepEqual(duplicateEvents, [{ close_reason: "closed_as_duplicate", long_delay: true }]);
+});
+
+test("task #374: refused while another process holds the key, a winner whose own socket dropped keeps the normal backoff", async () => {
+  const { delays, duplicateEvents } = await reconnectDelayAfterCloses([[4003, "duplicate_machine_connection_held"]]);
+  assert.deepEqual(delays, [1000], "back within the server's hold window, not five minutes later");
+  assert.deepEqual(duplicateEvents, [{ close_reason: "refused_held", long_delay: false }]);
+});
+
+test("task #374: after being closed as the duplicate, later refusals keep the long delay instead of retrying every few seconds", async () => {
+  const { delays } = await reconnectDelayAfterCloses([
+    [4003, "duplicate_machine_connection"],
+    [4003, "duplicate_machine_connection_held"],
+    [4003, "duplicate_machine_connection_held"],
+  ]);
+  assert.deepEqual(delays, [
+    DaemonConnection.DUPLICATE_RECONNECT_DELAY_MS,
+    DaemonConnection.DUPLICATE_RECONNECT_DELAY_MS,
+    DaemonConnection.DUPLICATE_RECONNECT_DELAY_MS,
+  ]);
+});
+
+test("task #374: other server close codes keep the normal backoff", async () => {
+  const { delays, duplicateEvents } = await reconnectDelayAfterCloses([[4001, "computer_machine_unlinked"]]);
+  assert.deepEqual(delays, [1000]);
+  assert.deepEqual(duplicateEvents, []);
+});

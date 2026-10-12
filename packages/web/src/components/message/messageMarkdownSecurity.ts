@@ -1,6 +1,6 @@
 import { defaultSchema } from "rehype-sanitize";
 import type { Options as RehypeSanitizeOptions } from "rehype-sanitize";
-import { ORDERED_LIST_MARKDOWN_ATTRIBUTES } from "../markdown/markdownSanitizeSchema";
+import { ORDERED_LIST_MARKDOWN_ATTRIBUTES, MARKDOWN_HREF_PROTOCOLS } from "../markdown/markdownSanitizeSchema";
 
 // Internal building block of `messageMarkdownSanitizeSchema` (its `tagNames`
 // allowlist). Not part of the module's public surface — the exported, tested
@@ -87,6 +87,10 @@ export const messageMarkdownSanitizeSchema: RehypeSanitizeOptions = {
       ...(defaultSchema.attributes?.span || []),
       "dataReminderFireAt",
     ],
+  },
+  protocols: {
+    ...defaultSchema.protocols,
+    href: MARKDOWN_HREF_PROTOCOLS,
   },
 };
 

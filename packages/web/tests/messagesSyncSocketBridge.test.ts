@@ -45,7 +45,6 @@ Object.defineProperty(globalThis, "window", {
 });
 
 const api = (await import("../src/api/client")).default;
-const { SYNC_CORE_MESSAGES_FLAG_KEY, resetMessagesSyncCoreForTests } = await import("../src/store/messageSyncDomain");
 const {
   MESSAGE_REPLIES_SYNC_WINDOW_PRODUCER,
   messageRef,
@@ -55,8 +54,6 @@ const {
 const {
   REGISTERED_SERVER_FEATURE_FLAG_KEYS,
 } = await import("../src/store/serverFeatureFlags");
-const { refreshSyncCoreMessagesFlagForCurrentServer, resetSyncCoreMessagesFlagForTests } = await import("../src/store/messageSyncFeatureFlag");
-const { refreshNormalizedMessageV2FlagForCurrentServer } = await import("../src/store/normalizedMessageV2FeatureFlag");
 const { reactionReadModelStore } = await import("../src/store/reactionReadModels");
 const { useChannelStore } = await import("../src/store/channelStore");
 const { useMessageStore } = await import("../src/store/messageStore");
@@ -192,7 +189,7 @@ function stubSyncCoreFlagEvaluation(enabled: boolean) {
     });
     return {
       data: {
-        evaluations: [{ key: SYNC_CORE_MESSAGES_FLAG_KEY, enabled }],
+        evaluations: [{ key: "sync_core_messages_v0", enabled }],
       },
     };
   }) as typeof api.post;
@@ -201,7 +198,7 @@ function stubSyncCoreFlagEvaluation(enabled: boolean) {
 function stubMessageFlagEvaluation(enabled: boolean) {
   api.post = (async () => ({
     data: {
-      evaluations: [{ key: SYNC_CORE_MESSAGES_FLAG_KEY, enabled }],
+      evaluations: [{ key: "sync_core_messages_v0", enabled }],
     },
   })) as typeof api.post;
 }
@@ -211,7 +208,7 @@ function stubThreadReplyFlagEvaluation(input: { syncCore: boolean }) {
     data: {
       evaluations: (body?.keys ?? REGISTERED_SERVER_FEATURE_FLAG_KEYS).map((key) => ({
         key,
-        enabled: key === SYNC_CORE_MESSAGES_FLAG_KEY ? input.syncCore : false,
+        enabled: key === "sync_core_messages_v0" ? input.syncCore : false,
       })),
     },
   })) as typeof api.post;
@@ -220,8 +217,6 @@ function stubThreadReplyFlagEvaluation(input: { syncCore: boolean }) {
 afterEach(() => {
   api.post = originalPost as typeof api.post;
   api.get = originalGet as typeof api.get;
-  resetSyncCoreMessagesFlagForTests();
-  resetMessagesSyncCoreForTests();
   resetThreadRepliesSyncCoreForTests();
   reactionReadModelStore.getState().reset();
   resetInboxStore();
@@ -254,9 +249,6 @@ function messageNewHandler(scheduleInboxRefresh = () => {}) {
   return socketHandler("message:new", scheduleInboxRefresh);
 }
 
-function messageUpdatedHandler(scheduleInboxRefresh = () => {}) {
-  return socketHandler("message:updated", scheduleInboxRefresh);
-}
 
 function threadUpdatedHandler(scheduleInboxRefresh = () => {}) {
   return socketHandler("thread:updated", scheduleInboxRefresh);
@@ -406,136 +398,28 @@ function canonicalThreadUpdateForServer(input: {
   });
 }
 
-test("message sync exposes one product flag and no V2 rollout key", () => {
-  assert.equal(REGISTERED_SERVER_FEATURE_FLAG_KEYS.includes(SYNC_CORE_MESSAGES_FLAG_KEY), true);
-  assert.equal(REGISTERED_SERVER_FEATURE_FLAG_KEYS.includes("sync_core_messages_v2_normalized_v0" as never), false);
-  assert.equal(
-    REGISTERED_SERVER_FEATURE_FLAG_KEYS.filter((key) => key.startsWith("sync_core_messages")).length,
-    1,
-  );
+test("retired message sync flags are absent from server evaluation", () => {
+  assert.equal(REGISTERED_SERVER_FEATURE_FLAG_KEYS.some(key => key.startsWith("sync_core_messages")), false);
 });
 
-test("socket bridge: sync_core_messages_v0 gates message:new through server flag evaluation before store consumption", async () => {
-  storage.clear();
+test("socket message updates keep the existing store path after message sync removal", () => {
   resetServerStore();
   resetMessageStore();
-  useMessageStore.getState().setCurrentUserId("user-current");
   resetChannelStore();
-  resetMessagesSyncCoreForTests();
-  resetSyncCoreMessagesFlagForTests();
-  stubSyncCoreFlagEvaluation(true);
-  assert.equal(await refreshSyncCoreMessagesFlagForCurrentServer(), true);
-
-  const handleMessageNew = messageNewHandler();
-  handleMessageNew(message(1, "first"));
-  const channelActivityAfterFirst = useChannelStore.getState().channelActivity;
-  handleMessageNew(message(1, "duplicate mutated content"));
-
+  messageNewHandler()(message(1, "original"));
+  socketHandler("message:updated")({ ...message(1, "updated"), pinned: true });
   const bucket = useMessageStore.getState().channelMessages[channelId] ?? [];
   assert.equal(bucket.length, 1);
-  assert.equal(bucket[0]?.content, "first", "duplicate same-seq frame must not re-enter the store path");
-  assert.equal(
-    useChannelStore.getState().channelActivity,
-    channelActivityAfterFirst,
-    "duplicate same-seq frame must not churn channel activity side effects",
-  );
+  assert.equal(bucket[0]?.content, "updated");
+  assert.equal(bucket[0]?.pinned, true);
 });
 
-test("socket bridge: sync_core duplicate_dropped exits before inbox refresh side effects", async () => {
+test("socket bridge: message:new keeps the direct store path after message sync removal", async () => {
   storage.clear();
   resetServerStore();
   resetMessageStore();
   resetChannelStore();
-  resetMessagesSyncCoreForTests();
-  resetSyncCoreMessagesFlagForTests();
-  stubSyncCoreFlagEvaluation(true);
-  assert.equal(await refreshSyncCoreMessagesFlagForCurrentServer(), true);
-
-  let inboxRefreshCount = 0;
-  const handleMessageNew = messageNewHandler(() => {
-    inboxRefreshCount += 1;
-  });
-
-  handleMessageNew(message(1, "first"));
-  const channelActivityAfterFirst = useChannelStore.getState().channelActivity;
-  handleMessageNew(message(1, "duplicate"));
-
-  assert.equal(inboxRefreshCount, 1, "duplicate_dropped must not schedule an inbox refresh");
-  assert.equal(
-    useChannelStore.getState().channelActivity,
-    channelActivityAfterFirst,
-    "duplicate_dropped must preserve channelActivity identity",
-  );
-});
-
-test("socket bridge: current message producers keep legacy writers under sync-core flag", async () => {
-  storage.clear();
-  resetServerStore();
-  resetMessageStore();
-  resetChannelStore();
-  resetMessagesSyncCoreForTests();
-  resetSyncCoreMessagesFlagForTests();
-  stubSyncCoreFlagEvaluation(true);
-  assert.equal(await refreshSyncCoreMessagesFlagForCurrentServer(), true);
-
-  const originalAddMessage = useMessageStore.getState().addMessage;
-  const originalUpdateMessage = useMessageStore.getState().updateMessage;
-  let addCalls = 0;
-  let updateCalls = 0;
-  useMessageStore.setState({
-    addMessage: (...args) => {
-      addCalls += 1;
-      return originalAddMessage(...args);
-    },
-    updateMessage: (...args) => {
-      updateCalls += 1;
-      return originalUpdateMessage(...args);
-    },
-  });
-  try {
-    const commentRef = {
-      attachmentId: "attachment-1",
-      filename: "trace.log",
-      hostMessageId: "host-1",
-      hostSource: {
-        type: "channel" as const,
-        routeKind: "channel" as const,
-        channelId,
-      },
-      anchorLabel: "re: trace.log",
-      anchorQuote: "root",
-    };
-    messageNewHandler()({
-      ...message(7, "comment"),
-      commentRef,
-    });
-    messageUpdatedHandler()({
-      ...message(7, "comment edited"),
-      commentRef: null,
-    });
-
-    assert.equal(addCalls, 1, "current message:new producers must keep the legacy addMessage invariants");
-    assert.equal(updateCalls, 1, "current message:updated producers must not borrow message seq as a mutation version");
-    const stored = useMessageStore.getState().channelMessages[channelId]?.[0];
-    assert.equal(stored?.content, "comment edited");
-    assert.deepEqual(stored?.commentRef, commentRef, "legacy/shared-null-preserve keeps scoped commentRef");
-  } finally {
-    useMessageStore.setState({
-      addMessage: originalAddMessage,
-      updateMessage: originalUpdateMessage,
-    });
-  }
-});
-
-test("socket bridge: server flag-off message:new keeps the legacy direct store path", async () => {
-  storage.clear();
-  resetServerStore();
-  resetMessageStore();
-  resetChannelStore();
-  resetMessagesSyncCoreForTests();
-  resetSyncCoreMessagesFlagForTests();
   stubSyncCoreFlagEvaluation(false);
-  assert.equal(await refreshSyncCoreMessagesFlagForCurrentServer(), false);
 
   const handleMessageNew = messageNewHandler();
   const first = message(1, "first");
@@ -576,7 +460,6 @@ test("thread replies bridge: raw V1 and shared-shaped envelopes fail open withou
     }],
   });
   stubThreadReplyFlagEvaluation({ syncCore: true });
-  assert.equal(await refreshSyncCoreMessagesFlagForCurrentServer(), true);
 
   const originalApplyReplyFrame = useThreadStore.getState().applyReplyFrame;
   let legacyReplyFrameCalls = 0;
@@ -608,7 +491,6 @@ test("thread replies bridge: producer-bound canonical envelope sole-applies thro
   useMessageStore.getState().setCurrentUserId("user-current");
   resetThreadStore();
   stubThreadReplyFlagEvaluation({ syncCore: false });
-  assert.equal(await refreshSyncCoreMessagesFlagForCurrentServer(), false);
 
   const originalApplyReplyFrame = useThreadStore.getState().applyReplyFrame;
   let legacyReplyFrameCalls = 0;
@@ -682,7 +564,6 @@ test("thread replies bridge: shared-shaped envelope does not replace raw replyCo
     }],
   });
   stubThreadReplyFlagEvaluation({ syncCore: true });
-  assert.equal(await refreshSyncCoreMessagesFlagForCurrentServer(), true);
 
   hydrateThreadRepliesSnapshotWithSyncCore({
     serverId: "server-sync-bridge",
@@ -729,7 +610,6 @@ test("thread replies bridge: shared-shaped envelope does not request rebaseline 
     }],
   });
   stubThreadReplyFlagEvaluation({ syncCore: true });
-  assert.equal(await refreshSyncCoreMessagesFlagForCurrentServer(), true);
 
   const snapshotRequests: string[] = [];
   api.get = (async (url: string) => {
@@ -770,7 +650,6 @@ test("thread replies bridge: stale A binding drops old raw and canonical events 
   resetThreadStore();
   resetInboxStore();
   stubThreadReplyFlagEvaluation({ syncCore: true });
-  assert.equal(await refreshSyncCoreMessagesFlagForCurrentServer(), true);
 
   const staleAHandler = threadUpdatedHandler();
 
@@ -780,7 +659,6 @@ test("thread replies bridge: stale A binding drops old raw and canonical events 
   resetThreadStore();
   resetInboxStore();
   stubThreadReplyFlagEvaluation({ syncCore: true });
-  assert.equal(await refreshSyncCoreMessagesFlagForCurrentServer(), true);
 
   staleAHandler(threadUpdate(9, {
     parentMessageId: "parent-a-raw",
@@ -812,7 +690,6 @@ test("thread replies bridge: stale A binding drops before reply summary writes",
     resetThreadStore();
     resetInboxStore();
     stubThreadReplyFlagEvaluation({ syncCore: true });
-    assert.equal(await refreshSyncCoreMessagesFlagForCurrentServer(), true);
 
     const staleAHandler = threadUpdatedHandler();
 
@@ -853,10 +730,7 @@ test("thread replies bridge: stale A binding drops before reply summary writes",
       followedThreads: useThreadStore.getState().followedThreads,
       inboxItems: useInboxStore.getState().items,
     };
-
-    resetSyncCoreMessagesFlagForTests();
     stubThreadReplyFlagEvaluation({ syncCore });
-    assert.equal(await refreshSyncCoreMessagesFlagForCurrentServer(), syncCore);
 
     staleAHandler(threadUpdate(9, {
       parentMessageId: "parent-a-raw",
@@ -902,7 +776,6 @@ test("thread replies bridge: stale rebaseline response cannot mutate UI or core 
   resetThreadStore();
   resetInboxStore();
   stubThreadReplyFlagEvaluation({ syncCore: true });
-  assert.equal(await refreshSyncCoreMessagesFlagForCurrentServer(), true);
 
   let resolveMessages!: (value: unknown) => void;
   let resolveSummary!: (value: unknown) => void;
@@ -1253,144 +1126,12 @@ test("thread replies bridge: server and sync-core resets clear reply scopes", ()
   assert.deepEqual(useThreadStore.getState().replyScopes, {});
 });
 
-test("socket bridge: the single sync-core flag sole-applies only already-eligible canonical facts", async () => {
-  resetServerStore();
-  resetMessageStore();
-  useMessageStore.getState().setCurrentUserId("user-current");
-  resetChannelStore();
-  stubMessageFlagEvaluation(true);
-  assert.equal(await refreshNormalizedMessageV2FlagForCurrentServer(), true);
-
-  const incoming = {
-    ...message(1, "normalized"),
-    reactions: [{ emoji: "👍", count: 2, previewK: [] }],
-  };
-  messageNewHandler()(incoming);
-
-  const stored = useMessageStore.getState().channelMessages[channelId]?.[0];
-  assert.deepEqual(stored?.reactions, [{ emoji: "👍", count: 2, previewK: [] }]);
-  assert.equal(JSON.stringify(stored).includes("reactorIds"), false);
-  assert.deepEqual(
-    reactionReadModelStore.getState().readViewerOverlay(
-      "user-current",
-      "server-sync-bridge",
-      incoming.id,
-      "👍",
-    ),
-    { status: "unknown" },
-  );
-});
-
-test("socket bridge: the single sync-core flag shadows raw V1 rosters without promoting them", async () => {
-  resetServerStore();
-  resetMessageStore();
-  useMessageStore.getState().setCurrentUserId("user-current");
-  resetChannelStore();
-  stubMessageFlagEvaluation(true);
-  assert.equal(await refreshSyncCoreMessagesFlagForCurrentServer(), true);
-
-  const incoming = {
-    ...message(1, "legacy shadow"),
-    reactions: [{
-      emoji: "👍",
-      count: 1,
-      reactorIds: ["user-2"],
-      reactorNames: ["Ben"],
-    }],
-  };
-  messageNewHandler()(incoming);
-
-  const stored = useMessageStore.getState().channelMessages[channelId]?.[0];
-  assert.deepEqual(stored?.reactions, incoming.reactions);
-  assert.equal("previewK" in (stored?.reactions?.[0] ?? {}), false);
-  assert.equal(
-    reactionReadModelStore.getState().actorCache.size,
-    1,
-    "raw V1 may seed the bounded shadow cache but cannot replace the message fact",
-  );
-  assert.deepEqual(
-    reactionReadModelStore.getState().readViewerOverlay(
-      "user-current",
-      "server-sync-bridge",
-      incoming.id,
-      "👍",
-    ),
-    { status: "unknown" },
-    "a channel-room frame must not be reclassified as receiver-private by the store",
-  );
-});
-
-test("socket bridge: non-eligible normalized input fails open to the V1 apply lane", async () => {
-  resetServerStore();
-  resetMessageStore();
-  useMessageStore.getState().setCurrentUserId("user-current");
-  resetChannelStore();
-  stubMessageFlagEvaluation(true);
-  assert.equal(await refreshNormalizedMessageV2FlagForCurrentServer(), true);
-
-  messageNewHandler()({
-    ...message(1, "invalid"),
-    reactions: [{ emoji: " 👍 ", count: 1, previewK: [] }],
-  });
-  assert.deepEqual(
-    useMessageStore.getState().channelMessages[channelId]?.[0]?.reactions,
-    [{ emoji: " 👍 ", count: 1, previewK: [] }],
-    "not-eligible normalized input must fail open to the existing V1 apply lane",
-  );
-  assert.equal(reactionReadModelStore.getState().actorCache.size, 0);
-});
-
-test("normalized V2 false-to-true activation rebaselines legacy HTTP state and resets the old sync core", async () => {
-  resetServerStore();
-  resetMessageStore();
-  useMessageStore.getState().setCurrentUserId("user-current");
-  resetChannelStore();
-  stubMessageFlagEvaluation(false);
-  assert.equal(await refreshSyncCoreMessagesFlagForCurrentServer(), false);
-
-  const legacy = {
-    ...message(1, "before activation"),
-    reactions: [{
-      emoji: "👍",
-      count: 1,
-      reactorIds: ["user-current"],
-      reactorNames: ["Current User"],
-    }],
-  };
-  useMessageStore.getState().addMessage(legacy);
-  assert.equal(
-    useMessageStore.getState().channelMessages[channelId]![0],
-    legacy,
-    "unresolved V2 must first exercise the exact legacy HTTP/store path",
-  );
-  // Prime the old module-global sync core with the same raw authority before
-  // the flag flips; the activation must reset this state as well as the store.
-  messageNewHandler()(legacy);
-  assert.equal("reactorIds" in useMessageStore.getState().channelMessages[channelId]![0]!.reactions![0]!, true);
-
-  resetSyncCoreMessagesFlagForTests();
-  stubMessageFlagEvaluation(true);
-  assert.equal(await refreshNormalizedMessageV2FlagForCurrentServer(), true);
-
-  const rebased = useMessageStore.getState().channelMessages[channelId]![0]!;
-  assert.deepEqual(rebased.reactions, legacy.reactions, "raw V1 remains the legacy authoritative fact");
-  assert.equal(reactionReadModelStore.getState().actorCache.size, 1, "activation may seed shadow reads");
-
-  messageNewHandler()({ ...legacy, content: "after activation" });
-  assert.equal(
-    useMessageStore.getState().channelMessages[channelId]![0]!.content,
-    "after activation",
-    "same-seq frame must apply after the V2 activation reset instead of being dropped by the old core",
-  );
-});
-
 test("receiver-private HTTP response for A cannot mutate or reactivate after auth switches to B", async () => {
   resetServerStore();
   resetMessageStore();
   useMessageStore.getState().setCurrentUserId("user-a");
   resetChannelStore();
   stubMessageFlagEvaluation(true);
-  assert.equal(await refreshNormalizedMessageV2FlagForCurrentServer(), true);
 
   let resolveRequest!: (value: unknown) => void;
   api.get = (async () => new Promise<unknown>((resolve) => {
@@ -1430,7 +1171,6 @@ test("sync resume keeps an invalid batch on V1 and skips normalized side effects
   useMessageStore.getState().setCurrentUserId("user-current");
   resetChannelStore();
   stubMessageFlagEvaluation(true);
-  assert.equal(await refreshNormalizedMessageV2FlagForCurrentServer(), true);
 
   const valid = {
     ...message(1, "valid"),
@@ -1469,59 +1209,6 @@ test("sync resume keeps an invalid batch on V1 and skips normalized side effects
     hasMore: false,
   });
   await new Promise((resolve) => setTimeout(resolve, 0));
-  assert.deepEqual(
-    reactionReadModelStore.getState().readViewerOverlay(
-      "user-current",
-      "server-sync-bridge",
-      valid.id,
-      "👍",
-    ),
-    { status: "loaded", reactedByMe: true },
-  );
-  assert.equal(viewerGetCalls, 1, "valid receiver-private resume must cold-recover viewer truth");
-  assert.deepEqual(
-    [...reactionReadModelStore.getState().viewerVersions.values()],
-    [7],
-    "resume recovery must enter the same versioned projector as GET, ACK, and user-room events",
-  );
-});
-
-test("reaction viewer events share the versioned complete-snapshot projector", async () => {
-  resetServerStore();
-  resetMessageStore();
-  useMessageStore.getState().setCurrentUserId("user-current");
-  resetChannelStore();
-  stubMessageFlagEvaluation(true);
-  assert.equal(await refreshNormalizedMessageV2FlagForCurrentServer(), true);
-
-  const handleViewer = socketHandler("reaction_viewer:updated");
-  handleViewer({
-    serverId: "server-sync-bridge",
-    messageId: "message-1",
-    viewerVersion: 2,
-    reactedEmojis: ["👍"],
-  });
-  handleViewer({
-    serverId: "server-sync-bridge",
-    messageId: "message-1",
-    viewerVersion: 1,
-    reactedEmojis: [],
-  });
-  handleViewer({
-    serverId: "server-sync-bridge",
-    messageId: "message-1",
-    viewerVersion: 2,
-    reactedEmojis: [],
-  });
-
-  assert.deepEqual(
-    reactionReadModelStore.getState().readViewerOverlay(
-      "user-current",
-      "server-sync-bridge",
-      "message-1",
-      "👍",
-    ),
-    { status: "loaded", reactedByMe: true },
-  );
-  assert.equal(reactionReadModelStore.getState().viewerSnapshotConflicts.length, 1);
+  assert.equal(viewerGetCalls, 0, "resume must not request the retired normalized viewer state");
+  assert.equal(reactionReadModelStore.getState().viewerVersions.size, 0);
 });

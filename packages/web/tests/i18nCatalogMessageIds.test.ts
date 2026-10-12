@@ -312,7 +312,7 @@ test("collectCurrentFindings: temp root without en.ts stays GREEN via catalogMes
   }
 });
 
-test("real corpus: catalog MessageId filter drops exact 23 keys/30 hits (billing+workspace-grid+settings+agent profile)", () => {
+test("real corpus: catalog MessageId filter drops exact 6 keys/6 hits (billing+settings+agent profile)", () => {
   const catalog = loadCatalogMessageIdsFromPath(EN_CATALOG);
   const baseline = JSON.parse(readFileSync(BASELINE_PATH, "utf8")) as Array<{
     path: string;
@@ -350,11 +350,13 @@ test("real corpus: catalog MessageId filter drops exact 23 keys/30 hits (billing
   // messageStore's focused-context failure now picks its catalog id through a
   // ternary (not-found vs beyond-history, task #14) instead of two object
   // literal `contextLoadError:` values, retiring that key/2 hits (23/30).
-  assert.equal(droppedAgg.length, 23, `expected 23 filtered keys; got ${droppedAgg.length}`);
+  // Removing the Workspace grid layout deleted workspaceGridUrlState.ts and its
+  // 17 catalog-id object literals (24 hits), leaving 6/6.
+  assert.equal(droppedAgg.length, 6, `expected 6 filtered keys; got ${droppedAgg.length}`);
   assert.equal(
     droppedAgg.reduce((n, e) => n + e.count, 0),
-    30,
-    "expected 30 filtered hits",
+    6,
+    "expected 6 filtered hits",
   );
   assert.equal(
     droppedAgg.filter((e) => e.path === "src/components/agent/AgentScopesPanel.tsx").length,
@@ -363,10 +365,6 @@ test("real corpus: catalog MessageId filter drops exact 23 keys/30 hits (billing
   assert.equal(
     droppedAgg.filter((e) => e.path === "src/utils/billingControls.ts").length,
     5,
-  );
-  assert.equal(
-    droppedAgg.filter((e) => e.path === "src/components/workspace/workspaceGridUrlState.ts").length,
-    17,
   );
   assert.equal(
     droppedAgg.filter((e) => e.path === "src/components/settings/settingsNavigation.ts").length,
@@ -408,10 +406,16 @@ test("real corpus: catalog MessageId filter drops exact 23 keys/30 hits (billing
   // 138 -> 137 keys / 166 -> 165 hits: the Computer upgrade copy rework renders
   // the target inside the catalogued "Upgrade to v{version}" button label, so
   // MachineDetailPanel's audited `(v` version-marker literal left the source.
-  assert.equal(current.length, 137, `final disposition baseline keys; got ${current.length}`);
+  // 137 -> 136 keys / 165 -> 164 hits: MachineDetailPanel's `~/.slock/agents/`
+  // workspace path moved out of JSX into a helper (the daemon now reports
+  // `~/.raft` paths on new machines; slock#9190).
+  // 136 -> 110 keys / 164 -> 132 hits: removing the Workspace grid layout
+  // deleted its panel-title protocol literals (#channel / @name / task #N) in
+  // MainLayout, Sidebar, member rows, MessageSearchPage and src/components/workspace.
+  assert.equal(current.length, 110, `final disposition baseline keys; got ${current.length}`);
   assert.equal(
     current.reduce((n, e) => n + e.count, 0),
-    165,
+    132,
 
     "final disposition baseline hits",
   );
@@ -431,7 +435,7 @@ test("real corpus: catalog MessageId filter drops exact 23 keys/30 hits (billing
     }),
   );
 
-  assert.equal(baseline.length, 137);
+  assert.equal(baseline.length, 110);
 
   assert.equal(
     baseline.filter((e) => e.path === "src/components/agent/AgentScopesPanel.tsx").length,

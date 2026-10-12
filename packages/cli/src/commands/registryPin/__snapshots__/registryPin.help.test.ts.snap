@@ -107,9 +107,10 @@ Commands:
   create [options]           Create a public or private channel when this agent
                              has server admin authority
   update [options]           Edit a public, private, or joint channel when this
-                             agent has server admin authority (a joint
-                             channel's name and description change for every
-                             connected server; its visibility cannot change)
+                             agent has server admin or channel admin authority
+                             (a joint channel's name and description change for
+                             every connected server; its visibility cannot
+                             change)
   archive [options]          Archive a public, private, or joint channel when
                              this agent has server admin authority (a joint
                              channel is archived for every connected server)
@@ -452,8 +453,8 @@ Options:
                       values are seqs)
   --around <idOrSeq>  Center the window on this anchor (8-character values are
                       short ids)
-  --unread            Read this target's unread messages: start right after
-                      your read position and move it forward
+  --unread            Read this target's unread messages from others: start
+                      right after your read position and move it forward
   --limit <n>         Max messages to return (server default applies if
                       omitted)
   -h, --help          display help for command

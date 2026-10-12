@@ -1,5 +1,15 @@
 import type { OsSupervisorKind } from "./osSupervisor";
 
+/**
+ * @deprecated `--os-supervised` and this env var belong to the retired
+ * OS-managed service mode. Nothing launches Computer with them any more; they
+ * are kept only so a leftover launchd/systemd/Task Scheduler definition that
+ * still runs `__service --slock-home <home> --os-supervised <kind>` is
+ * recognized and exits quietly, and so a stale value is scrubbed from child
+ * environments. Remove this module once no supported Computer version can
+ * still have such a definition installed
+ * (docs/contracts/computer-os-manager-retirement.md).
+ */
 export const OS_SUPERVISOR_KIND_ENV_VAR = "RAFT_COMPUTER_OS_SUPERVISOR_KIND";
 
 const OS_SUPERVISOR_KINDS = new Set<OsSupervisorKind>([

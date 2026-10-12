@@ -19,7 +19,11 @@ assert.equal(
 const fixture = mkdtempSync(join(packageRoot, ".lockstep-"));
 try {
   const mutantPath = join(fixture, "agentApiMessageContract.ts");
-  writeFileSync(mutantPath, source.replace(originalField, incompatibleField));
+  // The mutant lives outside src/, so point its one relative import back there.
+  const mutant = source
+    .replace(originalField, incompatibleField)
+    .replace('from "./lazySchema";', `from ${JSON.stringify(join(packageRoot, "src/lazySchema"))};`);
+  writeFileSync(mutantPath, mutant);
   writeFileSync(join(fixture, "tsconfig.json"), `${JSON.stringify({
     extends: join(packageRoot, "tsconfig.json"),
     compilerOptions: {

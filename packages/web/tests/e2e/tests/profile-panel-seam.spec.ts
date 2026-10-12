@@ -67,10 +67,13 @@ test("thread | profile with the channel folded: the thread draws no edge beside 
   await expect(page.getByTestId("profile-panel")).toBeVisible();
   expect((await box(page, "thread-main-column")).display).toBe("none");
 
-  const threadRootLeft = await page.getByTestId("thread-side-column").evaluate((el) =>
-    parseFloat(getComputedStyle(el.querySelector('[data-slot="thread-panel-root"]')!).borderLeftWidth));
-  expect(threadRootLeft).toBe(0);
-  const threadRight = await page.getByTestId("thread-side-column").evaluate((el) => parseFloat(getComputedStyle(el).borderRightWidth));
-  expect(threadRight).toBe(0);
+  // The thread renders a loading (or resolve-error) shell without the panel
+  // root until its channel resolves; wait for the real root so a missing root
+  // fails here by name instead of as a null getComputedStyle.
+  const threadSide = page.getByTestId("thread-side-column");
+  const threadRoot = threadSide.locator('[data-slot="thread-panel-root"]');
+  await expect(threadRoot).toBeVisible();
+  await expect(threadRoot).toHaveCSS("border-left-width", "0px");
+  await expect(threadSide).toHaveCSS("border-right-width", "0px");
   expect((await box(page, "profile-panel")).borderLeft).toBeGreaterThan(0);
 });

@@ -61,6 +61,8 @@ export interface AgentMessageLike {
   sender_type?: string;
   sender_name?: string;
   sender_description?: string | null;
+  /** IANA zone of a human web sender; transport only, not rendered yet. */
+  sender_timezone?: string | null;
   content?: string;
   attachments?: Array<{ id: string; filename: string }>;
   task_status?: string | null;
@@ -112,10 +114,19 @@ export function formatAgentMessageTarget(m: AgentMessageLike): RaftTargetString 
   return `#${m.channel_name}` as RaftTargetString;
 }
 
+/**
+ * `@name`, then the sender's time zone when the message carries one (a human
+ * web sender's browser zone at send time), then the profile description:
+ * `@cindyz (Asia/Shanghai) — Founder`. Message timestamps stay UTC; the zone
+ * only tells an agent how the sender meant "tomorrow" or "tonight".
+ */
+export function formatSenderHandleText(name: string, description?: string | null, timezone?: string | null): string {
+  const zone = timezone ? ` (${timezone})` : "";
+  return description ? `@${name}${zone} — ${description}` : `@${name}${zone}`;
+}
+
 export function formatAgentSenderHandle(m: AgentMessageLike): string {
-  const name = m.sender_name ?? "unknown";
-  const desc = m.sender_description ?? null;
-  return desc ? `@${name} — ${desc}` : `@${name}`;
+  return formatSenderHandleText(m.sender_name ?? "unknown", m.sender_description ?? null, m.sender_timezone ?? null);
 }
 
 export function formatAgentAttachmentSuffix(attachments: Array<{ id: string; filename: string }> | undefined, style: RaftHintStyle = "cli"): string {

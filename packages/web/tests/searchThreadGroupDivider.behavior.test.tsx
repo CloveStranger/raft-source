@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import "./helpers/domSetup";
 import { createElement } from "react";
 import { MemoryRouter } from "react-router-dom";
-import { cleanup, fireEvent, render as rtlRender, screen, waitFor } from "@testing-library/react";
+import { cleanup, render as rtlRender, screen, waitFor } from "@testing-library/react";
 import { TestIntlProvider } from "./helpers/intl";
 import type { Locale } from "../src/i18n/locale";
 const render: typeof rtlRender = (ui, options) => rtlRender(ui, { wrapper: TestIntlProvider, ...options });
@@ -71,13 +71,7 @@ function makeServer(): Server {
   };
 }
 
-type PanelSource = { title?: string; subtitle?: string };
-
-async function renderSearchPage(
-  locale?: Locale,
-  onDragPanelRef?: (event: unknown, ref: unknown, source?: PanelSource) => void,
-  query = "visual",
-) {
+async function renderSearchPage(locale?: Locale) {
   installBrowserStubs();
   localStorage.setItem("slock_access_token", "token");
   const { default: MessageSearchPage } = await import("../src/components/search/MessageSearchPage");
@@ -116,8 +110,8 @@ async function renderSearchPage(
 
   const tree = createElement(
     MemoryRouter,
-    { initialEntries: [`/s/server/search?q=${query}`] },
-    createElement(MessageSearchPage, { onDragPanelRef: onDragPanelRef as never }),
+    { initialEntries: ["/s/server/search?q=visual"] },
+    createElement(MessageSearchPage),
   );
   return locale
     ? rtlRender(createElement(TestIntlProvider, { locale }, tree))
@@ -351,84 +345,6 @@ test("i18n: thread group renders zh chrome and app-locale relative time", async 
     const body = document.body.textContent ?? "";
     assert.match(body, /前|后|分钟|小时|天|现在/, "group relative time renders in Chinese");
     assert.doesNotMatch(body, /\bago\b|\bminutes?\b|\bhours?\b|\bdays?\b/, "no English relative-time leaks under zh");
-  } finally {
-    api.get = originalGet;
-  }
-});
-
-// --- 赵梓淇 post-merge audit fast-follow: the message DRAG handoff panel chrome
-// must localize like the click path (different indentation had slipped the
-// replace_all). Behavioral tooth for the thread title (his exact proof:
-// actual "Thread parent-1" -> expected "消息列 parent-1") plus a mounted
-// non-thread subtitle tooth. Reverse-RED: reverting either formatter fails the
-// corresponding drag assertion. ---
-test("i18n: message drag handoff localizes thread and channel panel chrome under zh", async () => {
-  const originalGet = api.get;
-  api.get = async (url: string) => {
-    assert.equal(url, "/messages/search");
-    return {
-      data: {
-        hasMore: false,
-        results: [
-          {
-            id: "message-1",
-            channelId: "thread-1",
-            threadId: "thread-root-1",
-            parentMessageId: "parent-1",
-            parentMessageContent: "Parent thread title for visual testing",
-            parentChannelId: "channel-1",
-            parentChannelName: "visual-testing",
-            parentChannelType: "channel",
-            parentChannelArchivedAt: null,
-            senderId: "user-1",
-            senderType: "user",
-            senderName: "Current User",
-            channelName: "thread",
-            channelType: "thread",
-            channelArchivedAt: null,
-            content: "visual testing first hit",
-            snippet: "visual testing first hit",
-            createdAt: "2026-07-01T04:00:00.000Z",
-          },
-          {
-            id: "message-2",
-            channelId: "channel-1",
-            senderId: "user-1",
-            senderType: "user",
-            senderName: "Current User",
-            channelName: "general",
-            channelType: "channel",
-            channelArchivedAt: null,
-            content: "visual testing channel hit",
-            snippet: "visual testing channel hit",
-            createdAt: "2026-07-01T04:01:00.000Z",
-          },
-        ],
-      },
-    };
-  };
-
-  const sources: PanelSource[] = [];
-  try {
-    await renderSearchPage("zh-cn", (_event, _ref, source) => {
-      if (source) sources.push(source);
-    }, "drag-probe");
-
-    await waitFor(() => {
-      assert.ok(Array.from(document.querySelectorAll("button")).some((b) => b.textContent?.includes("visual testing first hit")));
-      assert.ok(Array.from(document.querySelectorAll("button")).some((b) => b.textContent?.includes("visual testing channel hit")));
-    });
-    const buttons = Array.from(document.querySelectorAll("button"));
-    const threadHit = buttons.find((button) => button.textContent?.includes("visual testing first hit"))!;
-    const channelHit = buttons.find((button) => button.textContent?.includes("visual testing channel hit"))!;
-    fireEvent.dragStart(threadHit);
-    fireEvent.dragStart(channelHit);
-
-    assert.ok(sources.some((s) => s.title === "消息列 parent-1"), "thread drag panel title is localized (消息列 parent-1)");
-    assert.ok(
-      sources.some((source) => source.title === "#general" && source.subtitle === "搜索结果"),
-      "channel drag panel subtitle is localized (搜索结果)",
-    );
   } finally {
     api.get = originalGet;
   }

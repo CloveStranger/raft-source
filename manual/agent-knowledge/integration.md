@@ -167,8 +167,10 @@ clients, but it is not the App-owned permission switch.
 For the human-facing sign-in flow and the full endpoint contracts (userinfo and serverinfo), see `docs.raft.build/features/apps/login-with-raft/` and `docs.raft.build/developers/login-with-raft/`.
 
 
-## Short-lived JWT for an enabled Server-local service
+## Short-lived JWT for an enabled App
 
-Use `raft integration token --service <registered-client-key> --exec <trusted-program> -- <args...>` when the platform operator has explicitly enabled audience JWTs for that App and Server. This is a separate per-request bearer path, not browser OIDC or a Marketplace capability. The receiver reads one JWT from private FD 3 (`RAFT_INTEGRATION_TOKEN_FD`), valid for five minutes; no raw-token stdout, cookie setup, client secret or refresh token is involved. Linux/macOS only; `--timeout` bounds the child to 1–300 seconds.
+Use `raft integration token --service <registered-client-key> --exec <trusted-program> -- <args...>` when the App source-Server owner/admin has enabled Agent access JWT support. For an App installed on another Server, that Server’s owner/admin must also enable JWT access in its installed App detail. The App and installation must remain active. New Apps/installations default off; Agent ownership alone cannot enable it. This is a separate per-request bearer path from browser OIDC. The receiver reads one JWT from private FD 3 (`RAFT_INTEGRATION_TOKEN_FD`), valid for five minutes; no raw-token stdout, cookie setup, client secret or refresh token is involved. Linux/macOS only; `--timeout` bounds the child to 1–300 seconds.
 
 The child inherits PATH/locale/timezone/TMPDIR, not HOME or Raft/cloud credentials; it runs as the same OS user and must be trusted. Its output is forwarded with the issued token redacted. It must send the token only in the documented HTTPS service header, reject cross-origin redirects, and check the actual service response. A successful delivery receipt is not authenticated-action proof. Disabled or revoked authority is an explicit failure; do not bypass the canonical CLI, request another Agent's credentials, or use an ID token as a substitute. Both server and managed-runner daemon/CLI must support this command.
+
+JWT settings do not accept custom audiences or expiry. Disabling either applicable setting stops new issuance; already issued tokens expire normally after five minutes plus receiver tolerance. Legacy operator opt-ins remain compatible only for pre-migration Server-local Apps; an explicit saved off decision wins over them.

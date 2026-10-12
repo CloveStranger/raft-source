@@ -5,8 +5,9 @@ import assert from "node:assert/strict";
 import { BasicTracer, MemoryTraceSink } from "@botiverse/raft-shared";
 
 import { getDb } from "../db/index";
-import { users } from "../db/schema";
-import { machineConnectionsRefusedTotal } from "../metrics";
+import { machines, users } from "../db/schema";
+import { daemonVersionLabel, machineConnectionsRefusedTotal } from "../metrics";
+import { eq } from "drizzle-orm";
 import { AgentOrchestrator } from "./agentOrchestrator";
 import { MACHINE_DRAIN_CLOSE_CODE, MACHINE_DRAIN_CLOSE_REASON } from "./machineDrain";
 import { registerMachine } from "./machineService";
@@ -24,9 +25,13 @@ afterEach(async () => {
   await closeTestDatabase();
 });
 
-async function drainingRefusals(): Promise<number> {
+async function drainingRefusals(daemonVersion?: string): Promise<number> {
   const metric = await machineConnectionsRefusedTotal.get();
-  return metric.values.find((value) => value.labels.reason === "draining")?.value ?? 0;
+  // One series per daemon_version: sum them, or pick one.
+  return metric.values
+    .filter((value) => value.labels.reason === "draining")
+    .filter((value) => daemonVersion === undefined || value.labels.daemon_version === daemonVersion)
+    .reduce((sum, value) => sum + value.value, 0);
 }
 
 function makeFakeMachineWs() {
@@ -137,6 +142,9 @@ test("a machine connection that arrives after the drain started is closed with 1
   assert.equal(orchestrator.drainRefusedMachineConnectionCount, 2);
   // The Prometheus counter moves with every refusal (SLO v1 post-deploy readout).
   assert.equal((await drainingRefusals()) - refusalsBefore, 2);
+  // Labelled with the version each machine last reported: these machines
+  // never sent ready, so their records have none.
+  assert.ok((await drainingRefusals("unknown")) >= 2, "refusals carry daemon_version from the machine record");
 
   // The refusal is observable: one event per refusal, with the running total.
   const events = sink.getAllLogEvents().filter((event) => event.name === "server.machine.connection.refused_while_draining");
@@ -158,4 +166,26 @@ test("a socket that is no longer open when refused is still counted and never re
   assert.deepEqual(closing.closes, [], "no close frame on a socket that is not OPEN");
   assert.equal(orchestrator.getMachineConnectionEpoch(machineIds[0]!), null);
   assert.equal(orchestrator.drainRefusedMachineConnectionCount, 1);
+});
+
+test("a drain refusal is labelled with the daemon version the machine last reported", async ({ db: _db }) => {
+  const { server, machineIds } = await seedServerWithMachines(1);
+  await getDb().update(machines).set({ daemonVersion: "1.0.40" }).where(eq(machines.id, machineIds[0]!));
+  const orchestrator = new AgentOrchestrator(makeReplicaStateStore());
+  const before = await drainingRefusals("1.0.40");
+  await orchestrator.closeMachineConnectionsForDrain({ spreadMs: 0 });
+  const late = makeFakeMachineWs();
+  await orchestrator.registerMachine(machineIds[0]!, server.id, late.ws as never);
+  assert.equal((await drainingRefusals("1.0.40")) - before, 1);
+  orchestrator.shutdown();
+});
+
+test("daemonVersionLabel keeps real versions, maps missing to unknown and anything else to other", () => {
+  assert.equal(daemonVersionLabel("1.0.43"), "1.0.43");
+  assert.equal(daemonVersionLabel("1.0.44-rc.1"), "1.0.44-rc.1");
+  assert.equal(daemonVersionLabel("0.9.12"), "0.9.12");
+  assert.equal(daemonVersionLabel(null), "unknown");
+  assert.equal(daemonVersionLabel(""), "unknown");
+  assert.equal(daemonVersionLabel("not a version"), "other");
+  assert.equal(daemonVersionLabel(`1.0.0-${"x".repeat(200)}`), "other");
 });

@@ -71,7 +71,23 @@ test("Reminder source identity rejects malformed UUID and revision shapes", () =
 
 test("Reminder projects every legal title into one bounded Inbox preview line", () => {
   const long = "x".repeat(500);
-  assert.equal(projectReminderInboxTitle(long), "x".repeat(120));
+  // A shortened title must be visibly incomplete: a silently cut structured
+  // value (version, id, count) is well-formed and therefore self-concealing.
+  assert.equal(projectReminderInboxTitle(long), "x".repeat(119) + "\u2026");
+  assert.equal(projectReminderInboxTitle("x".repeat(120)), "x".repeat(120), "exactly at the bound: no marker");
+  assert.equal(projectReminderInboxTitle("x".repeat(121)), "x".repeat(119) + "\u2026");
+  assert.equal(
+    projectReminderInboxTitle("check  CLI < 0.0.28 ".padEnd(130, "y")),
+    "check CLI < 0.0.28 ".padEnd(119, "y") + "\u2026",
+    "whitespace is collapsed before the bound is applied",
+  );
+  // The cut must not split a surrogate pair: a lone high surrogate at the end
+  // is not well-formed and renders as garbage before the marker.
+  const emojiAtCut = "x".repeat(118) + "\u{1F600}" + "y".repeat(10);
+  assert.equal(projectReminderInboxTitle(emojiAtCut), "x".repeat(118) + "\u2026");
+  // (ES2022 target: no String#isWellFormed; a lone high surrogate right before
+  // the marker is the only malformed shape this cut can produce.)
+  assert.doesNotMatch(projectReminderInboxTitle(emojiAtCut)!, /[\uD800-\uDBFF]\u2026$/);
   assert.equal(projectReminderInboxTitle("first\nsecond\r\nthird"), "first second third");
 
   const store = createAgentAppInboxStore({ registry: REMINDER_AGENT_INBOX_REGISTRY });

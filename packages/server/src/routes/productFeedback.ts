@@ -11,10 +11,13 @@ import {
   ProductFeedbackConfigurationError,
   ProductFeedbackUpstreamError,
   ProductFeedbackValidationError,
+  isPresignedRejection,
   isProductFeedbackConfigured,
   normalizeProductFeedbackMetadata,
+  parseProductFeedbackDiagnostics,
   submitProductFeedback,
   type ProductFeedbackKind,
+  type ProductFeedbackPresignedAttachment,
   type ProductFeedbackReporterAttribution,
 } from "../services/productFeedbackService";
 import {
@@ -32,6 +35,12 @@ import {
   ProductFeedbackRouteBindingError,
 } from "../services/productFeedbackRouteBindingService";
 import { productFeedbackServerTiming } from "../services/productFeedbackTiming";
+import {
+  isProductFeedbackSource,
+  ProductFeedbackSourceUnavailableError,
+  resolveProductFeedbackEnv,
+  type ProductFeedbackSource,
+} from "../services/productFeedbackApps";
 import { sendJsonServerError } from "./errorResponse";
 
 export const productFeedbackRouter: RouterType = Router();
@@ -172,7 +181,33 @@ function trustedFeedbackClientKind(req: Request): string | undefined {
   return raw?.trim() || undefined;
 }
 
-function mapUpstreamError(error: ProductFeedbackUpstreamError): { status: number; code: string } {
+class ProductFeedbackSourceInvalidError extends Error {}
+
+/** The client source of a conversation request: the trusted header, default web. */
+function conversationFeedbackSource(req: Request): ProductFeedbackSource {
+  const raw = trustedFeedbackClientKind(req);
+  if (raw === undefined) return "web";
+  if (!isProductFeedbackSource(raw)) throw new ProductFeedbackSourceInvalidError();
+  return raw;
+}
+
+function productFeedbackRouteBindingLog(error: ProductFeedbackRouteBindingError): void {
+  // A fixed reason code (an upstream status at most); never a value.
+  console.warn(`[product-feedback] route binding failed (${error.reason})`);
+}
+
+function productFeedbackSourceUnavailableLog(error: ProductFeedbackSourceUnavailableError): void {
+  // Source and a fixed reason code (field names at most); never a value.
+  console.warn(`[product-feedback] source unavailable (${error.source}: ${error.reason})`);
+}
+
+function mapUpstreamError(
+  error: ProductFeedbackUpstreamError,
+  options: { withDiagnostics?: boolean } = {},
+): { status: number; code: string } {
+  if (options.withDiagnostics && isPresignedRejection(error)) {
+    return { status: 400, code: "feedback_diagnostics_rejected" };
+  }
   if (error.upstreamStatus === 401 || error.upstreamStatus === 403) {
     return { status: 503, code: "feedback_integration_unavailable" };
   }
@@ -191,7 +226,13 @@ function positiveInt(value: unknown, fallback: number, max: number): number | nu
 }
 
 function sendConversationError(res: Response, error: unknown): boolean {
-  if (error instanceof ProductFeedbackRouteBindingError) {
+  if (error instanceof ProductFeedbackSourceInvalidError) {
+    res.status(400).json({ error: "Invalid feedback request", code: "feedback_invalid" });
+    return true;
+  }
+  if (error instanceof ProductFeedbackSourceUnavailableError) productFeedbackSourceUnavailableLog(error);
+  if (error instanceof ProductFeedbackRouteBindingError) productFeedbackRouteBindingLog(error);
+  if (error instanceof ProductFeedbackRouteBindingError || error instanceof ProductFeedbackSourceUnavailableError) {
     res.status(503).json({
       error: "Feedback service is temporarily unavailable",
       code: "feedback_integration_unavailable",
@@ -234,11 +275,12 @@ productFeedbackRouter.get("/tickets", async (req, res) => {
     return;
   }
   try {
-    const { reporterId } = await ensureProductFeedbackRouteBinding({ userId: req.userId! });
+    const env = await resolveProductFeedbackEnv({ userId: req.userId!, source: conversationFeedbackSource(req) });
+    const { reporterId } = await ensureProductFeedbackRouteBinding({ userId: req.userId!, env });
     const upstreamStartedAt = performance.now();
     let handsServerTiming: string | null = null;
     const list = await listProductFeedbackTickets({
-      userId: req.userId!, reporterId, limit, cursor,
+      userId: req.userId!, reporterId, limit, cursor, env,
       onUpstreamServerTiming: (value) => { handsServerTiming = value; },
     });
     setUpstreamTiming(res, upstreamStartedAt, handsServerTiming);
@@ -264,11 +306,12 @@ productFeedbackRouter.get("/tickets/:ticketId", async (req, res) => {
     return;
   }
   try {
-    const { reporterId } = await ensureProductFeedbackRouteBinding({ userId: req.userId! });
+    const env = await resolveProductFeedbackEnv({ userId: req.userId!, source: conversationFeedbackSource(req) });
+    const { reporterId } = await ensureProductFeedbackRouteBinding({ userId: req.userId!, env });
     const upstreamStartedAt = performance.now();
     let handsServerTiming: string | null = null;
     const detail = await getProductFeedbackTicket({
-      userId: req.userId!, reporterId, ticketId, commentLimit, commentCursor,
+      userId: req.userId!, reporterId, ticketId, commentLimit, commentCursor, env,
       onUpstreamServerTiming: (value) => { handsServerTiming = value; },
     });
     setUpstreamTiming(res, upstreamStartedAt, handsServerTiming);
@@ -299,7 +342,8 @@ productFeedbackRouter.post("/tickets/:ticketId/comments", runProductFeedbackUplo
     return;
   }
   try {
-    const { reporterId } = await ensureProductFeedbackRouteBinding({ userId: req.userId! });
+    const env = await resolveProductFeedbackEnv({ userId: req.userId!, source: conversationFeedbackSource(req) });
+    const { reporterId } = await ensureProductFeedbackRouteBinding({ userId: req.userId!, env });
     const result = await commentOnProductFeedbackTicket({
       reporterId,
       ticketId,
@@ -310,6 +354,7 @@ productFeedbackRouter.post("/tickets/:ticketId/comments", runProductFeedbackUplo
         filename: file.originalname,
         contentType: file.mimetype,
       })),
+      env,
     });
     res.status(result.status).json(result.comment);
   } catch (error) {
@@ -336,8 +381,9 @@ productFeedbackRouter.post("/tickets/:ticketId/close", async (req, res) => {
     return;
   }
   try {
-    const { reporterId } = await ensureProductFeedbackRouteBinding({ userId: req.userId! });
-    const result = await closeProductFeedbackTicket({ reporterId, ticketId, reason });
+    const env = await resolveProductFeedbackEnv({ userId: req.userId!, source: conversationFeedbackSource(req) });
+    const { reporterId } = await ensureProductFeedbackRouteBinding({ userId: req.userId!, env });
+    const result = await closeProductFeedbackTicket({ reporterId, ticketId, reason, env });
     res.json({ id: ticketId, ...result });
   } catch (error) {
     if (error instanceof ProductFeedbackConversationError) {
@@ -364,9 +410,10 @@ productFeedbackRouter.get("/tickets/:ticketId/attachments/:attachmentId", async 
     return;
   }
   try {
-    const { reporterId } = await ensureProductFeedbackRouteBinding({ userId: req.userId! });
+    const env = await resolveProductFeedbackEnv({ userId: req.userId!, source: conversationFeedbackSource(req) });
+    const { reporterId } = await ensureProductFeedbackRouteBinding({ userId: req.userId!, env });
     const stream = await getProductFeedbackAttachment({
-      userId: req.userId!, reporterId, ticketId, attachmentId,
+      userId: req.userId!, reporterId, ticketId, attachmentId, env,
     });
     const cleanup = () => stream.abort();
     res.once("close", cleanup);
@@ -462,6 +509,16 @@ productFeedbackRouter.post("/", runProductFeedbackUpload, async (req, res) => {
     }
     throw error;
   }
+  let diagnostics: ProductFeedbackPresignedAttachment | null;
+  try {
+    diagnostics = parseProductFeedbackDiagnostics(req.body?.diagnostics, feedbackMetadata.clientKind);
+  } catch (error) {
+    if (error instanceof ProductFeedbackValidationError) {
+      res.status(400).json({ error: "Invalid feedback diagnostics", code: "feedback_diagnostics_invalid" });
+      return;
+    }
+    throw error;
+  }
 
   const [user] = await getDb().select({
     email: users.email,
@@ -499,8 +556,9 @@ productFeedbackRouter.post("/", runProductFeedbackUpload, async (req, res) => {
   if (reporterAttribution) feedbackMetadata.reporterAttribution = reporterAttribution;
 
   try {
-    if (!isProductFeedbackConfigured()) throw new ProductFeedbackConfigurationError();
-    await ensureProductFeedbackRouteBinding({ userId });
+    const env = await resolveProductFeedbackEnv({ userId, source: feedbackMetadata.clientKind });
+    if (!isProductFeedbackConfigured(env)) throw new ProductFeedbackConfigurationError();
+    await ensureProductFeedbackRouteBinding({ userId, env });
     const upstreamStartedAt = performance.now();
     let handsServerTiming: string | null = null;
     const receipt = await submitProductFeedback({
@@ -511,18 +569,22 @@ productFeedbackRouter.post("/", runProductFeedbackUpload, async (req, res) => {
       userId,
       metadata: feedbackMetadata,
       ...(feedbackReportId ? { feedbackReportId } : {}),
+      ...(diagnostics ? { diagnostics } : {}),
       attachments: files.map((file) => ({
         buffer: file.buffer,
         filename: file.originalname,
         contentType: file.mimetype,
       })),
     }, {
+      env,
       onUpstreamServerTiming: (value) => { handsServerTiming = value; },
     });
     setUpstreamTiming(res, upstreamStartedAt, handsServerTiming);
     res.status(201).json(receipt);
   } catch (error) {
-    if (error instanceof ProductFeedbackRouteBindingError) {
+    if (error instanceof ProductFeedbackSourceUnavailableError) productFeedbackSourceUnavailableLog(error);
+    if (error instanceof ProductFeedbackRouteBindingError) productFeedbackRouteBindingLog(error);
+    if (error instanceof ProductFeedbackRouteBindingError || error instanceof ProductFeedbackSourceUnavailableError) {
       res.status(503).json({
         error: "Feedback service is temporarily unavailable",
         code: "feedback_integration_unavailable",
@@ -537,10 +599,12 @@ productFeedbackRouter.post("/", runProductFeedbackUpload, async (req, res) => {
       return;
     }
     if (error instanceof ProductFeedbackUpstreamError) {
-      const mapped = mapUpstreamError(error);
+      const mapped = mapUpstreamError(error, { withDiagnostics: diagnostics !== null });
       if (error.retryAfter) res.setHeader("Retry-After", error.retryAfter);
       res.status(mapped.status).json({
-        error: mapped.status === 429
+        error: mapped.code === "feedback_diagnostics_rejected"
+          ? "Hands rejected the diagnostics attachment; no feedback was created"
+          : mapped.status === 429
           ? "Too many feedback submissions. Please try again later."
           : mapped.status === 409
             ? "This feedback draft changed after it was submitted. Start a new draft and try again."

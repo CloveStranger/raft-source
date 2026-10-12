@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import api from "../api/client";
+import { getWithRwOverloadRetry } from "../api/overloadRetry";
 import type { ServerRole } from "@botiverse/raft-shared";
 import {
   DEFAULT_SIDEBAR_ORDER,
@@ -16,6 +17,7 @@ import { setProductEventServerIdGetter } from "../analytics/track";
 import { normalizeSidebarPinnedRefs } from "../utils/sidebarPinnedRefs";
 import type { SidebarPinnedRef } from "../utils/sidebarPinnedRefs";
 import { notifyAllChannelMembersChanged } from "./channelMemberEvents";
+import { hasChatSurfaces } from "../embed";
 import {
   parseServerUnreadSummaryRows,
   retainServerUnreadSummary,
@@ -391,7 +393,7 @@ function applyServerSwitch(
   });
   triggerServerReset();
   get().loadMembers();
-  get().loadSidebarOrder();
+  if (hasChatSurfaces()) get().loadSidebarOrder();
   void get().loadSettings();
 }
 
@@ -428,7 +430,7 @@ export const useServerStore = create<ServerState>((set, get) => ({
         // Loaders are no-ops without a current server and capture serverEpoch
         // themselves, so this is safe for URL-resolved and empty startup states.
         get().loadMembers();
-        get().loadSidebarOrder();
+        if (hasChatSurfaces()) get().loadSidebarOrder();
       } catch {
         set({ loading: false });
       }
@@ -697,6 +699,8 @@ export const useServerStore = create<ServerState>((set, get) => ({
   },
 
   loadServerUnreadSummary: async (_options = {}) => {
+    // The cross-server unread badge lives on the rail, which an embed never shows.
+    if (!hasChatSurfaces()) return;
     const { servers } = get();
     if (servers.length === 0) {
       set({ serverUnreadCounts: {} });
@@ -705,7 +709,7 @@ export const useServerStore = create<ServerState>((set, get) => ({
     await coalesce("server-unread-summary", async () => {
       const epoch = get().serverEpoch;
       try {
-        const { data } = await api.get("/servers/unread-summary");
+        const { data } = await getWithRwOverloadRetry("/servers/unread-summary");
         if (get().serverEpoch !== epoch) return;
         const next = parseServerUnreadSummaryRows(data);
         set((prev) => ({

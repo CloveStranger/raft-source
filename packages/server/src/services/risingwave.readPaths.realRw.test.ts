@@ -9,8 +9,20 @@
  * and the MV graph, then calls the real readers with every test seam disabled.
  */
 import assert from "node:assert/strict";
+import { eq } from "drizzle-orm";
 import { closeDatabase, getDb, initDatabase } from "../db/index";
-import { channelHumans, channels, messages, tasks, threadFollows } from "../db/schema";
+import {
+  channelHumans,
+  channels,
+  jointChannels,
+  jointChannelServers,
+  messageMentions,
+  messages,
+  serverMembers,
+  tasks,
+  threadFollows,
+  users,
+} from "../db/schema";
 import {
   closeRisingWavePool,
   CONVERSATION_UNREAD_VIEW,
@@ -29,6 +41,7 @@ import {
   getSidebarUnreadSummaryCounts,
   getUnreadCounts,
   getUnreadSummary,
+  isDmScopedInboxItem,
   listAgentInbox,
   selectAgentInboxChainRows,
 } from "./channelService";
@@ -133,6 +146,247 @@ test.skipIf(!configured)("Activity readers: items, mentions, scoped channel, uni
   );
   assert.equal(totals.get(f.receiverServer.id)?.totalUnreadCount, 3, "general + joint + followed thread");
   assert.equal(totals.get(f.senderServer.id)?.totalUnreadCount ?? 0, 0);
+});
+
+test.skipIf(!configured)("Activity DMs scope: RisingWave serves the same DMs and DM threads as canonical Postgres", async () => {
+  // A fresh user, so the fixture receiver's counts elsewhere in this file are untouched.
+  const db = getDb();
+  const [dmUser] = await db.insert(users).values({
+    name: `rwreal-dmuser-${f.tag}`, email: `rwreal-dmuser-${f.tag}@test.invalid`, passwordHash: "x", emailVerified: true,
+  }).returning();
+  await db.insert(serverMembers).values({ serverId: f.receiverServer.id, userId: dmUser.id, role: "member" });
+  const [room, dm, selfDm] = await db.insert(channels).values([
+    { serverId: f.receiverServer.id, name: `rwreal-dmscope-room-${f.tag}`, type: "channel" },
+    { serverId: f.receiverServer.id, name: `rwreal-dmscope-dm-${f.tag}`, type: "dm" },
+    { serverId: f.receiverServer.id, name: `rwreal-dmscope-self-${f.tag}`, type: "dm" },
+  ]).returning();
+  await db.insert(channelHumans).values([
+    { channelId: room.id, userId: dmUser.id },
+    { channelId: room.id, userId: f.sender.id },
+    { channelId: dm.id, userId: dmUser.id },
+    { channelId: dm.id, userId: f.sender.id },
+    { channelId: selfDm.id, userId: dmUser.id },
+  ]);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  const [roomMessage] = await db.insert(messages).values({
+    channelId: room.id, senderType: "user", senderId: f.sender.id, content: `room ${f.tag}`,
+  }).returning();
+  const [dmMessage] = await db.insert(messages).values({
+    channelId: dm.id, senderType: "user", senderId: f.sender.id, content: `dm ${f.tag}`,
+  }).returning();
+  const [selfMessage] = await db.insert(messages).values({
+    channelId: selfDm.id, senderType: "user", senderId: dmUser.id, content: `note to self ${f.tag}`,
+  }).returning();
+  const [roomThread, dmThread] = await db.insert(channels).values([
+    { serverId: f.receiverServer.id, name: `thread-${roomMessage.id.slice(0, 8)}`, type: "thread", parentMessageId: roomMessage.id },
+    { serverId: f.receiverServer.id, name: `thread-${dmMessage.id.slice(0, 8)}`, type: "thread", parentMessageId: dmMessage.id },
+  ]).returning();
+  await db.insert(threadFollows).values([
+    { threadChannelId: roomThread.id, parentMessageId: roomMessage.id, reason: "manual", followerType: "user", followerId: dmUser.id },
+    { threadChannelId: dmThread.id, parentMessageId: dmMessage.id, reason: "manual", followerType: "user", followerId: dmUser.id },
+  ]);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  await db.insert(messages).values([
+    { channelId: roomThread.id, senderType: "user", senderId: f.sender.id, content: `room thread reply ${f.tag}` },
+    { channelId: dmThread.id, senderType: "user", senderId: f.sender.id, content: `dm thread reply ${f.tag}` },
+  ]);
+
+  // Wait until the unscoped RW Activity carries the four conversations with activity from others.
+  const expectedTargets = [room.id, dm.id, roomThread.id, dmThread.id];
+  const timeoutMs = Number(process.env.RISINGWAVE_REAL_CDC_TIMEOUT_MS ?? 120_000);
+  const deadline = Date.now() + timeoutMs;
+  let unscoped = await getInboxItems(f.receiverServer.id, dmUser.id, { filter: "all", limit: 50 });
+  while (!expectedTargets.every((id) => unscoped.items.some((item) => targetOf(item) === id)) && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    unscoped = await getInboxItems(f.receiverServer.id, dmUser.id, { filter: "all", limit: 50 });
+  }
+  assert.deepEqual(
+    expectedTargets.filter((id) => !unscoped.items.some((item) => targetOf(item) === id)),
+    [],
+    "RisingWave Activity did not reflect the DM-scope fixture in time",
+  );
+  // The self-DM has only the user's own message; give its row the same chance to land.
+  await new Promise((resolve) => setTimeout(resolve, 1_000));
+
+  for (const filter of ["all", "unread", "mentions"] as const) {
+    const rw = await getInboxItems(f.receiverServer.id, dmUser.id, { filter, limit: 50, scope: "dms" });
+    const pg = await getInboxItems(f.receiverServer.id, dmUser.id, { filter, limit: 50, scope: "dms", forceCanonicalPostgres: true });
+    assert.deepEqual(rw.items.map(targetOf), pg.items.map(targetOf), `${filter}: RW and PG list the same rows`);
+    assert.equal(rw.totalCount, pg.totalCount, `${filter}: totalCount`);
+    assert.equal(rw.totalUnreadCount, pg.totalUnreadCount, `${filter}: totalUnreadCount`);
+    assert.equal(rw.activeUnreadCount, pg.activeUnreadCount, `${filter}: activeUnreadCount`);
+    assert.deepEqual(
+      rw.groups.map((group) => [group.channelId, group.count]),
+      pg.groups.map((group) => [group.channelId, group.count]),
+      `${filter}: groups (ids and counts)`,
+    );
+    assert.ok(rw.items.every(isDmScopedInboxItem), `${filter}: only DM rows`);
+    assert.ok(rw.groups.every((group) => group.channelType === "dm"), `${filter}: only DM groups`);
+  }
+
+  // Capture the exact serving query the reader sends, then print RisingWave's plan for it
+  // (Rill's review: plan shape, i.e. receiver-prefix range scan vs full scan; cardinality aside).
+  const pool = getRisingWavePool()!;
+  let served: { text: string; values: unknown[] } | null = null;
+  __testRisingWaveInbox.set({
+    query: ((client: Parameters<typeof queryRisingWave>[0], text: string, values?: unknown[]) => {
+      if (values?.[6] === "dms") served = { text, values };
+      return queryRisingWave(client, text, values);
+    }) as typeof queryRisingWave,
+  });
+  let scoped: Awaited<ReturnType<typeof getInboxItems>>;
+  try {
+    scoped = await getInboxItems(f.receiverServer.id, dmUser.id, { filter: "all", limit: 50, scope: "dms" });
+  } finally {
+    __testRisingWaveInbox.reset();
+  }
+  assert.ok(served, "the scoped read went through the RisingWave serving query");
+  const { text, values } = served as { text: string; values: unknown[] };
+  const literal = (value: unknown) => (value === null || value === undefined ? "NULL" : `'${String(value).replaceAll("'", "''")}'`);
+  const explainText = text.replace(/\$(\d+)(?!\d)/g, (_match, index: string) => literal(values[Number(index) - 1]));
+  const plan = await queryRisingWave<Record<string, string>>(pool, `EXPLAIN ${explainText}`);
+  const planText = plan.result.rows.map((row) => Object.values(row).join(" ")).join("\n");
+  console.log(`[dm-scope EXPLAIN] scoped Activity serving query (filter=all, scope=dms)\n${planText}`);
+  assert.ok(planText.length > 0);
+
+  const targets = scoped.items.map(targetOf);
+  assert.ok(targets.includes(dm.id), "the DM is listed");
+  assert.ok(targets.includes(dmThread.id), "the followed DM thread is listed");
+  assert.ok(!targets.includes(room.id), "the channel is excluded");
+  assert.ok(!targets.includes(roomThread.id), "the channel thread is excluded");
+  assert.deepEqual(targets, unscoped.items.filter(isDmScopedInboxItem).map(targetOf), "scope is a pure restriction");
+  // Reported, not patched: whether a self-DM appears follows unscoped Activity on both paths.
+  assert.equal(
+    targets.includes(selfDm.id),
+    (await getInboxItems(f.receiverServer.id, dmUser.id, { filter: "all", limit: 50, forceCanonicalPostgres: true }))
+      .items.some((item) => targetOf(item) === selfDm.id),
+    `self-DM (${selfMessage.id}) presence matches canonical Postgres`,
+  );
+});
+
+test.skipIf(!configured)("threads below a deleted DM leave Activity and the sidebar, as in canonical Postgres (task #333)", async () => {
+  // Deleting an agent soft-deletes its DM and leaves the DM's threads live. Two such
+  // threads: one the user follows, one where only an unread mention reaches the user.
+  const db = getDb();
+  const [user] = await db.insert(users).values({
+    name: `rwreal-deldm-${f.tag}`, email: `rwreal-deldm-${f.tag}@test.invalid`, passwordHash: "x", emailVerified: true,
+  }).returning();
+  await db.insert(serverMembers).values({ serverId: f.receiverServer.id, userId: user.id, role: "member" });
+  const [dm] = await db.insert(channels).values({
+    serverId: f.receiverServer.id, name: `rwreal-deldm-dm-${f.tag}`, type: "dm",
+  }).returning();
+  await db.insert(channelHumans).values([
+    { channelId: dm.id, userId: user.id },
+    { channelId: dm.id, userId: f.sender.id },
+  ]);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  const [followedParent, mentionParent] = await db.insert(messages).values([
+    { channelId: dm.id, senderType: "user", senderId: f.sender.id, content: `deldm followed ${f.tag}` },
+    { channelId: dm.id, senderType: "user", senderId: f.sender.id, content: `deldm mention ${f.tag}` },
+  ]).returning();
+  const [followedThread, mentionThread] = await db.insert(channels).values([
+    { serverId: f.receiverServer.id, name: `thread-${followedParent.id.slice(0, 8)}`, type: "thread", parentMessageId: followedParent.id },
+    { serverId: f.receiverServer.id, name: `thread-${mentionParent.id.slice(0, 8)}`, type: "thread", parentMessageId: mentionParent.id },
+  ]).returning();
+  await db.insert(threadFollows).values({
+    threadChannelId: followedThread.id, parentMessageId: followedParent.id, reason: "manual", followerType: "user", followerId: user.id,
+  });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  await db.insert(messages).values({
+    channelId: followedThread.id, senderType: "user", senderId: f.sender.id, content: `deldm followed reply ${f.tag}`,
+  });
+  const [mentionReply] = await db.insert(messages).values({
+    channelId: mentionThread.id, senderType: "user", senderId: f.sender.id, content: `deldm @user ${f.tag}`,
+  }).returning();
+  await db.insert(messageMentions).values({
+    messageId: mentionReply.id, messageSeq: mentionReply.seq, serverId: f.receiverServer.id,
+    channelId: mentionThread.id, handleAtSendTime: "you", targetType: "user", targetId: user.id,
+  });
+
+  // A joint thread with a live parent: rw_thread_parent_v3 maps it to the user's local
+  // projection of the joint channel. The parent filter must keep it (Rill's review).
+  // Its own joint channel, so the fixture's joint conversation (and the agent's counts
+  // on it) stays untouched.
+  const [ownCanonical, ownSenderLocal, ownLocal] = await db.insert(channels).values([
+    { serverId: f.storage.id, name: `rwreal-deldm-canonical-${f.tag}`, type: "joint" },
+    { serverId: f.senderServer.id, name: `rwreal-deldm-sender-local-${f.tag}`, type: "joint" },
+    { serverId: f.receiverServer.id, name: `rwreal-deldm-local-${f.tag}`, type: "joint" },
+  ]).returning();
+  const [ownJoint] = await db.insert(jointChannels).values({
+    canonicalChannelId: ownCanonical.id, createdByServerId: f.senderServer.id, createdByUserId: f.owner.id,
+  }).returning();
+  await db.insert(jointChannelServers).values([
+    { jointChannelId: ownJoint.id, serverId: f.senderServer.id, localChannelId: ownSenderLocal.id, role: "host", status: "active", joinedByUserId: f.owner.id },
+    { jointChannelId: ownJoint.id, serverId: f.receiverServer.id, localChannelId: ownLocal.id, role: "participant", status: "active", joinedByUserId: f.owner.id },
+  ]);
+  await db.insert(channelHumans).values([
+    { channelId: ownLocal.id, userId: user.id },
+    { channelId: ownSenderLocal.id, userId: f.sender.id },
+  ]);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  const [jointParent] = await db.insert(messages).values({
+    channelId: ownCanonical.id, senderType: "user", senderId: f.sender.id, content: `deldm joint parent ${f.tag}`,
+  }).returning();
+  const [canonicalThread] = await db.insert(channels).values({
+    serverId: f.storage.id, name: `thread-${jointParent.id.slice(0, 8)}`, type: "thread", parentMessageId: jointParent.id,
+  }).returning();
+  await db.update(messages).set({ threadId: canonicalThread.id }).where(eq(messages.id, jointParent.id));
+  const [localThread] = await db.insert(channels).values({
+    serverId: f.receiverServer.id, name: `thread-${jointParent.id.slice(0, 8)}`, type: "thread",
+  }).returning();
+  const [threadJoint] = await db.insert(jointChannels).values({
+    canonicalChannelId: canonicalThread.id, createdByServerId: f.senderServer.id, createdByUserId: f.owner.id,
+  }).returning();
+  await db.insert(jointChannelServers).values({
+    jointChannelId: threadJoint.id, serverId: f.receiverServer.id, localChannelId: localThread.id,
+    role: "participant", status: "active", joinedByUserId: f.owner.id,
+  });
+  await db.insert(threadFollows).values({
+    threadChannelId: localThread.id, parentMessageId: jointParent.id, reason: "manual", followerType: "user", followerId: user.id,
+  });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  await db.insert(messages).values({
+    channelId: canonicalThread.id, senderType: "user", senderId: f.sender.id, content: `deldm joint reply ${f.tag}`,
+  });
+
+  const threads = [followedThread.id, mentionThread.id];
+  const timeoutMs = Number(process.env.RISINGWAVE_REAL_CDC_TIMEOUT_MS ?? 120_000);
+  const waitFor = async (want: (targets: string[]) => boolean, what: string) => {
+    const deadline = Date.now() + timeoutMs;
+    let targets: string[] = [];
+    do {
+      targets = (await getInboxItems(f.receiverServer.id, user.id, { filter: "all", limit: 50 })).items.map(targetOf);
+      if (want(targets)) return targets;
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    } while (Date.now() < deadline);
+    assert.fail(`${what}; RisingWave Activity lists ${JSON.stringify(targets)}`);
+  };
+  // Precondition: while the DM is live, both DM threads and the joint thread are in Activity.
+  await waitFor(
+    (targets) => [...threads, localThread.id].every((id) => targets.includes(id)),
+    "the DM threads and the joint thread did not reach Activity",
+  );
+
+  await db.update(channels).set({ deletedAt: new Date() }).where(eq(channels.id, dm.id));
+  const after = await waitFor(
+    (targets) => threads.every((id) => !targets.includes(id)),
+    "threads below the deleted DM are still served",
+  );
+  const pg = (await getInboxItems(f.receiverServer.id, user.id, { filter: "all", limit: 50, forceCanonicalPostgres: true }))
+    .items.map(targetOf);
+  assert.deepEqual(after, pg, "RW and canonical Postgres list the same rows");
+  assert.ok(after.includes(localThread.id), "a joint thread with a live parent stays in Activity");
+  for (const filter of ["unread", "mentions"] as const) {
+    const rw = (await getInboxItems(f.receiverServer.id, user.id, { filter, limit: 50 })).items.map(targetOf);
+    assert.ok(threads.every((id) => !rw.includes(id)), `${filter}: no thread below the deleted DM`);
+  }
+  const sidebar = await queryRisingWave<{ target_id: string }>(
+    getRisingWavePool()!,
+    `SELECT target_id FROM ${CONVERSATION_UNREAD_VIEW} WHERE receiver_type = 'user' AND receiver_id = $1 AND target_id = ANY($2)`,
+    [user.id, threads],
+  );
+  assert.deepEqual(sidebar.result.rows, [], "the sidebar has no slot for a thread below the deleted DM");
 });
 
 test.skipIf(!configured)("active followed threads are served by rw_followed_threads_v5 and equal the legacy path", async () => {

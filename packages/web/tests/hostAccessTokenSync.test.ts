@@ -67,7 +67,7 @@ function harness(
   };
 }
 
-test("all four native settings surfaces share the same path classifier", () => {
+test("every native host surface shares the same path classifier", () => {
   assert.equal(hostAccessTokenSurfaceForPathname("/s/dev/computers"), "computers");
   assert.equal(hostAccessTokenSurfaceForPathname("/s/dev/settings/billing"), "billing");
   assert.equal(hostAccessTokenSurfaceForPathname("/s/dev/settings/applications"), "marketplace");
@@ -79,6 +79,12 @@ test("all four native settings surfaces share the same path classifier", () => {
   assert.equal(hostAccessTokenSurfaceForPathname("/settings/integrations"), "marketplace");
   assert.equal(hostAccessTokenSurfaceForPathname("/settings/administration"), "administration");
   assert.equal(hostAccessTokenSurfaceForPathname("/settings/profile"), null);
+  assert.equal(hostAccessTokenSurfaceForPathname("/s/dev/agent/agent-1"), "agent");
+  assert.equal(hostAccessTokenSurfaceForPathname("/s/dev/agent/agent-1/"), "agent");
+  assert.equal(hostAccessTokenSurfaceForPathname("/agent/agent-1"), "agent");
+  assert.equal(hostAccessTokenSurfaceForPathname("/s/dev/agent"), null);
+  assert.equal(hostAccessTokenSurfaceForPathname("/s/dev/agent/agent-1/extra"), null);
+  assert.equal(hostAccessTokenSurfaceForPathname("/s/dev/agents/agent-1"), null);
 });
 
 test("event detail is access-only fence metadata with strict integer generations", () => {
@@ -199,6 +205,51 @@ test("missing token, logout, cross-server, stale and duplicate events fail close
 
   assert.deepEqual(h.committed, ["access-4"]);
   h.sync.close();
+});
+
+test("the agent page takes a renewal for its own server and refuses another server's", () => {
+  // The context surface comes from the real pathname classifier, as it does in the auth store.
+  const agentPage = (serverId: string): HostAccessTokenContext => ({
+    hostShell: true,
+    surface: hostAccessTokenSurfaceForPathname("/s/dev/agent/agent-1"),
+    accountId: "account-1",
+    serverId,
+  });
+
+  const sameServer = harness();
+  sameServer.setContext(agentPage("server-1"));
+  sameServer.setStoredAccessToken("access-agent");
+  sameServer.target.dispatchEvent(event(detail({ sequence: 1 })));
+  sameServer.flush();
+  assert.deepEqual(sameServer.committed, ["access-agent"]);
+  sameServer.sync.close();
+
+  // The page is showing another server than the one the host bound the token to.
+  const crossServer = harness();
+  crossServer.setContext(agentPage("server-2"));
+  crossServer.setStoredAccessToken("access-agent");
+  crossServer.target.dispatchEvent(event(detail({ sequence: 1 })));
+  crossServer.flush();
+  assert.deepEqual(crossServer.committed, []);
+  assert.equal(crossServer.accessTokenReads(), 0);
+  crossServer.sync.close();
+
+  // The host event names another server than the bootstrapped binding.
+  const retargeted = harness();
+  retargeted.setContext(agentPage("server-1"));
+  retargeted.target.dispatchEvent(event(detail({ serverId: "server-2", sequence: 1 })));
+  retargeted.flush();
+  assert.deepEqual(retargeted.committed, []);
+  retargeted.sync.close();
+
+  // A stale session or WebView generation is refused on the agent page as well.
+  const staleGeneration = harness();
+  staleGeneration.setContext(agentPage("server-1"));
+  staleGeneration.target.dispatchEvent(event(detail({ sessionGeneration: 3, sequence: 1 })));
+  staleGeneration.target.dispatchEvent(event(detail({ webViewGeneration: 6, sequence: 2 })));
+  staleGeneration.flush();
+  assert.deepEqual(staleGeneration.committed, []);
+  staleGeneration.sync.close();
 });
 
 test("context changes before the scheduled commit and page disposal both cancel updates", () => {

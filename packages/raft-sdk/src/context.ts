@@ -9,6 +9,12 @@ export interface RaftContextAgent {
   description: string | null;
   runtime: string;
   external: boolean;
+  /**
+   * Set when this agent is someone's personal assistant (RFC 074): the
+   * `routes.assistant.*` reads exist for it. Null otherwise, and on Servers
+   * that predate the field. Says nothing about whether the feature is on.
+   */
+  assistantOf: { userId: string } | null;
 }
 
 /** The single Server the credential is bound to. */
@@ -47,6 +53,7 @@ const projection = z.object({
     description: z.string().nullable(),
     runtime: z.string(),
     external: z.boolean(),
+    assistantOf: z.object({ userId: z.string() }).nullable().optional(),
   }),
   server: z.object({ id: z.string(), slug: z.string(), name: z.string() }),
   credential: z.object({ capabilities: z.array(z.string()) }),
@@ -76,7 +83,15 @@ export async function getRaftContext(client: Pick<AgentApiClient, "agent">): Pro
     ok: true,
     status: result.status,
     data: {
-      agent: { ...agent },
+      agent: {
+        id: agent.id,
+        name: agent.name,
+        displayName: agent.displayName,
+        description: agent.description,
+        runtime: agent.runtime,
+        external: agent.external,
+        assistantOf: agent.assistantOf ? { userId: agent.assistantOf.userId } : null,
+      },
       server: { ...server },
       capabilities: [...credential.capabilities],
       guide: prompt?.text ?? null,

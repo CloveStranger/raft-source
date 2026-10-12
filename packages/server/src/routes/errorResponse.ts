@@ -4,8 +4,9 @@ import { normalizeObservedRoutePattern } from "../middleware/requestObservabilit
 import { addTraceEvent, errorClassOf, getCurrentTraceContext } from "../tracing/semanticTrace";
 import { sanitizeRouteErrorMessage } from "../tracing/routeFailure";
 import { DmTargetResolutionError } from "../services/dmTargetResolutionError";
-import { RisingWaveOverloadedError } from "../db/risingwave";
+import { RisingWaveNotConfiguredError, RisingWaveOverloadedError, RisingWaveReadError } from "../db/risingwave";
 import { setRequestTraceErrorCode } from "../middleware/requestObservability";
+import { risingWaveUnavailableResponsesTotal } from "../metrics";
 
 /** Seconds a client should wait before retrying a RisingWave-overloaded read. */
 export const RISINGWAVE_OVERLOAD_RETRY_AFTER_SECONDS = 2;
@@ -29,23 +30,77 @@ function findRisingWaveOverload(err: unknown): RisingWaveOverloadedError | null 
 export function respondToRisingWaveOverload(err: unknown, res: Response): boolean {
   const overload = findRisingWaveOverload(err);
   if (!overload) return false;
-  addTraceEvent("server.route.rw_overloaded", {
-    event_kind: "route_error_response",
-    outcome: "error",
-    reason: "rw_overloaded",
-    http_status: 503,
-    error_class: "RisingWaveOverloadedError",
-  });
-  // Also on the request's own span (server.http.request error_code), so
-  // dashboards filter overloads by column instead of expanding span events.
-  setRequestTraceErrorCode(res, "rw_overloaded");
   res.setHeader("Retry-After", String(RISINGWAVE_OVERLOAD_RETRY_AFTER_SECONDS));
-  res.status(503).json({
-    error: "Temporarily overloaded, retry shortly",
+  sendRisingWaveUnavailable(res, {
+    status: 503,
     code: "rw_overloaded",
     retryable: true,
+    error: "Temporarily overloaded, retry shortly",
+    errorClass: "RisingWaveOverloadedError",
   });
   return true;
+}
+
+/**
+ * The typed RisingWave failure contract (task #162), for routes that adopted
+ * it (`GET /api/channels/unread`): overload as above; RisingWave not
+ * configured is 503 rw_unconfigured with no Retry-After (retrying will not
+ * help); any other RisingWave read failure is 502 rw_read_failed. Everything
+ * else returns false and stays the route's 500. Clients treat all three as
+ * "not obtained", never as zero.
+ */
+export function respondToRisingWaveUnavailable(err: unknown, res: Response): boolean {
+  if (respondToRisingWaveOverload(err, res)) return true;
+  if (err instanceof RisingWaveNotConfiguredError) {
+    sendRisingWaveUnavailable(res, {
+      status: 503,
+      code: "rw_unconfigured",
+      retryable: false,
+      error: "RisingWave is not configured",
+      errorClass: "RisingWaveNotConfiguredError",
+    });
+    return true;
+  }
+  if (err instanceof RisingWaveReadError) {
+    sendRisingWaveUnavailable(res, {
+      status: 502,
+      code: "rw_read_failed",
+      retryable: true,
+      error: "Read failed, retry shortly",
+      errorClass: "RisingWaveReadError",
+    });
+    return true;
+  }
+  return false;
+}
+
+function sendRisingWaveUnavailable(res: Response, response: {
+  status: 502 | 503;
+  code: "rw_overloaded" | "rw_unconfigured" | "rw_read_failed";
+  retryable: boolean;
+  error: string;
+  errorClass: string;
+}): void {
+  addTraceEvent(`server.route.${response.code}`, {
+    event_kind: "route_error_response",
+    outcome: "error",
+    reason: response.code,
+    http_status: response.status,
+    error_class: response.errorClass,
+  });
+  // Also on the request's own span (server.http.request error_code), so
+  // dashboards filter these by column instead of expanding span events.
+  setRequestTraceErrorCode(res, response.code);
+  risingWaveUnavailableResponsesTotal.inc({
+    route_pattern: normalizeObservedRoutePattern(res.req),
+    code: response.code,
+    retryable: String(response.retryable),
+  });
+  res.status(response.status).json({
+    error: response.error,
+    code: response.code,
+    retryable: response.retryable,
+  });
 }
 
 interface JsonServerErrorOptions {

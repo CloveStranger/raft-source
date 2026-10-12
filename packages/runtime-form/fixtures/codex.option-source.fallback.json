@@ -7,6 +7,19 @@
   "pointer": "/model",
   "options": [
     {
+      "value": "gpt-6.1-sol",
+      "label": "GPT-6.1 Sol",
+      "supportedReasoningEfforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+        "ultra"
+      ],
+      "defaultReasoningEffort": "low"
+    },
+    {
       "value": "gpt-6-astra",
       "label": "GPT-6-Astra",
       "supportedReasoningEfforts": [
@@ -18,6 +31,31 @@
         "ultra"
       ],
       "defaultReasoningEffort": "low"
+    },
+    {
+      "value": "gpt-6-sol",
+      "label": "GPT-6 Sol",
+      "supportedReasoningEfforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+        "ultra"
+      ],
+      "defaultReasoningEffort": "medium"
+    },
+    {
+      "value": "gpt-6-luna",
+      "label": "GPT-6 Luna",
+      "supportedReasoningEfforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "defaultReasoningEffort": "medium"
     },
     {
       "value": "gpt-5.6-sol",
@@ -158,7 +196,7 @@
       ]
     }
   ],
-  "defaultValue": "gpt-6-astra",
+  "defaultValue": "gpt-6.1-sol",
   "customValueAllowed": true,
   "status": "fallback",
   "reason": "missing_config",

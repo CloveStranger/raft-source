@@ -262,25 +262,34 @@ test("task #1221: a non-retryable start failure blocks at once, only for the cur
   await breaker.recordStart("agent-1", "launch-a", 1_000);
   await breaker.recordStart("agent-1", "launch-b", 2_000);
   // A late failure from the previous launch must not block the current one.
-  assert.equal(await breaker.recordNonRetryableStartFailure("agent-1", { launchId: "launch-a", reason: "model_not_configured", nowMs: 3_000 }), false);
+  assert.equal((await breaker.recordStartFailure("agent-1", { launchId: "launch-a", reason: "model_not_configured", nowMs: 3_000 })).outcome, "ignored");
   assert.equal(await breaker.isBlocked("agent-1"), false);
-  assert.equal(await breaker.recordNonRetryableStartFailure("agent-1", { launchId: null, reason: "model_not_configured", nowMs: 3_000 }), false);
+  assert.equal((await breaker.recordStartFailure("agent-1", { launchId: null, reason: "model_not_configured", nowMs: 3_000 })).outcome, "ignored");
   // The current launch's failure blocks immediately (no threshold) and only once.
-  assert.equal(await breaker.recordNonRetryableStartFailure("agent-1", { launchId: "launch-b", reason: "model_not_configured", nowMs: 3_000 }), true);
+  assert.equal((await breaker.recordStartFailure("agent-1", { launchId: "launch-b", reason: "model_not_configured", nowMs: 3_000 })).outcome, "blocked");
   assert.equal(await breaker.isBlocked("agent-1"), true);
-  assert.equal(await breaker.recordNonRetryableStartFailure("agent-1", { launchId: "launch-b", reason: "model_not_configured", nowMs: 4_000 }), false);
+  assert.equal((await breaker.recordStartFailure("agent-1", { launchId: "launch-b", reason: "model_not_configured", nowMs: 4_000 })).outcome, "ignored");
+});
+
+test("task #10: session_needs_reset blocks automatic starts on the first failure; a human start (Reset Session) lifts it", async () => {
+  const breaker = new WakeCrashLoopBreaker(new InMemoryWakeCrashLoopStateStore());
+  await breaker.recordStart("agent-1", "launch-a", 1_000);
+  assert.equal((await breaker.recordStartFailure("agent-1", { launchId: "launch-a", reason: "session_needs_reset", nowMs: 1_500 })).outcome, "blocked");
+  assert.equal(await breaker.isBlocked("agent-1"), true);
+  await breaker.recordStart("agent-1", "launch-b", 2_000, { human: true });
+  assert.equal(await breaker.isBlocked("agent-1"), false);
 });
 
 test("task #1221: a config change or a human start lifts a start-failure block", async () => {
   const breaker = new WakeCrashLoopBreaker(new InMemoryWakeCrashLoopStateStore());
   await breaker.recordStart("agent-1", "launch-a", 1_000);
-  await breaker.recordNonRetryableStartFailure("agent-1", { launchId: "launch-a", reason: "runtime_login_required", nowMs: 1_500 });
+  await breaker.recordStartFailure("agent-1", { launchId: "launch-a", reason: "runtime_login_required", nowMs: 1_500 });
   assert.equal(await breaker.liftForConfigChange("agent-1"), true);
   assert.equal(await breaker.isBlocked("agent-1"), false);
   assert.equal(await breaker.liftForConfigChange("agent-1"), false, "nothing to lift");
 
   await breaker.recordStart("agent-1", "launch-b", 2_000);
-  await breaker.recordNonRetryableStartFailure("agent-1", { launchId: "launch-b", reason: "runtime_config_invalid", nowMs: 2_500 });
+  await breaker.recordStartFailure("agent-1", { launchId: "launch-b", reason: "runtime_config_invalid", nowMs: 2_500 });
   await breaker.recordStart("agent-1", "launch-c", 3_000, { human: true });
   assert.equal(await breaker.isBlocked("agent-1"), false, "a human start opens a fresh episode");
 });
@@ -292,18 +301,18 @@ test("task #1221: a config change before the old launch reports its failure stop
   // Configuration changes while the old start is still in flight (not blocked yet).
   assert.equal(await breaker.liftForConfigChange("agent-1"), false, "nothing was blocked");
   // The old start's failure arrives late.
-  assert.equal(await breaker.recordNonRetryableStartFailure("agent-1", { launchId: "launch-old", reason: "model_not_configured", nowMs: 2_000 }), false);
+  assert.equal((await breaker.recordStartFailure("agent-1", { launchId: "launch-old", reason: "model_not_configured", nowMs: 2_000 })).outcome, "ignored");
   assert.equal(await breaker.isBlocked("agent-1"), false, "the next wake starts under the new configuration");
   // A start under the new configuration can still be blocked by its own failure.
   await breaker.recordStart("agent-1", "launch-new", 3_000);
-  assert.equal(await breaker.recordNonRetryableStartFailure("agent-1", { launchId: "launch-new", reason: "model_not_configured", nowMs: 3_500 }), true);
+  assert.equal((await breaker.recordStartFailure("agent-1", { launchId: "launch-new", reason: "model_not_configured", nowMs: 3_500 })).outcome, "blocked");
 });
 
 test("task #1221: the block owes a catch-up; a config-change lift keeps it owed; only the carrying start's active report clears it", async () => {
   const breaker = new WakeCrashLoopBreaker(new InMemoryWakeCrashLoopStateStore());
   await breaker.recordStart("agent-1", "launch-a", 1_000);
   assert.equal(await breaker.isCatchupOwed("agent-1"), false);
-  await breaker.recordNonRetryableStartFailure("agent-1", { launchId: "launch-a", reason: "model_not_configured", nowMs: 1_500 });
+  await breaker.recordStartFailure("agent-1", { launchId: "launch-a", reason: "model_not_configured", nowMs: 1_500 });
   assert.equal(await breaker.isCatchupOwed("agent-1"), true);
   await breaker.liftForConfigChange("agent-1");
   assert.equal(await breaker.isBlocked("agent-1"), false);
@@ -320,10 +329,72 @@ test("task #1221: the block owes a catch-up; a config-change lift keeps it owed;
 test("task #1221: a manual stop keeps an undelivered catch-up owed and voids the old carrier", async () => {
   const breaker = new WakeCrashLoopBreaker(new InMemoryWakeCrashLoopStateStore());
   await breaker.recordStart("agent-1", "launch-a", 1_000);
-  await breaker.recordNonRetryableStartFailure("agent-1", { launchId: "launch-a", reason: "model_not_configured", nowMs: 1_500 });
+  await breaker.recordStartFailure("agent-1", { launchId: "launch-a", reason: "model_not_configured", nowMs: 1_500 });
   await breaker.recordStart("agent-1", "launch-b", 2_000, { human: true });
   await breaker.markCatchupCarried("agent-1", "launch-b");
   await breaker.recordManualStop("agent-1");
   assert.equal(await breaker.isCatchupOwed("agent-1"), true, "the stop does not deliver it");
   assert.equal(await breaker.confirmCatchupDelivered("agent-1", "launch-b"), false, "the pre-stop carrier can no longer clear it");
+});
+
+
+test("model_not_found retries once after the hold; a second failure in a row blocks", async () => {
+  const breaker = new WakeCrashLoopBreaker(new InMemoryWakeCrashLoopStateStore(), { retryOnceDelayMs: 60_000 });
+  await breaker.recordStart("agent-1", "launch-a", 1_000);
+  const first = await breaker.recordStartFailure("agent-1", { launchId: "launch-a", reason: "model_not_found", nowMs: 2_000 });
+  assert.deepEqual(first, { outcome: "retry_scheduled", blocked: false, startFailureCount: 1, retryAfterMs: 62_000 });
+  assert.deepEqual(await breaker.automaticWakeHold("agent-1", 61_999), { kind: "retry_pending", retryAfterMs: 62_000 });
+  assert.equal(await breaker.automaticWakeHold("agent-1", 62_000), null, "the hold ends; the retry may start");
+  assert.equal(await breaker.isCatchupOwed("agent-1"), true, "messages refused during the hold are owed to the retry");
+
+  await breaker.recordStart("agent-1", "launch-b", 62_250);
+  const second = await breaker.recordStartFailure("agent-1", { launchId: "launch-b", reason: "model_not_found", nowMs: 63_000 });
+  assert.deepEqual(second, { outcome: "blocked", blocked: true, startFailureCount: 2, retryAfterMs: null });
+  assert.deepEqual(await breaker.automaticWakeHold("agent-1", 200_000), { kind: "blocked", reason: "model_not_found" });
+});
+
+test("a retry that starts clears the streak, so a later model_not_found gets its own retry", async () => {
+  const breaker = new WakeCrashLoopBreaker(new InMemoryWakeCrashLoopStateStore());
+  await breaker.recordStart("agent-1", "launch-a", 1_000);
+  await breaker.recordStartFailure("agent-1", { launchId: "launch-a", reason: "model_not_found", nowMs: 2_000 });
+  await breaker.recordStart("agent-1", "launch-b", 70_000);
+  assert.equal(await breaker.recordStartSucceeded("agent-1", "launch-b"), true);
+  assert.equal(await breaker.recordStartSucceeded("agent-1", "launch-b"), false, "nothing left to clear");
+  await breaker.recordStart("agent-1", "launch-c", 80_000);
+  assert.equal((await breaker.recordStartFailure("agent-1", { launchId: "launch-c", reason: "model_not_found", nowMs: 81_000 })).outcome, "retry_scheduled");
+});
+
+test("any start failure blocks after five failed starts in a row, keeping the last reason", async () => {
+  const breaker = new WakeCrashLoopBreaker(new InMemoryWakeCrashLoopStateStore());
+  const outcomes: string[] = [];
+  for (let i = 1; i <= 5; i += 1) {
+    await breaker.recordStart("agent-1", `launch-${i}`, i * 1_000);
+    const reason = i === 5 ? "provider_connection_materialization_failed" : "runtime_spawn_failed";
+    outcomes.push((await breaker.recordStartFailure("agent-1", { launchId: `launch-${i}`, reason, nowMs: i * 1_000 + 500 })).outcome);
+  }
+  assert.deepEqual(outcomes, ["counted", "counted", "counted", "counted", "blocked"]);
+  assert.deepEqual(await breaker.automaticWakeHold("agent-1", 10_000), { kind: "blocked", reason: "provider_connection_materialization_failed" });
+  assert.equal(await breaker.isCatchupOwed("agent-1"), true);
+});
+
+test("a model_not_found after a different failure is a first model_not_found: it retries", async () => {
+  const breaker = new WakeCrashLoopBreaker(new InMemoryWakeCrashLoopStateStore());
+  await breaker.recordStart("agent-1", "launch-a", 1_000);
+  assert.equal((await breaker.recordStartFailure("agent-1", { launchId: "launch-a", reason: "runtime_spawn_failed", nowMs: 1_500 })).outcome, "counted");
+  await breaker.recordStart("agent-1", "launch-b", 2_000);
+  assert.equal((await breaker.recordStartFailure("agent-1", { launchId: "launch-b", reason: "model_not_found", nowMs: 2_500 })).outcome, "retry_scheduled");
+});
+
+test("a config change or a human start ends a start-failure streak and a pending retry", async () => {
+  const breaker = new WakeCrashLoopBreaker(new InMemoryWakeCrashLoopStateStore());
+  await breaker.recordStart("agent-1", "launch-a", 1_000);
+  await breaker.recordStartFailure("agent-1", { launchId: "launch-a", reason: "model_not_found", nowMs: 1_500 });
+  assert.equal(await breaker.liftForConfigChange("agent-1"), false, "not blocked, but the streak is gone");
+  assert.equal(await breaker.automaticWakeHold("agent-1", 2_000), null, "the new model need not wait for the retry");
+  await breaker.recordStart("agent-1", "launch-b", 3_000);
+  assert.equal((await breaker.recordStartFailure("agent-1", { launchId: "launch-b", reason: "model_not_found", nowMs: 3_500 })).outcome, "retry_scheduled", "counted as a first failure again");
+
+  await breaker.recordStart("agent-1", "launch-c", 4_000, { human: true });
+  assert.equal(await breaker.automaticWakeHold("agent-1", 4_100), null);
+  assert.equal((await breaker.recordStartFailure("agent-1", { launchId: "launch-c", reason: "model_not_found", nowMs: 4_500 })).outcome, "retry_scheduled");
 });

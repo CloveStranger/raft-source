@@ -6,8 +6,6 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import api from "../src/api/client";
 import Sidebar from "../src/components/layout/Sidebar";
 import { TestIntlProvider } from "./helpers/intl";
-import { WORKSPACE_GRID_OPEN_DM_EVENT } from "../src/components/workspace/workspaceGridOpenEvents";
-import { useWorkspaceGridNavigationStore } from "../src/components/workspace/workspaceGridNavigationStore";
 import type { Agent } from "../src/store/agentStore";
 import { useAgentStore } from "../src/store/agentStore";
 import { useAuthStore } from "../src/store/authStore";
@@ -30,7 +28,6 @@ afterEach(() => {
   useChannelStore.setState({ openDM: originalOpenDM, openUserDM: originalOpenUserDM });
   useAgentStore.setState({ resetAgent: originalResetAgent, stopAgent: originalStopAgent });
   useUIStore.setState({ sidebarOpen: false });
-  useWorkspaceGridNavigationStore.setState({ active: false });
 });
 
 function installApiStub() {
@@ -177,7 +174,7 @@ function seedSidebar(
   } as never);
 }
 
-function renderSidebar(workspaceRailMode?: "members") {
+function renderSidebar() {
   function LocationProbe() {
     return <output data-testid="location-path">{useLocation().pathname}</output>;
   }
@@ -185,7 +182,7 @@ function renderSidebar(workspaceRailMode?: "members") {
   render(
     <MemoryRouter initialEntries={["/s/server/members"]}>
       <TestIntlProvider>
-        <Sidebar workspaceRailMode={workspaceRailMode} />
+        <Sidebar />
       </TestIntlProvider>
       <LocationProbe />
     </MemoryRouter>,
@@ -219,7 +216,7 @@ test("the add-agent menu routes managed and external creation to distinct dialog
   assert.ok(await screen.findByRole("heading", { name: "Create External Agent" }));
 });
 
-test("classic Members rail shows humans alongside agents", () => {
+test("Members rail shows humans alongside agents", () => {
   seedSidebar([makeAgent("Helper")], [makeHuman("Cindy")]);
   renderSidebar();
 
@@ -228,7 +225,7 @@ test("classic Members rail shows humans alongside agents", () => {
   assert.equal(screen.getByRole("button", { name: "Cindy" }) !== null, true);
 });
 
-test("classic Members agent menu opens the Stop and Restart / Reset confirmation flows", async () => {
+test("Members agent menu opens the Stop and Restart / Reset confirmation flows", async () => {
   const agent = { ...makeAgent("Helper"), status: "active" as const };
   let resetCalls = 0;
   let stopCalls = 0;
@@ -265,7 +262,7 @@ test("classic Members agent menu opens the Stop and Restart / Reset confirmation
   assert.ok(screen.getByRole("radio", { name: /^Full Reset & Restart/ }));
 });
 
-test("classic Members agent menu gives a member exactly Restart Model and Reset Model", async () => {
+test("Members agent menu gives a member exactly Restart Model and Reset Model", async () => {
   const agent = { ...makeAgent("Helper"), status: "active" as const };
   seedSidebar([agent], [], false, "member");
   renderSidebar();
@@ -281,7 +278,7 @@ test("classic Members agent menu gives a member exactly Restart Model and Reset 
   assert.equal(screen.queryByText("Full Reset & Restart"), null);
 });
 
-test("classic Members rail surfaces human load failures", () => {
+test("Members rail surfaces human load failures", () => {
   seedSidebar([makeAgent("Helper")], [], true);
   renderSidebar();
 
@@ -290,7 +287,7 @@ test("classic Members rail surfaces human load failures", () => {
   assert.equal(screen.queryByText("No humans"), null);
 });
 
-test("classic Members human row keeps single-click detail and opens its DM on double-click", async () => {
+test("Members human row keeps single-click detail and opens its DM on double-click", async () => {
   const human = makeHuman("Cindy");
   const opened: string[] = [];
   let resolveDm!: (dm: Channel) => void;
@@ -332,7 +329,7 @@ test("classic Members human row keeps single-click detail and opens its DM on do
   assert.equal(useUIStore.getState().sidebarOpen, false, "opening the DM closes the mobile sidebar");
 });
 
-test("classic Members agent row opens its DM on double-click", async () => {
+test("Members agent row opens its DM on double-click", async () => {
   const agent = makeAgent("Helper");
   const opened: string[] = [];
   let resolveDm!: (dm: Channel) => void;
@@ -372,7 +369,7 @@ test("classic Members agent row opens its DM on double-click", async () => {
   assert.equal(screen.getByTestId("location-path").textContent, "/s/server/dm/dm-helper");
 });
 
-test("classic Members human row reuses the exact existing human DM", async () => {
+test("Members human row reuses the exact existing human DM", async () => {
   const human = makeHuman("Cindy");
   let opened = 0;
   seedSidebar([], [human]);
@@ -401,7 +398,7 @@ test("classic Members human row reuses the exact existing human DM", async () =>
   assert.equal(screen.getByTestId("location-path").textContent, "/s/server/dm/dm-existing-human");
 });
 
-test("classic Members agent row reuses the exact existing agent DM", async () => {
+test("Members agent row reuses the exact existing agent DM", async () => {
   const agent = makeAgent("Helper");
   let opened = 0;
   seedSidebar([agent]);
@@ -428,36 +425,4 @@ test("classic Members agent row reuses the exact existing agent DM", async () =>
 
   assert.equal(opened, 0, "an exact existing agent DM must bypass the create/open request");
   assert.equal(screen.getByTestId("location-path").textContent, "/s/server/dm/dm-existing-agent");
-});
-
-test("workspace Members double-click emits the typed DM open command", async () => {
-  const agent = makeAgent("Helper");
-  const openedDmIds: string[] = [];
-  seedSidebar([agent]);
-  useChannelStore.setState({
-    dmChannels: [makeDm("dm-workspace-agent", "agent", agent.id)],
-  });
-  useWorkspaceGridNavigationStore.setState({ active: true });
-  renderSidebar("members");
-
-  const onOpenDm = (event: Event) => {
-    openedDmIds.push((event as CustomEvent<{ dmChannelId: string }>).detail.dmChannelId);
-  };
-  window.addEventListener(WORKSPACE_GRID_OPEN_DM_EVENT, onOpenDm);
-  const originalCustomEvent = globalThis.CustomEvent;
-  globalThis.CustomEvent = window.CustomEvent;
-  try {
-    const row = screen.getByRole("button", { name: "Helper" });
-    await act(async () => {
-      fireEvent.click(row, { detail: 1 });
-      fireEvent.click(row, { detail: 2 });
-      fireEvent.doubleClick(row, { detail: 2 });
-      await Promise.resolve();
-    });
-  } finally {
-    globalThis.CustomEvent = originalCustomEvent;
-    window.removeEventListener(WORKSPACE_GRID_OPEN_DM_EVENT, onOpenDm);
-  }
-
-  assert.deepEqual(openedDmIds, ["dm-workspace-agent"]);
 });

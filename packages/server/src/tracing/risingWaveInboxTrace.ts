@@ -2,6 +2,7 @@ import type { TraceAttributes } from "@botiverse/raft-shared";
 import {
   getRisingWaveConnectionTimeoutMillis,
   getRisingWavePoolState,
+  RisingWaveReadError,
   type RisingWavePoolState,
 } from "../db/risingwave";
 import { addTraceEvent, errorClassOf } from "./semanticTrace";
@@ -38,7 +39,10 @@ export interface RisingWaveInboxFailureTraceInput {
 }
 
 export function risingWaveInboxFailureAttrs(input: RisingWaveInboxFailureTraceInput): TraceAttributes {
-  const classification = classifyRisingWaveError(input.error);
+  // RisingWaveReadError only types the route response; classify the driver
+  // error it wraps so error_class / error_kind / sqlstate keep their meaning.
+  const error = input.error instanceof RisingWaveReadError ? input.error.cause : input.error;
+  const classification = classifyRisingWaveError(error);
   const poolState = input.poolState ?? getRisingWavePoolState();
   return {
     event_kind: "rw_inbox_backend",
@@ -56,7 +60,7 @@ export function risingWaveInboxFailureAttrs(input: RisingWaveInboxFailureTraceIn
     inbox_fallback_reason: input.fallbackReason ?? "rw_error",
     inbox_contract_version: input.contractVersion,
     query_name: input.queryName,
-    error_class: errorClass(input.error),
+    error_class: errorClass(error),
     error_kind: classification.errorKind,
     error_subkind: classification.failureStage,
     rw_failure_stage: classification.failureStage,
@@ -66,7 +70,7 @@ export function risingWaveInboxFailureAttrs(input: RisingWaveInboxFailureTraceIn
     // store; the failure REASON always does. Without this field a breaker open
     // records THAT it opened but not WHY — the raw message was consumed by the
     // classifier above and then discarded.
-    error_message: traceErrorMessage(input.error),
+    error_message: traceErrorMessage(error),
     timeout_ms: getRisingWaveConnectionTimeoutMillis(),
     ...poolState,
     rw_breaker_state: input.breakerState ?? "not_configured",

@@ -46,6 +46,7 @@ import {
 } from "@botiverse/raft-shared/src/agentOps/seenPolicy/index";
 
 import { privateStatePath, writePrivateState } from "../commands/message/_privateStateFile";
+import { resolveRaftHome } from "./raftHome";
 
 export interface LedgerStreamEntry {
   seq?: number;
@@ -94,7 +95,7 @@ export function resolveStateDbPath(agentId: string, env: NodeJS.ProcessEnv = pro
   if (override) {
     return path.join(override, "slock-cli-ledger", agentId, "state.db");
   }
-  const home = env.RAFT_HOME?.trim() || env.SLOCK_HOME?.trim() || path.join(os.homedir(), ".slock");
+  const home = resolveRaftHome(env);
   // `agent-state/` is a machine-owned sibling of `cli-transport/` —
   // deliberately outside the agent's workspace; see the header comment.
   return path.join(path.resolve(home), "agent-state", agentId, "state.db");
@@ -132,7 +133,7 @@ function legacyCandidatePaths(
   if (overrideDir?.trim()) {
     return [{ filePath: path.join(overrideDir.trim(), namespace, agentId, filename), sharedTmpdir: false }];
   }
-  const home = env.RAFT_HOME?.trim() || env.SLOCK_HOME?.trim() || path.join(os.homedir(), ".slock");
+  const home = resolveRaftHome(env);
   return [
     { filePath: path.join(home, namespace, agentId, filename), sharedTmpdir: false },
     { filePath: path.join(os.tmpdir(), namespace, agentId, filename), sharedTmpdir: true },
@@ -844,6 +845,55 @@ export function recordObservation(
     ensureObservationsShape(db);
     db.prepare("INSERT OR REPLACE INTO observations (type, id, rev, context_id, seen_at) VALUES (?, ?, ?, ?, ?)")
       .run(type, id, rev, contextId, Date.now());
+  });
+}
+
+/**
+ * Atomically claim the first delivery of `(type, id)` at `rev` in context
+ * `contextId`: records it and answers `true` when the ledger did not already
+ * hold exactly that rev and context, `false` when it did. One statement, so a
+ * concurrent writer (the daemon delivering while this CLI reads) cannot make
+ * both sides think they were first. The daemon writes the same rows with the
+ * same statement. `undefined` when the ledger cannot answer.
+ */
+export function claimObservation(
+  agentId: string,
+  type: string,
+  id: string,
+  rev: string,
+  contextId: string,
+  env: NodeJS.ProcessEnv = process.env,
+): boolean | undefined {
+  try {
+    return withDb(agentId, env, (db) => {
+      ensureObservationsShape(db);
+      const result = db.prepare(`INSERT INTO observations (type, id, rev, context_id, seen_at) VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT (type, id) DO UPDATE SET rev = excluded.rev, context_id = excluded.context_id, seen_at = excluded.seen_at
+        WHERE observations.rev IS NOT excluded.rev OR observations.context_id IS NOT excluded.context_id`)
+        .run(type, id, rev, contextId, Date.now());
+      return Number(result.changes) === 1;
+    });
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Undo a claim whose output never reached the agent. Only the exact row the
+ * claim wrote is removed; best-effort, a leftover only hides the full form
+ * once in that context.
+ */
+export function releaseObservation(
+  agentId: string,
+  type: string,
+  id: string,
+  rev: string,
+  contextId: string,
+  env: NodeJS.ProcessEnv = process.env,
+): void {
+  withDbBestEffort(agentId, env, (db) => {
+    ensureObservationsShape(db);
+    db.prepare("DELETE FROM observations WHERE type = ? AND id = ? AND rev = ? AND context_id = ?").run(type, id, rev, contextId);
   });
 }
 

@@ -27,7 +27,8 @@ import {
 import { traceRows } from "../testing/traceRows";
 
 class FakeChildProcess extends EventEmitter {
-  readonly pid = 4242;
+  // Never a real pid: an uninjected kill path sends process.kill(-pid, SIGKILL) for real.
+  readonly pid = 2_000_004_242;
   readonly stdin = new PassThrough();
   readonly stdout = new PassThrough();
   readonly stderr = new PassThrough();
@@ -291,7 +292,7 @@ test("PowerShell operations abort the whole child tree", async () => {
   controller.abort();
 
   await assert.rejects(running, /aborted/);
-  assert.deepEqual(killed, [4242]);
+  assert.deepEqual(killed, [2_000_004_242]);
 });
 
 const longCjkText = "长".repeat(65_536);

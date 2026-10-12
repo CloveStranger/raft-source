@@ -1,4 +1,5 @@
-import type { ReactNode } from "react";
+import { useCallback } from "react";
+import type { MouseEvent, ReactNode } from "react";
 import { useIntl } from "react-intl";
 import { Badge, Button } from "raft-ui";
 import type { AgentActivity, ServerRole } from "@botiverse/raft-shared";
@@ -260,6 +261,12 @@ export function ChannelMemberHoverActions({
     onClick: () => void;
   };
 }) {
+  const onRoleAction = roleAction?.onClick;
+  const handleRoleActionClick = useCallback((event: MouseEvent) => {
+    event.stopPropagation();
+    onRoleAction?.();
+  }, [onRoleAction]);
+
   if (!roleAction && !removeAction) return null;
 
   return (
@@ -267,10 +274,7 @@ export function ChannelMemberHoverActions({
       {roleAction && (
         <Button
           type="button"
-          onClick={(event) => {
-            event.stopPropagation();
-            roleAction.onClick();
-          }}
+          onClick={handleRoleActionClick}
           disabled={roleAction.disabled}
           size="sm"
           variant="outline"

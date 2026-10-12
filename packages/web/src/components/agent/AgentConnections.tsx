@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useIntl } from "react-intl";
 import {
   Button,
@@ -88,6 +88,10 @@ export function AgentConnections({ agentId }: { agentId: string }) {
     void load();
   }, [load]);
 
+  const handleAgentMissing = useCallback(() => {
+    setState({ kind: "agent_missing" });
+  }, []);
+
   if (state.kind === "hidden" || state.kind === "loading") return null;
   return (
     <div className="border-t border-line-muted theme-brutal:border-black/10 px-5 py-4" data-testid="agent-connections">
@@ -103,7 +107,7 @@ export function AgentConnections({ agentId }: { agentId: string }) {
           {formatMessage({ id: "agent.detail.connections.agentMissingAtProvider" })}
         </p>
       ) : (
-        <GithubConnectionRow agentId={agentId} status={state.status} onChanged={load} onAgentMissing={() => setState({ kind: "agent_missing" })} />
+        <GithubConnectionRow agentId={agentId} status={state.status} onChanged={load} onAgentMissing={handleAgentMissing} />
       )}
     </div>
   );
@@ -137,21 +141,21 @@ function GithubConnectionRow({
   const [partialDisconnect, setPartialDisconnect] = useState<string | null>(null);
   const [retrying, setRetrying] = useState(false);
 
-  const connectors = status.connectors ?? [];
+  const connectors = useMemo(() => status.connectors ?? [], [status.connectors]);
   const current = status.connected
     ? connectors.find((connector) => connector.id === status.connectorId) ?? connectors.find((connector) => connector.current) ?? null
     : null;
   const currentCreator = current ? creatorLabel(current) : null;
 
-  const failed = (err: unknown, kind: "start" | "switch" | "disconnect") => {
+  const failed = useCallback((err: unknown, kind: "start" | "switch" | "disconnect") => {
     if (errorCode(err) === AGENT_MISSING_AT_PROVIDER_CODE) {
       onAgentMissing();
       return;
     }
     setError({ kind, reason: providerRefusalReason(err) });
-  };
+  }, [onAgentMissing]);
 
-  const start = async () => {
+  const start = useCallback(async () => {
     setStarting(true);
     setError(null);
     try {
@@ -165,9 +169,9 @@ function GithubConnectionRow({
     } finally {
       setStarting(false);
     }
-  };
+  }, [agentId, includePrivate, failed]);
 
-  const assign = async (connectorId: string) => {
+  const assign = useCallback(async (connectorId: string) => {
     const connector = connectors.find((item) => item.id === connectorId);
     // Raft re-checks on the server; the UI only never offers what would be refused.
     if (!connector || !connector.canManage || connectorId === status.connectorId) return;
@@ -181,16 +185,16 @@ function GithubConnectionRow({
     } finally {
       setSwitching(false);
     }
-  };
+  }, [agentId, connectors, status.connectorId, onChanged, failed]);
 
-  const detach = async () => {
+  const detach = useCallback(async () => {
     await api.delete(agentConnectionPath(agentId, "github"));
     await onChanged();
-  };
+  }, [agentId, onChanged]);
 
   // The provider may disconnect a connector only partially (some agents not
   // detached, 502 `…_disconnect_partial`): not a success; the same call again completes it.
-  const disconnectConnector = async (connectorId: string) => {
+  const disconnectConnector = useCallback(async (connectorId: string) => {
     setError(null);
     try {
       await api.delete(agentConnectorPath(agentId, "github", connectorId));
@@ -201,9 +205,9 @@ function GithubConnectionRow({
     }
     setPartialDisconnect(null);
     await onChanged();
-  };
+  }, [agentId, onChanged]);
 
-  const retryDisconnect = async (connectorId: string) => {
+  const retryDisconnect = useCallback(async (connectorId: string) => {
     setRetrying(true);
     try {
       await disconnectConnector(connectorId);
@@ -213,17 +217,57 @@ function GithubConnectionRow({
     } finally {
       setRetrying(false);
     }
-  };
+  }, [disconnectConnector, failed]);
 
   const requestedScope = includePrivate ? "repo" : "public_repo";
-  const connectorLabel = (connector: AgentConnectionConnectorView) => {
+  const connectorLabel = useCallback((connector: AgentConnectionConnectorView) => {
     const creator = creatorLabel(connector);
     const account = connector.account ?? "GitHub";
     return creator
       ? formatMessage({ id: "agent.detail.connections.connectorOption" }, { account, creator })
       : account;
-  };
-  const selectItems = connectors.map((connector) => ({ value: connector.id, label: connectorLabel(connector) }));
+  }, [formatMessage]);
+  const selectItems = useMemo(() => connectors.map((connector) => ({ value: connector.id, label: connectorLabel(connector) })), [connectors, connectorLabel]);
+
+  const handleValueChange = useCallback((value: unknown) => {
+    if (typeof value === "string") void assign(value);
+  }, [assign]);
+
+  const handleStartClick = useCallback(() => {
+    void start();
+  }, [start]);
+
+  const handleDetachClick = useCallback(() => {
+    setConfirm("detach");
+  }, []);
+
+  const handleDisconnectClick = useCallback(() => {
+    setConfirm("disconnect");
+  }, []);
+
+  const handleIncludePrivateChange = useCallback((checked: boolean | "indeterminate") => {
+    setIncludePrivate(checked === true);
+  }, []);
+
+  const handlePendingContinue = useCallback(() => {
+    if (pending) window.location.assign(pending.url);
+  }, [pending]);
+
+  const handlePendingCancel = useCallback(() => {
+    setPending(null);
+  }, []);
+
+  const handleRetryPartial = useCallback(() => {
+    if (partialDisconnect) void retryDisconnect(partialDisconnect);
+  }, [retryDisconnect, partialDisconnect]);
+
+  const handleConfirmClose = useCallback(() => {
+    setConfirm(null);
+  }, []);
+
+  const handleDisconnectConfirm = useCallback(() => {
+    if (current) void disconnectConnector(current.id);
+  }, [disconnectConnector, current]);
 
   return (
     <div className="space-y-2 border theme-brutal:border-2 border-line-muted theme-brutal:border-black bg-layer-panel theme-brutal:bg-white p-3" data-testid="agent-connection-github" data-connected={status.connected ? "true" : "false"}>
@@ -262,9 +306,7 @@ function GithubConnectionRow({
           <Select
             value={status.connectorId}
             disabled={switching}
-            onValueChange={(value) => {
-              if (typeof value === "string") void assign(value);
-            }}
+            onValueChange={handleValueChange}
             items={selectItems}
           >
             <SelectTrigger className="w-full" aria-label={formatMessage({ id: "agent.detail.connections.useConnection" })}>
@@ -300,17 +342,17 @@ function GithubConnectionRow({
             type="button"
             disabled={starting}
             title={formatMessage({ id: "agent.detail.connections.connectHint" }, { scopes: requestedScope })}
-            onClick={() => void start()}
+            onClick={handleStartClick}
           >
             {formatMessage({ id: connectors.length > 0 || status.connected ? "agent.detail.connections.connectNew" : "agent.detail.connections.connect" })}
           </Button>
           {status.connected && (
-            <Button variant="outline" size="sm" type="button" onClick={() => setConfirm("detach")}>
+            <Button variant="outline" size="sm" type="button" onClick={handleDetachClick}>
               {formatMessage({ id: "agent.detail.connections.detach" })}
             </Button>
           )}
           {status.connected && current?.canManage && (
-            <Button variant="outline" size="sm" type="button" onClick={() => setConfirm("disconnect")}>
+            <Button variant="outline" size="sm" type="button" onClick={handleDisconnectClick}>
               {formatMessage({ id: "agent.detail.connections.disconnectConnector" })}
             </Button>
           )}
@@ -320,7 +362,7 @@ function GithubConnectionRow({
         <label className="flex items-center gap-2 text-xs text-foreground-muted theme-brutal:text-black/70">
           <Checkbox
             checked={includePrivate}
-            onCheckedChange={(checked) => setIncludePrivate(checked === true)}
+            onCheckedChange={handleIncludePrivateChange}
             aria-label={formatMessage({ id: "agent.detail.connections.includePrivate" })}
           />
           <span>{formatMessage({ id: "agent.detail.connections.includePrivate" })}</span>
@@ -332,10 +374,10 @@ function GithubConnectionRow({
             {formatMessage({ id: "agent.detail.connections.reviewScopes" }, { scopes: pending.scopes.join(", ") || requestedScope })}
           </p>
           <div className="flex flex-wrap items-center gap-2">
-            <Button variant="primary" size="sm" type="button" onClick={() => window.location.assign(pending.url)}>
+            <Button variant="primary" size="sm" type="button" onClick={handlePendingContinue}>
               {formatMessage({ id: "agent.detail.connections.continue" })}
             </Button>
-            <Button variant="outline" size="sm" type="button" onClick={() => setPending(null)}>
+            <Button variant="outline" size="sm" type="button" onClick={handlePendingCancel}>
               {formatMessage({ id: "agent.detail.connections.cancel" })}
             </Button>
           </div>
@@ -359,7 +401,7 @@ function GithubConnectionRow({
           <p className="text-xs font-bold text-warning-strong theme-brutal:text-brutal-orange">
             {formatMessage({ id: "agent.detail.connections.disconnectPartial" })}
           </p>
-          <Button variant="outline" size="sm" type="button" disabled={retrying} onClick={() => void retryDisconnect(partialDisconnect)}>
+          <Button variant="outline" size="sm" type="button" disabled={retrying} onClick={handleRetryPartial}>
             {formatMessage({ id: "agent.detail.connections.retry" })}
           </Button>
         </div>
@@ -370,7 +412,7 @@ function GithubConnectionRow({
           message={formatMessage({ id: "agent.detail.connections.detachMessage" }, { account: status.account ?? "GitHub" })}
           confirmLabel={formatMessage({ id: "agent.detail.connections.detach" })}
           onConfirm={detach}
-          onClose={() => setConfirm(null)}
+          onClose={handleConfirmClose}
         />
       )}
       {confirm === "disconnect" && current && (
@@ -379,8 +421,8 @@ function GithubConnectionRow({
           message={formatMessage({ id: "agent.detail.connections.disconnectConnectorMessage" }, { account: current.account ?? "GitHub" })}
           confirmLabel={formatMessage({ id: "agent.detail.connections.disconnectConnector" })}
           confirmTestId="agent-connection-disconnect-connector-confirm"
-          onConfirm={() => disconnectConnector(current.id)}
-          onClose={() => setConfirm(null)}
+          onConfirm={handleDisconnectConfirm}
+          onClose={handleConfirmClose}
         />
       )}
     </div>

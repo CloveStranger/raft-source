@@ -252,6 +252,84 @@ test("stop service: stale pidfile → clears pidfile + status='stale_pidfile_cle
   });
 });
 
+// --- task #912: stale pidfile but a service still answers on the IPC endpoint ---
+test("stop service: stale pidfile + IPC answers with a live pid → that service is stopped, not reported stale", async () => {
+  await withHome(async (home) => {
+    await writePidfile(home, 99999); // the killed replacement from a failed self-restart
+    const pidfilePath = servicePidPath(home);
+    const LIVE = 4242;
+    let alive = true;
+    const killed: number[] = [];
+    const events: ComputerApiEvent[] = [];
+    const result = await stop(
+      { slockHome: home },
+      {
+        readPidfile: async () => 99999,
+        isProcessAlive: (pid) => pid === LIVE && alive,
+        probeLiveServicePid: async () => LIVE,
+        killService: (pid) => {
+          killed.push(pid);
+          alive = false;
+        },
+        sleep: async () => {},
+        onEvent: (e) => events.push(e),
+      },
+    );
+    assert.equal(result.status, "stopped");
+    assert.equal(result.pid, LIVE);
+    assert.deepEqual(killed, [LIVE]);
+    const stopping = events.find((e) => e.kind === "stop.stopping");
+    assert.ok(stopping && stopping.kind === "stop.stopping" && stopping.pid === LIVE);
+    assert.equal(events.find((e) => e.kind === "stop.stale_pidfile_cleared"), undefined);
+    // The incumbent exited on SIGTERM; its pidfile is gone.
+    await assert.rejects(
+      () => readFile(pidfilePath, "utf8"),
+      (e) => (e as NodeJS.ErrnoException).code === "ENOENT",
+    );
+  });
+});
+
+test("stop service: stale pidfile + nothing answers on IPC → still stale_pidfile_cleared, no kill", async () => {
+  await withHome(async (home) => {
+    await writePidfile(home, 99999);
+    let killCount = 0;
+    const result = await stop(
+      { slockHome: home },
+      {
+        readPidfile: async () => 99999,
+        isProcessAlive: () => false,
+        probeLiveServicePid: async () => null,
+        killService: () => {
+          killCount += 1;
+        },
+      },
+    );
+    assert.equal(result.status, "stale_pidfile_cleared");
+    assert.equal(result.pid, 99999);
+    assert.equal(killCount, 0);
+  });
+});
+
+test("stop service: an IPC answer naming a dead pid is ignored", async () => {
+  await withHome(async (home) => {
+    await writePidfile(home, 99999);
+    let killCount = 0;
+    const result = await stop(
+      { slockHome: home },
+      {
+        readPidfile: async () => 99999,
+        isProcessAlive: () => false,
+        probeLiveServicePid: async () => 31337,
+        killService: () => {
+          killCount += 1;
+        },
+      },
+    );
+    assert.equal(result.status, "stale_pidfile_cleared");
+    assert.equal(killCount, 0);
+  });
+});
+
 // --- Gate 5: alive service SIGTERM happy path ---
 test("stop service: alive service → SIGTERM + waits for exit + status='stopped' + emits signaled+stopped", async () => {
   await withHome(async (home) => {
@@ -430,4 +508,79 @@ test("stop service: source has exactly one graceful process.kill(SIGTERM) author
   assert.equal(src.match(/process\.kill\s*\(/g)?.length, 1);
   assert.match(src, /process\.kill\s*\([^)]*,\s*["']SIGTERM["']\s*\)/);
   assert.equal(src.match(/\b(?:process\.)?kill\s*\([^)]*,\s*(?:9|["']SIGKILL["'])/g), null);
+});
+
+
+// --- task #917: a systemd unit that owns the live pid is stopped through systemd ---
+test("task #917: stop delegates to `systemctl stop` when the unit's MainPID is the live service", async () => {
+  await withHome(async (home) => {
+    let alive = true;
+    let killed = 0;
+    const calls: string[] = [];
+    const result = await stop(
+      { slockHome: home },
+      {
+        readPidfile: async () => 777,
+        isProcessAlive: () => alive,
+        killService: () => { killed += 1; },
+        sleep: async () => undefined,
+        pollIntervalMs: 1,
+        timeoutMs: 50,
+        inspectSupervisor: async () => ({
+          record: { kind: "systemd", scope: "user", unit: "raft-computer.service", invocationId: "x", pid: 777, recordedAt: "t" },
+          unitLoaded: true, enabledState: "enabled", activeState: "active", mainPid: 777, killMode: "process", reachable: true,
+        }),
+        systemctl: async (scope, args) => { calls.push(`${scope}:${args.join(" ")}`); alive = false; return { code: 0, stdout: "", stderr: "" }; },
+      },
+    );
+    assert.equal(result.status, "stopped");
+    assert.deepEqual(calls, ["user:stop raft-computer.service"]);
+    assert.equal(killed, 0, "no SIGTERM from here: the unit's Restart= policy would answer it with a relaunch");
+  });
+});
+
+test("task #917: stop never acts beside an unreachable manager, and reports a failing systemctl", async () => {
+  await withHome(async (home) => {
+    const record = { kind: "systemd" as const, scope: "user" as const, unit: "raft-computer.service", invocationId: "x", pid: 777, recordedAt: "t" };
+    let killed = 0;
+    await assert.rejects(
+      () => stop({ slockHome: home }, {
+        readPidfile: async () => 777, isProcessAlive: () => true, killService: () => { killed += 1; },
+        inspectSupervisor: async () => ({ record, unitLoaded: false, enabledState: null, activeState: null, mainPid: null, killMode: null, reachable: false }),
+      }),
+      (err: unknown) => err instanceof ComputerServiceError && err.code === "STOP_SUPERVISOR_UNREACHABLE" && /XDG_RUNTIME_DIR/.test(err.message),
+    );
+    await assert.rejects(
+      () => stop({ slockHome: home }, {
+        readPidfile: async () => 777, isProcessAlive: () => true, killService: () => { killed += 1; },
+        inspectSupervisor: async () => ({ record, unitLoaded: true, enabledState: "enabled", activeState: "active", mainPid: 777, killMode: "process", reachable: true }),
+        systemctl: async () => ({ code: 1, stdout: "", stderr: "Failed to stop raft-computer.service: Access denied" }),
+      }),
+      (err: unknown) => err instanceof ComputerServiceError && err.code === "STOP_SUPERVISOR_FAILED" && /Access denied/.test(err.message),
+    );
+    assert.equal(killed, 0);
+  });
+});
+
+test("task #917: a unit that does not own the live pid leaves the SIGTERM path untouched", async () => {
+  await withHome(async (home) => {
+    let alive = true;
+    let killed = 0;
+    const result = await stop(
+      { slockHome: home },
+      {
+        readPidfile: async () => 777,
+        isProcessAlive: () => alive,
+        killService: () => { killed += 1; alive = false; },
+        sleep: async () => undefined, pollIntervalMs: 1, timeoutMs: 50,
+        inspectSupervisor: async () => ({
+          record: { kind: "systemd", scope: "user", unit: "raft-computer.service", invocationId: "x", pid: 1, recordedAt: "t" },
+          unitLoaded: true, enabledState: "enabled", activeState: "inactive", mainPid: 0, killMode: "process", reachable: true,
+        }),
+        systemctl: async () => { throw new Error("must not be called"); },
+      },
+    );
+    assert.equal(result.status, "stopped");
+    assert.equal(killed, 1);
+  });
 });

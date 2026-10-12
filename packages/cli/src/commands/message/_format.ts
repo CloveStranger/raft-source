@@ -18,6 +18,7 @@ import {
   formatAgentTaskCurrentProjection,
   formatAgentSearchResults,
   formatUtcTimestamp,
+  formatSenderHandleText,
   indentAgentBodyContinuationLines,
   neutralizeAgentRaftRefLiterals,
   renderAgentSearchPreviewText,
@@ -172,7 +173,8 @@ function formatHistoryMessageLine(channel: string, m: HistoryMessage, index: num
   const taskSuffix = m.taskStatus
     ? ` [task #${m.taskNumber} status=${m.taskStatus}${formatTaskAssigneeSuffix(m.taskAssigneeId, assigneeName)}]`
     : "";
-  const handle = senderDescription ? `@${senderName} — ${senderDescription}` : `@${senderName}`;
+  const senderTimezone = typeof m.senderTimezone === "string" ? m.senderTimezone : typeof m.sender_timezone === "string" ? m.sender_timezone : null;
+  const handle = formatSenderHandleText(senderName, senderDescription, senderTimezone);
   return `[${headerParts.join(" ")}] ${handle}: ${indentAgentBodyContinuationLines(m.content ?? "")}${attachSuffix}${taskSuffix}${formatTaskCurrentProjection(m.taskCurrentProjection)}`;
 }
 
@@ -377,34 +379,43 @@ export const formatSendDraftStdinDeadlineDiagnostic = axSurface(
   },
 );
 
-export const DRAFT_REPLACED_EXCERPT_LIMIT = 400;
+export const DRAFT_REPLACED_EXCERPT_LIMIT = 160;
+
+function replacedDraftRecoveryLine(recoveryFilePath: string | null): string {
+  return recoveryFilePath
+    ? `Recovery file: ${JSON.stringify(recoveryFilePath)}`
+    : "Recovery copy: unavailable (local save failed; sending continued).";
+}
 
 /**
- * A target holds exactly ONE draft — the slot is keyed `(agentId, target)` both
- * locally and server-side — so sending new content discards whatever was there.
- *
- * The discarded body is printed on purpose: after this point it exists nowhere
- * else, and this line is the last copy. It is the sender's own text going back
- * to the sender's own terminal. Deliberately NOT suggesting `--send-draft` as a
- * recovery: by the time this prints, the slot already belongs to the new
- * content, so that command would send the replacement rather than the thing
- * just lost.
+ * A target holds exactly ONE active draft. Before normal send replaces that
+ * slot, the previous body is archived best-effort in local agent-state. The
+ * terminal only gets a bounded excerpt plus the archive path; a local archive
+ * failure is reported honestly but never blocks delivery.
  */
 export const formatDraftReplacedWarning = axSurface(
-  "Draft-replaced warning carrying the last copy of the discarded body.",
-  (target: string, previousContent: string): string => {
-  const trimmed = previousContent.trim();
-  const excerpt = trimmed.length > DRAFT_REPLACED_EXCERPT_LIMIT
-    ? `${trimmed.slice(0, DRAFT_REPLACED_EXCERPT_LIMIT)}… (${trimmed.length} chars total, truncated)`
-    : trimmed;
-  return ([
-    `Warning: replacing an unsent draft for ${target}.`,
-    `One draft is kept per target, so the previous body is now discarded.`,
-    `Discarded draft (last copy):`,
-    excerpt,
-  ].join("\n"));
-},
+  "Draft-replaced warning with a bounded excerpt and local recovery file.",
+  (target: string, previousContent: string, recoveryFilePath: string | null): string => {
+    const compact = previousContent.trim().replace(/\s+/gu, " ");
+    const excerpt = compact.length > DRAFT_REPLACED_EXCERPT_LIMIT
+      ? `${compact.slice(0, DRAFT_REPLACED_EXCERPT_LIMIT)}…`
+      : compact;
+    return ([
+      `Warning: replacing an unsent draft for ${target}.`,
+      `Previous draft excerpt (${previousContent.length} chars): ${excerpt}`,
+      replacedDraftRecoveryLine(recoveryFilePath),
+    ].join("\n"));
+  },
   {
-    examples: [{ args: ["#general", "the previously drafted body that is being discarded"] }],
+    examples: [{ args: ["#general", "the previously drafted body", "/home/agent/replaced-drafts/draft.txt"] }],
+  },
+);
+
+export const formatDraftReplacedSuccess = axSurface(
+  "Successful send receipt line for a replaced draft and its local recovery file.",
+  (recoveryFilePath: string | null): string =>
+    `Replaced an unsent draft. ${replacedDraftRecoveryLine(recoveryFilePath)}`,
+  {
+    examples: [{ args: ["/home/agent/replaced-drafts/draft.txt"] }],
   },
 );

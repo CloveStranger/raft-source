@@ -14,6 +14,28 @@ export interface RuntimeAdmissionPolicy {
   grokRuntimeEnabled: boolean;
 }
 
+/**
+ * Released mobile apps (1.12, 1.13) decode runtime options STRICTLY: any key
+ * they do not know fails the whole catalog (`computer_runtime_options_contract_mismatch`),
+ * so the create-agent runtime list never opens. The `runtimeFormV2` marker is
+ * therefore opt-in: only a client that asks for it (web, header
+ * `X-Raft-Runtime-Form-V2: 1`) receives it; everyone else gets the pre-v2 key set unchanged.
+ */
+export interface RuntimeOptionProjection {
+  includeRuntimeFormV2Marker: boolean;
+}
+
+const NO_RUNTIME_FORM_V2_MARKER: RuntimeOptionProjection = { includeRuntimeFormV2Marker: false };
+
+/** Request header a client sends to declare that it understands the `runtimeFormV2` marker. */
+export const RUNTIME_FORM_V2_MARKER_HEADER = "x-raft-runtime-form-v2";
+
+export function runtimeOptionProjectionFromHeaders(
+  headers: Record<string, string | string[] | undefined>,
+): RuntimeOptionProjection {
+  return { includeRuntimeFormV2Marker: headers[RUNTIME_FORM_V2_MARKER_HEADER] === "1" };
+}
+
 function capabilityStatus(
   runtime: RuntimeInfo,
   installedRuntimeIds: ReadonlySet<string>,
@@ -27,6 +49,7 @@ function projectRuntimeOption(input: {
   installedRuntimeIds: ReadonlySet<string>;
   currentRuntime: string | null;
   admissionReason: RuntimeAdmissionReason;
+  projection: RuntimeOptionProjection;
 }): RuntimeSelectionOption {
   const current = input.runtime.id === input.currentRuntime;
   const capability = capabilityStatus(input.runtime, input.installedRuntimeIds);
@@ -53,7 +76,9 @@ function projectRuntimeOption(input: {
     // schema path, installed v1 apps), `runtimeFormV2` for the v2 form. A
     // runtime that only has a v2 form carries no v1 ref.
     ...(v1Form && (availableForNew || current) ? { formDefinitionRef: v1Form.ref } : {}),
-    ...(runtimeFormV2Entry(input.runtime.id) && (availableForNew || current) ? { runtimeFormV2: RUNTIME_FORM_V2_MARKER } : {}),
+    ...(input.projection.includeRuntimeFormV2Marker && runtimeFormV2Entry(input.runtime.id) && (availableForNew || current)
+      ? { runtimeFormV2: RUNTIME_FORM_V2_MARKER }
+      : {}),
   };
 }
 
@@ -65,6 +90,7 @@ function projectNewUseOptions(
   candidates: RuntimeInfo[],
   installedRuntimeIds: readonly string[],
   policy: RuntimeAdmissionPolicy,
+  projection: RuntimeOptionProjection,
 ): RuntimeSelectionOption[] {
   const installed = new Set(installedRuntimeIds);
   return candidates
@@ -74,27 +100,31 @@ function projectNewUseOptions(
       installedRuntimeIds: installed,
       currentRuntime: null,
       admissionReason: null,
+      projection,
     }));
 }
 
 export function projectNewAgentRuntimeOptions(
   installedRuntimeIds: readonly string[],
   policy: RuntimeAdmissionPolicy,
+  projection: RuntimeOptionProjection = NO_RUNTIME_FORM_V2_MARKER,
 ): RuntimeSelectionOption[] {
-  return projectNewUseOptions(getCreatableRuntimeOptions(), installedRuntimeIds, policy);
+  return projectNewUseOptions(getCreatableRuntimeOptions(), installedRuntimeIds, policy, projection);
 }
 
+/** Server setup state never carries the marker: no client opens a v2 form from it. */
 export function projectSetupRuntimeOptions(
   installedRuntimeIds: readonly string[],
   policy: RuntimeAdmissionPolicy,
 ): RuntimeSelectionOption[] {
-  return projectNewUseOptions(getSetupRuntimeOptions(), installedRuntimeIds, policy);
+  return projectNewUseOptions(getSetupRuntimeOptions(), installedRuntimeIds, policy, NO_RUNTIME_FORM_V2_MARKER);
 }
 
 export function projectExistingAgentRuntimeOptions(
   installedRuntimeIds: readonly string[],
   currentRuntime: string,
   policy: RuntimeAdmissionPolicy,
+  projection: RuntimeOptionProjection = NO_RUNTIME_FORM_V2_MARKER,
 ): RuntimeSelectionOption[] {
   const installed = new Set(installedRuntimeIds);
   return getExistingAgentRuntimeOptions(currentRuntime)
@@ -112,6 +142,7 @@ export function projectExistingAgentRuntimeOptions(
         installedRuntimeIds: installed,
         currentRuntime,
         admissionReason,
+        projection,
       });
     });
 }

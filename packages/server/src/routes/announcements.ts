@@ -1,3 +1,7 @@
+import { sql } from "drizzle-orm";
+import { getDb } from "../db/index";
+import { streamStorageResponse } from "../services/storageResponseStream";
+import { getDirectUploadStorage, isStorageNotFoundError } from "../services/storageService";
 import {
   Router,
   type Router as RouterType,
@@ -69,4 +73,34 @@ announcementRouter.post("/:id/dismiss", requireAuth, requireVerified, async (req
     return;
   }
   res.json({ ok: true });
+});
+
+// Anonymous delivery is allowed only after the owning announcement has actually
+// been published and reached its start time. Draft bytes stay in private storage.
+announcementRouter.get("/images/:id", async (req, res) => {
+  const id = req.params.id as string;
+  if (!UUID_RE.test(id)) { res.sendStatus(404); return; }
+  const result = await getDb().execute(sql`
+    SELECT asset.storage_key, asset.content_type
+    FROM announcement_image_assets asset
+    WHERE asset.id = ${id}::uuid AND asset.deleting_at IS NULL AND EXISTS (
+      SELECT 1 FROM announcements a
+      CROSS JOIN LATERAL json_each(a.localized_content) locale
+      WHERE locale.value->'image'->>'assetId' = ${id}
+      AND a.published_at IS NOT NULL AND a.starts_at <= now()
+    )
+  `);
+  const row = result.rows[0] as { storage_key: string; content_type: string } | undefined;
+  if (!row) { res.sendStatus(404); return; }
+  const storage = getDirectUploadStorage();
+  if (!storage) { res.sendStatus(503); return; }
+  try {
+    const body = await storage.get(row.storage_key);
+    res.setHeader("Content-Type", row.content_type);
+    res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
+    res.setHeader("X-Content-Type-Options", "nosniff");
+    res.setHeader("X-Robots-Tag", "noindex, nofollow");
+    res.setHeader("Cross-Origin-Resource-Policy", "cross-origin");
+    await streamStorageResponse(body, res);
+  } catch (error) { if (!res.headersSent) res.sendStatus(isStorageNotFoundError(error) ? 404 : 503); else res.destroy(); }
 });

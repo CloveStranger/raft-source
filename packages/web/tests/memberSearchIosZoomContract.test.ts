@@ -8,7 +8,10 @@ const read = (path: string) => readFileSync(resolve(repoRoot, path), "utf8");
 
 test("channel member searches use a real 16px font on coarse pointers without scale or viewport hacks", () => {
   const css = read("src/index.css");
-  const members = read("src/components/agent/ChannelMembers.tsx");
+  const members = [
+    read("src/components/agent/ChannelMembers.tsx"),
+    read("src/components/agent/MemberRoleActions.tsx"),
+  ].join("\n");
   const createChannel = read("src/components/channel/CreateChannelDialog.tsx");
   const createJoint = read("src/components/channel/CreateJointChannelDialog.tsx");
 

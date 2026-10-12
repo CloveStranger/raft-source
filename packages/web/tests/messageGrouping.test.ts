@@ -5,6 +5,8 @@ import assert from "node:assert/strict";
 
 import {
   computeMessageGrouping,
+  followedByFor,
+  followsSystemFor,
   localDayKey,
   shouldShowGroupedMessageHeader,
 } from "../src/components/message/messageGrouping";
@@ -136,4 +138,42 @@ test("empty list yields an empty map", () => {
 test("localDayKey is a stable YYYY-MM-DD bucket; invalid input yields empty string", () => {
   assert.equal(localDayKey("2026-07-01T15:00:00Z"), "2026-07-01");
   assert.equal(localDayKey("not-a-date"), "");
+});
+
+test("followedByFor marks mid-group rows compact, group breaks group, and the end nothing", () => {
+  const messages = [
+    msg({ id: "a", createdAt: "2026-07-01T15:00:00Z" }),
+    msg({ id: "b", createdAt: "2026-07-01T15:00:30Z" }),
+    msg({ id: "c", senderId: "u2", createdAt: "2026-07-01T15:01:00Z" }),
+    msg({ id: "d", senderId: "u2", createdAt: "2026-07-01T15:01:30Z" }),
+  ];
+  const grouping = computeMessageGrouping(messages);
+  assert.equal(followedByFor(messages, 0, grouping), "compact", "a is followed by its continuation b");
+  assert.equal(followedByFor(messages, 1, grouping), "group", "b is followed by another sender");
+  assert.equal(followedByFor(messages, 2, grouping), "compact", "c is followed by its continuation d");
+  assert.equal(followedByFor(messages, 3, grouping), undefined, "the last row has nothing following");
+});
+
+test("a system next-row reads as a group break, not a continuation", () => {
+  const messages = [
+    msg({ id: "a", createdAt: "2026-07-01T15:00:00Z" }),
+    msg({ id: "s", messageType: "system", createdAt: "2026-07-01T15:00:30Z" }),
+  ];
+  const grouping = computeMessageGrouping(messages);
+  assert.equal(
+    followedByFor(messages, 0, grouping),
+    "group",
+    "the note breaks the run even though the system row shows no avatar",
+  );
+});
+
+test("followsSystemFor marks messages directly after a system note", () => {
+  const messages = [
+    msg({ id: "a", createdAt: "2026-07-01T15:00:00Z" }),
+    msg({ id: "s", messageType: "system", createdAt: "2026-07-01T15:00:30Z" }),
+    msg({ id: "b", createdAt: "2026-07-01T15:01:00Z" }),
+  ];
+  assert.equal(followsSystemFor(messages, 0), false);
+  assert.equal(followsSystemFor(messages, 1), false);
+  assert.equal(followsSystemFor(messages, 2), true, "b follows the system note");
 });

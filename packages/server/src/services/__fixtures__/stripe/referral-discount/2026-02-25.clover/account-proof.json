@@ -1,0 +1,22 @@
+{
+  "objects": [
+    {
+      "id": "acct_referral_test",
+      "object": "account",
+      "lastResponse": {
+        "apiVersion": "2026-02-25.clover",
+        "requestId": "req_referral_account_fixture"
+      }
+    },
+    {
+      "object": "balance",
+      "livemode": false,
+      "available": [],
+      "pending": [],
+      "lastResponse": {
+        "apiVersion": "2026-02-25.clover",
+        "requestId": "req_referral_balance_fixture"
+      }
+    }
+  ]
+}

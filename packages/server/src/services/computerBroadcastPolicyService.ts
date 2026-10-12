@@ -12,7 +12,11 @@ export interface ComputerPlatform {
   os: "linux" | "macos" | "windows";
   architecture: "x64" | "arm64";
 }
-export type ComputerSourceFactProvenance = "owner_connection" | "replica_meta";
+// stored_report: the version this machine last reported, read from its row
+// because no live connection fact is available yet (the window between a
+// reconnect and this replica seeing the new connection's `ready`). Display
+// fallback only; checks that need a live answer require owner_connection.
+export type ComputerSourceFactProvenance = "owner_connection" | "replica_meta" | "stored_report";
 export interface ComputerSourceFact {
   version: string | null;
   observedAt: string | null;
@@ -146,6 +150,13 @@ type BroadcastGate =
   | { enabled: true }
   | { enabled: false; reasonCode: "broadcast_disabled" | "broadcast_gate_unavailable" };
 
+async function readBroadcastFlag(serverId: string | null): Promise<boolean> {
+  return (await evaluateFeatureFlag({
+    key: REMOTE_COMPUTER_UPGRADE_V2_FEATURE_FLAG_KEY,
+    serverId,
+  })).enabled;
+}
+
 async function readBroadcastGate(
   serverId: string | null,
   deps: ComputerHandsResolutionDependencies,
@@ -153,10 +164,7 @@ async function readBroadcastGate(
   try {
     const enabled = deps.isBroadcastEnabled
       ? await deps.isBroadcastEnabled(serverId)
-      : (await evaluateFeatureFlag({
-          key: REMOTE_COMPUTER_UPGRADE_V2_FEATURE_FLAG_KEY,
-          serverId,
-        })).enabled;
+      : await readBroadcastFlag(serverId);
     return enabled ? { enabled: true } : { enabled: false, reasonCode: "broadcast_disabled" };
   } catch {
     // An unreadable gate is not permission to broadcast. It gets its own reason
@@ -228,6 +236,30 @@ export async function evaluateBroadcastPolicy(
     return { ...selected, reasonCode: "already_current" };
   }
   return { ...selected, eligibility: "eligible", reasonCode: "eligible" };
+}
+
+/**
+ * Evaluator for callers that decide many machines in one request (the machine
+ * list). The gate depends only on serverId, so it is read once per serverId
+ * and shared; per-machine evaluation used to cost two flag queries per
+ * Computer. A failed read is shared too, so every machine of that server
+ * reports `broadcast_gate_unavailable`, as it would have one by one.
+ * Not a cache: create one per request so a flag change is seen next request.
+ */
+export function createBatchBroadcastPolicyEvaluator(
+  deps: ComputerHandsResolutionDependencies = {},
+): (input: EvaluateComputerBroadcastPolicyInput) => Promise<ComputerBroadcastPolicyDecision> {
+  const gates = new Map<string | null, Promise<boolean>>();
+  const readGate = deps.isBroadcastEnabled ?? readBroadcastFlag;
+  const isBroadcastEnabled = (serverId: string | null): Promise<boolean> => {
+    let gate = gates.get(serverId);
+    if (!gate) {
+      gate = (async () => readGate(serverId))();
+      gates.set(serverId, gate);
+    }
+    return gate;
+  };
+  return (input) => evaluateBroadcastPolicy(input, { ...deps, isBroadcastEnabled });
 }
 
 export function projectComputerBroadcastPolicyDecision(

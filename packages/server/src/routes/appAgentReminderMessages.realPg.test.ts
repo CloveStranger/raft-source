@@ -17,6 +17,7 @@ import { openTestApp } from "../test/integration/app";
 import { migrateRealPgTestDatabase } from "../test/integration/realPgMigrate";
 import { agentApi, postReminder, seedReminderApp, seedReminderWorld } from "../test/appAgentReminderFixture";
 import { __setAppAgentReminderRaceHooksForTests } from "../services/appAgentReminderMessageService";
+import { withChannelDelivery } from "../test/orchestratorStub";
 
 /** Releases every waiter once `parties` arrived (or after a bounded wait, so a bug fails instead of hanging). */
 function barrier(parties: number) {
@@ -56,12 +57,12 @@ async function withRealPgApp(run: (app: TestApp, deliveries: Array<{ agentId: st
     skipAuthRateLimit: true,
   });
   const deliveries: Array<{ agentId: string; message: AgentMessage }> = [];
-  app.app.set("agentOrchestrator", {
+  app.app.set("agentOrchestrator", withChannelDelivery({
     deliverMessage: async (agentId: string, message: AgentMessage) => {
       deliveries.push({ agentId, message });
       return { status: "queued", reason: "local_inbox" };
     },
-  });
+  }));
   try {
     await run(app, deliveries);
   } finally {

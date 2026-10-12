@@ -17,6 +17,9 @@ type MachineReadModelInput = {
   daemonVersion: string | null;
   lastHeartbeat: Date | null;
   createdAt: Date;
+  // Last Computer version this machine reported, persisted on `ready`.
+  computerVersion?: string | null;
+  computerVersionReportedAt?: Date | null;
 };
 
 export type MachineReadModel = MachineReadModelInput & {
@@ -101,12 +104,39 @@ export async function buildMachineReadModel(
     os: machine.os ?? null,
     lastHeartbeat: machine.lastHeartbeat ?? null,
     daemonVersion: liveDaemonVersion ?? machine.daemonVersion ?? null,
-    computerVersion: liveComputerFact?.version ?? null,
-    computerVersionObservedAt: liveComputerFact?.observedAt ?? null,
-    computerVersionProvenance: liveComputerFact?.provenance ?? null,
+    ...computerVersionFields(status, liveComputerFact, machine),
     isComputer: opts?.isComputer ?? false,
     computerAttachedByCurrentUser: opts?.computerAttachedByCurrentUser ?? false,
     agentCount: opts?.agentCount ?? 0,
     diskStatus: status === "online" ? diskStatus : null,
+  };
+}
+
+/**
+ * The live fact when there is one. An ONLINE machine with no live version yet
+ * (just reconnected, e.g. right after an upgrade restart, and this replica has
+ * not seen its `ready`) shows the version it last reported instead of none, so
+ * the page does not sit on "reading the version". Offline machines keep null.
+ */
+function computerVersionFields(
+  status: "online" | "offline",
+  live: { version: string | null; observedAt: string | null; provenance: ComputerSourceFactProvenance | null } | null,
+  machine: Pick<MachineReadModelInput, "computerVersion" | "computerVersionReportedAt">,
+): Pick<MachineReadModel, "computerVersion" | "computerVersionObservedAt" | "computerVersionProvenance"> {
+  if (live?.version) {
+    return { computerVersion: live.version, computerVersionObservedAt: live.observedAt, computerVersionProvenance: live.provenance };
+  }
+  const stored = machine.computerVersion?.trim();
+  if (status === "online" && stored) {
+    return {
+      computerVersion: stored,
+      computerVersionObservedAt: machine.computerVersionReportedAt?.toISOString() ?? null,
+      computerVersionProvenance: "stored_report",
+    };
+  }
+  return {
+    computerVersion: live?.version ?? null,
+    computerVersionObservedAt: live?.observedAt ?? null,
+    computerVersionProvenance: live?.provenance ?? null,
   };
 }

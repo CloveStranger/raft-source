@@ -25,7 +25,7 @@ import {
   type AgentMigrationUpdatedPayload,
   type ServerToMachineMessage,
 } from "@botiverse/raft-shared";
-import { getDb, isDatabaseInitialized, type DatabaseExecutor } from "../db/index";
+import { getDb, isDatabaseInitialized, withDbTraceAttributes, type DatabaseExecutor } from "../db/index";
 import { FencedAuthorizationDeniedError, lockActorMembershipRow } from "../lib/actorMembershipFence";
 import { userCanActOnAgentResource } from "../lib/actorPermissions";
 import {
@@ -1480,6 +1480,33 @@ export async function getAgentMigrationGateStatus(
   if (!executor && !isDatabaseInitialized()) return { migration: null };
   const { active } = await readActiveAgentMigration(executor ?? getDb(), agentId, now);
   return { migration: active };
+}
+
+/**
+ * getAgentMigrationGateStatus for several agents in one query: whether each
+ * agent has an active migration (at most one per agent, by the partial unique
+ * index) that still gates delivery.
+ */
+export async function getAgentMigrationGateActive(
+  agentIds: readonly string[],
+  executor?: DatabaseExecutor,
+  now: Date = currentDate(),
+): Promise<Map<string, boolean>> {
+  const gated = new Map(agentIds.map((id) => [id, false]));
+  if (agentIds.length === 0 || (!executor && !isDatabaseInitialized())) return gated;
+  const rows = await withDbTraceAttributes(
+    { db_callsite: "agent_migrations.gate_active" },
+    () => (executor ?? getDb()).select()
+      .from(agentMigrations)
+      .where(and(
+        inArray(agentMigrations.agentId, [...agentIds]),
+        inArray(agentMigrations.state, [...ACTIVE_AGENT_MIGRATION_STATES]),
+      )),
+  );
+  for (const row of rows) {
+    if (planZenMigratingDelivery({ migration: row, now }).action !== "deadline-expired") gated.set(row.agentId, true);
+  }
+  return gated;
 }
 
 export async function getActiveAgentMigration(

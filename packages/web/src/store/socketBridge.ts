@@ -37,22 +37,6 @@ import { dispatchServerNotificationPrefsUpdated } from "./events/notificationPre
 import { useInboxStore } from "./inboxStore";
 import { useLiveAgentActivityStore } from "./liveAgentActivityStore";
 import { useMachineStore } from "./machineStore";
-import { isSyncCoreMessagesFlagEnabled } from "./messageSyncFeatureFlag";
-import { isNormalizedMessageV2FlagEnabled } from "./normalizedMessageV2FeatureFlag";
-import {
-  applyMessageReactionsForV2Ingress,
-  applyMessagesReactionsForV2Ingress,
-  isMessageV2IngressAdmissible,
-  isMessageV2IngressSoleApplyEligible,
-} from "./normalizedMessageReactions";
-import {
-  applyReactionViewerSnapshotForCurrentPrincipal,
-  hydrateReactionViewerSnapshot,
-} from "./reactionViewerReadModel";
-import type { VersionedReactionViewerSnapshot } from "./reactionReadModels";
-import {
-  consumeSocketMessageNewWithSyncCore,
-} from "./messageSyncDomain";
 import { isSyncCoreNotificationPrefsFlagEnabled } from "./notificationPrefsSyncFeatureFlag";
 import {
   consumeNotificationPrefsUpdateWithSyncCore,
@@ -78,6 +62,7 @@ import type {
   Message,
 } from "./messageStore";
 import { useReadReceiptStore } from "./readReceiptStore";
+import { hasChatSurfaces } from "../embed";
 import { useSavedStore } from "./savedStore";
 import { useServerStore } from "./serverStore";
 import { registerTaskRealtimeHandlers } from "./taskRealtimeSync";
@@ -157,7 +142,6 @@ const STATUS_RECONCILE_INTERVAL_MS = 600_000;
 export const MAIN_LAYOUT_SOCKET_EVENT_NAMES = [
   "message:new",
   "message:updated",
-  "reaction_viewer:updated",
   "scope_read:updated",
   "read_state:updated",
   "read_state:updated_bulk",
@@ -355,11 +339,12 @@ function cancelBootUnreadFallback() {
 let bootConnectFallbackTimer: ReturnType<typeof setTimeout> | null = null;
 
 function loadConnectSnapshotSet() {
-  useServerStore.getState().loadSidebarOrder();
+  const chat = hasChatSurfaces();
+  if (chat) useServerStore.getState().loadSidebarOrder();
   useMachineStore.getState().loadMachines();
   useAgentStore.getState().loadAgents();
   useServerStore.getState().loadServers();
-  loadFollowedThreads();
+  if (chat) loadFollowedThreads();
 }
 
 function armBootConnectFallback() {
@@ -414,6 +399,13 @@ function bootstrapMainLayoutRealtimeBridge(
   transport: MainLayoutRealtimeTransport,
 ) {
   transport.reconnectSocket();
+  // A host-shell embed has no chat surface: it keeps the socket (computer
+  // status and upgrade progress are pushed) and the connect snapshot's
+  // machines / agents / servers, and skips the chat-only loads.
+  if (!hasChatSurfaces()) {
+    armBootConnectFallback();
+    return;
+  }
   useChannelStore.getState().loadChannels();
   useChannelStore.getState().loadDMChannels();
   // machines / agents / followedThreads are deliberately NOT loaded here:
@@ -454,38 +446,7 @@ export function buildMainLayoutSocketBindings(
     useMessageStore.getState().currentUserId,
   );
 
-  const normalizeChannelRoomMessage = (message: Message): Message => {
-    if (!isNormalizedMessageV2FlagEnabled()) return message;
-    const serverId = useServerStore.getState().current?.id;
-    const principalId = useMessageStore.getState().currentUserId;
-    if (!serverId || !principalId) return message;
-    return applyMessageReactionsForV2Ingress(message, {
-      serverId,
-      principalId,
-      source: "channel-room",
-      viewerUserId: principalId,
-    });
-  };
-
   const messageNew = (msg: Message) => {
-    if (isNormalizedMessageV2FlagEnabled()) {
-      const projectedMessage = normalizeChannelRoomMessage(msg);
-      const result = consumeSocketMessageNewWithSyncCore(projectedMessage);
-      if (result.kind !== "duplicate_dropped") {
-        useMessageStore.getState().addMessage(result.message, "channel-room");
-        applyLiveMessageActivity(result.message, scheduleInboxRefresh);
-      }
-      return;
-    }
-    if (isSyncCoreMessagesFlagEnabled()) {
-      const result = consumeSocketMessageNewWithSyncCore(msg);
-      if (result.kind !== "duplicate_dropped") {
-        useMessageStore.getState().addMessage(result.message, "channel-room");
-        applyLiveMessageActivity(result.message, scheduleInboxRefresh);
-      }
-      return;
-    }
-
     const messageStore = useMessageStore.getState();
     const accepted = !messageStore.channelMessages[msg.channelId]?.some((existing) => existing.id === msg.id);
     messageStore.addMessage(msg, "channel-room");
@@ -496,7 +457,7 @@ export function buildMainLayoutSocketBindings(
   // Merge-only updates for existing messages (task field changes).
   // Does NOT create new messages or increment unread counts.
   const messageUpdated = (msg: Message) => {
-    useMessageStore.getState().updateMessage(normalizeChannelRoomMessage(msg));
+    useMessageStore.getState().updateMessage(msg);
   };
 
   const applyReadStateUpdate = (update: ReadStateUpdate) => {
@@ -504,7 +465,15 @@ export function buildMainLayoutSocketBindings(
     if (update.serverId !== currentServerId) return;
     if (consumeReadStateUpdate(update) !== "accepted") return;
     const projection = useMessageStore.getState().applyReadStateProjection(update.scopeId);
-    if (!projection.complete) return;
+    if (!projection.complete) {
+      // This tab cannot count the thread's unread from loaded replies (read in
+      // another tab, Activity "mark all read"); use the server's count so the
+      // channel "N new" badge does not keep a stale number.
+      if (update.unreadCount !== undefined) {
+        useThreadStore.getState().applyServerThreadUnread(update.scopeId, update.unreadCount);
+      }
+      return;
+    }
     useInboxStore.getState().applyReadStateProjection(update.scopeId, projection);
     useThreadStore.getState().applyReadStateProjection(update.scopeId, projection);
   };
@@ -991,6 +960,7 @@ export function buildMainLayoutSocketBindings(
     // changed (visibility, guest policy, role) and no longer tells non-members
     // which channel they lost. The room set is authoritative once joined, so
     // re-read the channel list here rather than on connect.
+    if (!hasChatSurfaces()) return;
     void useChannelStore.getState().loadChannels();
     useMessageStore.getState().loadUnreadCounts();
     loadInboxReset({ background: true });
@@ -1005,35 +975,7 @@ export function buildMainLayoutSocketBindings(
     currentSeq: number;
     hasMore: boolean;
   }) => {
-    let eligibleMessages = messages;
-    if (isNormalizedMessageV2FlagEnabled()) {
-      const serverId = useServerStore.getState().current?.id;
-      const principalId = useMessageStore.getState().currentUserId;
-      if (!serverId || !principalId) return;
-      eligibleMessages = applyMessagesReactionsForV2Ingress(messages, {
-        serverId,
-        principalId,
-        source: "receiver-private",
-        viewerUserId: principalId,
-      });
-      const reactionMessageIds = messages.every(isMessageV2IngressAdmissible)
-        ? messages
-          .filter((message) => (
-            message.messageType !== "system"
-            && isMessageV2IngressSoleApplyEligible(message)
-          ))
-          .map((message) => message.id)
-        : [];
-      for (const messageId of new Set(reactionMessageIds)) {
-        void hydrateReactionViewerSnapshot({ principalId, serverId, messageId }).catch((error) => {
-          console.error("[MessageV2] failed to recover reaction viewer snapshot after resume", {
-            messageId,
-            error,
-          });
-        });
-      }
-    }
-    useMessageStore.getState().batchAddMessages(eligibleMessages);
+    useMessageStore.getState().batchAddMessages(messages);
     useMessageStore.setState((s) => ({
       lastSeq: Math.max(s.lastSeq, currentSeq),
     }));
@@ -1130,13 +1072,6 @@ export function buildMainLayoutSocketBindings(
     { event: "thread:followers-updated", handler: threadFollowersUpdated },
     { event: "connect", handler: reconnectSnapshot },
     { event: "rooms:joined", handler: roomsJoined },
-    {
-      event: "reaction_viewer:updated",
-      handler: (snapshot: VersionedReactionViewerSnapshot) => {
-        if (!isNormalizedMessageV2FlagEnabled()) return;
-        applyReactionViewerSnapshotForCurrentPrincipal(snapshot);
-      },
-    },
     { event: "sync:resume:response", handler: syncResumeResponse },
     { event: "heartbeat", handler: recordHeartbeat },
   ];
@@ -1290,13 +1225,16 @@ function attachMainLayoutRecoveryBridge(
       transport.ensureSocketConnected();
     }
     if (plan.reloadLiveData) {
-      useMessageStore.getState().loadUnreadCounts();
-      useMessageStore.getState().markCurrentChannelRead();
-      useServerStore.getState().loadSidebarOrder();
+      const chat = hasChatSurfaces();
+      if (chat) {
+        useMessageStore.getState().loadUnreadCounts();
+        useMessageStore.getState().markCurrentChannelRead();
+        useServerStore.getState().loadSidebarOrder();
+      }
       useMachineStore.getState().loadMachines();
       useAgentStore.getState().resetActivitySeq();
       useAgentStore.getState().loadAgents();
-      void useAnnouncementStore.getState().load();
+      if (chat) void useAnnouncementStore.getState().load();
     }
   };
 

@@ -4,6 +4,7 @@ import {
   projectMachineSystemNotifications,
   type MachineNotificationReadModel,
 } from "./systemNotificationService";
+import { planUsageLimitTransition, runtimeProviderForAgentRuntime } from "./usageLimitAttentionService";
 
 const EVALUATED_AT = new Date("2026-07-21T10:30:00.000Z");
 
@@ -152,5 +153,46 @@ test("response freezes replace lifecycle, no-read, and local-dismiss semantics",
       dismiss: "local_by_notification_id",
     },
     notifications: [],
+  });
+});
+
+test("usage-limit attention maps only runtimes sharing the provider account", () => {
+  assert.equal(runtimeProviderForAgentRuntime("claude"), "claude");
+  assert.equal(runtimeProviderForAgentRuntime("kimi-sdk"), "kimi");
+  assert.equal(runtimeProviderForAgentRuntime("pi"), null);
+});
+
+test("usage-limit activation ignores stale/unknown data and resolves only on a newer authoritative ok", () => {
+  const first = new Date("2026-10-11T00:00:00.000Z");
+  const newer = new Date("2026-10-11T00:01:00.000Z");
+  const active = { state: "active" as const, activationGeneration: 4, lastObservedAt: first };
+  assert.deepEqual(planUsageLimitTransition({ latest: active, observedAt: newer, windowStatus: "limit_reached" }), {
+    action: "update_active",
+  });
+  assert.deepEqual(planUsageLimitTransition({ latest: active, observedAt: first, windowStatus: "limit_reached" }), {
+    action: "ignore",
+  });
+  assert.deepEqual(planUsageLimitTransition({ latest: active, observedAt: newer, windowStatus: "parse_unavailable" }), {
+    action: "ignore",
+  });
+  assert.deepEqual(planUsageLimitTransition({ latest: active, observedAt: newer, windowStatus: "ok" }), {
+    action: "resolve",
+  });
+  assert.deepEqual(planUsageLimitTransition({ latest: active, observedAt: first, windowStatus: "ok" }), {
+    action: "ignore",
+  });
+});
+
+test("usage-limit recovered-to-limited creates a new activation generation", () => {
+  const first = new Date("2026-10-11T00:00:00.000Z");
+  const newer = new Date("2026-10-11T00:01:00.000Z");
+  const resolved = { state: "resolved" as const, activationGeneration: 7, lastObservedAt: first };
+  assert.deepEqual(planUsageLimitTransition({ latest: resolved, observedAt: newer, windowStatus: "limit_reached" }), {
+    action: "activate",
+    generation: 8,
+  });
+  assert.deepEqual(planUsageLimitTransition({ latest: null, observedAt: first, windowStatus: "limit_reached" }), {
+    action: "activate",
+    generation: 1,
   });
 });

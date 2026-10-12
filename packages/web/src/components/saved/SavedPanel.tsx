@@ -24,11 +24,14 @@ import PanelHeader from "../ui/PanelHeader";
 import EmptyState from "../ui/EmptyState";
 import { ConversationCardSkeleton } from "../ui/Skeleton";
 
-const SavedItem = memo(function SavedItem({ entry, onOpenEntry, onRemoveMessage, onDragEntry, serverSlug }: {
+function stopKeyPropagation(event: React.KeyboardEvent) {
+  event.stopPropagation();
+}
+
+const SavedItem = memo(function SavedItem({ entry, onOpenEntry, onRemoveMessage, serverSlug }: {
   entry: SavedEntry;
   onOpenEntry: (entry: SavedEntry) => void;
   onRemoveMessage: (messageId: string) => void;
-  onDragEntry?: (event: React.DragEvent<HTMLButtonElement>, entry: SavedEntry) => void;
   serverSlug: string | undefined;
 }) {
   const { formatMessage, locale } = useIntl();
@@ -83,9 +86,12 @@ const SavedItem = memo(function SavedItem({ entry, onOpenEntry, onRemoveMessage,
     onOpenEntry(entry);
   }, [entry, onOpenEntry]);
 
-  const handleDragStart = useCallback((event: React.DragEvent<HTMLButtonElement>) => {
-    onDragEntry?.(event, entry);
-  }, [entry, onDragEntry]);
+  const handleKeyDown = useCallback((event: React.KeyboardEvent) => {
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      handleOpen();
+    }
+  }, [handleOpen]);
 
   return (
     <ContextMenu>
@@ -94,14 +100,7 @@ const SavedItem = memo(function SavedItem({ entry, onOpenEntry, onRemoveMessage,
           <Card
             render={<div role="button" tabIndex={0} />}
             onClick={handleOpen}
-            onKeyDown={(event) => {
-              if (event.key === "Enter" || event.key === " ") {
-                event.preventDefault();
-                handleOpen();
-              }
-            }}
-            draggable={!!onDragEntry}
-            onDragStart={onDragEntry ? (event) => handleDragStart(event as unknown as React.DragEvent<HTMLButtonElement>) : undefined}
+            onKeyDown={handleKeyDown}
             className="relative flex flex-row items-center gap-3 transition-colors p-3 text-left w-full shadow-none border-line-muted theme-brutal:border-2 theme-brutal:border-black bg-layer-panel theme-brutal:bg-white hover:bg-fill-muted data-[popup-open]:bg-fill-muted"
           />
         }
@@ -138,7 +137,7 @@ const SavedItem = memo(function SavedItem({ entry, onOpenEntry, onRemoveMessage,
         <div className="ml-auto shrink-0 self-center">
           <PanelToggleAction
             pressed
-            onKeyDown={(event) => event.stopPropagation()}
+            onKeyDown={stopKeyPropagation}
             onClick={handleRemoveButtonClick}
             aria-label={formatMessage({ id: "saved.remove" })}
             className="data-pressed:text-accent-strong theme-brutal:data-pressed:text-brutal-orange data-pressed:bg-accent-soft/30"
@@ -167,9 +166,7 @@ const SavedItem = memo(function SavedItem({ entry, onOpenEntry, onRemoveMessage,
   );
 });
 
-export default function SavedPanel({ onOpenEntry, onDragEntry, embedded = false }: {
-  onOpenEntry?: (entry: SavedEntry) => void;
-  onDragEntry?: (event: React.DragEvent<HTMLButtonElement>, entry: SavedEntry) => void;
+export default function SavedPanel({ embedded = false }: {
   /** Embedded hosts own the surrounding panel header and navigation. */
   embedded?: boolean;
 } = {}) {
@@ -192,10 +189,6 @@ export default function SavedPanel({ onOpenEntry, onDragEntry, embedded = false 
   const loadMoreSentinelRef = useRef<HTMLDivElement | null>(null);
 
   const openSavedEntry = useCallback((entry: SavedEntry) => {
-    if (onOpenEntry) {
-      onOpenEntry(entry);
-      return;
-    }
     if (entry.channelType === "thread" && entry.parentChannelId && entry.parentMessageId) {
       nav.toMessage(entry.parentChannelId, entry.parentMessageId);
       // Stryker disable all: typed thread payload shape is covered by openThread payload/source contracts.
@@ -208,7 +201,7 @@ export default function SavedPanel({ onOpenEntry, onDragEntry, embedded = false 
     } else {
       nav.toMessage(entry.channelId, entry.messageId);
     }
-  }, [nav, onOpenEntry, openThread]);
+  }, [nav, openThread]);
 
   const removeSavedMessage = useCallback((messageId: string) => {
     void unsaveMessage(messageId);
@@ -282,7 +275,6 @@ export default function SavedPanel({ onOpenEntry, onDragEntry, embedded = false 
                 serverSlug={serverSlug}
                 onOpenEntry={openSavedEntry}
                 onRemoveMessage={removeSavedMessage}
-                onDragEntry={onDragEntry}
               />
             ))}
             {hasMore && (

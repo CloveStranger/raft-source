@@ -69,6 +69,11 @@ test("all message reference chips share one box from the RUI recipe (no local fo
     new URL("../src/components/message/ReferenceChip.tsx", import.meta.url),
     "utf8",
   );
+  // MessageItem's permalink chip component lives in its own file since task #709.
+  const permalinkChip = readFileSync(
+    new URL("../src/components/message/PermalinkReferenceChip.tsx", import.meta.url),
+    "utf8",
+  );
   const taskRefSection = source.slice(
     source.indexOf("const taskRef"),
     source.indexOf("const raftPermalink"),
@@ -80,7 +85,7 @@ test("all message reference chips share one box from the RUI recipe (no local fo
   // only behaviour classes (cursor, busy/unavailable opacity) — no font scale
   // and no hand-spelled box. In-message refs stay on the arrow cursor (stdrc
   // task #28 msg=ca65d96d).
-  for (const src of [source, mention, referenceChip, attachmentCommentRefChip]) {
+  for (const src of [source, mention, referenceChip, attachmentCommentRefChip, permalinkChip]) {
     assert.doesNotMatch(src, /MSG_REF_CHIP_FONT_SCALE|messageRefChip/, "the local font scale is retired");
     assert.doesNotMatch(src, /\bMSG_REF_CHIP\b(?!\w)/, "old MSG_REF_CHIP box must stay retired");
     assert.doesNotMatch(src, /inline-block max-w-full overflow-hidden text-ellipsis/);
@@ -94,9 +99,10 @@ test("all message reference chips share one box from the RUI recipe (no local fo
 
   // The permalink chip renders through ReferenceChip with the Link icon and the
   // in/out-of-server soft-signal color, plus the non-bold trailing "msg" badge.
-  assert.match(source, /raftPermalink[\s\S]*?<ReferenceChip[\s\S]*?icon=\{Link\}/);
-  assert.match(source, /raftPermalink[\s\S]*?variant="link"/);
-  assert.match(source, /text-\[10px\] font-normal leading-none text-foreground-placeholder/);
+  assert.match(source, /raftPermalink[\s\S]*?<PermalinkReferenceChip\b/);
+  assert.match(permalinkChip, /<ReferenceChip[\s\S]*?icon=\{Link\}/);
+  assert.match(permalinkChip, /<ReferenceChip[\s\S]*?variant="link"/);
+  assert.match(permalinkChip, /text-\[10px\] font-normal leading-none text-foreground-placeholder/);
 
   // Comment ref chips render through ReferenceChip with the MessageSquare icon
   // and the stone color (distinct from the permalink's soft-signal, per stdrc).
@@ -121,9 +127,11 @@ test("all message reference chips share one box from the RUI recipe (no local fo
 
   // No chip (in either renderer) may re-inline the old box or a link-hand cursor.
   assert.doesNotMatch(source, /inline-block border border-black[^"`]*leading-\[21px\]/);
+  assert.doesNotMatch(permalinkChip, /inline-block border border-black[^"`]*leading-\[21px\]/);
   assert.doesNotMatch(mention, /inline-block border border-black[^"`]*leading-\[21px\]/);
   assert.doesNotMatch(attachmentCommentRefChip, /inline-block border border-black[^"`]*leading-\[21px\]/);
   assert.doesNotMatch(source, /cursor-pointer/);
+  assert.doesNotMatch(permalinkChip, /cursor-pointer/);
   assert.doesNotMatch(mention, /cursor-pointer/);
   assert.doesNotMatch(attachmentCommentRefChip, /cursor-pointer/);
   assert.doesNotMatch(source, /dataTaskRef[\s\S]*?bg-brutal-lime/);
@@ -137,9 +145,14 @@ test("all message reference chips share one box from the RUI recipe (no local fo
 
 test("MessageItem permalink chip uses onOpenPermalink without cross-server branching (B1 / 73dddf321)", () => {
   const source = readFileSync(new URL("../src/components/message/MessageItem.tsx", import.meta.url), "utf8");
+  // The chip component lives in its own file since task #709.
+  const permalinkChip = readFileSync(new URL("../src/components/message/PermalinkReferenceChip.tsx", import.meta.url), "utf8");
 
   // Verify staging 73dddf321 fix: cross-server permalinks must not branch on isCurrentServer
-  assert.doesNotMatch(source, /const _?isCurrentServer =/);
-  assert.doesNotMatch(source, /if \(_?isCurrentServer\)/);
-  assert.match(source, /onOpenPermalink\?\.(\(href\)|href)/);
+  for (const src of [source, permalinkChip]) {
+    assert.doesNotMatch(src, /const _?isCurrentServer =/);
+    assert.doesNotMatch(src, /if \(_?isCurrentServer\)/);
+  }
+  assert.match(source, /<PermalinkReferenceChip[\s\S]*?onOpenPermalink=\{onOpenPermalink\}/);
+  assert.match(permalinkChip, /onOpenPermalink\?\.(\(href\)|href)/);
 });

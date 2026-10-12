@@ -502,6 +502,106 @@ export const AGENT_API_ROUTE_MANIFEST = [
     }
   },
   {
+    "key": "channelCreate",
+    "method": "POST",
+    "path": "/channels",
+    "fullPath": "/internal/agent-api/channels",
+    "client": {
+      "resource": "channels",
+      "method": "create"
+    },
+    "capability": "channels",
+    "description": "Create a public or private channel when the bound agent's server role allows it; the agent joins it.",
+    "sideEffect": "write",
+    "idempotency": "none",
+    "destructive": false,
+    "audience": "both",
+    "request": {
+      "params": false,
+      "query": false,
+      "body": true
+    },
+    "response": {
+      "kind": "json",
+      "body": true
+    }
+  },
+  {
+    "key": "channelUpdate",
+    "method": "PATCH",
+    "path": "/channels/:channelId",
+    "fullPath": "/internal/agent-api/channels/:channelId",
+    "client": {
+      "resource": "channels",
+      "method": "update"
+    },
+    "capability": "channels",
+    "description": "Rename a channel, change its description, or change its visibility, when the bound agent's role allows it.",
+    "sideEffect": "write",
+    "idempotency": "natural",
+    "destructive": true,
+    "audience": "both",
+    "request": {
+      "params": true,
+      "query": false,
+      "body": true
+    },
+    "response": {
+      "kind": "json",
+      "body": true
+    }
+  },
+  {
+    "key": "channelMemberAdd",
+    "method": "POST",
+    "path": "/channels/:channelId/members",
+    "fullPath": "/internal/agent-api/channels/:channelId/members",
+    "client": {
+      "resource": "channels",
+      "method": "addMember"
+    },
+    "capability": "channels",
+    "description": "Add a human or agent to a channel when the bound agent's role allows it.",
+    "sideEffect": "write",
+    "idempotency": "natural",
+    "destructive": false,
+    "audience": "both",
+    "request": {
+      "params": true,
+      "query": false,
+      "body": true
+    },
+    "response": {
+      "kind": "json",
+      "body": true
+    }
+  },
+  {
+    "key": "channelMemberRemove",
+    "method": "DELETE",
+    "path": "/channels/:channelId/members",
+    "fullPath": "/internal/agent-api/channels/:channelId/members",
+    "client": {
+      "resource": "channels",
+      "method": "removeMember"
+    },
+    "capability": "channels",
+    "description": "Remove a human or agent from a channel when the bound agent's role allows it.",
+    "sideEffect": "write",
+    "idempotency": "natural",
+    "destructive": true,
+    "audience": "both",
+    "request": {
+      "params": true,
+      "query": false,
+      "body": true
+    },
+    "response": {
+      "kind": "json",
+      "body": true
+    }
+  },
+  {
     "key": "channelMembers",
     "method": "GET",
     "path": "/channel-members",
@@ -627,6 +727,56 @@ export const AGENT_API_ROUTE_MANIFEST = [
     }
   },
   {
+    "key": "assistantOwnerInbox",
+    "method": "GET",
+    "path": "/assistant/owner-inbox",
+    "fullPath": "/internal/agent-api/assistant/owner-inbox",
+    "client": {
+      "resource": "assistant",
+      "method": "ownerInbox"
+    },
+    "capability": "read",
+    "description": "Personal assistants only: list your owner's inbox (what they would see in Activity, minus DMs), newest activity first. Reads nothing as read for anyone.",
+    "sideEffect": "read",
+    "idempotency": "natural",
+    "destructive": false,
+    "audience": "both",
+    "request": {
+      "params": false,
+      "query": true,
+      "body": false
+    },
+    "response": {
+      "kind": "json",
+      "body": true
+    }
+  },
+  {
+    "key": "assistantOwnerMessages",
+    "method": "GET",
+    "path": "/assistant/owner-messages",
+    "fullPath": "/internal/agent-api/assistant/owner-messages",
+    "client": {
+      "resource": "assistant",
+      "method": "ownerMessages"
+    },
+    "capability": "read",
+    "description": "Personal assistants only: read messages in a channel or thread your owner can see (never a DM): the newest, or a window before / after / around a message. Marks nothing read for anyone.",
+    "sideEffect": "read",
+    "idempotency": "natural",
+    "destructive": false,
+    "audience": "both",
+    "request": {
+      "params": false,
+      "query": true,
+      "body": false
+    },
+    "response": {
+      "kind": "json",
+      "body": true
+    }
+  },
+  {
     "key": "agentContext",
     "method": "GET",
     "path": "/context",
@@ -718,6 +868,81 @@ export const AGENT_API_ROUTE_MANIFEST = [
     "audience": "both",
     "request": {
       "params": false,
+      "query": false,
+      "body": true
+    },
+    "response": {
+      "kind": "json",
+      "body": true
+    }
+  },
+  {
+    "key": "serverLabs",
+    "method": "GET",
+    "path": "/labs",
+    "fullPath": "/internal/agent-api/labs",
+    "client": {
+      "resource": "labs",
+      "method": "list"
+    },
+    "capability": "read",
+    "description": "The server's Labs: whether Labs access is on, each lab's state and enrollment, and what the bound agent may change.",
+    "sideEffect": "read",
+    "idempotency": "natural",
+    "destructive": false,
+    "audience": "both",
+    "request": {
+      "params": false,
+      "query": false,
+      "body": false
+    },
+    "response": {
+      "kind": "json",
+      "body": true
+    }
+  },
+  {
+    "key": "serverLabsAccess",
+    "method": "PATCH",
+    "path": "/labs/access",
+    "fullPath": "/internal/agent-api/labs/access",
+    "client": {
+      "resource": "labs",
+      "method": "setAccess"
+    },
+    "capability": "server",
+    "description": "Turn the server's Labs access on or off (server owner only).",
+    "sideEffect": "write",
+    "idempotency": "natural",
+    "destructive": true,
+    "audience": "both",
+    "request": {
+      "params": false,
+      "query": false,
+      "body": true
+    },
+    "response": {
+      "kind": "json",
+      "body": true
+    }
+  },
+  {
+    "key": "serverLabEnrollment",
+    "method": "PUT",
+    "path": "/labs/:labKey",
+    "fullPath": "/internal/agent-api/labs/:labKey",
+    "client": {
+      "resource": "labs",
+      "method": "setEnrollment"
+    },
+    "capability": "server",
+    "description": "Enroll the server in an open lab or leave it (server settings authority).",
+    "sideEffect": "write",
+    "idempotency": "natural",
+    "destructive": true,
+    "audience": "both",
+    "request": {
+      "params": true,
       "query": false,
       "body": true
     },
@@ -2029,4 +2254,4 @@ export const AGENT_API_ROUTE_MANIFEST = [
 ] as const;
 
 /** Content hash of AGENT_API_ROUTE_MANIFEST; see computeAgentApiManifestVersion. */
-export const AGENT_API_MANIFEST_VERSION = "1d0fc2a4c66a25e1";
+export const AGENT_API_MANIFEST_VERSION = "1f425c1bf59cd214";

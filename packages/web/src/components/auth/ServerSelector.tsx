@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from "react";
-import type { FormEvent } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import type { ChangeEvent, FormEvent } from "react";
 import { useIntl } from "react-intl";
 import { clearClockTimeout, setClockTimeout } from "@botiverse/raft-shared";
 import { useServerStore } from "../../store/serverStore";
@@ -7,7 +7,7 @@ import type { Server } from "../../store/serverStore";
 import { useAuthStore } from "../../store/authStore";
 import Banner from "../ui/Banner";
 import TextLink from "../ui/TextLink";
-import { Card, Input, Button } from "raft-ui";
+import { Input, Button } from "raft-ui";
 import CenteredCardFrame from "./CenteredCardFrame";
 import { AuthPageIntro } from "./AuthPageFrame";
 import FormField from "../ui/FormField";
@@ -16,10 +16,14 @@ import OnboardingCreateShell from "./OnboardingCreateShell";
 import ServerCreatePreview from "./ServerCreatePreview";
 import SignedInAs from "./SignedInAs";
 import { requestHostedOnboardingServerSwitch } from "../../embed/hostBridge";
+import { ServerOptionCard } from "./ServerOptionCard";
 
 interface ServerSelectorProps {
   onSelect: (server: Server) => void;
 }
+
+const toSlug = (value: string) =>
+  value.toLowerCase().replace(/[^a-z0-9-]/g, "-");
 
 export default function ServerSelector({ onSelect }: ServerSelectorProps) {
   const { formatMessage } = useIntl();
@@ -54,7 +58,7 @@ export default function ServerSelector({ onSelect }: ServerSelectorProps) {
     if (switchTimeoutRef.current !== null) clearClockTimeout(switchTimeoutRef.current);
   }, []);
 
-  const handleSelect = (server: Server) => {
+  const handleSelect = useCallback((server: Server) => {
     const outcome = requestHostedOnboardingServerSwitch(server.id);
     if (outcome === "not-hosted") {
       onSelect(server);
@@ -71,10 +75,33 @@ export default function ServerSelector({ onSelect }: ServerSelectorProps) {
       setSwitchPending(false);
       setError(formatMessage({ id: "pages.serverSelector.switchFailed" }));
     }, 5000);
-  };
+  }, [onSelect, formatMessage]);
 
-  const toSlug = (value: string) =>
-    value.toLowerCase().replace(/[^a-z0-9-]/g, "-");
+  const handleNameChange = useCallback((e: ChangeEvent<HTMLInputElement>) => {
+    setName(e.target.value);
+    if (!slugTouched) setSlug(toSlug(e.target.value));
+  }, [slugTouched]);
+
+  const handleSlugChange = useCallback((e: ChangeEvent<HTMLInputElement>) => {
+    setSlugTouched(true);
+    setSlug(toSlug(e.target.value));
+  }, []);
+
+  const handleCancelCreate = useCallback(() => {
+    setView("choose");
+    setName("");
+    setSlug("");
+    setSlugTouched(false);
+    setError("");
+  }, []);
+
+  const handleShowCreate = useCallback(() => {
+    setView("create");
+  }, []);
+
+  const handleLogout = useCallback(() => {
+    void logout();
+  }, [logout]);
 
   const handleCreate = async (e: FormEvent) => {
     e.preventDefault();
@@ -134,10 +161,7 @@ export default function ServerSelector({ onSelect }: ServerSelectorProps) {
                   id="server-create-name"
                   type="text"
                   value={name}
-                  onChange={(e) => {
-                    setName(e.target.value);
-                    if (!slugTouched) setSlug(toSlug(e.target.value));
-                  }}
+                  onChange={handleNameChange}
                   placeholder={formatMessage({ id: "pages.serverSelector.serverNamePlaceholder" })}
                   autoFocus
                   required
@@ -153,10 +177,7 @@ export default function ServerSelector({ onSelect }: ServerSelectorProps) {
                   id="server-create-slug"
                   type="text"
                   value={slug}
-                  onChange={(e) => {
-                    setSlugTouched(true);
-                    setSlug(toSlug(e.target.value));
-                  }}
+                  onChange={handleSlugChange}
                   placeholder="alex-chen-studio"
                   required
                 />
@@ -198,10 +219,7 @@ export default function ServerSelector({ onSelect }: ServerSelectorProps) {
               <Input
                 type="text"
                 value={name}
-                onChange={(e) => {
-                  setName(e.target.value);
-                  if (!slugTouched) setSlug(toSlug(e.target.value));
-                }}
+                onChange={handleNameChange}
                 placeholder={formatMessage({ id: "pages.serverSelector.serverNamePlaceholderTeam" })}
                 autoFocus
                 required
@@ -211,10 +229,7 @@ export default function ServerSelector({ onSelect }: ServerSelectorProps) {
               <SlugInput
                 type="text"
                 value={slug}
-                onChange={(e) => {
-                  setSlugTouched(true);
-                  setSlug(toSlug(e.target.value));
-                }}
+                onChange={handleSlugChange}
                 placeholder="my-team"
                 required
               />
@@ -226,13 +241,7 @@ export default function ServerSelector({ onSelect }: ServerSelectorProps) {
                   variant="outline"
                   size="lg"
                   className="flex-1"
-                  onClick={() => {
-                    setView("choose");
-                    setName("");
-                    setSlug("");
-                    setSlugTouched(false);
-                    setError("");
-                  }}
+                  onClick={handleCancelCreate}
                 >
                   {formatMessage({ id: "pages.serverSelector.cancel" })}
                 </Button>
@@ -268,16 +277,7 @@ export default function ServerSelector({ onSelect }: ServerSelectorProps) {
             className="mb-6 space-y-2"
           >
             {servers.map((server) => (
-              <Card
-                key={server.id}
-                variant="option"
-                render={<button type="button" onClick={() => handleSelect(server)} disabled={switchPending} className="w-full text-left" />}
-                className="gap-0 p-3"
-                data-testid="server-selector-option"
-              >
-                <div className="font-bold text-foreground-strong">{server.name}</div>
-                <div className="text-sm font-normal text-foreground-muted">/{server.slug}</div>
-              </Card>
+              <ServerOptionCard key={server.id} server={server} switchPending={switchPending} onSelect={handleSelect} />
             ))}
           </div>
         )}
@@ -289,7 +289,7 @@ export default function ServerSelector({ onSelect }: ServerSelectorProps) {
         )}
 
         <Button
-          onClick={() => setView("create")}
+          onClick={handleShowCreate}
           size="lg"
           variant="accent"
           className="w-full"
@@ -297,7 +297,7 @@ export default function ServerSelector({ onSelect }: ServerSelectorProps) {
           {formatMessage({ id: "pages.serverSelector.createNewServerAction" })}
         </Button>
         <div className="mt-3 text-center">
-          <TextLink className="text-sm font-bold" onClick={() => logout()}>
+          <TextLink className="text-sm font-bold" onClick={handleLogout}>
             {formatMessage({ id: "pages.serverSelector.logOut" })}
           </TextLink>
         </div>

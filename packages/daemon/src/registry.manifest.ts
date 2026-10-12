@@ -69,9 +69,10 @@ export function createBuiltInLocalScheduleRuntime(options: BuiltInLocalAppRuntim
     measureMemoryFile: options.cleanerMeasureMemoryFile,
     measureRaftDiskFootprint: options.cleanerMeasureRaftDiskFootprint,
     getInbox: options.getInbox,
-    // Cleaner hints are advisory: never start a stopped agent for one.
+    // Cleaner hints are advisory: never start a stopped agent for one, and
+    // never interrupt a turn that started after the Working → Idle edge.
     wake: async (agentId: string, item: AgentInboxAppItem) => {
-      await options.notifyInbox(agentId, item, { startStoppedAgent: false });
+      await options.notifyInbox(agentId, item, { startStoppedAgent: false, requireIdle: true });
     },
     trace: options.trace,
   });
@@ -125,6 +126,7 @@ export function createBuiltInLocalScheduleRuntime(options: BuiltInLocalAppRuntim
       }
       return reminder.handleServerMessage(message);
     },
+    onAgentWorkingToIdle: (agentId: string) => cleaner.onAgentWorkingToIdle(agentId),
     beforeAck: (agentId: string, item: AgentInboxAppItem) => reminder.beforeAck(agentId, item),
     beforeServerAuthorizedAck: (agentId: string, item: AgentInboxAppItem) =>
       reminder.beforeServerAuthorizedAck(agentId, item),

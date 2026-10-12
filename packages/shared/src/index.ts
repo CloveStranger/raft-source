@@ -1,3 +1,6 @@
+import type { AnnouncementContent, AnnouncementPresentation } from "../announcement-presentation";
+export { validateAnnouncementPresentation } from "../announcement-presentation";
+export type { AnnouncementContent, AnnouncementPresentation } from "../announcement-presentation";
 // Shared types for Slock — used by server, web, and machine (daemon process)
 
 import { makeIsMember } from "./typeGuards";
@@ -91,6 +94,8 @@ export interface AgentThreadContextMessage {
   message_id: string;
   sender_name: string;
   sender_description?: string | null;
+  /** IANA zone the human sender's browser reported (web sends); null otherwise. */
+  sender_timezone?: string | null;
   sender_type: AgentMessageSenderType;
   content: string;
   timestamp: string;
@@ -122,6 +127,8 @@ export interface AgentMessage {
   sender_id: string;
   sender_name: string;
   sender_description?: string | null;
+  /** IANA zone the human sender's browser reported (web sends); null otherwise. */
+  sender_timezone?: string | null;
   sender_type: AgentMessageSenderType;
   content: string;
   timestamp: string;
@@ -210,7 +217,9 @@ export interface AgentMessage {
 export * from "./observedFailureSummary";
 export * from "./diagnosticRedaction";
 export * from "./feedbackMachineEvidence";
+export * from "./machineDuplicateConnection";
 export * from "./feedbackTranscriptOutcome";
+export * from "./feedbackAgentEventTail";
 export * from "./scopeAttestationBudget";
 export * from "./activityMute";
 export * from "./channelPermissions";
@@ -241,6 +250,7 @@ export * from "./externalProjection";
 export * from "./slackBridgeDelivery";
 export * from "./slackBridgeProvisioning";
 export * from "./agentApiContract";
+export { lazySchemaStats, warmContractSchemas } from "./lazySchema";
 export * from "./thirdPartyEventId";
 export * from "./agentApiRouteMeta";
 export * from "./agentApiDescription";
@@ -264,6 +274,7 @@ export * from "./agentInboxApp";
 export * from "./attentionDependencyOracle";
 export * from "./runtimeProviderDisplay";
 export * from "./runtimeAccountUsage";
+export * from "./systemAttention";
 export * from "./runtimeModelCatalog";
 export * from "./externalAgentIntegration";
 export * from "./translationLanguages";
@@ -525,6 +536,15 @@ export const DAEMON_CAPABILITY_RUNTIME_OUTCOME_V1 = "agent:runtime-outcome-v1";
  * pauses and keeps its queue.
  */
 export const SERVER_CAPABILITY_RUNTIME_OUTCOME_ACK_V1 = "agent:runtime-outcome-ack-v1";
+/**
+ * task #365 (server capability, on `machine:context.capabilities`): the server
+ * counts a start the daemon proved never created a process (`not_spawned`
+ * reason `spawn_error`) in its own bounded backoff, and stamps automatic
+ * `agent:start` frames with the claim-time `connectionEpochId`. Without it the
+ * daemon keeps today's behaviour (the failed spawn is reported as a crash, so
+ * the #1119 crash-loop breaker still protects an older server).
+ */
+export const SERVER_CAPABILITY_START_SPAWN_ERROR_V1 = "agent:start-spawn-error-v1";
 export const COMPUTER_CAPABILITY_SUPERVISOR_MUTATIONS = "computer:supervisor-mutations-v1";
 
 /**
@@ -694,6 +714,15 @@ export const AGENT_START_NOT_SPAWNED_REASONS = [
   "terminal_failure_needs_manual",
   /** The daemon refused a start (human or automatic): its outcome outbox cannot reserve room for this launch until acks drain. */
   "terminal_failure_outcome_storage_blocked",
+  /**
+   * task #365: proven never created: the child has no pid and the spawn
+   * syscall itself failed (EACCES, ENOENT, ...). Sent only to a server with
+   * `SERVER_CAPABILITY_START_SPAWN_ERROR_V1`, which counts it in its own
+   * bounded backoff. Says nothing about whether the cause is temporary.
+   */
+  "spawn_error",
+  /** task #365: an automatic start claimed against an earlier connection (`connectionEpochId`); refused, never counted. */
+  "stale_dispatch",
 ] as const;
 export type AgentStartNotSpawnedReason = (typeof AGENT_START_NOT_SPAWNED_REASONS)[number];
 
@@ -727,7 +756,7 @@ export type ServerToMachineMessage =
    * first frame after accepting a machine connection so the daemon can bind
    * Computer-local App state to a logical Server identity before use.
    */
-  | { type: "machine:context"; machineId: string; serverId: string; /** Additive: server capabilities, e.g. `SERVER_CAPABILITY_RUNTIME_OUTCOME_ACK_V1`. */ capabilities?: string[] }
+  | { type: "machine:context"; machineId: string; serverId: string; /** Additive: server capabilities, e.g. `SERVER_CAPABILITY_RUNTIME_OUTCOME_ACK_V1`. */ capabilities?: string[]; /** Additive (task #365): the server's id for this connection; an automatic `agent:start` carrying another one is stale. */ connectionEpochId?: string }
   /**
    * RFC 071 outbox: the server applied (or deliberately ignored) one outbox
    * entry. A normal entry is named by `(daemonInstanceId, clientSeq)`; a gap
@@ -750,7 +779,7 @@ export type ServerToMachineMessage =
    *  - `humanStart`: an explicit human start (RFC 071 §5 E3). The daemon's
    *    local refusal of automatic starts does not apply to it.
    */
-  | { type: "agent:start"; agentId: string; config: AgentConfig; wakeMessage?: AgentMessage; wakeMessageTransient?: boolean; resumeMessages?: AgentMessage[]; unreadSummary?: Record<string, number>; resumePrompt?: string; launchId?: string; startDispatchId?: string; traceparent?: string; catchupBatchId?: string; breakerGeneration?: number; takeoverEpoch?: number; humanStart?: boolean }
+  | { type: "agent:start"; agentId: string; config: AgentConfig; wakeMessage?: AgentMessage; wakeMessageTransient?: boolean; resumeMessages?: AgentMessage[]; unreadSummary?: Record<string, number>; resumePrompt?: string; launchId?: string; startDispatchId?: string; traceparent?: string; catchupBatchId?: string; breakerGeneration?: number; takeoverEpoch?: number; humanStart?: boolean; /** Additive (task #365): the connection the server claimed this automatic start against; the daemon refuses it on any other connection. */ connectionEpochId?: string }
   /**
    * Retired wire request: new Computers reject it without launching an Agent.
    * Retained for rolling upgrades; new Servers never emit it.
@@ -1065,8 +1094,28 @@ export const SPAWN_FAILURE_REASONS = [
   "runtime_login_required",
   "runtime_config_invalid",
   "model_not_configured",
+  "session_needs_reset",
 ] as const;
 export type SpawnFailureReason = (typeof SPAWN_FAILURE_REASONS)[number];
+
+/**
+ * task #1242 — how the daemon's PATH lookup ended when a start failed with
+ * `runtime_not_found`. Written from the Windows launch resolution (task
+ * #1240); absent on older daemons and when the lookup had no verdict to give
+ * (a plain POSIX ENOENT). Only `not_on_path` is a confirmed absence that may
+ * suggest installing; the other three say the lookup did not decide, so copy
+ * stays neutral. Unknown values are dropped by the server, never echoed.
+ */
+export const SPAWN_FAILURE_LOOKUP_REASONS = [
+  "not_on_path",
+  "lookup_timed_out",
+  "lookup_permission_denied",
+  "lookup_failed",
+] as const;
+export type SpawnFailureLookupReason = (typeof SPAWN_FAILURE_LOOKUP_REASONS)[number];
+export function isSpawnFailureLookupReason(value: unknown): value is SpawnFailureLookupReason {
+  return typeof value === "string" && (SPAWN_FAILURE_LOOKUP_REASONS as readonly string[]).includes(value);
+}
 
 /**
  * task #1221 — start failures that retrying cannot fix: the runtime refused
@@ -1078,7 +1127,22 @@ export const NON_RETRYABLE_SPAWN_FAILURE_REASONS: readonly SpawnFailureReason[] 
   "model_not_configured",
   "runtime_login_required",
   "runtime_config_invalid",
+  // task #10: the session's context compaction failed repeatedly; resuming it
+  // again cannot succeed. Only Reset Session (a new session id) gets out.
+  "session_needs_reset",
 ];
+
+/**
+ * Start failures that are almost always configuration (the model name is not
+ * in the runtime's list on this computer: renamed or removed upstream, or its
+ * provider has no usable key there) but could be a momentarily empty model
+ * list. The server retries once after SPAWN_FAILURE_RETRY_ONCE_DELAY_MS; a
+ * second failure in a row stops automatic relaunches like the reasons above.
+ */
+export const RETRY_ONCE_SPAWN_FAILURE_REASONS: readonly SpawnFailureReason[] = [
+  "model_not_found",
+];
+export const SPAWN_FAILURE_RETRY_ONCE_DELAY_MS = 60_000;
 
 /**
  * task #1123 — typed carrier on the `runtime_unavailable` activity frame the
@@ -1088,6 +1152,19 @@ export const NON_RETRYABLE_SPAWN_FAILURE_REASONS: readonly SpawnFailureReason[] 
 export interface SpawnFailureActivityDiagnostic {
   reason: SpawnFailureReason;
   model?: string;
+  /**
+   * task #1242 — present only with `reason: "runtime_not_found"`, when the
+   * daemon's PATH lookup could say how it ended. Absent means "no verdict":
+   * the web must not read it as confirmed missing.
+   */
+  lookupReason?: SpawnFailureLookupReason;
+  /**
+   * Set by the server, never by a daemon: automatic restarts are paused after
+   * this failure (a reason retrying cannot fix, or too many failed starts in a
+   * row) until the owner changes the model or key settings or restarts the
+   * agent. `reason` is the last failure.
+   */
+  autoRestartPaused?: boolean;
 }
 /** Tier-2 (task #272) machine log tail outcome, reported beside the transcript result. Absent from older daemons. */
 export interface FeedbackMachineLogTailOutcome {
@@ -1490,6 +1567,15 @@ export type MachineToServerMessage =
    * runner emits this receipt after reconnect.
    */
   | { type: "computer:restart:done"; requestId: string; ok: boolean; error?: string }
+  /**
+   * task #917: terminal outcome of a remote `computer:upgrade` request that
+   * never reached the installer. `ok: false` carries the refusal (an external
+   * supervisor that cannot be upgraded in place, a busy service, an
+   * unreachable IPC seam) so the server settles the request at once instead
+   * of waiting out its deadline; the same receipt is also written to disk and
+   * relayed on the next `ready`. Older servers ignore the type.
+   */
+  | { type: "computer:upgrade:done"; requestId: string; ok: boolean; reason?: string; code?: string }
   | { type: "ready"; capabilities?: string[]; /** RFC 069 §8: this daemon process's generation. */ daemonInstanceId?: string; /** RFC 071 outbox: agents whose outcome storage is unreliable; `agent:runtime-outcome-v1` does not apply to them. */ runtimeOutcomeUnreliableAgents?: string[]; runtimes: string[]; runtimeVersions?: Record<string, string>; runningAgents: string[]; hostname?: string; os?: string; daemonVersion?: string; computerVersion?: string; migrationTransport?: AgentMigrationTransportReady; lifecycleAcks?: ComputerLifecycleExecutionAck[]; lastUpgradeReceipt?: ComputerLastUpgradeReceipt };
 
 export type MachineShutdownReason =
@@ -1937,6 +2023,12 @@ export interface WorkspaceDirectoryInfo {
   lastModified: string;
   /** Number of top-level files */
   fileCount: number;
+  /**
+   * Where the workspace is on the machine, `~`-relative when under the user's
+   * home (e.g. `~/.raft/agents/<id>/`). Absent from daemons before 1.0.46,
+   * which only ever used `~/.slock/agents/`.
+   */
+  displayPath?: string;
 }
 
 /** A Claude Code skill (slash command) from SKILL.md */
@@ -2478,7 +2570,34 @@ export type RuntimeModelSourceOutcome =
   | { kind: "missing_config"; recovery?: string }
   | { kind: "no_models"; recovery?: string }
   | { kind: "unsupported" }
-  | { kind: "error"; retryable: boolean; code?: RuntimeModelDetectionErrorCode };
+  | {
+    kind: "error";
+    retryable: boolean;
+    code?: RuntimeModelDetectionErrorCode;
+    /**
+     * task #1242 — present only with `code: "runtime_not_found"`, when the
+     * daemon's runtime probe could say how its PATH lookup ended. Absent on
+     * older daemons and when the probe had no verdict; absent is not
+     * "confirmed missing".
+     */
+    reason?: RuntimeModelDetectionLookupReason;
+  };
+
+/**
+ * task #1242 — the daemon runtime probe's structured cause for an unavailable
+ * runtime, carried beside `runtime_not_found`. Only `not_installed` is a
+ * confirmed absence; the others say the lookup did not decide.
+ */
+export const RUNTIME_MODEL_DETECTION_LOOKUP_REASONS = [
+  "not_installed",
+  "probe_timeout",
+  "permission_denied",
+  "probe_failed",
+] as const;
+export type RuntimeModelDetectionLookupReason = (typeof RUNTIME_MODEL_DETECTION_LOOKUP_REASONS)[number];
+export function isRuntimeModelDetectionLookupReason(value: unknown): value is RuntimeModelDetectionLookupReason {
+  return typeof value === "string" && (RUNTIME_MODEL_DETECTION_LOOKUP_REASONS as readonly string[]).includes(value);
+}
 
 export const RUNTIME_MODEL_DETECTION_ERROR_CODES = [
   "runtime_not_found",
@@ -2569,14 +2688,39 @@ export const RUNTIME_MODELS: Record<string, RuntimeModelInfo[]> = {
     { id: "claude-sonnet-5-5", label: "Claude Sonnet 5.5" },
     { id: "claude-sonnet-5", label: "Claude Sonnet 5" },
     { id: "claude-sonnet-4-6", label: "Claude Sonnet 4.6" },
+    { id: "claude-haiku-5-5", label: "Claude Haiku 5.5" },
     { id: "claude-haiku-4-5", label: "Claude Haiku 4.5" },
   ],
   codex: [
+    // Order and per-model reasoning metadata follow upstream Codex's bundled
+    // catalog (codex-rs/models-manager/models.json, rust-v0.162.0): picker
+    // priority, `default_reasoning_level`, `supported_reasoning_levels`.
+    {
+      id: "gpt-6.1-sol",
+      label: "GPT-6.1 Sol",
+      supportedReasoningEfforts: ["low", "medium", "high", "xhigh", "max", "ultra"],
+      defaultReasoningEffort: "low",
+      verified: "launchable",
+    },
     {
       id: "gpt-6-astra",
       label: "GPT-6-Astra",
       supportedReasoningEfforts: ["low", "medium", "high", "xhigh", "max", "ultra"],
       defaultReasoningEffort: "low",
+      verified: "launchable",
+    },
+    {
+      id: "gpt-6-sol",
+      label: "GPT-6 Sol",
+      supportedReasoningEfforts: ["low", "medium", "high", "xhigh", "max", "ultra"],
+      defaultReasoningEffort: "medium",
+      verified: "launchable",
+    },
+    {
+      id: "gpt-6-luna",
+      label: "GPT-6 Luna",
+      supportedReasoningEfforts: ["low", "medium", "high", "xhigh", "max"],
+      defaultReasoningEffort: "medium",
       verified: "launchable",
     },
     {
@@ -4151,17 +4295,12 @@ export interface AnnouncementPage {
 }
 
 /** Fully translated content for one renderable display locale. */
-export interface AnnouncementContent {
-  title: string;
-  pages: AnnouncementPage[];
-}
-
 /** Announcement content is authored only for display locales shipped by Raft. */
 export type AnnouncementContentByLocale = Partial<Record<DisplayLocale, AnnouncementContent>>;
 
 /** An account-level popup announcement. Shown exactly once per user (by id)
  *  until dismissed; a new announcement always means a new id. */
-export interface Announcement {
+export interface Announcement extends AnnouncementPresentation {
   id: string;
   title: string;
   pages: AnnouncementPage[];
@@ -4565,3 +4704,6 @@ export * from "./inboxScopeReadFrontier";
 
 export * from "./channelConversionState";
 export * from "./providerRequestActivity";
+
+export { appAgentJwtSettingsSchema, updateAppAgentJwtSettingsSchema, type AppAgentJwtSettings } from "./agentAudienceJwt";
+export * from "./appWhenToUse";

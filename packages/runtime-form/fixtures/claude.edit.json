@@ -189,6 +189,12 @@
       "pointer": "/model"
     }
   },
+  "writeOnlyKeepRequiresUnchanged": {
+    "/apiKey": [
+      "/provider",
+      "/apiUrl"
+    ]
+  },
   "values": {
     "provider": "custom",
     "apiUrl": "https://gateway.example.test",
