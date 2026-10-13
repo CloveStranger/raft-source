@@ -1,0 +1,71 @@
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: slock
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?init required}
+    command: [postgres, -c, wal_level=logical, -c, max_replication_slots=10, -c, max_wal_senders=10]
+    volumes:
+      - ${RAFT_STATE:?}/postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -U postgres -d slock']
+      interval: 2s
+      timeout: 5s
+      retries: 60
+  redis:
+    image: redis@sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499
+    restart: unless-stopped
+    command: [redis-server, --appendonly, 'no', --save, '60 1', --dir, /data, --dbfilename, dump.rdb]
+    volumes:
+      - ${RAFT_STATE:?}/redis:/data
+    healthcheck:
+      test: [CMD, redis-cli, ping]
+      interval: 2s
+      timeout: 5s
+      retries: 60
+  risingwave:
+    image: risingwavelabs/risingwave@sha256:ba5915a5e85c938a3ec62d76c63c6e4cb37d4f4e3c5c30886f0d2eff61b70073
+    cpus: 2.0
+    command: [single_node, --store-directory, /data, --parallelism, '2']
+    restart: unless-stopped
+    volumes:
+      - ${RAFT_STATE:?}/risingwave:/data
+  api:
+    image: raft-local-server:source
+    build:
+      context: ${RAFT_SOURCE:?}
+      dockerfile: packages/server/Dockerfile
+    restart: unless-stopped
+    env_file: ${RAFT_STATE:?}/server.env
+    environment:
+      NODE_ENV: production
+      REDIS_URL: redis://redis:6379
+      DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD}@db:5432/slock
+      RISINGWAVE_DATABASE_URL: postgresql://root@risingwave:4566/dev
+      UPLOADS_LOCAL: 'true'
+      UPLOADS_DIR: /data/uploads
+      PORT: '3001'
+    volumes:
+      - ${RAFT_STATE:?}/uploads:/data/uploads
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+  web:
+    image: raft-local-web:source
+    build:
+      context: ${RAFT_SOURCE:?}
+      dockerfile: packages/web/Dockerfile
+      args:
+        VITE_API_URL: ''
+        VITE_COMMIT_SHA: ${RAFT_REVISION:?}
+        VITE_FRONTEND_RELEASE_ID: local-${RAFT_REVISION:?}
+    restart: unless-stopped
+    ports:
+      - 127.0.0.1:${RAFT_HTTP_PORT:-8080}:80
+    volumes:
+      - ${RAFT_SOURCE:?}/deploy/local/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on: [api]

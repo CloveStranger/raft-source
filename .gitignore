@@ -40,3 +40,8 @@ scripts/app-name-ratchet-baseline.txt.mutating
 
 # vitest coverage reports (e.g. packages/sync-core test:coverage)
 coverage/
+
+# Local deployment state and encrypted backup outputs (keep outside source).
+/.local/
+/.tmp/
+*.raftbackup

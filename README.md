@@ -80,3 +80,9 @@ predates the pnpm 12 upgrade still declares pnpm 10 and correctly runs it.
   through a local, origin-bound proxy with a per-launch token.
 
 See `SECURITY.md` for how to report anything that breaks these properties.
+
+## 本地持久化部署与私有备份
+
+此分支提供 [本地部署、GitHub 私有备份与恢复指南](deploy/local/README.md)，覆盖数据库、本地上传文件、Computer/Agent 数据及登记的工作目录。
+
+日常本地操作：`./raft-local start`、`./raft-local restart`、`./raft-local status`；macOS 可双击 `start-raft.command` 或 `restart-raft.command`。详细步骤见 [本地部署手册](deploy/local/README.md)。

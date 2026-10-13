@@ -1,0 +1,10 @@
+.git
+**/node_modules
+**/.env
+**/.env.*
+**/*.key
+.local
+.tmp
+uploads
+**/*.raftbackup
+**/backup-data

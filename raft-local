@@ -1,0 +1,21 @@
+#!/bin/bash
+set -euo pipefail
+project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+node_bin="${RAFT_NODE:-}"
+usable_node() { "$1" -e 'process.exit(Number(process.versions.node.split(".")[0]) >= 24 ? 0 : 1)' >/dev/null 2>&1; }
+if [[ -z "$node_bin" ]]; then
+  if command -v node >/dev/null 2>&1 && usable_node "$(command -v node)"; then
+    node_bin="$(command -v node)"
+  else
+    # Finder/Terminal can inherit an older system Node while NVM already has Node 24.
+    for candidate in "$HOME"/.nvm/versions/node/v*/bin/node; do
+      if [[ -x "$candidate" ]] && usable_node "$candidate"; then node_bin="$candidate"; break; fi
+    done
+  fi
+fi
+if [[ -z "$node_bin" ]] || ! usable_node "$node_bin"; then
+  echo '需要 Node 24+。请安装或设置 RAFT_NODE=/绝对路径/node。' >&2
+  exit 1
+fi
+export PATH="$HOME/.local/bin:$HOME/.pyenv/shims:/opt/homebrew/bin:/Applications/Docker.app/Contents/Resources/bin:$PATH"
+exec "$node_bin" "$project_root/scripts/local/manage.mjs" "$@"
